@@ -120,12 +120,16 @@ func TestRenderUsesEnterpriseNativeXMLNotApacheCompatibilityMode(t *testing.T) {
 		"<address>[::1]:443</address>",
 		"<secure>1</secure>",
 		"<name>vh_site_a_binding_a</name>",
-		"<configFile>$SERVER_ROOT/conf/vhosts/site-a--binding-a/vhconf.xml</configFile>",
+		"<configFile>$SERVER_ROOT/conf/vhosts/.panel-generations/g42/site-a--binding-a/vhconf.xml</configFile>",
 		"<name>vh_site_b_binding_b</name>",
-		"<configFile>$SERVER_ROOT/conf/vhosts/site-b--binding-b/vhconf.xml</configFile>",
+		"<configFile>$SERVER_ROOT/conf/vhosts/.panel-generations/g42/site-b--binding-b/vhconf.xml</configFile>",
 		"<vhost>vh_site_a_binding_a</vhost>",
 		"<domain>site-a.example.test, www.site-a.example.test</domain>",
 		"<vhost>vh_site_b_binding_b</vhost>",
+	)
+	assertContainsNone(t, server,
+		"<configFile>$SERVER_ROOT/conf/vhosts/site-a--binding-a/vhconf.xml</configFile>",
+		"<configFile>$SERVER_ROOT/conf/vhosts/site-b--binding-b/vhconf.xml</configFile>",
 	)
 	assertContainsNone(t, allContent(generation),
 		"<VirtualHost",

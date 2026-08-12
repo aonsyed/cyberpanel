@@ -108,7 +108,7 @@ func renderServer(request native.RenderRequest, index renderIndex, bindings []we
 		output.WriteString("    <virtualHost>\n")
 		writeElement(&output, 3, "name", vhostName(site, binding))
 		writeElement(&output, 3, "vhRoot", siteRoot(site))
-		writeElement(&output, 3, "configFile", "$SERVER_ROOT/conf/vhosts/"+string(artifactKey(site, binding))+"/vhconf.xml")
+		writeElement(&output, 3, "configFile", "$SERVER_ROOT/conf/vhosts/.panel-generations/g"+strconv.FormatUint(request.Snapshot.Generation, 10)+"/"+string(artifactKey(site, binding))+"/vhconf.xml")
 		writeElement(&output, 3, "allowSymbolLink", "0")
 		if servesApplication(binding) {
 			writeElement(&output, 3, "enableScript", "1")

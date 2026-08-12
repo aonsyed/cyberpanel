@@ -118,11 +118,15 @@ func TestRenderDerivesUniqueVHostLSAPIAndTLSIdentityPerSite(t *testing.T) {
 		"address [::1]:443",
 		"secure 1",
 		"virtualHost vh_site_a_binding_a",
-		"configFile $SERVER_ROOT/conf/vhosts/site-a--binding-a/vhost.conf",
+		"configFile $SERVER_ROOT/conf/vhosts/.panel-generations/g42/site-a--binding-a/vhost.conf",
 		"virtualHost vh_site_b_binding_b",
-		"configFile $SERVER_ROOT/conf/vhosts/site-b--binding-b/vhost.conf",
+		"configFile $SERVER_ROOT/conf/vhosts/.panel-generations/g42/site-b--binding-b/vhost.conf",
 		"map vh_site_a_binding_a site-a.example.test, www.site-a.example.test",
 		"map vh_site_b_binding_b site-b.example.test",
+	)
+	assertContainsNone(t, server,
+		"configFile $SERVER_ROOT/conf/vhosts/site-a--binding-a/vhost.conf",
+		"configFile $SERVER_ROOT/conf/vhosts/site-b--binding-b/vhost.conf",
 	)
 	assertContainsAll(t, siteA,
 		"docRoot /var/lib/cyberpanel/sites/site-a/roots/g7/releases/current/public",
