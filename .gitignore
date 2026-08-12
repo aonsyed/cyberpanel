@@ -122,3 +122,7 @@ mysql_password.txt
 # Documentation files (local reference only)
 CHANGES_SUMMARY.md
 RESOURCE_LIMITS_IMPLEMENTATION.md
+
+# Greenfield QEMU development state
+.worktrees/
+.work/qemu/

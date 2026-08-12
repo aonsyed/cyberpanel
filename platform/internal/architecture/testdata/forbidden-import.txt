@@ -1,0 +1,3 @@
+package forbidden
+
+import _ "github.com/aonsyed/cyberpanel/CyberCP"
