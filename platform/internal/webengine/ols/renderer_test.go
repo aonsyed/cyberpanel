@@ -60,6 +60,47 @@ func TestRenderEmitsDeterministicCompleteNativeTextGeneration(t *testing.T) {
 	}
 }
 
+func TestRenderAssignsUniqueNativeNamesToCollidingListenerRefs(t *testing.T) {
+	request := renderRequest(t, webengine.EditionOpenLiteSpeed)
+	refs := []webengine.ResourceRef{
+		"listener/a.b",
+		"listener/a-b",
+		"listener/a",
+		"listener/a-ipv6",
+	}
+	request.Desired.Engine.Listeners = []webengine.Listener{
+		{Ref: refs[0], Addresses: []string{"127.0.0.1"}, Port: 8080, TLSMode: webengine.TLSModeClear, Protocols: []webengine.Protocol{webengine.ProtocolHTTP1}, DefaultBindingRef: "binding/a"},
+		{Ref: refs[1], Addresses: []string{"127.0.0.1"}, Port: 8081, TLSMode: webengine.TLSModeClear, Protocols: []webengine.Protocol{webengine.ProtocolHTTP1}, DefaultBindingRef: "binding/a"},
+		{Ref: refs[2], Addresses: []string{"::1"}, Port: 8082, TLSMode: webengine.TLSModeClear, Protocols: []webengine.Protocol{webengine.ProtocolHTTP1}, DefaultBindingRef: "binding/a"},
+		{Ref: refs[3], Addresses: []string{"127.0.0.1"}, Port: 8083, TLSMode: webengine.TLSModeClear, Protocols: []webengine.Protocol{webengine.ProtocolHTTP1}, DefaultBindingRef: "binding/a"},
+	}
+	request.Desired.Bindings[0].ListenerRefs = refs
+	request.Desired.Bindings[1].ListenerRefs = []webengine.ResourceRef{refs[0]}
+
+	generation, err := New().Render(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Render(): %v", err)
+	}
+	server := artifactContent(t, generation, native.ArtifactServer, "engine")
+	var names []string
+	for _, line := range strings.Split(server, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "listener" && fields[2] == "{" {
+			names = append(names, fields[1])
+		}
+	}
+	if len(names) != len(refs) {
+		t.Fatalf("rendered listener names = %#v, want one physical name per ref %#v", names, refs)
+	}
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if _, exists := seen[name]; exists {
+			t.Fatalf("rendered listener name %q is not unique: %#v", name, names)
+		}
+		seen[name] = struct{}{}
+	}
+}
+
 func TestRenderDerivesUniqueVHostLSAPIAndTLSIdentityPerSite(t *testing.T) {
 	generation, err := New().Render(context.Background(), renderRequest(t, webengine.EditionOpenLiteSpeed))
 	if err != nil {

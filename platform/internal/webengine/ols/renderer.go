@@ -4,6 +4,7 @@ package ols
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -124,13 +125,14 @@ func renderServer(request native.RenderRequest, index renderIndex, bindings []we
 
 	listeners := append([]webengine.Listener(nil), request.Desired.Engine.Listeners...)
 	sort.Slice(listeners, func(left, right int) bool { return listeners[left].Ref < listeners[right].Ref })
+	listenerNames := nativeListenerNames(listeners)
 	for _, listener := range listeners {
 		addresses := sortedAddresses(listener.Addresses)
 		ipv4Count := 0
 		ipv6Count := 0
 		for _, address := range addresses {
 			parsed := netip.MustParseAddr(address)
-			physicalName := listenerName(listener.Ref, parsed.Is6(), &ipv4Count, &ipv6Count)
+			physicalName := listenerName(listener.Ref, parsed.Is6(), &ipv4Count, &ipv6Count, listenerNames)
 			output.WriteString("listener ")
 			output.WriteString(physicalName)
 			output.WriteString(" {\n")
@@ -304,20 +306,119 @@ func joinHostnames(hostnames []webengine.Hostname) string {
 	return strings.Join(sortedHostnames(hostnames), ", ")
 }
 
-func listenerName(ref webengine.ResourceRef, ipv6 bool, ipv4Count, ipv6Count *int) string {
-	base := hyphenName(string(ref))
+const maxNativeListenerNameLength = 63
+
+type physicalListenerIdentity struct {
+	ref   webengine.ResourceRef
+	ipv6  bool
+	index int
+}
+
+func nativeListenerNames(listeners []webengine.Listener) map[physicalListenerIdentity]string {
+	ordered := append([]webengine.Listener(nil), listeners...)
+	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Ref < ordered[right].Ref })
+
+	identities := make([]physicalListenerIdentity, 0)
+	candidates := make(map[physicalListenerIdentity]string)
+	candidateCounts := make(map[string]int)
+	for _, listener := range ordered {
+		ipv4Count := 0
+		ipv6Count := 0
+		for _, address := range sortedAddresses(listener.Addresses) {
+			ipv6 := netip.MustParseAddr(address).Is6()
+			index := 0
+			if ipv6 {
+				ipv6Count++
+				index = ipv6Count
+			} else {
+				ipv4Count++
+				index = ipv4Count
+			}
+			identity := physicalListenerIdentity{ref: listener.Ref, ipv6: ipv6, index: index}
+			candidate := listenerNameCandidate(identity)
+			identities = append(identities, identity)
+			candidates[identity] = candidate
+			candidateCounts[candidate]++
+		}
+	}
+
+	names := make(map[physicalListenerIdentity]string, len(identities))
+	reserved := make(map[string]struct{}, len(identities))
+	for _, identity := range identities {
+		candidate := candidates[identity]
+		if candidateCounts[candidate] == 1 && len(candidate) <= maxNativeListenerNameLength {
+			names[identity] = candidate
+			reserved[candidate] = struct{}{}
+		}
+	}
+
+	used := make(map[string]struct{}, len(identities))
+	for name := range reserved {
+		used[name] = struct{}{}
+	}
+	for _, identity := range identities {
+		if _, exists := names[identity]; exists {
+			continue
+		}
+		for ordinal := 1; ; ordinal++ {
+			name := disambiguatedListenerName(candidates[identity], identity, ordinal)
+			if _, exists := used[name]; exists {
+				continue
+			}
+			names[identity] = name
+			used[name] = struct{}{}
+			break
+		}
+	}
+	return names
+}
+
+func listenerName(ref webengine.ResourceRef, ipv6 bool, ipv4Count, ipv6Count *int, names map[physicalListenerIdentity]string) string {
+	index := 0
 	if ipv6 {
 		(*ipv6Count)++
-		if *ipv6Count == 1 {
+		index = *ipv6Count
+	} else {
+		(*ipv4Count)++
+		index = *ipv4Count
+	}
+	return names[physicalListenerIdentity{ref: ref, ipv6: ipv6, index: index}]
+}
+
+func listenerNameCandidate(identity physicalListenerIdentity) string {
+	base := hyphenName(string(identity.ref))
+	if identity.ipv6 {
+		if identity.index == 1 {
 			return base + "-ipv6"
 		}
-		return base + "-ipv6-" + strconv.Itoa(*ipv6Count)
+		return base + "-ipv6-" + strconv.Itoa(identity.index)
 	}
-	(*ipv4Count)++
-	if *ipv4Count == 1 {
+	if identity.index == 1 {
 		return base
 	}
-	return base + "-ipv4-" + strconv.Itoa(*ipv4Count)
+	return base + "-ipv4-" + strconv.Itoa(identity.index)
+}
+
+func disambiguatedListenerName(prefix string, identity physicalListenerIdentity, ordinal int) string {
+	family := "ipv4"
+	if identity.ipv6 {
+		family = "ipv6"
+	}
+	digest := sha256.Sum256([]byte(string(identity.ref) + "\x00" + family + "\x00" + strconv.Itoa(identity.index)))
+	hash := fmt.Sprintf("%x", digest[:12])
+	disambiguator := ""
+	if ordinal > 1 {
+		disambiguator = "-" + strconv.Itoa(ordinal)
+	}
+	maxPrefixLength := maxNativeListenerNameLength - 1 - len(hash) - len(disambiguator)
+	if len(prefix) > maxPrefixLength {
+		prefix = prefix[:maxPrefixLength]
+	}
+	prefix = strings.TrimRight(prefix, "-")
+	if prefix == "" {
+		prefix = "listener"
+	}
+	return prefix + "-" + hash + disambiguator
 }
 
 func nativeAddress(address netip.Addr, port uint16) string {
