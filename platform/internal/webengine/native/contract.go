@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
@@ -46,17 +47,26 @@ type RuntimeSnapshot struct {
 	Sites        []SiteRuntime
 	LSAPIPools   []LSAPIPool
 	TLSMaterials []TLSMaterial
+	AccessVerifiers []AccessVerifier
 }
 
 type SiteKey string
 type PoolKey string
 type MaterialKey string
+type VerifierKey string
 
 type SiteRuntime struct {
 	SiteRef        webengine.ResourceRef
 	IdentityRef    webengine.ResourceRef
 	SiteKey        SiteKey
 	RootGeneration uint64
+}
+
+// HealthDocumentRoot is the immutable, root-owned attestation directory for a
+// candidate site generation. Tenant-writable content is never used to prove
+// engine activation.
+func HealthDocumentRoot(site SiteRuntime) string {
+	return "/var/lib/cyberpanel/site-health/" + string(site.SiteKey) + "/g" + strconv.FormatUint(site.RootGeneration, 10)
 }
 
 type LSAPIPool struct {
@@ -76,6 +86,25 @@ type TLSMaterial struct {
 	Generation  uint64
 }
 
+type PasswordVerifier struct {
+	PrincipalRef webengine.ResourceRef
+	Username     string
+	Digest       string
+}
+
+// AccessVerifier contains only one-way password verifiers. It may be sealed in
+// durable generation state; plaintext credentials and secret broker references
+// must never cross the renderer boundary.
+type AccessVerifier struct {
+	PolicyRef   webengine.ResourceRef
+	BindingRef  webengine.ResourceRef
+	SiteRef     webengine.ResourceRef
+	IdentityRef webengine.ResourceRef
+	VerifierKey VerifierKey
+	Generation  uint64
+	Principals  []PasswordVerifier
+}
+
 type GenerationKind string
 
 const GenerationCompleteReplacement GenerationKind = "complete_replacement"
@@ -83,8 +112,9 @@ const GenerationCompleteReplacement GenerationKind = "complete_replacement"
 type ArtifactRole string
 
 const (
-	ArtifactServer      ArtifactRole = "server"
-	ArtifactVirtualHost ArtifactRole = "virtual_host"
+	ArtifactServer             ArtifactRole = "server"
+	ArtifactVirtualHost        ArtifactRole = "virtual_host"
+	ArtifactCredentialVerifier ArtifactRole = "web_access_verifier"
 )
 
 type ArtifactKey string
@@ -99,11 +129,12 @@ type Artifact struct {
 }
 
 type ConfigGeneration struct {
-	Edition       webengine.Edition
-	Kind          GenerationKind
-	DesiredDigest string
-	ContentDigest string
-	Artifacts     []Artifact
+	Edition            webengine.Edition
+	Kind               GenerationKind
+	DesiredDigest      string
+	SnapshotGeneration uint64
+	ContentDigest      string
+	Artifacts          []Artifact
 }
 
 // ValidateRequest validates both the canonical model and all registry-owned
@@ -127,12 +158,15 @@ func ValidateRequest(request RenderRequest, edition webengine.Edition) error {
 
 // NewCompleteGeneration sorts and copies artifacts, then binds their exact
 // bytes and metadata to a domain-separated digest.
-func NewCompleteGeneration(edition webengine.Edition, desiredDigest string, artifacts []Artifact) (ConfigGeneration, error) {
+func NewCompleteGeneration(edition webengine.Edition, desiredDigest string, snapshotGeneration uint64, artifacts []Artifact) (ConfigGeneration, error) {
 	if edition != webengine.EditionOpenLiteSpeed && edition != webengine.EditionLiteSpeedEnterprise {
 		return ConfigGeneration{}, fmt.Errorf("%w: unknown edition %q", ErrInvalidGeneration, edition)
 	}
 	if !validSHA256(desiredDigest) {
 		return ConfigGeneration{}, fmt.Errorf("%w: desired digest is not SHA-256", ErrInvalidGeneration)
+	}
+	if snapshotGeneration == 0 {
+		return ConfigGeneration{}, fmt.Errorf("%w: snapshot generation must be non-zero", ErrInvalidGeneration)
 	}
 
 	ordered := make([]Artifact, len(artifacts))
@@ -150,7 +184,7 @@ func NewCompleteGeneration(edition webengine.Edition, desiredDigest string, arti
 		return ConfigGeneration{}, fmt.Errorf("%w: complete generation requires server:engine", ErrInvalidGeneration)
 	}
 	for index, artifact := range ordered {
-		if artifact.Role != ArtifactServer && artifact.Role != ArtifactVirtualHost {
+		if artifact.Role != ArtifactServer && artifact.Role != ArtifactVirtualHost && artifact.Role != ArtifactCredentialVerifier {
 			return ConfigGeneration{}, fmt.Errorf("%w: artifact %d has unknown role", ErrInvalidGeneration, index)
 		}
 		if !validRegistryKey(string(artifact.Key)) || artifact.Mode != 0o600 || len(artifact.Content) == 0 {
@@ -162,10 +196,13 @@ func NewCompleteGeneration(edition webengine.Edition, desiredDigest string, arti
 	}
 
 	digest := sha256.New()
-	writeDigestPart(digest, []byte("cyberpanel:webengine:native-generation:v1"))
+	writeDigestPart(digest, []byte("cyberpanel:webengine:native-generation:v2"))
 	writeDigestPart(digest, []byte(edition))
 	writeDigestPart(digest, []byte(GenerationCompleteReplacement))
 	writeDigestPart(digest, []byte(desiredDigest))
+	var snapshot [8]byte
+	binary.BigEndian.PutUint64(snapshot[:], snapshotGeneration)
+	writeDigestPart(digest, snapshot[:])
 	for _, artifact := range ordered {
 		writeDigestPart(digest, []byte(artifact.Role))
 		writeDigestPart(digest, []byte(artifact.Key))
@@ -176,11 +213,12 @@ func NewCompleteGeneration(edition webengine.Edition, desiredDigest string, arti
 	}
 
 	return ConfigGeneration{
-		Edition:       edition,
-		Kind:          GenerationCompleteReplacement,
-		DesiredDigest: desiredDigest,
-		ContentDigest: hex.EncodeToString(digest.Sum(nil)),
-		Artifacts:     ordered,
+		Edition:            edition,
+		Kind:               GenerationCompleteReplacement,
+		DesiredDigest:      desiredDigest,
+		SnapshotGeneration: snapshotGeneration,
+		ContentDigest:      hex.EncodeToString(digest.Sum(nil)),
+		Artifacts:          ordered,
 	}, nil
 }
 
@@ -222,6 +260,16 @@ func validateDesiredStrings(desired webengine.DesiredState) error {
 		for _, listenerRef := range binding.ListenerRefs {
 			if !validResourceRef(listenerRef) {
 				return fmt.Errorf("binding %d contains an unsafe listener reference", bindingIndex)
+			}
+		}
+	}
+	for policyIndex, policy := range desired.AccessPolicies {
+		if !validResourceRef(policy.Ref) || !validResourceRef(policy.BindingRef) {
+			return fmt.Errorf("access policy %d contains an unsafe reference", policyIndex)
+		}
+		for _, principal := range policy.PrincipalRefs {
+			if !validResourceRef(principal) {
+				return fmt.Errorf("access policy %d contains an unsafe principal reference", policyIndex)
 			}
 		}
 	}
@@ -298,6 +346,42 @@ func validateSnapshot(request RenderRequest) error {
 		materialIdentities[identity] = struct{}{}
 	}
 
+	verifiers := make(map[webengine.ResourceRef]AccessVerifier, len(snapshot.AccessVerifiers))
+	verifierIdentities := make(map[string]struct{}, len(snapshot.AccessVerifiers))
+	for index, verifier := range snapshot.AccessVerifiers {
+		if !validResourceRef(verifier.PolicyRef) || !validResourceRef(verifier.BindingRef) || !validResourceRef(verifier.SiteRef) || !validResourceRef(verifier.IdentityRef) || !validRegistryKey(string(verifier.VerifierKey)) || verifier.Generation == 0 || len(verifier.Principals) == 0 || len(verifier.Principals) > 128 {
+			return fmt.Errorf("access verifier %d is invalid", index)
+		}
+		site, exists := sites[verifier.SiteRef]
+		if !exists || site.IdentityRef != verifier.IdentityRef {
+			return fmt.Errorf("access verifier %d does not belong to its site identity", index)
+		}
+		if _, exists := verifiers[verifier.PolicyRef]; exists {
+			return fmt.Errorf("access verifier %d duplicates policy reference", index)
+		}
+		identity := string(verifier.VerifierKey) + "\x00" + uint64Decimal(verifier.Generation)
+		if _, exists := verifierIdentities[identity]; exists {
+			return fmt.Errorf("access verifier %d duplicates native identity", index)
+		}
+		seenPrincipals := make(map[webengine.ResourceRef]struct{}, len(verifier.Principals))
+		seenUsernames := make(map[string]struct{}, len(verifier.Principals))
+		for principalIndex, principal := range verifier.Principals {
+			if !validResourceRef(principal.PrincipalRef) || !validVerifierUsername(principal.Username) || !validBcryptDigest(principal.Digest) {
+				return fmt.Errorf("access verifier %d principal %d is invalid", index, principalIndex)
+			}
+			if _, exists := seenPrincipals[principal.PrincipalRef]; exists {
+				return fmt.Errorf("access verifier %d duplicates principal reference", index)
+			}
+			if _, exists := seenUsernames[principal.Username]; exists {
+				return fmt.Errorf("access verifier %d duplicates username", index)
+			}
+			seenPrincipals[principal.PrincipalRef] = struct{}{}
+			seenUsernames[principal.Username] = struct{}{}
+		}
+		verifiers[verifier.PolicyRef] = verifier
+		verifierIdentities[identity] = struct{}{}
+	}
+
 	applications := make(map[webengine.ResourceRef]webengine.WebApplicationSpec, len(request.Desired.Applications))
 	for index, application := range request.Desired.Applications {
 		site, exists := sites[application.SiteRef]
@@ -310,12 +394,14 @@ func validateSnapshot(request RenderRequest) error {
 	for _, listener := range request.Desired.Engine.Listeners {
 		listeners[listener.Ref] = listener
 	}
+	bindings := make(map[webengine.ResourceRef]webengine.WebBindingSpec, len(request.Desired.Bindings))
 	for index, binding := range request.Desired.Bindings {
+		bindings[binding.Ref] = binding
 		application, exists := applications[binding.ApplicationRef]
 		if !exists {
 			return fmt.Errorf("binding %d does not resolve to an application", index)
 		}
-		if binding.RoutingState == webengine.RoutingServe && binding.Relationship != webengine.BindingRedirect {
+		if binding.RoutingState == webengine.RoutingServe && binding.Relationship != webengine.BindingRedirect && application.ReverseProxy==nil {
 			if _, exists := pools[poolLookup(application.SiteRef, application.PHPProfileRef)]; !exists {
 				return fmt.Errorf("binding %d has no LSAPI pool", index)
 			}
@@ -323,7 +409,8 @@ func validateSnapshot(request RenderRequest) error {
 		if binding.TLSPolicyRef != "" {
 			material, exists := materials[binding.TLSPolicyRef]
 			site := sites[application.SiteRef]
-			if !exists || material.SiteRef != application.SiteRef || material.IdentityRef != site.IdentityRef {
+			sharedPreviewMaterial := exists && binding.Relationship == webengine.BindingPreview && material.SiteRef == webengine.ResourceRef("site/system-default") && material.IdentityRef == webengine.ResourceRef("identity/system-default")
+			if !exists || !sharedPreviewMaterial && (material.SiteRef != application.SiteRef || material.IdentityRef != site.IdentityRef) {
 				return fmt.Errorf("binding %d has no owned TLS material", index)
 			}
 		}
@@ -335,7 +422,70 @@ func validateSnapshot(request RenderRequest) error {
 			}
 		}
 	}
+	for index, policy := range request.Desired.AccessPolicies {
+		if policy.State != webengine.AccessPolicyEnabled {
+			if _, exists := verifiers[policy.Ref]; exists {
+				return fmt.Errorf("disabled access policy %d has a native verifier", index)
+			}
+			continue
+		}
+		binding, exists := bindings[policy.BindingRef]
+		if !exists {
+			return fmt.Errorf("access policy %d does not resolve to a binding", index)
+		}
+		application, exists := applications[binding.ApplicationRef]
+		if !exists {
+			return fmt.Errorf("access policy %d does not resolve to an application", index)
+		}
+		verifier, exists := verifiers[policy.Ref]
+		if !exists || verifier.BindingRef != policy.BindingRef || verifier.SiteRef != application.SiteRef || len(verifier.Principals) != len(policy.PrincipalRefs) {
+			return fmt.Errorf("access policy %d has no owned verifier", index)
+		}
+		for principalIndex, principalRef := range policy.PrincipalRefs {
+			if verifier.Principals[principalIndex].PrincipalRef != principalRef {
+				return fmt.Errorf("access policy %d principal order does not match verifier", index)
+			}
+		}
+	}
+	for policyRef := range verifiers {
+		found := false
+		for _, policy := range request.Desired.AccessPolicies {
+			if policy.Ref == policyRef && policy.State == webengine.AccessPolicyEnabled {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("access verifier has no enabled policy")
+		}
+	}
 	return nil
+}
+
+func validVerifierUsername(value string) bool {
+	if value == "" || len(value) > 64 || value[0] == '-' || value[0] == '.' {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-' || character == '.' || character == '@') {
+			return false
+		}
+	}
+	return true
+}
+
+func validBcryptDigest(value string) bool {
+	if len(value) != 60 || !(strings.HasPrefix(value, "$2a$12$") || strings.HasPrefix(value, "$2b$12$") || strings.HasPrefix(value, "$2y$12$")) {
+		return false
+	}
+	for index := 7; index < len(value); index++ {
+		character := value[index]
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '.' || character == '/') {
+			return false
+		}
+	}
+	return true
 }
 
 func validResourceRef(ref webengine.ResourceRef) bool {

@@ -56,6 +56,26 @@ func (hostname Hostname) MarshalJSON() ([]byte, error) {
 	return json.Marshal(hostname.value)
 }
 
+func (hostname *Hostname) UnmarshalJSON(encoded []byte) error {
+	if hostname == nil {
+		return errors.New("hostname destination is required")
+	}
+	var value string
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return errors.New("hostname must be a JSON string")
+	}
+	if value == "" {
+		*hostname = Hostname{}
+		return nil
+	}
+	parsed, err := ParseHostname(value)
+	if err != nil {
+		return err
+	}
+	*hostname = parsed
+	return nil
+}
+
 type TLSMode string
 type Protocol string
 type BindingRelationship string
@@ -63,6 +83,8 @@ type RedirectStatus string
 type RoutingState string
 type LicenseState string
 type Severity string
+type AccessPolicyState string
+type AccessFailurePolicy string
 
 const (
 	TLSModeClear TLSMode = "clear"
@@ -88,6 +110,11 @@ const (
 	LicenseTrial  LicenseState = "trial"
 
 	SeverityError Severity = "error"
+
+	AccessPolicyEnabled  AccessPolicyState = "enabled"
+	AccessPolicyDisabled AccessPolicyState = "disabled"
+
+	AccessFailureDeny AccessFailurePolicy = "deny"
 )
 
 // Finding is a stable, machine-consumable validation result.
@@ -127,7 +154,10 @@ type WebApplicationSpec struct {
 	PHPProfileRef      ResourceRef
 	ResourceProfileRef ResourceRef
 	LogPolicyRef       ResourceRef
+	ReverseProxy       *ReverseProxySpec
 }
+
+type ReverseProxySpec struct{Address netip.Addr;Port uint16}
 
 type WebBindingSpec struct {
 	Ref            ResourceRef
@@ -141,10 +171,30 @@ type WebBindingSpec struct {
 	RoutingState   RoutingState
 }
 
+// WebAccessPolicy is an engine-neutral HTTP authentication contract. Password
+// verifiers are deliberately absent: they live in RuntimeSnapshot and are
+// rendered into a root-owned, non-document-root artifact. ExpiresAtUnix is an
+// authority deadline, not a browser hint; an expired policy must be withdrawn
+// by reconciliation and remains fail-closed until that happens.
+type WebAccessPolicy struct {
+	Ref                  ResourceRef
+	BindingRef           ResourceRef
+	Realm                string
+	Route                string
+	Methods              []string
+	PrincipalRefs        []ResourceRef
+	State                AccessPolicyState
+	ExpiresAtUnix        uint64
+	MaximumFailures      uint16
+	FailureWindowSeconds uint32
+	FailurePolicy        AccessFailurePolicy
+}
+
 type DesiredState struct {
 	Engine       WebEngineSpec
 	Applications []WebApplicationSpec
 	Bindings     []WebBindingSpec
+	AccessPolicies []WebAccessPolicy
 }
 
 // Validate returns deterministic, stable findings without mutating desired
@@ -275,6 +325,7 @@ func Validate(state DesiredState) []Finding {
 			add("WEBENGINE_LOG_POLICY_REQUIRED", applicationPath+".logPolicyRef")
 		}
 		validateRef(application.LogPolicyRef, applicationPath+".logPolicyRef")
+		if application.ReverseProxy!=nil{if !application.ReverseProxy.Address.IsLoopback()||application.ReverseProxy.Address.Zone()!=""||application.ReverseProxy.Port<1024{add("WEBENGINE_PROXY_TARGET_INVALID",applicationPath+".reverseProxy")}}
 	}
 
 	hostsByListener := make(map[ResourceRef]map[string]struct{})
@@ -368,6 +419,73 @@ func Validate(state DesiredState) []Finding {
 			}
 		}
 		validateRef(binding.TLSPolicyRef, bindingPath+".tlsPolicyRef")
+	}
+
+	policyRefs := make(map[ResourceRef]struct{}, len(state.AccessPolicies))
+	policyScopes := make(map[string]struct{}, len(state.AccessPolicies))
+	for policyIndex, policy := range state.AccessPolicies {
+		policyPath := "accessPolicies[" + decimal(policyIndex) + "]"
+		if policy.Ref == "" {
+			add("WEBENGINE_ACCESS_POLICY_REF_REQUIRED", policyPath+".ref")
+		} else if !validResourceRef(policy.Ref) {
+			add("WEBENGINE_RESOURCE_REF_INVALID", policyPath+".ref")
+		} else if _, exists := policyRefs[policy.Ref]; exists {
+			add("WEBENGINE_ACCESS_POLICY_REF_DUPLICATE", policyPath+".ref")
+		} else {
+			policyRefs[policy.Ref] = struct{}{}
+		}
+		validateRef(policy.BindingRef, policyPath+".bindingRef")
+		binding, bindingExists := bindings[policy.BindingRef]
+		if !bindingExists {
+			add("WEBENGINE_ACCESS_POLICY_BINDING_MISSING", policyPath+".bindingRef")
+		} else if binding.Relationship == BindingRedirect || binding.RoutingState != RoutingServe {
+			add("WEBENGINE_ACCESS_POLICY_BINDING_INELIGIBLE", policyPath+".bindingRef")
+		}
+		if !safeAccessRealm(policy.Realm) {
+			add("WEBENGINE_ACCESS_POLICY_REALM_INVALID", policyPath+".realm")
+		}
+		if !safeAccessRoute(policy.Route) {
+			add("WEBENGINE_ACCESS_POLICY_ROUTE_INVALID", policyPath+".route")
+		}
+		scopeKey := string(policy.BindingRef) + "\x00" + policy.Route
+		if _, exists := policyScopes[scopeKey]; exists {
+			add("WEBENGINE_ACCESS_POLICY_SCOPE_DUPLICATE", policyPath+".route")
+		} else {
+			policyScopes[scopeKey] = struct{}{}
+		}
+		if policy.State != AccessPolicyEnabled && policy.State != AccessPolicyDisabled {
+			add("WEBENGINE_ACCESS_POLICY_STATE_INVALID", policyPath+".state")
+		}
+		// Both supported native engines apply authentication at context scope.
+		// Require the complete HTTP method set until a qualified per-method
+		// native representation exists for both editions.
+		if len(policy.Methods) != 9 {
+			add("WEBENGINE_ACCESS_POLICY_METHODS_INVALID", policyPath+".methods")
+		}
+		seenMethods := make(map[string]struct{}, len(policy.Methods))
+		for methodIndex, method := range policy.Methods {
+			if !safeAccessMethod(method) {
+				add("WEBENGINE_ACCESS_POLICY_METHOD_INVALID", policyPath+".methods["+decimal(methodIndex)+"]")
+			}
+			if _, exists := seenMethods[method]; exists {
+				add("WEBENGINE_ACCESS_POLICY_METHOD_DUPLICATE", policyPath+".methods["+decimal(methodIndex)+"]")
+			}
+			seenMethods[method] = struct{}{}
+		}
+		if len(policy.PrincipalRefs) == 0 || len(policy.PrincipalRefs) > 128 {
+			add("WEBENGINE_ACCESS_POLICY_PRINCIPALS_INVALID", policyPath+".principalRefs")
+		}
+		seenPrincipals := make(map[ResourceRef]struct{}, len(policy.PrincipalRefs))
+		for principalIndex, principal := range policy.PrincipalRefs {
+			validateRef(principal, policyPath+".principalRefs["+decimal(principalIndex)+"]")
+			if _, exists := seenPrincipals[principal]; exists {
+				add("WEBENGINE_ACCESS_POLICY_PRINCIPAL_DUPLICATE", policyPath+".principalRefs["+decimal(principalIndex)+"]")
+			}
+			seenPrincipals[principal] = struct{}{}
+		}
+		if policy.MaximumFailures < 3 || policy.MaximumFailures > 100 || policy.FailureWindowSeconds < 10 || policy.FailureWindowSeconds > 3600 || policy.FailurePolicy != AccessFailureDeny {
+			add("WEBENGINE_ACCESS_POLICY_FAILURE_POLICY_INVALID", policyPath+".failurePolicy")
+		}
 	}
 
 	const (
@@ -473,6 +591,16 @@ func canonicalState(state DesiredState) DesiredState {
 		})
 	}
 	sort.Slice(copy.Bindings, func(i, j int) bool { return copy.Bindings[i].Ref < copy.Bindings[j].Ref })
+	copy.AccessPolicies = append([]WebAccessPolicy(nil), state.AccessPolicies...)
+	for policyIndex := range copy.AccessPolicies {
+		copy.AccessPolicies[policyIndex].Methods = append([]string(nil), state.AccessPolicies[policyIndex].Methods...)
+		copy.AccessPolicies[policyIndex].PrincipalRefs = append([]ResourceRef(nil), state.AccessPolicies[policyIndex].PrincipalRefs...)
+		sort.Strings(copy.AccessPolicies[policyIndex].Methods)
+		sort.Slice(copy.AccessPolicies[policyIndex].PrincipalRefs, func(i, j int) bool {
+			return copy.AccessPolicies[policyIndex].PrincipalRefs[i] < copy.AccessPolicies[policyIndex].PrincipalRefs[j]
+		})
+	}
+	sort.Slice(copy.AccessPolicies, func(i, j int) bool { return copy.AccessPolicies[i].Ref < copy.AccessPolicies[j].Ref })
 	if state.Engine.EnterpriseLicense != nil {
 		license := *state.Engine.EnterpriseLicense
 		copy.Engine.EnterpriseLicense = &license
@@ -524,6 +652,39 @@ func documentInsideApplication(applicationRoot, documentRoot string) bool {
 		return false
 	}
 	return documentRoot == applicationRoot || strings.HasPrefix(documentRoot, applicationRoot+"/")
+}
+
+func safeAccessRealm(value string) bool {
+	if value == "" || len(value) > 128 || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character > 0x7e || character == '<' || character == '>' || character == '{' || character == '}' || character == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+func safeAccessRoute(value string) bool {
+	if value == "" || len(value) > 2048 || !strings.HasPrefix(value, "/") || strings.Contains(value, `\\`) || strings.IndexByte(value, 0) >= 0 || path.Clean(value) != value {
+		return false
+	}
+	for _, segment := range strings.Split(strings.TrimPrefix(value, "/"), "/") {
+		if segment == "." || segment == ".." || len(segment) > 255 {
+			return false
+		}
+	}
+	return true
+}
+
+func safeAccessMethod(value string) bool {
+	switch value {
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE":
+		return true
+	default:
+		return false
+	}
 }
 
 func decimal(value int) string {

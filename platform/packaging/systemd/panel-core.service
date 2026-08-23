@@ -1,0 +1,49 @@
+[Unit]
+Description=CyberPanel local control-plane authority
+Documentation=https://github.com/aonsyed/cyberpanel
+After=local-fs.target panel-authd.service panel-secretd.service panel-execd.service panel-providerd.service
+Requires=panel-authd.service panel-secretd.service panel-execd.service panel-providerd.service
+Before=panel-gateway.service
+
+[Service]
+Type=simple
+User=cyberpanel
+Group=cyberpanel
+ExecStart=/usr/lib/cyberpanel/bin/cyberpanel serve -config /etc/cyberpanel/panel-core.json
+LoadCredential=audit-signing.key:/etc/cyberpanel/secrets/audit-signing.key
+LoadCredential=webmail-session.key:/etc/cyberpanel/secrets/webmail-session.key
+RuntimeDirectory=cyberpanel-core
+RuntimeDirectoryMode=0750
+UMask=0077
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=30s
+TimeoutStopSec=45s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/cyberpanel
+ReadWritePaths=/var/lib/cyberpanel/control /var/lib/cyberpanel/audit /var/lib/cyberpanel/backup-spool /var/backups/cyberpanel/repositories /run/cyberpanel-core
+InaccessiblePaths=/run/docker.sock /var/run/docker.sock /var/lib/cyberpanel-auth /var/lib/cyberpanel/siteops /var/lib/cyberpanel/sites /var/lib/cyberpanel/quarantine /var/lib/cyberpanel/tombstones
+LimitNOFILE=4096
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

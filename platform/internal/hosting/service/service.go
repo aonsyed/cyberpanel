@@ -60,6 +60,7 @@ func (command CreateSite) commandDigest() string {
 		SiteID:          command.Site.ID.String(),
 		ProjectID:       command.Site.ProjectID.String(),
 		PrimaryHostname: command.Site.PrimaryHostname.String(),
+		PHPProfile:      command.Site.PHPProfile,
 	})
 }
 
@@ -79,6 +80,59 @@ type MarkQuarantined lifecycleRequest
 type RestoreSite lifecycleRequest
 type BeginPurge lifecycleRequest
 type MarkDeleted lifecycleRequest
+
+type AttachDomainBinding struct {
+	CommandID          string
+	Actor              Actor
+	TenantID           site.TenantID
+	SiteID             site.SiteID
+	ExpectedGeneration uint64
+	Binding            site.DomainBinding
+}
+
+func (command AttachDomainBinding) commandID() string { return command.CommandID }
+func (command AttachDomainBinding) commandTenant() site.TenantID { return command.TenantID }
+func (command AttachDomainBinding) commandActor() Actor { return command.Actor }
+func (command AttachDomainBinding) commandDigest() string {
+	return canonicalDigest(struct {
+		Version uint32 `json:"version"`
+		Type string `json:"type"`
+		CommandID string `json:"command_id"`
+		ActorTenantID string `json:"actor_tenant_id"`
+		TenantID string `json:"tenant_id"`
+		SiteID string `json:"site_id"`
+		ExpectedGeneration uint64 `json:"expected_generation"`
+		Hostname string `json:"hostname"`
+		Kind site.BindingKind `json:"kind"`
+		RedirectTarget string `json:"redirect_target,omitempty"`
+		RedirectStatus site.RedirectStatus `json:"redirect_status,omitempty"`
+	}{1,"AttachDomainBinding",command.CommandID,command.Actor.TenantID.String(),command.TenantID.String(),command.SiteID.String(),command.ExpectedGeneration,command.Binding.Hostname.String(),command.Binding.Kind,command.Binding.RedirectTarget.String(),command.Binding.RedirectStatus})
+}
+
+type DetachDomainBinding struct {
+	CommandID          string
+	Actor              Actor
+	TenantID           site.TenantID
+	SiteID             site.SiteID
+	ExpectedGeneration uint64
+	Hostname           site.Hostname
+}
+
+func (command DetachDomainBinding) commandID() string { return command.CommandID }
+func (command DetachDomainBinding) commandTenant() site.TenantID { return command.TenantID }
+func (command DetachDomainBinding) commandActor() Actor { return command.Actor }
+func (command DetachDomainBinding) commandDigest() string {
+	return canonicalDigest(struct {
+		Version uint32 `json:"version"`
+		Type string `json:"type"`
+		CommandID string `json:"command_id"`
+		ActorTenantID string `json:"actor_tenant_id"`
+		TenantID string `json:"tenant_id"`
+		SiteID string `json:"site_id"`
+		ExpectedGeneration uint64 `json:"expected_generation"`
+		Hostname string `json:"hostname"`
+	}{1,"DetachDomainBinding",command.CommandID,command.Actor.TenantID.String(),command.TenantID.String(),command.SiteID.String(),command.ExpectedGeneration,command.Hostname.String()})
+}
 
 func lifecycleID(request lifecycleRequest) string            { return request.CommandID }
 func lifecycleTenant(request lifecycleRequest) site.TenantID { return request.TenantID }
@@ -193,6 +247,7 @@ type CommandScope struct {
 type SiteProjection struct {
 	Generation uint64
 	Lifecycle  site.Lifecycle
+	PHPProfile site.PHPProfile
 	Bindings   []site.DomainBinding
 }
 
@@ -441,7 +496,7 @@ func validRequest(request SiteEffectRequest, scope CommandScope, commandID, dige
 }
 
 func validProjection(projection SiteProjection) bool {
-	if projection.Generation == 0 || !validLifecycle(projection.Lifecycle) || len(projection.Bindings) == 0 {
+	if projection.Generation == 0 || !validLifecycle(projection.Lifecycle) || !site.ValidPHPProfile(projection.PHPProfile) || len(projection.Bindings) == 0 {
 		return false
 	}
 	primaryCount := 0
@@ -525,6 +580,12 @@ func scopeOfCommand(command Command) (CommandScope, error) {
 	if create, ok := command.(CreateSite); ok {
 		return CommandScope{TenantID: create.TenantID, SiteID: create.Site.ID}, nil
 	}
+	if attach, ok := command.(AttachDomainBinding); ok {
+		return CommandScope{TenantID: attach.TenantID, SiteID: attach.SiteID}, nil
+	}
+	if detach, ok := command.(DetachDomainBinding); ok {
+		return CommandScope{TenantID: detach.TenantID, SiteID: detach.SiteID}, nil
+	}
 	request, ok := asLifecycleRequest(command)
 	if !ok {
 		return CommandScope{}, ErrInvalidCommand
@@ -536,6 +597,20 @@ func applyCommand(ctx context.Context, repository SiteRepository, command Comman
 	if create, ok := command.(CreateSite); ok {
 		proposal, err := site.Create(create.Site)
 		return proposal, 0, err
+	}
+	if attach, ok := command.(AttachDomainBinding); ok {
+		current, err := repository.Load(ctx, attach.TenantID, attach.SiteID)
+		if err != nil { return site.Site{}, 0, err }
+		if current.TenantID() != attach.TenantID || current.ID() != attach.SiteID { return site.Site{}, 0, ErrNotFound }
+		proposal, err := current.AttachBinding(attach.ExpectedGeneration, attach.Binding)
+		return proposal, attach.ExpectedGeneration, err
+	}
+	if detach, ok := command.(DetachDomainBinding); ok {
+		current, err := repository.Load(ctx, detach.TenantID, detach.SiteID)
+		if err != nil { return site.Site{}, 0, err }
+		if current.TenantID() != detach.TenantID || current.ID() != detach.SiteID { return site.Site{}, 0, ErrNotFound }
+		proposal, err := current.DetachBinding(detach.ExpectedGeneration, detach.Hostname)
+		return proposal, detach.ExpectedGeneration, err
 	}
 	request, ok := asLifecycleRequest(command)
 	if !ok {
@@ -602,6 +677,7 @@ func projectionFromSite(aggregate site.Site) SiteProjection {
 	return SiteProjection{
 		Generation: aggregate.Generation(),
 		Lifecycle:  aggregate.Lifecycle(),
+		PHPProfile: aggregate.PHPProfile(),
 		Bindings:   aggregate.Bindings(),
 	}
 }
@@ -637,6 +713,7 @@ type projectionDigestDTO struct {
 	Version    int                `json:"v"`
 	Generation uint64             `json:"generation"`
 	Lifecycle  site.Lifecycle     `json:"lifecycle"`
+	PHPProfile site.PHPProfile    `json:"php_profile"`
 	Bindings   []bindingDigestDTO `json:"bindings"`
 }
 
@@ -664,9 +741,10 @@ func projectionDigest(projection SiteProjection) string {
 		return bindings[left].Kind < bindings[right].Kind
 	})
 	encoded, _ := json.Marshal(projectionDigestDTO{
-		Version:    1,
+		Version:    2,
 		Generation: projection.Generation,
 		Lifecycle:  projection.Lifecycle,
+		PHPProfile: projection.PHPProfile,
 		Bindings:   bindings,
 	})
 	sum := sha256.Sum256(encoded)
@@ -682,6 +760,7 @@ type commandDigestDTO struct {
 	SiteID             string `json:"site_id,omitempty"`
 	ProjectID          string `json:"project_id,omitempty"`
 	PrimaryHostname    string `json:"primary_hostname,omitempty"`
+	PHPProfile         site.PHPProfile `json:"php_profile,omitempty"`
 	ExpectedGeneration uint64 `json:"expected_generation,omitempty"`
 }
 

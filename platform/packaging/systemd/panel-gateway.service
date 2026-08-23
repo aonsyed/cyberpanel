@@ -1,0 +1,36 @@
+[Unit]
+Description=CyberPanel network API gateway
+After=network-online.target panel-core.service
+Wants=network-online.target
+Requires=panel-core.service
+
+[Service]
+Type=simple
+User=cyberpanel-gateway
+Group=cyberpanel
+ExecStart=/usr/lib/cyberpanel/bin/paneld -config /etc/cyberpanel/panel-gateway.json
+LoadCredential=gateway-signer:/var/lib/cyberpanel/control/trust/gateway-signer.json
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/cyberpanel
+InaccessiblePaths=/var/lib/cyberpanel/control /var/lib/cyberpanel-auth /var/lib/cyberpanel/siteops /run/docker.sock /var/run/docker.sock
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

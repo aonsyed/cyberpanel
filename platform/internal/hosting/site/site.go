@@ -2,6 +2,7 @@
 package site
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -87,6 +88,15 @@ func ParseHostname(raw string) (Hostname, error) {
 
 func (hostname Hostname) String() string { return hostname.value }
 
+func (id SiteID) MarshalJSON() ([]byte, error) { return json.Marshal(id.value) }
+func (id *SiteID) UnmarshalJSON(data []byte) error { var raw string; if err := json.Unmarshal(data, &raw); err != nil { return err }; if raw == "" { *id = SiteID{}; return nil }; parsed, err := NewSiteID(raw); if err == nil { *id = parsed }; return err }
+func (id TenantID) MarshalJSON() ([]byte, error) { return json.Marshal(id.value) }
+func (id *TenantID) UnmarshalJSON(data []byte) error { var raw string; if err := json.Unmarshal(data, &raw); err != nil { return err }; if raw == "" { *id = TenantID{}; return nil }; parsed, err := NewTenantID(raw); if err == nil { *id = parsed }; return err }
+func (id ProjectID) MarshalJSON() ([]byte, error) { return json.Marshal(id.value) }
+func (id *ProjectID) UnmarshalJSON(data []byte) error { var raw string; if err := json.Unmarshal(data, &raw); err != nil { return err }; if raw == "" { *id = ProjectID{}; return nil }; parsed, err := NewProjectID(raw); if err == nil { *id = parsed }; return err }
+func (hostname Hostname) MarshalJSON() ([]byte, error) { return json.Marshal(hostname.value) }
+func (hostname *Hostname) UnmarshalJSON(data []byte) error { var raw string; if err := json.Unmarshal(data, &raw); err != nil { return err }; if raw == "" { *hostname = Hostname{}; return nil }; parsed, err := ParseHostname(raw); if err == nil { *hostname = parsed }; return err }
+
 type Lifecycle string
 
 const (
@@ -117,6 +127,20 @@ const (
 	RedirectStatusTemporary302 RedirectStatus = "temporary_302"
 )
 
+// PHPProfile is a closed product runtime selection, never a package name or
+// executable path supplied by a caller.
+type PHPProfile string
+
+const (
+	PHPProfile82 PHPProfile = "php82"
+	PHPProfile83 PHPProfile = "php83"
+	PHPProfile84 PHPProfile = "php84"
+)
+
+func ValidPHPProfile(profile PHPProfile) bool {
+	return profile == PHPProfile82 || profile == PHPProfile83 || profile == PHPProfile84
+}
+
 // DomainBinding gives one hostname its site-local routing relationship.
 type DomainBinding struct {
 	Hostname       Hostname
@@ -130,6 +154,7 @@ type CreateInput struct {
 	TenantID        TenantID
 	ProjectID       ProjectID
 	PrimaryHostname Hostname
+	PHPProfile      PHPProfile
 }
 
 // Site is an immutable value aggregate. Its accessors and mutators never expose
@@ -138,20 +163,78 @@ type Site struct {
 	id               SiteID
 	tenantID         TenantID
 	projectID        ProjectID
+	phpProfile       PHPProfile
 	lifecycle        Lifecycle
 	desiredLifecycle Lifecycle
 	generation       uint64
 	bindings         []DomainBinding
 }
 
+// Snapshot is the canonical, self-validating persistence representation of a
+// Site. It exposes no mutable aggregate state to callers.
+func (site Site) Snapshot() ([]byte, error) {
+	if err := site.validate(); err != nil {
+		return nil, err
+	}
+	bindings := make([]bindingSnapshot, 0, len(site.bindings))
+	for _, binding := range site.bindings { bindings = append(bindings, bindingSnapshot{Hostname: binding.Hostname.String(), Kind: binding.Kind, RedirectTarget: binding.RedirectTarget.String(), RedirectStatus: binding.RedirectStatus}) }
+	return json.Marshal(siteSnapshot{Version: 2, ID: site.id.value, TenantID: site.tenantID.value, ProjectID: site.projectID.value, PHPProfile: site.phpProfile,
+		Lifecycle: site.lifecycle, DesiredLifecycle: site.desiredLifecycle, Generation: site.generation, Bindings: bindings})
+}
+
+// Restore reconstitutes a Site only from its canonical snapshot and repeats
+// every aggregate invariant before returning it.
+func Restore(snapshot []byte) (Site, error) {
+	var stored siteSnapshot
+	if err := json.Unmarshal(snapshot, &stored); err != nil || (stored.Version != 1 && stored.Version != 2) {
+		return Site{}, ErrInvalidAggregate
+	}
+	id, err := NewSiteID(stored.ID); if err != nil { return Site{}, ErrInvalidAggregate }
+	tenant, err := NewTenantID(stored.TenantID); if err != nil { return Site{}, ErrInvalidAggregate }
+	project, err := NewProjectID(stored.ProjectID); if err != nil { return Site{}, ErrInvalidAggregate }
+	bindings := make([]DomainBinding, 0, len(stored.Bindings))
+	for _, binding := range stored.Bindings {
+		hostname, err := ParseHostname(binding.Hostname); if err != nil { return Site{}, ErrInvalidAggregate }
+		var target Hostname
+		if binding.RedirectTarget != "" { target, err = ParseHostname(binding.RedirectTarget); if err != nil { return Site{}, ErrInvalidAggregate } }
+		bindings = append(bindings, DomainBinding{Hostname: hostname, Kind: binding.Kind, RedirectTarget: target, RedirectStatus: binding.RedirectStatus})
+	}
+	profile := stored.PHPProfile
+	if stored.Version == 1 && profile == "" { profile = PHPProfile83 }
+	aggregate := Site{id: id, tenantID: tenant, projectID: project, phpProfile: profile, lifecycle: stored.Lifecycle, desiredLifecycle: stored.DesiredLifecycle,
+		generation: stored.Generation, bindings: bindings}
+	if err := aggregate.validate(); err != nil { return Site{}, err }
+	return aggregate, nil
+}
+
+type siteSnapshot struct {
+	Version          int             `json:"v"`
+	ID               string          `json:"id"`
+	TenantID         string          `json:"tenant_id"`
+	ProjectID        string          `json:"project_id"`
+	PHPProfile       PHPProfile      `json:"php_profile,omitempty"`
+	Lifecycle        Lifecycle       `json:"lifecycle"`
+	DesiredLifecycle Lifecycle       `json:"desired_lifecycle"`
+	Generation       uint64          `json:"generation"`
+	Bindings         []bindingSnapshot `json:"bindings"`
+}
+
+type bindingSnapshot struct {
+	Hostname string `json:"hostname"`
+	Kind BindingKind `json:"kind"`
+	RedirectTarget string `json:"redirect_target,omitempty"`
+	RedirectStatus RedirectStatus `json:"redirect_status,omitempty"`
+}
+
 func Create(input CreateInput) (Site, error) {
-	if input.ID.value == "" || input.TenantID.value == "" || input.ProjectID.value == "" || input.PrimaryHostname.value == "" {
+	if input.ID.value == "" || input.TenantID.value == "" || input.ProjectID.value == "" || input.PrimaryHostname.value == "" || !ValidPHPProfile(input.PHPProfile) {
 		return Site{}, fmt.Errorf("site identity and primary hostname are required")
 	}
 	return Site{
 		id:               input.ID,
 		tenantID:         input.TenantID,
 		projectID:        input.ProjectID,
+		phpProfile:       input.PHPProfile,
 		lifecycle:        LifecycleProvisioning,
 		desiredLifecycle: LifecycleActive,
 		generation:       1,
@@ -165,6 +248,7 @@ func Create(input CreateInput) (Site, error) {
 func (site Site) ID() SiteID                  { return site.id }
 func (site Site) TenantID() TenantID          { return site.tenantID }
 func (site Site) ProjectID() ProjectID        { return site.projectID }
+func (site Site) PHPProfile() PHPProfile      { return site.phpProfile }
 func (site Site) Lifecycle() Lifecycle        { return site.lifecycle }
 func (site Site) DesiredLifecycle() Lifecycle { return site.desiredLifecycle }
 func (site Site) Generation() uint64          { return site.generation }
@@ -295,7 +379,7 @@ func validRedirectStatus(status RedirectStatus) bool {
 }
 
 func (site Site) validate() error {
-	if site.id.value == "" || site.tenantID.value == "" || site.projectID.value == "" || site.generation == 0 || !validLifecycle(site.lifecycle) || site.desiredLifecycle != LifecycleActive || len(site.bindings) == 0 {
+	if site.id.value == "" || site.tenantID.value == "" || site.projectID.value == "" || !ValidPHPProfile(site.phpProfile) || site.generation == 0 || !validLifecycle(site.lifecycle) || site.desiredLifecycle != LifecycleActive || len(site.bindings) == 0 {
 		return ErrInvalidAggregate
 	}
 	primaryCount := 0

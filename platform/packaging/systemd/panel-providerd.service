@@ -1,0 +1,48 @@
+[Unit]
+Description=CyberPanel isolated external provider worker
+Documentation=https://github.com/aonsyed/cyberpanel
+After=local-fs.target network-online.target panel-secretd.service
+Wants=network-online.target
+Requires=panel-secretd.service
+Before=panel-core.service
+
+[Service]
+Type=simple
+User=cyberpanel
+Group=cyberpanel
+ExecStart=/usr/local/libexec/cyberpanel/panel-providerd
+RuntimeDirectory=cyberpanel-provider
+RuntimeDirectoryMode=0750
+UMask=0077
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/cyberpanel
+ReadWritePaths=/run/cyberpanel-provider
+InaccessiblePaths=/var/lib/cyberpanel/control /var/lib/cyberpanel-auth /var/lib/cyberpanel-secrets /var/lib/cyberpanel/siteops /var/lib/cyberpanel/sites /var/lib/cyberpanel/quarantine /var/lib/cyberpanel/tombstones /run/docker.sock /var/run/docker.sock
+LimitNOFILE=1024
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,192 @@
+package identity
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base32"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/netip"
+	"strings"
+	"time"
+)
+
+// AuthVerifier is the local protected authentication boundary. The control
+// database stores only opaque verifier references and public authenticator
+// metadata; password, TOTP, recovery-code and API-key verifiers never cross it.
+type AuthVerifier interface {
+	EnrollPassword(context.Context, ID, []byte) (ID, error)
+	VerifyPassword(context.Context, ID, []byte) (bool, error)
+	IssueAPIKey(context.Context, ID, []Permission, time.Time) (ID, []byte, error)
+	VerifyAPIKey(context.Context, []byte) (ID, bool, error)
+	BeginTOTPEnrollment(context.Context, ID) (ID, []byte, []string, error)
+	ConfirmTOTPEnrollment(context.Context, ID, string) error
+	VerifyTOTP(context.Context, ID, string) (bool, error)
+	BeginWebAuthnRegistration(context.Context, ID, string) (ID, []byte, error)
+	FinishWebAuthnRegistration(context.Context, ID, []byte) ([]byte, error)
+	VerifyWebAuthn(context.Context, ID, []byte) (bool, error)
+	Revoke(context.Context, ID) error
+}
+
+// WebAuthnLoginVerifier is implemented by the protected verifier when
+// passkeys are enabled. Assertion challenges and sign counters remain owned by
+// that boundary; panel-core receives only public options and a verified
+// credential reference.
+type WebAuthnLoginVerifier interface {
+	BeginWebAuthnAssertion(context.Context, ID, string) (ID, []byte, error)
+	FinishWebAuthnAssertion(context.Context, ID, []byte) (ID, bool, error)
+}
+
+type RecoveryCodeVerifier interface {
+	VerifyRecoveryCode(context.Context, ID, string) (bool, error)
+}
+
+type AuditSink interface {
+	Record(context.Context, AuditEvent) error
+}
+
+type AuditEvent struct {
+	ID          string
+	ActorID     ID
+	TenantID    ID
+	Action      string
+	TargetKind  string
+	TargetID    ID
+	Outcome     string
+	RequestHash string
+	At          time.Time
+}
+
+// ActorContext is created only by the local authentication gateway after a
+// session or scoped service credential has been verified. Application
+// commands never accept an actor ID without the epoch/assurance binding.
+type ActorContext struct {
+	PrincipalID ID
+	SessionID ID
+	CredentialID ID
+	AuthzEpoch uint64
+	Assurance AssuranceLevel
+}
+
+type Service struct {
+	store      *Store
+	authorizer *Authorizer
+	verifier   AuthVerifier
+	audit      AuditSink
+	clock      func() time.Time
+}
+
+func NewService(store *Store, verifier AuthVerifier, audit AuditSink) (*Service, error) {
+	if store == nil || store.db == nil || verifier == nil || audit == nil { return nil, fmt.Errorf("%w: identity service dependencies", ErrInvalid) }
+	authorizer, err := NewAuthorizer(store)
+	if err != nil { return nil, err }
+	return &Service{store:store,authorizer:authorizer,verifier:verifier,audit:audit,clock:time.Now},nil
+}
+
+type InstallationClaim struct {
+	PrincipalID ID
+	TenantID ID
+	MembershipID ID
+	RoleID ID
+	BindingID ID
+	PlanID ID
+	Username string
+	Email string
+	DisplayName string
+	Locale string
+	Password []byte
+	Quota ResourceQuota
+}
+
+// ClaimInstallation creates the sole initial owner through a local, one-time
+// installer ceremony. Callers must ensure the database is empty and consume
+// the installation claim token before invoking it.
+func (s *Service) ClaimInstallation(ctx context.Context, claim InstallationClaim) (Principal,error) {
+	now:=s.clock().UTC(); if len(claim.Password)<12{return Principal{},fmt.Errorf("%w: password length",ErrInvalid)}
+	principal:=Principal{ID:claim.PrincipalID,Kind:PrincipalHuman,Username:normalizeUsername(claim.Username),Email:strings.ToLower(strings.TrimSpace(claim.Email)),DisplayName:strings.TrimSpace(claim.DisplayName),State:PrincipalActive,Locale:defaultLocale(claim.Locale),Theme:ThemeSystem,AuthzEpoch:1,CredentialEpoch:1,Generation:1,CreatedAt:now,UpdatedAt:now}
+	plan:=Plan{ID:claim.PlanID,OwnerTenantID:claim.TenantID,Name:"Installation owner",Quota:claim.Quota,Generation:1,CreatedAt:now,UpdatedAt:now}
+	tenant:=Tenant{ID:claim.TenantID,Kind:TenantOwner,Name:"Installation",State:TenantActive,PlanID:claim.PlanID,Generation:1,AuthzEpoch:1,CreatedAt:now,UpdatedAt:now}
+	membership:=Membership{ID:claim.MembershipID,PrincipalID:claim.PrincipalID,TenantID:claim.TenantID,State:MembershipActive,Generation:1,CreatedAt:now,UpdatedAt:now}
+	role:=Role{ID:claim.RoleID,TenantID:claim.TenantID,Name:"Installation owner",Permissions:[]Permission{"*:*"},Builtin:true,Generation:1,CreatedAt:now,UpdatedAt:now}
+	binding:=RoleBinding{ID:claim.BindingID,SubjectKind:SubjectPrincipal,SubjectID:claim.PrincipalID,RoleID:claim.RoleID,Scope:Scope{Kind:ScopeInstallation},Generation:1,CreatedAt:now}
+	if err:=principal.Validate();err!=nil{return Principal{},err};if err:=tenant.Validate();err!=nil{return Principal{},err};if err:=plan.Validate();err!=nil{return Principal{},err};if err:=membership.Validate();err!=nil{return Principal{},err};if err:=role.Validate();err!=nil{return Principal{},err};if err:=binding.Validate();err!=nil{return Principal{},err}
+	ref,err:=s.verifier.EnrollPassword(ctx,principal.ID,claim.Password);clearBytes(claim.Password);if err!=nil{return Principal{},err}
+	credentialID,err:=derivedID("cred",principal.ID.String()+"\x00password");if err!=nil{return Principal{},err}
+	credential:=Credential{ID:credentialID,PrincipalID:principal.ID,Kind:CredentialPassword,State:CredentialActive,Label:"Password",VerifierRef:ref,AuthzEpoch:principal.AuthzEpoch,CreatedAt:now}
+	tx,err:=s.store.db.BeginTx(ctx,nil);if err!=nil{return Principal{},err};defer tx.Rollback()
+	for _,operation:=range []func()error{func()error{return putPlan(ctx,tx,plan)},func()error{return putTenant(ctx,tx,tenant)},func()error{return putPrincipal(ctx,tx,principal)},func()error{return putMembership(ctx,tx,membership)},func()error{return putRole(ctx,tx,role)},func()error{return putBinding(ctx,tx,binding)},func()error{return putCredential(ctx,tx,credential)}}{if err=operation();err!=nil{s.verifier.Revoke(ctx,ref);return Principal{},err}}
+	if err=tx.Commit();err!=nil{s.verifier.Revoke(ctx,ref);return Principal{},err};s.record(ctx,principal.ID,tenant.ID,"installation.claim","principal",principal.ID,"applied",principal.ID.String());return principal,nil
+}
+
+type CreateTenantCommand struct { Actor ActorContext; TenantID, ParentTenantID, SponsorID, PlanID, DelegationID ID; Kind TenantKind; Name string; Permissions []Permission; Quota ResourceQuota }
+
+func(s *Service)CreateTenant(ctx context.Context,command CreateTenantCommand)(Tenant,error){scope:=Scope{Kind:ScopeTenant,TenantID:command.ParentTenantID};if _,err:=s.authorize(ctx,command.Actor,"tenant:create",scope,AssuranceMFA);err!=nil{return Tenant{},err};parent,err:=s.store.Tenant(ctx,command.ParentTenantID);if err!=nil{return Tenant{},err};parentPlan,err:=s.store.Plan(ctx,parent.PlanID);if err!=nil{return Tenant{},err};if !parentPlan.Quota.Contains(command.Quota){return Tenant{},ErrQuotaExceeded};now:=s.clock().UTC();tenant:=Tenant{ID:command.TenantID,ParentTenantID:parent.ID,SponsorID:command.SponsorID,Kind:command.Kind,Name:strings.TrimSpace(command.Name),State:TenantActive,PlanID:command.PlanID,Generation:1,AuthzEpoch:1,CreatedAt:now,UpdatedAt:now};plan:=Plan{ID:command.PlanID,OwnerTenantID:tenant.ID,Name:tenant.Name+" plan",Quota:command.Quota,Generation:1,CreatedAt:now,UpdatedAt:now};ceiling:=DelegationCeiling{ID:command.DelegationID,SponsorTenantID:parent.ID,ChildTenantID:tenant.ID,Permissions:CanonicalPermissions(command.Permissions),QuotaBudget:command.Quota,Generation:1,CreatedAt:now,UpdatedAt:now};if err=tenant.Validate();err!=nil{return Tenant{},err};if err=plan.Validate();err!=nil{return Tenant{},err};if err=ceiling.Validate();err!=nil{return Tenant{},err};tx,err:=s.store.db.BeginTx(ctx,nil);if err!=nil{return Tenant{},err};defer tx.Rollback();if err=putPlan(ctx,tx,plan);err==nil{err=putTenant(ctx,tx,tenant)};if err==nil{err=putDelegation(ctx,tx,ceiling)};if err!=nil{return Tenant{},err};if err=tx.Commit();err!=nil{return Tenant{},err};s.record(ctx,command.Actor.PrincipalID,tenant.ID,"tenant.create","tenant",tenant.ID,"applied",tenant.ID.String());return tenant,nil}
+
+func(s *Service)SuspendTenant(ctx context.Context,actor ActorContext,tenantID ID,expected uint64)(Tenant,error){if expected==0{return Tenant{},ErrInvalid};if _,err:=s.AuthorizeActor(ctx,actor,"identity:manage",Scope{Kind:ScopeTenant,TenantID:tenantID},AssuranceMFA);err!=nil{return Tenant{},err};tenant,err:=s.store.Tenant(ctx,tenantID);if err!=nil{return Tenant{},err};if tenant.Generation!=expected{return Tenant{},ErrStaleGeneration};if tenant.Kind==TenantOwner||tenant.State!=TenantActive{return Tenant{},ErrConflict};tenant.State=TenantSuspended;tenant.Generation++;tenant.AuthzEpoch++;tenant.UpdatedAt=s.clock().UTC();if err=s.store.Apply(ctx,Mutation{Tenant:&tenant});err!=nil{return Tenant{},err};s.record(ctx,actor.PrincipalID,tenant.ID,"tenant.suspend","tenant",tenant.ID,"applied",tenant.ID.String());return tenant,nil}
+
+func(s *Service)ConfigureTenantPlan(ctx context.Context,actor ActorContext,tenantID ID,expected uint64,planID ID,quota ResourceQuota)(Tenant,error){if expected==0||quota.Validate()!=nil{return Tenant{},ErrInvalid};if _,err:=s.AuthorizeActor(ctx,actor,"identity:manage",Scope{Kind:ScopeTenant,TenantID:tenantID},AssuranceMFA);err!=nil{return Tenant{},err};tenant,err:=s.store.Tenant(ctx,tenantID);if err!=nil{return Tenant{},err};if tenant.Generation!=expected||tenant.PlanID!=planID||tenant.State==TenantDeleted||tenant.State==TenantDeleting{return Tenant{},ErrStaleGeneration};plan,err:=s.store.Plan(ctx,planID);if err!=nil{return Tenant{},err};if plan.OwnerTenantID!=tenant.ID{return Tenant{},ErrForbidden};if tenant.ParentTenantID!=""{parent,loadErr:=s.store.Tenant(ctx,tenant.ParentTenantID);if loadErr!=nil{return Tenant{},loadErr};parentPlan,loadErr:=s.store.Plan(ctx,parent.PlanID);if loadErr!=nil{return Tenant{},loadErr};if !parentPlan.Quota.Contains(quota){return Tenant{},ErrQuotaExceeded}};usage,err:=s.store.Usage(ctx,tenant.ID);if err!=nil{return Tenant{},err};if !quotaContainsUsage(quota,usage){return Tenant{},ErrQuotaExceeded};now:=s.clock().UTC();plan.Quota=quota;plan.Generation++;plan.UpdatedAt=now;tenant.Generation++;tenant.AuthzEpoch++;tenant.UpdatedAt=now;if err=s.store.Apply(ctx,Mutation{Tenant:&tenant,Plan:&plan});err!=nil{return Tenant{},err};s.record(ctx,actor.PrincipalID,tenant.ID,"tenant.entitlement.configure","tenant",tenant.ID,"applied",plan.ID.String());return tenant,nil}
+
+func quotaContainsUsage(quota ResourceQuota,usage Usage)bool{return usage.Sites<=quota.Sites&&usage.Domains<=quota.Domains&&usage.Databases<=quota.Databases&&usage.Mailboxes<=quota.Mailboxes&&usage.FTPAccounts<=quota.FTPAccounts&&usage.DiskBytes<=quota.DiskBytes&&usage.Inodes<=quota.Inodes&&usage.MonthlyTransfer<=quota.MonthlyTransfer}
+
+type CreatePrincipalCommand struct { Actor ActorContext; PrincipalID, MembershipID, TenantID ID; Username,Email,DisplayName,Locale string; Password []byte }
+
+func(s *Service)CreatePrincipal(ctx context.Context,command CreatePrincipalCommand)(Principal,error){if _,err:=s.authorize(ctx,command.Actor,"principal:create",Scope{Kind:ScopeTenant,TenantID:command.TenantID},AssuranceMFA);err!=nil{return Principal{},err};now:=s.clock().UTC();p:=Principal{ID:command.PrincipalID,Kind:PrincipalHuman,Username:normalizeUsername(command.Username),Email:strings.ToLower(strings.TrimSpace(command.Email)),DisplayName:strings.TrimSpace(command.DisplayName),State:PrincipalActive,Locale:defaultLocale(command.Locale),Theme:ThemeSystem,AuthzEpoch:1,CredentialEpoch:1,Generation:1,CreatedAt:now,UpdatedAt:now};m:=Membership{ID:command.MembershipID,PrincipalID:p.ID,TenantID:command.TenantID,State:MembershipActive,Generation:1,CreatedAt:now,UpdatedAt:now};if err:=p.Validate();err!=nil{return Principal{},err};if err:=m.Validate();err!=nil{return Principal{},err};if len(command.Password)<12{return Principal{},ErrInvalid};ref,err:=s.verifier.EnrollPassword(ctx,p.ID,command.Password);clearBytes(command.Password);if err!=nil{return Principal{},err};credentialID,err:=derivedID("cred",p.ID.String()+"\x00password");if err!=nil{return Principal{},err};credential:=Credential{ID:credentialID,PrincipalID:p.ID,Kind:CredentialPassword,State:CredentialActive,Label:"Password",VerifierRef:ref,AuthzEpoch:1,CreatedAt:now};tx,err:=s.store.db.BeginTx(ctx,nil);if err!=nil{return Principal{},err};defer tx.Rollback();if err=putPrincipal(ctx,tx,p);err==nil{err=putMembership(ctx,tx,m)};if err==nil{err=putCredential(ctx,tx,credential)};if err!=nil{s.verifier.Revoke(ctx,ref);return Principal{},err};if err=tx.Commit();err!=nil{s.verifier.Revoke(ctx,ref);return Principal{},err};s.record(ctx,command.Actor.PrincipalID,command.TenantID,"principal.create","principal",p.ID,"applied",p.ID.String());return p,nil}
+
+func(s *Service)PutRole(ctx context.Context,actor ActorContext,role Role)(Role,error){if _,err:=s.authorize(ctx,actor,"role:manage",Scope{Kind:ScopeTenant,TenantID:role.TenantID},AssuranceMFA);err!=nil{return Role{},err};existing,err:=s.store.Role(ctx,role.ID);now:=s.clock().UTC();if errors.Is(err,ErrNotFound){role.Generation=1;role.CreatedAt=now}else if err!=nil{return Role{},err}else{role.Generation=existing.Generation+1;role.CreatedAt=existing.CreatedAt};role.UpdatedAt=now;role.Permissions=CanonicalPermissions(role.Permissions);if err=role.Validate();err!=nil{return Role{},err};if err=s.store.Apply(ctx,Mutation{Role:&role});err!=nil{return Role{},err};s.record(ctx,actor.PrincipalID,role.TenantID,"role.put","role",role.ID,"applied",role.ID.String());return role,nil}
+
+func(s *Service)BindRole(ctx context.Context,actor ActorContext,binding RoleBinding)(RoleBinding,error){if _,err:=s.authorize(ctx,actor,"role:bind",binding.Scope,AssuranceMFA);err!=nil{return RoleBinding{},err};role,err:=s.store.Role(ctx,binding.RoleID);if err!=nil{return RoleBinding{},err};if role.TenantID!=""&&role.TenantID!=binding.Scope.TenantID{return RoleBinding{},ErrForbidden};binding.Generation=1;binding.CreatedAt=s.clock().UTC();if err=binding.Validate();err!=nil{return RoleBinding{},err};if err=s.store.Apply(ctx,Mutation{Binding:&binding});err!=nil{return RoleBinding{},err};s.record(ctx,actor.PrincipalID,binding.Scope.TenantID,"role.bind","role_binding",binding.ID,"applied",binding.ID.String());return binding,nil}
+
+type LoginRequest struct{ Username string; Password []byte; Source netip.Addr; UserAgentDigest string; SessionTTL,AbsoluteTTL time.Duration }
+type LoginResult struct{ Principal Principal; Credential Credential; MFARequired bool; ChallengeID ID; Session Session; SessionToken []byte; CSRFToken []byte }
+
+type WebAuthnLoginChallenge struct { PrincipalID ID; ChallengeID ID; PublicKeyOptions []byte; ExpiresAt time.Time }
+
+func(s *Service)AuthenticatePassword(ctx context.Context,request LoginRequest)(LoginResult,error){p,err:=s.store.PrincipalByUsername(ctx,normalizeUsername(request.Username));if err!=nil{clearBytes(request.Password);return LoginResult{},ErrUnauthenticated};if p.State==PrincipalSuspended{clearBytes(request.Password);return LoginResult{},ErrSuspended};if p.State!=PrincipalActive{clearBytes(request.Password);return LoginResult{},ErrUnauthenticated};credentialID,_:=derivedID("cred",p.ID.String()+"\x00password");credential,err:=s.store.Credential(ctx,credentialID);if err!=nil||credential.State!=CredentialActive{clearBytes(request.Password);return LoginResult{},ErrUnauthenticated};ok,verifyErr:=s.verifier.VerifyPassword(ctx,credential.VerifierRef,request.Password);clearBytes(request.Password);if verifyErr!=nil||!ok{return LoginResult{},ErrUnauthenticated};mfa,err:=s.findMFA(ctx,p.ID);if err!=nil&&!errors.Is(err,ErrNotFound){return LoginResult{},err};if err==nil{challenge,challengeErr:=s.createAuthChallenge(ctx,p,credential,mfa,request.Source,request.UserAgentDigest);if challengeErr!=nil{return LoginResult{},challengeErr};return LoginResult{Principal:p,Credential:credential,MFARequired:true,ChallengeID:challenge},ErrAssuranceRequired};session,token,csrf,err:=s.issueSession(ctx,p,credential,AssurancePassword,request.Source,request.UserAgentDigest,request.SessionTTL,request.AbsoluteTTL);if err!=nil{return LoginResult{},err};return LoginResult{Principal:p,Credential:credential,Session:session,SessionToken:token,CSRFToken:csrf},nil}
+
+func(s *Service)IssueAPIKey(ctx context.Context,actor ActorContext,principal,credentialID ID,scopes []Permission,expires time.Time)(Credential,[]byte,error){if _,err:=s.authorize(ctx,actor,"credential:issue",Scope{Kind:ScopeInstallation},AssuranceMFA);err!=nil{return Credential{},nil,err};target,err:=s.store.Principal(ctx,principal);if err!=nil{return Credential{},nil,err};ref,raw,err:=s.verifier.IssueAPIKey(ctx,target.ID,CanonicalPermissions(scopes),expires);if err!=nil{return Credential{},nil,err};credential:=Credential{ID:credentialID,PrincipalID:target.ID,Kind:CredentialAPIKey,State:CredentialActive,Label:"API key",VerifierRef:ref,Scopes:CanonicalPermissions(scopes),AuthzEpoch:target.AuthzEpoch,CreatedAt:s.clock().UTC(),ExpiresAt:&expires};if err=credential.Validate();err!=nil{s.verifier.Revoke(ctx,ref);clearBytes(raw);return Credential{},nil,err};if err=s.store.Apply(ctx,Mutation{Credential:&credential});err!=nil{s.verifier.Revoke(ctx,ref);clearBytes(raw);return Credential{},nil,err};s.record(ctx,actor.PrincipalID,"","credential.issue","credential",credential.ID,"applied",credential.ID.String());return credential,raw,nil}
+
+func(s *Service)SuspendPrincipal(ctx context.Context,actor ActorContext,principalID,tenantID ID,suspend bool)(Principal,error){if _,err:=s.authorize(ctx,actor,"principal:suspend",Scope{Kind:ScopeTenant,TenantID:tenantID},AssuranceMFA);err!=nil{return Principal{},err};p,err:=s.store.Principal(ctx,principalID);if err!=nil{return Principal{},err};if suspend{p.State=PrincipalSuspended}else{p.State=PrincipalActive};p.AuthzEpoch++;p.CredentialEpoch++;p.Generation++;p.UpdatedAt=s.clock().UTC();if err=s.store.Apply(ctx,Mutation{Principal:&p});err!=nil{return Principal{},err};s.record(ctx,actor.PrincipalID,tenantID,"principal.suspend","principal",p.ID,"applied",fmt.Sprint(suspend));return p,nil}
+
+func(s *Service)ValidateSession(ctx context.Context,sessionID ID,rawToken,csrf []byte,source netip.Addr)(Session,Principal,error){session,err:=s.store.Session(ctx,sessionID);if err!=nil{return Session{},Principal{},ErrUnauthenticated};now:=s.clock().UTC();if session.RevokedAt!=nil||!now.Before(session.ExpiresAt)||!now.Before(session.AbsoluteExpiresAt)||!session.SourcePrefix.Contains(source){return Session{},Principal{},ErrUnauthenticated};if digest(rawToken)[:16]!=session.ID.StringSuffix()||(len(csrf)>0&&digest(csrf)!=session.CSRFSecretDigest){return Session{},Principal{},ErrUnauthenticated};p,err:=s.store.Principal(ctx,session.PrincipalID);if err!=nil||p.State!=PrincipalActive||p.AuthzEpoch!=session.AuthzEpoch||p.CredentialEpoch!=session.CredentialEpoch{return Session{},Principal{},ErrUnauthenticated};session.LastSeenAt=now;if extended:=now.Add(30*time.Minute);extended.Before(session.AbsoluteExpiresAt){session.ExpiresAt=extended};if err=s.store.Apply(ctx,Mutation{Session:&session});err!=nil{return Session{},Principal{},err};return session,p,nil}
+
+func(s *Service)AuthenticateAPIKey(ctx context.Context,raw []byte)(ActorContext,Principal,error){if len(raw)<24||len(raw)>4096{clearBytes(raw);return ActorContext{},Principal{},ErrUnauthenticated};verifiedID,ok,err:=s.verifier.VerifyAPIKey(ctx,raw);clearBytes(raw);if err!=nil||!ok{return ActorContext{},Principal{},ErrUnauthenticated};credential,loadErr:=s.store.Credential(ctx,verifiedID);if loadErr!=nil{credential,loadErr=s.store.CredentialByVerifierRef(ctx,verifiedID)};if loadErr!=nil||credential.Kind!=CredentialAPIKey||credential.State!=CredentialActive||credential.RevokedAt!=nil||credential.CompromisedAt!=nil{return ActorContext{},Principal{},ErrUnauthenticated};now:=s.clock().UTC();if credential.ExpiresAt!=nil&&!now.Before(*credential.ExpiresAt){return ActorContext{},Principal{},ErrExpired};principal,err:=s.store.Principal(ctx,credential.PrincipalID);if err!=nil||principal.State!=PrincipalActive||principal.AuthzEpoch!=credential.AuthzEpoch{return ActorContext{},Principal{},ErrUnauthenticated};credential.LastUsedAt=&now;if err=s.store.Apply(ctx,Mutation{Credential:&credential});err!=nil{return ActorContext{},Principal{},err};return ActorContext{PrincipalID:principal.ID,CredentialID:credential.ID,AuthzEpoch:principal.AuthzEpoch,Assurance:AssurancePassword},principal,nil}
+
+func(s *Service)AuthorizeActor(ctx context.Context,actor ActorContext,permission Permission,scope Scope,minimum AssuranceLevel)(AuthorizationDecision,error){decision,err:=s.authorize(ctx,actor,permission,scope,minimum);if err!=nil{return decision,err};if actor.SessionID==""{credential,loadErr:=s.store.Credential(ctx,actor.CredentialID);if loadErr!=nil{return AuthorizationDecision{},ErrUnauthenticated};if !containsPermission(credential.Scopes,permission){return AuthorizationDecision{},ErrForbidden}};return decision,nil}
+
+type MFAEnrollment struct { Credential Credential; Secret []byte; RecoveryCodes []string; WebAuthnOptions []byte }
+
+func(s *Service)BeginTOTP(ctx context.Context,actor ActorContext,credentialID ID)(MFAEnrollment,error){if err:=s.validateActor(ctx,actor,AssurancePassword);err!=nil{return MFAEnrollment{},err};ref,secret,recovery,err:=s.verifier.BeginTOTPEnrollment(ctx,actor.PrincipalID);if err!=nil{return MFAEnrollment{},err};credential:=Credential{ID:credentialID,PrincipalID:actor.PrincipalID,Kind:CredentialTOTP,State:CredentialPending,Label:"Authenticator app",VerifierRef:ref,AuthzEpoch:actor.AuthzEpoch,CreatedAt:s.clock().UTC()};if err=credential.Validate();err!=nil{s.verifier.Revoke(ctx,ref);clearBytes(secret);return MFAEnrollment{},err};if err=s.store.Apply(ctx,Mutation{Credential:&credential});err!=nil{s.verifier.Revoke(ctx,ref);clearBytes(secret);return MFAEnrollment{},err};return MFAEnrollment{Credential:credential,Secret:secret,RecoveryCodes:recovery},nil}
+
+func(s *Service)ConfirmTOTP(ctx context.Context,actor ActorContext,credentialID ID,code string)(Credential,error){if err:=s.validateActor(ctx,actor,AssurancePassword);err!=nil{return Credential{},err};credential,err:=s.store.Credential(ctx,credentialID);if err!=nil{return Credential{},err};if credential.PrincipalID!=actor.PrincipalID||credential.Kind!=CredentialTOTP||credential.State!=CredentialPending{return Credential{},ErrForbidden};if err=s.verifier.ConfirmTOTPEnrollment(ctx,credential.VerifierRef,code);err!=nil{return Credential{},ErrUnauthenticated};credential.State=CredentialActive;if err=s.store.Apply(ctx,Mutation{Credential:&credential});err!=nil{return Credential{},err};s.record(ctx,actor.PrincipalID,"","credential.totp.confirm","credential",credential.ID,"applied",credential.ID.String());return credential,nil}
+
+func(s *Service)BeginWebAuthn(ctx context.Context,actor ActorContext,credentialID ID,rpID string)(MFAEnrollment,error){if err:=s.validateActor(ctx,actor,AssurancePassword);err!=nil{return MFAEnrollment{},err};ref,options,err:=s.verifier.BeginWebAuthnRegistration(ctx,actor.PrincipalID,rpID);if err!=nil{return MFAEnrollment{},err};credential:=Credential{ID:credentialID,PrincipalID:actor.PrincipalID,Kind:CredentialWebAuthn,State:CredentialPending,Label:"Passkey",VerifierRef:ref,AuthzEpoch:actor.AuthzEpoch,CreatedAt:s.clock().UTC()};if err=credential.Validate();err!=nil{s.verifier.Revoke(ctx,ref);return MFAEnrollment{},err};if err=s.store.Apply(ctx,Mutation{Credential:&credential});err!=nil{s.verifier.Revoke(ctx,ref);return MFAEnrollment{},err};return MFAEnrollment{Credential:credential,WebAuthnOptions:options},nil}
+
+func(s *Service)FinishWebAuthn(ctx context.Context,actor ActorContext,credentialID ID,response []byte)(Credential,error){if err:=s.validateActor(ctx,actor,AssurancePassword);err!=nil{return Credential{},err};credential,err:=s.store.Credential(ctx,credentialID);if err!=nil{return Credential{},err};if credential.PrincipalID!=actor.PrincipalID||credential.Kind!=CredentialWebAuthn||credential.State!=CredentialPending{return Credential{},ErrForbidden};publicData,err:=s.verifier.FinishWebAuthnRegistration(ctx,credential.VerifierRef,response);if err!=nil{return Credential{},ErrUnauthenticated};credential.PublicData=append([]byte(nil),publicData...);credential.State=CredentialActive;if err=s.store.Apply(ctx,Mutation{Credential:&credential});err!=nil{return Credential{},err};s.record(ctx,actor.PrincipalID,"","credential.webauthn.confirm","credential",credential.ID,"applied",credential.ID.String());return credential,nil}
+
+func(s *Service)CompleteTOTPLogin(ctx context.Context,challengeID ID,code string,source netip.Addr,sessionTTL,absoluteTTL time.Duration)(LoginResult,error){challenge,err:=s.loadAuthChallenge(ctx,challengeID);if err!=nil{return LoginResult{},ErrUnauthenticated};now:=s.clock().UTC();if challenge.consumed.Valid||!now.Before(challenge.expires)||!challenge.source.Contains(source){return LoginResult{},ErrUnauthenticated};mfa,err:=s.store.Credential(ctx,challenge.mfaCredential);if err!=nil||mfa.State!=CredentialActive||mfa.Kind!=CredentialTOTP{return LoginResult{},ErrUnauthenticated};ok,err:=s.verifier.VerifyTOTP(ctx,mfa.VerifierRef,code);if err!=nil||!ok{return LoginResult{},ErrUnauthenticated};result,err:=s.store.db.ExecContext(ctx,`UPDATE identity_auth_challenges SET consumed_at=? WHERE id=? AND consumed_at IS NULL AND expires_at>?`,now,challengeID,now);if err!=nil{return LoginResult{},err};rows,_:=result.RowsAffected();if rows!=1{return LoginResult{},ErrUnauthenticated};p,err:=s.store.Principal(ctx,challenge.principal);if err!=nil||p.State!=PrincipalActive{return LoginResult{},ErrUnauthenticated};primary,err:=s.store.Credential(ctx,challenge.primaryCredential);if err!=nil{return LoginResult{},ErrUnauthenticated};session,token,csrf,err:=s.issueSession(ctx,p,primary,AssuranceMFA,source,challenge.userAgent,sessionTTL,absoluteTTL);if err!=nil{return LoginResult{},err};return LoginResult{Principal:p,Credential:primary,Session:session,SessionToken:token,CSRFToken:csrf},nil}
+
+func(s *Service)BeginWebAuthnLogin(ctx context.Context,username,rpID string)(WebAuthnLoginChallenge,error){backend,ok:=s.verifier.(WebAuthnLoginVerifier);if !ok{return WebAuthnLoginChallenge{},ErrNotFound};principal,err:=s.store.PrincipalByUsername(ctx,normalizeUsername(username));if err!=nil||principal.State!=PrincipalActive{return WebAuthnLoginChallenge{},ErrUnauthenticated};challenge,options,err:=backend.BeginWebAuthnAssertion(ctx,principal.ID,rpID);if err!=nil{return WebAuthnLoginChallenge{},ErrUnauthenticated};return WebAuthnLoginChallenge{PrincipalID:principal.ID,ChallengeID:challenge,PublicKeyOptions:append([]byte(nil),options...),ExpiresAt:s.clock().UTC().Add(5*time.Minute)},nil}
+
+func(s *Service)CompleteWebAuthnLogin(ctx context.Context,challengeID ID,response []byte,source netip.Addr,userAgent string,sessionTTL,absoluteTTL time.Duration)(LoginResult,error){backend,ok:=s.verifier.(WebAuthnLoginVerifier);if !ok||!source.IsValid()||len(response)==0||len(response)>2<<20{return LoginResult{},ErrUnauthenticated};ref,verified,err:=backend.FinishWebAuthnAssertion(ctx,challengeID,response);clearBytes(response);if err!=nil||!verified{return LoginResult{},ErrUnauthenticated};credential,err:=s.store.CredentialByVerifierRef(ctx,ref);if err!=nil||credential.Kind!=CredentialWebAuthn||credential.State!=CredentialActive||credential.RevokedAt!=nil||credential.CompromisedAt!=nil{return LoginResult{},ErrUnauthenticated};principal,err:=s.store.Principal(ctx,credential.PrincipalID);if err!=nil||principal.State!=PrincipalActive||principal.AuthzEpoch!=credential.AuthzEpoch{return LoginResult{},ErrUnauthenticated};session,token,csrf,err:=s.issueSession(ctx,principal,credential,AssurancePhishingResistant,source,userAgent,sessionTTL,absoluteTTL);if err!=nil{return LoginResult{},err};return LoginResult{Principal:principal,Credential:credential,Session:session,SessionToken:token,CSRFToken:csrf},nil}
+
+type authChallenge struct{ principal,primaryCredential,mfaCredential ID; source netip.Prefix; userAgent string; created,expires time.Time; consumed sql.NullTime }
+func(s *Service)createAuthChallenge(ctx context.Context,p Principal,primary,mfa Credential,source netip.Addr,userAgent string)(ID,error){if !source.IsValid(){return "",ErrInvalid};raw:=base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randomBytes(20));id,err:=NewID("mfa_"+strings.ToLower(raw));if err!=nil{return "",err};bits:=32;if source.Is6(){bits=128};now:=s.clock().UTC();_,err=s.store.db.ExecContext(ctx,`INSERT INTO identity_auth_challenges VALUES(?,?,?,?,?,?,?,?,NULL)`,id,p.ID,primary.ID,mfa.ID,netip.PrefixFrom(source,bits).String(),userAgent,now,now.Add(5*time.Minute));return id,err}
+func(s *Service)loadAuthChallenge(ctx context.Context,id ID)(authChallenge,error){var value authChallenge;var prefix string;err:=s.store.db.QueryRowContext(ctx,`SELECT principal_id,primary_credential_id,mfa_credential_id,source_prefix,user_agent_digest,created_at,expires_at,consumed_at FROM identity_auth_challenges WHERE id=?`,id).Scan(&value.principal,&value.primaryCredential,&value.mfaCredential,&prefix,&value.userAgent,&value.created,&value.expires,&value.consumed);if errors.Is(err,sql.ErrNoRows){return value,ErrNotFound};if err!=nil{return value,err};value.source,err=netip.ParsePrefix(prefix);return value,err}
+
+func(s *Service)authorize(ctx context.Context,actor ActorContext,permission Permission,scope Scope,minimum AssuranceLevel)(AuthorizationDecision,error){if err:=s.validateActor(ctx,actor,minimum);err!=nil{return AuthorizationDecision{},err};request:=AuthorizationRequest{PrincipalID:actor.PrincipalID,Permission:permission,Scope:scope,At:s.clock().UTC(),Assurance:actor.Assurance};return s.authorizer.Decide(ctx,request)}
+func(s *Service)validateActor(ctx context.Context,actor ActorContext,minimum AssuranceLevel)error{if !actor.PrincipalID.Valid()||!actor.CredentialID.Valid()||actor.AuthzEpoch==0||actor.Assurance<minimum{return ErrAssuranceRequired};principal,err:=s.store.Principal(ctx,actor.PrincipalID);if err!=nil{return err};if principal.State!=PrincipalActive||principal.AuthzEpoch!=actor.AuthzEpoch{return ErrUnauthenticated};if actor.SessionID!=""{session,err:=s.store.Session(ctx,actor.SessionID);if err!=nil{return ErrUnauthenticated};now:=s.clock().UTC();if session.PrincipalID!=actor.PrincipalID||session.CredentialID!=actor.CredentialID||session.AuthzEpoch!=actor.AuthzEpoch||session.Assurance!=actor.Assurance||session.RevokedAt!=nil||!now.Before(session.ExpiresAt)||!now.Before(session.AbsoluteExpiresAt){return ErrUnauthenticated};return nil};credential,err:=s.store.Credential(ctx,actor.CredentialID);if err!=nil{return ErrUnauthenticated};if credential.PrincipalID!=actor.PrincipalID||credential.Kind!=CredentialAPIKey||credential.State!=CredentialActive||credential.AuthzEpoch!=actor.AuthzEpoch||credential.RevokedAt!=nil||credential.CompromisedAt!=nil||(credential.ExpiresAt!=nil&&!s.clock().UTC().Before(*credential.ExpiresAt)){return ErrUnauthenticated};return nil}
+func(s *Service)issueSession(ctx context.Context,p Principal,c Credential,assurance AssuranceLevel,source netip.Addr,ua string,ttl,absolute time.Duration)(Session,[]byte,[]byte,error){if !source.IsValid(){return Session{},nil,nil,ErrInvalid};if ttl<=0{ttl=30*time.Minute};if absolute<ttl{absolute=12*time.Hour};raw:=randomBytes(32);csrf:=randomBytes(32);encoded:=base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randomBytes(20));id,_:=NewID("ses_"+strings.ToLower(encoded));now:=s.clock().UTC();bits:=32;if source.Is6(){bits=128};session:=Session{ID:id,PrincipalID:p.ID,CredentialID:c.ID,AuthzEpoch:p.AuthzEpoch,CredentialEpoch:p.CredentialEpoch,Assurance:assurance,SourcePrefix:netip.PrefixFrom(source,bits),UserAgentDigest:ua,CSRFSecretDigest:digest(csrf),CreatedAt:now,LastSeenAt:now,ExpiresAt:now.Add(ttl),AbsoluteExpiresAt:now.Add(absolute)};session.ID=ID(session.ID.String()+"_"+digest(raw)[:16]);if err:=session.Validate();err!=nil{return Session{},nil,nil,err};if err:=s.store.Apply(ctx,Mutation{Session:&session});err!=nil{return Session{},nil,nil,err};return session,raw,csrf,nil}
+func(s *Service)findMFA(ctx context.Context,principal ID)(Credential,error){rows,err:=s.store.db.QueryContext(ctx,`SELECT id FROM identity_credentials WHERE principal_id=? AND kind='totp' AND state='active' AND revoked_at IS NULL ORDER BY id LIMIT 1`,principal);if err!=nil{return Credential{},err};defer rows.Close();if !rows.Next(){return Credential{},ErrNotFound};var id ID;if err=rows.Scan(&id);err!=nil{return Credential{},err};return s.store.Credential(ctx,id)}
+func(s *Service)record(ctx context.Context,actor,tenant ID,action,kind string,target ID,outcome,request string){sum:=sha256.Sum256([]byte(request));event:=AuditEvent{ID:hex.EncodeToString(sum[:]),ActorID:actor,TenantID:tenant,Action:action,TargetKind:kind,TargetID:target,Outcome:outcome,RequestHash:hex.EncodeToString(sum[:]),At:s.clock().UTC()};_ = s.audit.Record(ctx,event)}
+func normalizeUsername(v string)string{return strings.ToLower(strings.TrimSpace(v))}
+func defaultLocale(v string)string{v=strings.TrimSpace(v);if v==""{return "en-US"};return v}
+func randomBytes(size int)[]byte{value:=make([]byte,size);if _,err:=rand.Read(value);err!=nil{panic("cryptographic random source unavailable")};return value}
+func digest(value []byte)string{sum:=sha256.Sum256(value);return hex.EncodeToString(sum[:])}
+func derivedID(prefix,value string)(ID,error){sum:=sha256.Sum256([]byte(value));return NewID(prefix+"_"+hex.EncodeToString(sum[:])[:32])}
+func clearBytes(value []byte){for i:=range value{value[i]=0}}
+
+// StringSuffix is the digest binding embedded in opaque session IDs.
+func(id ID)StringSuffix()string{parts:=strings.Split(id.String(),"_");if len(parts)<3{return ""};return parts[len(parts)-1]}

@@ -39,7 +39,7 @@ func (renderer *Renderer) Render(ctx context.Context, request native.RenderReque
 		return native.ConfigGeneration{}, err
 	}
 
-	artifacts := make([]native.Artifact, 0, len(bindings)+1)
+	artifacts := make([]native.Artifact, 0, len(bindings)+len(request.Snapshot.AccessVerifiers)+1)
 	artifacts = append(artifacts, native.Artifact{
 		Role:    native.ArtifactServer,
 		Key:     "engine",
@@ -56,8 +56,13 @@ func (renderer *Renderer) Render(ctx context.Context, request native.RenderReque
 			Content: renderVirtualHost(request, index, application, site, binding),
 		})
 	}
+	verifiers := append([]native.AccessVerifier(nil), request.Snapshot.AccessVerifiers...)
+	sort.Slice(verifiers, func(i, j int) bool { return verifiers[i].PolicyRef < verifiers[j].PolicyRef })
+	for _, verifier := range verifiers {
+		artifacts = append(artifacts, native.Artifact{Role: native.ArtifactCredentialVerifier, Key: native.ArtifactKey(verifier.VerifierKey), Mode: 0o600, Content: renderAccessVerifier(verifier)})
+	}
 
-	return native.NewCompleteGeneration(renderer.Edition(), desiredDigest, artifacts)
+	return native.NewCompleteGeneration(renderer.Edition(), desiredDigest, request.Snapshot.Generation, artifacts)
 }
 
 type renderIndex struct {
@@ -66,6 +71,8 @@ type renderIndex struct {
 	sites        map[webengine.ResourceRef]native.SiteRuntime
 	pools        map[string]native.LSAPIPool
 	materials    map[webengine.ResourceRef]native.TLSMaterial
+	policies     map[webengine.ResourceRef][]webengine.WebAccessPolicy
+	verifiers    map[webengine.ResourceRef]native.AccessVerifier
 }
 
 func newRenderIndex(request native.RenderRequest) renderIndex {
@@ -75,6 +82,8 @@ func newRenderIndex(request native.RenderRequest) renderIndex {
 		sites:        make(map[webengine.ResourceRef]native.SiteRuntime, len(request.Snapshot.Sites)),
 		pools:        make(map[string]native.LSAPIPool, len(request.Snapshot.LSAPIPools)),
 		materials:    make(map[webengine.ResourceRef]native.TLSMaterial, len(request.Snapshot.TLSMaterials)),
+		policies:     make(map[webengine.ResourceRef][]webengine.WebAccessPolicy),
+		verifiers:    make(map[webengine.ResourceRef]native.AccessVerifier, len(request.Snapshot.AccessVerifiers)),
 	}
 	for _, application := range request.Desired.Applications {
 		index.applications[application.Ref] = application
@@ -91,6 +100,15 @@ func newRenderIndex(request native.RenderRequest) renderIndex {
 	for _, material := range request.Snapshot.TLSMaterials {
 		index.materials[material.PolicyRef] = material
 	}
+	for _, policy := range request.Desired.AccessPolicies {
+		index.policies[policy.BindingRef] = append(index.policies[policy.BindingRef], policy)
+	}
+	for bindingRef := range index.policies {
+		sort.Slice(index.policies[bindingRef], func(i, j int) bool { return index.policies[bindingRef][i].Route < index.policies[bindingRef][j].Route })
+	}
+	for _, verifier := range request.Snapshot.AccessVerifiers {
+		index.verifiers[verifier.PolicyRef] = verifier
+	}
 	return index
 }
 
@@ -100,6 +118,11 @@ func renderServer(request native.RenderRequest, index renderIndex, bindings []we
 	output.WriteString("serverName cyberpanel-managed\n")
 	output.WriteString("showVersionNumber 0\n")
 	output.WriteString("autoLoadHtaccess 0\n\n")
+	output.WriteString("module mod_security {\n")
+	output.WriteString("  ls_enabled 1\n")
+	output.WriteString("  modsecurity on\n")
+	output.WriteString("  modsecurity_rules_file /usr/local/lsws/conf/modsec/cyberpanel.conf\n")
+	output.WriteString("}\n\n")
 
 	for _, binding := range bindings {
 		application := index.applications[binding.ApplicationRef]
@@ -201,6 +224,9 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 		output.WriteByte('\n')
 	}
 	output.WriteString("enableGzip 1\n\n")
+	if binding.Relationship == webengine.BindingPreview {
+		output.WriteString("rewrite {\n  enable 1\n  rules <<<END_preview_rules\nRewriteCond %{HTTPS} !=on\nRewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=308,L,NE]\nEND_preview_rules\n}\n\n")
+	}
 
 	output.WriteString("index {\n")
 	output.WriteString("  useServer 0\n")
@@ -219,6 +245,21 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 		output.WriteString(certFile)
 		output.WriteString("\n  certChain 1\n  renegProtection 1\n  sslSessionCache 1\n}\n\n")
 	}
+	policies := index.policies[binding.Ref]
+	for _, policy := range policies {
+		verifier := index.verifiers[policy.Ref]
+		output.WriteString("realm ")
+		output.WriteString(accessRealmName(policy.Ref))
+		output.WriteString(" {\n  userDB {\n    location ")
+		output.WriteString(accessVerifierPath(request.Snapshot.Generation, verifier))
+		output.WriteString("\n    maxCacheSize 1024\n    cacheTimeout 60\n  }\n}\n\n")
+	}
+	output.WriteString("context /.well-known/acme-challenge/ {\n")
+	output.WriteString("  type static\n  location /var/lib/cyberpanel/acme/http-01\n  allowBrowse 0\n  addDefaultCharset off\n  rewrite {\n    enable 0\n  }\n}\n\n")
+	output.WriteString("context /.well-known/panel-health/ {\n")
+	output.WriteString("  type static\n  location ")
+	output.WriteString(native.HealthDocumentRoot(site))
+	output.WriteString("\n  allowBrowse 0\n  addDefaultCharset off\n  rewrite {\n    enable 0\n  }\n}\n\n")
 
 	switch {
 	case binding.RoutingState == webengine.RoutingMaintenance || binding.RoutingState == webengine.RoutingSuspended:
@@ -235,6 +276,17 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 		output.WriteString("/\n  externalRedirect 1\n  statusCode ")
 		output.WriteString(redirectCode(binding.RedirectStatus))
 		output.WriteString("\n}\n")
+	case application.ReverseProxy != nil:
+		proxyName := proxyProcessorName(application.Ref)
+		output.WriteString("extprocessor "); output.WriteString(proxyName); output.WriteString(" {\n  type proxy\n  address "); output.WriteString(netip.AddrPortFrom(application.ReverseProxy.Address, application.ReverseProxy.Port).String()); output.WriteString("\n  maxConns 256\n  initTimeout 30\n  retryTimeout 0\n  respBuffer 0\n}\n\ncontext / {\n  type proxy\n  handler "); output.WriteString(proxyName); output.WriteString("\n  addDefaultCharset off\n")
+		if policy, exists := accessPolicyAt(policies, "/"); exists {
+			writeAccessDirectives(&output, policy, index.verifiers[policy.Ref])
+		}
+		output.WriteString("}\n")
+		for _, policy := range policies {
+			if policy.Route == "/" { continue }
+			output.WriteString("\ncontext "); output.WriteString(policy.Route); output.WriteString(" {\n  type proxy\n  handler "); output.WriteString(proxyName); output.WriteByte('\n'); writeAccessDirectives(&output, policy, index.verifiers[policy.Ref]); output.WriteString("}\n")
+		}
 	default:
 		pool := index.pools[poolLookup(application.SiteRef, application.PHPProfileRef)]
 		poolName := lsapiName(pool)
@@ -252,9 +304,32 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 		output.WriteString("  maxConns ")
 		output.WriteString(strconv.FormatUint(uint64(pool.MaxConnections), 10))
 		output.WriteString("\n  initTimeout 60\n  retryTimeout 0\n  persistConn 1\n  respBuffer 0\n  autoStart 0\n}\n")
+		for _, policy := range policies {
+			output.WriteString("\ncontext ")
+			output.WriteString(policy.Route)
+			output.WriteString(" {\n  type null\n  location ")
+			output.WriteString(siteRoot(site)+"/"+application.DocumentRoot)
+			if policy.Route != "/" { output.WriteString(policy.Route) }
+			output.WriteString("\n  allowBrowse 1\n")
+			writeAccessDirectives(&output, policy, index.verifiers[policy.Ref])
+			output.WriteString("}\n")
+		}
 	}
 	return []byte(output.String())
 }
+
+func renderAccessVerifier(verifier native.AccessVerifier) []byte {
+	principals := append([]native.PasswordVerifier(nil), verifier.Principals...)
+	sort.Slice(principals, func(i, j int) bool { return principals[i].Username < principals[j].Username })
+	var output strings.Builder
+	for _, principal := range principals { output.WriteString(principal.Username); output.WriteByte(':'); output.WriteString(principal.Digest); output.WriteByte('\n') }
+	return []byte(output.String())
+}
+
+func accessRealmName(ref webengine.ResourceRef) string { sum := sha256.Sum256([]byte(ref)); return "panel_" + fmt.Sprintf("%x", sum[:10]) }
+func accessVerifierPath(generation uint64, verifier native.AccessVerifier) string { return "$SERVER_ROOT/conf/vhosts/.panel-generations/g"+strconv.FormatUint(generation,10)+"/access/"+string(verifier.VerifierKey)+".users" }
+func accessPolicyAt(policies []webengine.WebAccessPolicy, route string) (webengine.WebAccessPolicy, bool) { for _, policy := range policies { if policy.Route==route{return policy,true} };return webengine.WebAccessPolicy{},false }
+func writeAccessDirectives(output *strings.Builder, policy webengine.WebAccessPolicy, verifier native.AccessVerifier) { output.WriteString("  realm ");output.WriteString(accessRealmName(policy.Ref));output.WriteString("\n  authName ");output.WriteString(policy.Realm);output.WriteString("\n  required user");for _,principal:=range verifier.Principals{output.WriteByte(' ');output.WriteString(principal.Username)};output.WriteByte('\n') }
 
 func validateDerivedIdentities(bindings []webengine.WebBindingSpec, index renderIndex) error {
 	artifacts := make(map[native.ArtifactKey]struct{}, len(bindings))
@@ -451,8 +526,9 @@ func lsapiSocket(site native.SiteRuntime, pool native.LSAPIPool) string {
 }
 
 func tlsFiles(generation uint64, material native.TLSMaterial) (string, string) {
-	base := "/var/lib/cyberpanel/webengine/generations/g" + strconv.FormatUint(generation, 10) + "/tls/" + string(material.MaterialKey) + "/g" + strconv.FormatUint(material.Generation, 10)
-	return base + "/privkey.pem", base + "/fullchain.pem"
+	_, _ = generation, material.Generation
+	base := "/var/lib/cyberpanel/certificates/consumers/webengine/" + string(material.MaterialKey) + "/current"
+	return base + "/private.key", base + "/fullchain.pem"
 }
 
 func systemContentRoot(binding webengine.WebBindingSpec) string {
@@ -515,4 +591,9 @@ func mapName(value string, separator byte) string {
 		}
 	}
 	return output.String()
+}
+
+func proxyProcessorName(ref webengine.ResourceRef) string {
+	digest := sha256.Sum256([]byte("cyberpanel:webengine-proxy:v1\x00" + string(ref)))
+	return "proxy-" + fmt.Sprintf("%x", digest[:10])
 }

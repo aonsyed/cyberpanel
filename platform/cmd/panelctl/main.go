@@ -1,0 +1,33 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base32"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
+)
+
+const maximumInput = 8 << 20
+
+func main(){if len(os.Args)<2{usage();os.Exit(2)};var err error;switch os.Args[1]{case "invoke":err=invoke(os.Args[2:]);case "recovery":err=recovery(os.Args[2:]);default:usage();os.Exit(2)};if err!=nil{fmt.Fprintln(os.Stderr,"panelctl:",err);os.Exit(1)}}
+
+func invoke(arguments []string)error{flags:=flag.NewFlagSet("invoke",flag.ContinueOnError);endpoint:=flags.String("endpoint","https://127.0.0.1:8090","panel gateway URL");socket:=flags.String("socket","","optional gateway Unix socket");apiKeyFile:=flags.String("api-key-file","","0600 file containing an API key");operationName:=flags.String("operation","","closed API operation name");tenant:=flags.String("tenant","","tenant identifier");resource:=flags.String("resource","","resource identifier");expected:=flags.Uint64("expected-generation",0,"expected resource generation");payloadPath:=flags.String("payload","-","JSON payload file, or - for stdin");idempotency:=flags.String("idempotency-key","","stable idempotency key for mutations");timeout:=flags.Duration("timeout",2*time.Minute,"request deadline");if err:=flags.Parse(arguments);err!=nil{return err};if flags.NArg()!=0||*operationName==""{return errors.New("invoke requires --operation and no positional arguments")};registry,err:=apiserver.NewDomainRegistry();if err!=nil{return err};operation,ok:=registry.Lookup(*operationName);if !ok{return errors.New("unknown operation")};if operation.Mutating&&*idempotency==""{return errors.New("mutating operation requires --idempotency-key")};if !operation.Mutating&&*idempotency!=""{return errors.New("read operation does not accept --idempotency-key")};payload,err:=readPayload(*payloadPath,false);if err!=nil{return err};defer wipe(payload);var apiKey string;if *apiKeyFile!=""{keyPath:=*apiKeyFile;if !filepath.IsAbs(keyPath){keyPath,err=filepath.Abs(keyPath);if err!=nil{return err}};apiKey,err=apiserver.ReadAPIKeyFile(keyPath);if err!=nil{return err}};client,err:=apiserver.NewClient(apiserver.ClientConfig{BaseURL:*endpoint,UnixSocket:*socket,APIKey:apiKey});if err!=nil{return err};requestID,err:=newLocalID("request");if err!=nil{return err};request:=apiserver.RequestEnvelope{APIVersion:apiserver.APIVersion,RequestID:requestID,Operation:*operationName,TenantID:*tenant,ResourceID:*resource,ExpectedGeneration:*expected,Payload:payload};ctx,cancel:=context.WithTimeout(context.Background(),*timeout);defer cancel();response,err:=client.Invoke(ctx,request,*idempotency);if err!=nil{return err};return printJSON(response)}
+
+func recovery(arguments []string)error{if len(arguments)<1{return errors.New("recovery requires health, claim, or rotate-trust")};flags:=flag.NewFlagSet("recovery",flag.ContinueOnError);socket:=flags.String("socket","/run/cyberpanel/recovery.sock","root-only recovery socket");timeout:=flags.Duration("timeout",30*time.Second,"recovery deadline");claimPath:=flags.String("claim","-","0600 installation claim JSON file, or - for stdin");if err:=flags.Parse(arguments[1:]);err!=nil{return err};if flags.NArg()!=0{return errors.New("unexpected recovery arguments")};client,err:=apiserver.NewRecoveryClient(*socket);if err!=nil{return err};ctx,cancel:=context.WithTimeout(context.Background(),*timeout);defer cancel();switch arguments[0]{case "health":result,err:=client.Health(ctx);if err!=nil{return err};return printJSON(result);case "rotate-trust":result,err:=client.RotateTrust(ctx);if err!=nil{return err};return printJSON(result);case "claim":content,err:=readPayload(*claimPath,true);if err!=nil{return err};defer wipe(content);var payload apiserver.InstallationClaimPayload;if err=decodeStrict(content,&payload);err!=nil{return err};result,err:=client.Claim(ctx,payload);payload.Password="";payload.ClaimToken="";if err!=nil{return err};return printJSON(result);default:return errors.New("recovery permits only health, claim, and rotate-trust")}}
+
+func readPayload(path string,secret bool)(json.RawMessage,error){var content []byte;var err error;if path=="-"{content,err=io.ReadAll(io.LimitReader(os.Stdin,maximumInput+1))}else{if !filepath.IsAbs(path){path,err=filepath.Abs(path);if err!=nil{return nil,err}};info,statErr:=os.Lstat(path);if statErr!=nil{return nil,statErr};if !info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Size()>maximumInput||info.Mode().Perm()&0002!=0{return nil,errors.New("unsafe or oversized input file")};if secret&&info.Mode().Perm()&0077!=0{return nil,errors.New("claim file must not be accessible by group or other users")};file,openErr:=os.Open(path);if openErr!=nil{return nil,openErr};opened,statErr:=file.Stat();if statErr!=nil||!os.SameFile(info,opened){_ = file.Close();return nil,errors.New("input file changed while opening")};content,err=io.ReadAll(io.LimitReader(file,maximumInput+1));closeErr:=file.Close();if err==nil{err=closeErr}};if err!=nil{return nil,err};if len(content)==0||len(content)>maximumInput||!json.Valid(content){wipe(content);return nil,errors.New("input must be one bounded JSON value")};return json.RawMessage(content),nil}
+func decodeStrict(content []byte,target any)error{decoder:=json.NewDecoder(strings.NewReader(string(content)));decoder.DisallowUnknownFields();if err:=decoder.Decode(target);err!=nil{return err};if err:=decoder.Decode(&struct{}{});err!=io.EOF{return errors.New("trailing JSON data")};return nil}
+func newLocalID(prefix string)(string,error){value:=make([]byte,18);if _,err:=rand.Read(value);err!=nil{return "",err};return prefix+"_"+strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(value)),nil}
+func wipe(value []byte){for index:=range value{value[index]=0}}
+func printJSON(value any)error{encoder:=json.NewEncoder(os.Stdout);encoder.SetIndent("","  ");return encoder.Encode(value)}
+func usage(){fmt.Fprintln(os.Stderr,"usage: panelctl invoke [flags]\n       panelctl recovery {health|claim|rotate-trust} [flags]")}

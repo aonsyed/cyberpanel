@@ -1,0 +1,35 @@
+[Unit]
+Description=CyberPanel managed Redis instance %i
+After=network.target local-fs.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/redis-server /etc/redis/%i.conf --supervised systemd --daemonize no
+User=redis
+Group=redis
+RuntimeDirectory=redis
+RuntimeDirectoryMode=0750
+StateDirectory=redis/%i
+StateDirectoryMode=0750
+UMask=0027
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/redis/%i /run/redis
+LimitNOFILE=65535
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

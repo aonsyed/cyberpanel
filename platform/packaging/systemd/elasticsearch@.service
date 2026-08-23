@@ -1,0 +1,41 @@
+[Unit]
+Description=CyberPanel managed Elasticsearch instance %i
+After=network.target local-fs.target
+
+[Service]
+Type=notify
+ExecStart=/usr/share/elasticsearch/bin/systemd-entrypoint -Epath.conf=/etc/elasticsearch -Epath.data=/var/lib/elasticsearch/%i -Epath.logs=/var/log/elasticsearch/%i -Epath.repo=/var/lib/elasticsearch/%i/snapshots -Enode.name=%i
+Environment=ES_PATH_CONF=/etc/elasticsearch
+Environment=ES_JAVA_OPTS=-XX:ErrorFile=/var/log/elasticsearch/%i/hs_err_pid%%p.log
+EnvironmentFile=-/etc/elasticsearch/%i.env
+User=elasticsearch
+Group=elasticsearch
+RuntimeDirectory=elasticsearch/%i
+RuntimeDirectoryMode=0750
+StateDirectory=elasticsearch/%i
+StateDirectoryMode=0750
+LogsDirectory=elasticsearch/%i
+LogsDirectoryMode=0750
+UMask=0027
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=180s
+LimitNOFILE=65535
+LimitNPROC=4096
+TasksMax=4096
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/elasticsearch/%i /var/log/elasticsearch/%i /run/elasticsearch/%i
+
+[Install]
+WantedBy=multi-user.target

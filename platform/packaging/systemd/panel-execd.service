@@ -1,0 +1,46 @@
+[Unit]
+Description=CyberPanel privileged site runtime executor
+Documentation=https://github.com/aonsyed/cyberpanel
+After=local-fs.target systemd-user-sessions.service panel-secretd.service
+Requires=panel-secretd.service
+Before=panel-core.service lsws.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/cyberpanel/panel-execd
+User=root
+Group=root
+UMask=0027
+RuntimeDirectory=cyberpanel
+RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=yes
+StateDirectory=cyberpanel
+StateDirectoryMode=0755
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=30s
+TimeoutStopSec=45s
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=~cgroup
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL CAP_SETGID CAP_SETUID CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_MKNOD CAP_AUDIT_WRITE
+ReadWritePaths=/etc /var/lib/cyberpanel /var/lib/cyberpanel-containers /var/backups/cyberpanel /run/cyberpanel /run/user /etc/systemd/system /usr/local/lsws/conf
+LimitNOFILE=4096
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

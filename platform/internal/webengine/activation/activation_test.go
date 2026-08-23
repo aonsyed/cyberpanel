@@ -86,10 +86,11 @@ func currentReceipt(edition webengine.Edition, digest string) Receipt {
 
 func generation() native.ConfigGeneration {
 	return native.ConfigGeneration{
-		Edition:       webengine.EditionOpenLiteSpeed,
-		Kind:          native.GenerationCompleteReplacement,
-		DesiredDigest: strings.Repeat("d", 64),
-		ContentDigest: strings.Repeat("c", 64),
+		Edition:            webengine.EditionOpenLiteSpeed,
+		Kind:               native.GenerationCompleteReplacement,
+		DesiredDigest:      strings.Repeat("d", 64),
+		SnapshotGeneration: 42,
+		ContentDigest:      strings.Repeat("c", 64),
 	}
 }
 

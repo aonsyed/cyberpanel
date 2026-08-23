@@ -1,0 +1,1 @@
+{"database_path":"/var/lib/cyberpanel-auth/authn.db","webauthn_display_name":"CyberPanel","webauthn_origins":{"localhost":["https://localhost:8090"]},"maximum_concurrent":128}

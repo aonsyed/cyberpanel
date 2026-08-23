@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "component_id": "panel_execd",
+  "format": "tar_gzip",
+  "members": [
+    {
+      "path_id": "panel_execd",
+      "command": "./cmd/panel-execd",
+      "archive_path": "panel-execd",
+      "install_path": "/usr/local/libexec/cyberpanel/panel-execd",
+      "mode": "0755"
+    },
+    {
+      "path_id": "panel_cron_exec",
+      "command": "./cmd/panel-cron-exec",
+      "archive_path": "panel-cron-exec",
+      "install_path": "/usr/local/libexec/cyberpanel/panel-cron-exec",
+      "mode": "0755"
+    },
+    {
+      "path_id": "panel_git_transport",
+      "command": "./cmd/panel-git-transport",
+      "archive_path": "panel-git-transport",
+      "install_path": "/usr/local/libexec/cyberpanel/panel-git-transport",
+      "mode": "0755"
+    },
+    {
+      "path_id": "panel_providerd",
+      "command": "./cmd/panel-providerd",
+      "archive_path": "panel-providerd",
+      "install_path": "/usr/local/libexec/cyberpanel/panel-providerd",
+      "mode": "0755"
+    }
+  ]
+}

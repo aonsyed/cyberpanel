@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/native"
@@ -53,6 +54,7 @@ type Activator struct {
 	Store  Store
 	Engine Engine
 	Probe  Probe
+	mu     sync.Mutex
 }
 
 func (a *Activator) Apply(ctx context.Context, generation native.ConfigGeneration) (Receipt, error) {
@@ -62,6 +64,8 @@ func (a *Activator) Apply(ctx context.Context, generation native.ConfigGeneratio
 	if a == nil || nilInterface(a.Store) || nilInterface(a.Engine) || nilInterface(a.Probe) {
 		return ambiguous(), errors.New("activation dependencies are required")
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	candidate, err := a.Store.Stage(ctx, generation)
 	if err != nil {
@@ -113,7 +117,7 @@ func (a *Activator) rollback(ctx context.Context, candidate, previous Receipt, c
 
 func validGeneration(g native.ConfigGeneration) error {
 	if (g.Edition != webengine.EditionOpenLiteSpeed && g.Edition != webengine.EditionLiteSpeedEnterprise) ||
-		g.Kind != native.GenerationCompleteReplacement || !validDigest(g.ContentDigest) {
+		g.Kind != native.GenerationCompleteReplacement || g.SnapshotGeneration == 0 || !validDigest(g.ContentDigest) {
 		return errors.New("invalid config generation")
 	}
 	return nil
