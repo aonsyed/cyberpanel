@@ -69,6 +69,7 @@ func main() {
 	databaseServer := &database.DatabaseBrokerServer{Authorizer:databasePolicy,Executor:databaseExecutor,MaximumConcurrent:64}
 	operationsSecrets, err := operations.NewLinuxOperationsSecretBrokerSource(materialClient, installationOwner); if err != nil { log.Fatalf("initialize operations secret source: %v", err) }
 	operationsConfig := operations.DefaultLinuxOperationsConfig(); operationsConfig.Secrets = operationsSecrets
+	operationsConfig.Sites=operations.LinuxOperationsSiteResolverFunc(func(ctx context.Context,siteID string)(operations.LinuxOperationsSiteBinding,error){binding,found,resolveErr:=registry.BindingForSite(siteID);if resolveErr!=nil{return operations.LinuxOperationsSiteBinding{},resolveErr};if !found{return operations.LinuxOperationsSiteBinding{},operations.ErrNotFound};generation:=binding.RootGeneration;if generation==0{generation=binding.Fence};return operations.LinuxOperationsSiteBinding{TenantID:binding.TenantID,SiteID:binding.SiteID,SiteKey:binding.SiteKey,UID:binding.UID,GID:binding.GID,Generation:generation},nil})
 	operationsExecutor, err := operations.NewLinuxOperationsExecutor(operationsConfig); if err != nil { log.Fatalf("initialize operations executor: %v", err) }
 	if err = operationsExecutor.ResumeSecurityWatchdogs(context.Background()); err != nil { log.Fatalf("recover unconfirmed firewall/SSH transaction: %v", err) }
 	if err = operationsExecutor.ResumeWAFTransactions(context.Background()); err != nil { log.Fatalf("recover unconfirmed WAF transaction: %v", err) }

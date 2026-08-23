@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -28,7 +30,7 @@ var operationsServiceUnits = map[ServiceName]string{
 	ServiceWebEnterprise: "lsws.service", ServiceWebOpenLiteSpeed: "lsws.service", ServiceMariaDB: "mariadb.service",
 	ServicePostfix: "postfix.service", ServiceDovecot: "dovecot.service", ServicePowerDNS: "pdns.service",
 	ServicePureFTPd: "pure-ftpd.service", ServiceRedis: "redis-server.service", ServiceElasticsearch: "elasticsearch.service",
-	ServicePanel: "cyberpanel.service",
+	ServicePanel: "panel-core.service",
 }
 var operationsServiceUnitCandidates=map[ServiceName][]string{ServicePureFTPd:{"pure-ftpd.service","pure-ftpd-mysql.service"},ServiceRedis:{"redis-server.service","redis.service"},ServicePowerDNS:{"pdns.service","pdns_server.service"}}
 func (executor *LinuxOperationsExecutor)serviceUnit(ctx context.Context,service ServiceName)(string,error){canonical,ok:=operationsServiceUnits[service];if !ok{return "",ErrInvalidEffect};candidates:=operationsServiceUnitCandidates[service];if len(candidates)==0{candidates=[]string{canonical}};for _,candidate:=range candidates{output,err:=executor.runner.Run(ctx,"/usr/bin/systemctl","show",candidate,"--property=LoadState","--value");if err==nil&&strings.TrimSpace(string(output))=="loaded"{return candidate,nil}};return "",ErrNotFound}
@@ -168,11 +170,39 @@ func probeMariaDBProtocol(ctx context.Context,port uint16)error{connection,err:=
 func probeRedisProtocol(ctx context.Context,port uint16)error{connection,err:=(&net.Dialer{Timeout:2*time.Second}).DialContext(ctx,"tcp",net.JoinHostPort("127.0.0.1",strconv.Itoa(int(port))));if err!=nil{return err};defer connection.Close();_ = connection.SetDeadline(time.Now().Add(2*time.Second));if _,err=connection.Write([]byte("*1\r\n$4\r\nPING\r\n"));err!=nil{return err};response:=make([]byte,64);count,err:=connection.Read(response);if err!=nil{return err};if !bytes.HasPrefix(response[:count],[]byte("+PONG"))&&!bytes.HasPrefix(response[:count],[]byte("-NOAUTH")){return errors.New("invalid Redis protocol response")};return nil}
 
 func (executor *LinuxOperationsExecutor) queryMetrics(ctx context.Context, effect MetricsQueryEffect) (linuxEffectResult, error) {
-	if effect.Limit == 0 || effect.Limit > 10000 || effect.End.Before(effect.Start) || effect.End.Sub(effect.Start) > 31*24*time.Hour { return linuxEffectResult{}, ErrInvalidEffect }
-	at := executor.clock.Now().UTC(); if at.Before(effect.Start) { at = effect.Start }; if at.After(effect.End) { at = effect.End }
-	points := make([]MetricPoint, 0, len(effect.Names)); seen := make(map[MetricName]struct{})
-	for _, name := range effect.Names { if len(points) >= int(effect.Limit) { break }; if _, exists := seen[name]; exists { continue }; seen[name] = struct{}{}; value, unit, err := executor.metricValue(ctx, effect.Scope, name); if err != nil { continue }; points = append(points, MetricPoint{Name:name, At:at, Value:value, Unit:unit}) }
-	return linuxEffectResult{Result: EffectResult{Metrics:&MetricsBatch{Scope:effect.Scope, Points:points, Truncated:len(points)<len(effect.Names)}}}, nil
+	if effect.Limit == 0 || effect.Limit > 256 || !effect.End.After(effect.Start) || effect.End.Sub(effect.Start) > 31*24*time.Hour || effect.Step < time.Second || effect.Step > 24*time.Hour { return linuxEffectResult{}, ErrInvalidEffect }
+	observedAt := executor.clock.Now().UTC()
+	batch := &MetricsBatch{Scope:effect.Scope,ObservedAt:observedAt}
+	if observedAt.Before(effect.Start) || observedAt.After(effect.End) { batch.UnavailableReason="historical_metrics_unavailable";return linuxEffectResult{Result:EffectResult{Metrics:batch}},nil }
+	seen := make(map[MetricName]struct{},len(effect.Names));available:=false
+	for _,name:=range effect.Names{
+		if _,exists:=seen[name];exists{continue};seen[name]=struct{}{}
+		if name==MetricServiceHealth{
+			for _,service:=range []ServiceName{ServiceWebEnterprise,ServiceWebOpenLiteSpeed,ServiceMariaDB,ServicePostfix,ServiceDovecot,ServicePowerDNS,ServicePureFTPd,ServiceRedis,ServiceElasticsearch,ServicePanel}{
+				if len(batch.Points)>=int(effect.Limit){batch.Truncated=true;break}
+				point:=executor.serviceHealthPoint(ctx,effect.Scope,service,observedAt);batch.Points=append(batch.Points,point);available=available||point.Available
+			}
+			continue
+		}
+		if len(batch.Points)>=int(effect.Limit){batch.Truncated=true;break}
+		value,unit,err:=executor.metricValue(ctx,effect.Scope,name);point:=MetricPoint{Name:name,At:observedAt,Unit:metricUnit(name),Available:err==nil}
+		if err==nil{point.Value=value;point.Unit=unit;available=true}else{point.UnavailableReason="collector_unavailable"}
+		batch.Points=append(batch.Points,point)
+	}
+	batch.Available=available
+	if !available{batch.UnavailableReason="collectors_unavailable"}
+	return linuxEffectResult{Result: EffectResult{Metrics:batch}}, nil
+}
+
+func metricUnit(name MetricName)MetricUnit{switch name{case MetricCPUUsage:return UnitRatio;case MetricMemoryUsage,MetricDiskUsage,MetricIOBytes,MetricNetworkBytes:return UnitBytes;case MetricLoad1,MetricInodeUsage,MetricPHPWorkers,MetricServiceHealth:return UnitCount};return ""}
+
+func (executor *LinuxOperationsExecutor)serviceHealthPoint(ctx context.Context,scope EnforcementScope,service ServiceName,observedAt time.Time)MetricPoint{
+	point:=MetricPoint{Name:MetricServiceHealth,Service:service,At:observedAt,Unit:UnitCount}
+	if scope.Kind!=ScopeNode{point.UnavailableReason="node_scope_required";return point}
+	unit,err:=executor.serviceUnit(ctx,service);if err!=nil{point.UnavailableReason="service_unit_unavailable";return point}
+	output,err:=executor.runner.Run(ctx,"/usr/bin/systemctl","show",unit,"--property=LoadState,ActiveState,SubState","--no-pager");if err!=nil{point.UnavailableReason="service_state_unavailable";return point}
+	values:=parseKeyValues(output);if values["LoadState"]!="loaded"||values["ActiveState"]==""{point.UnavailableReason="service_state_unavailable";return point}
+	point.Available=true;point.Status=values["ActiveState"]+"/"+values["SubState"];if values["ActiveState"]=="active"{point.Value=1};return point
 }
 
 func (executor *LinuxOperationsExecutor) metricValue(ctx context.Context, scope EnforcementScope, name MetricName) (float64, MetricUnit, error) {
@@ -189,11 +219,15 @@ func (executor *LinuxOperationsExecutor) metricValue(ctx context.Context, scope 
 			content,err:=os.ReadFile(filepath.Join(cgroup,"cgroup.procs"));if err!=nil{return 0,UnitCount,err};count:=0;for _,pid:=range strings.Fields(string(content)){comm,readErr:=os.ReadFile(filepath.Join("/proc",pid,"comm"));if readErr==nil&&strings.Contains(string(comm),"lsphp"){count++}};return float64(count),UnitCount,nil
 		case MetricNetworkBytes:
 			return 0,UnitBytes,errors.New("network accounting requires the transfer ledger")
+		default:
+			return 0,metricUnit(name),ErrNotFound
 		}
 	}
 	switch name {
 	case MetricCPUUsage:
-		content, err := os.ReadFile("/proc/loadavg"); if err != nil { return 0, UnitRatio, err }; fields := strings.Fields(string(content)); value, err := strconv.ParseFloat(fields[0], 64); return value/float64(runtime.NumCPU()), UnitRatio, err
+		content,err:=os.ReadFile("/proc/stat");if err!=nil{return 0,UnitRatio,err};line:=strings.SplitN(string(content),"\n",2)[0];fields:=strings.Fields(line);if len(fields)<5||fields[0]!="cpu"{return 0,UnitRatio,ErrInvalidEffect};var total,idle uint64;for index,field:=range fields[1:]{value,parseErr:=strconv.ParseUint(field,10,64);if parseErr!=nil{return 0,UnitRatio,parseErr};total+=value;if index==3||index==4{idle+=value}};if total==0{return 0,UnitRatio,ErrInvalidEffect};return float64(total-idle)/float64(total),UnitRatio,nil
+	case MetricLoad1:
+		content,err:=os.ReadFile("/proc/loadavg");if err!=nil{return 0,UnitCount,err};fields:=strings.Fields(string(content));if len(fields)<1{return 0,UnitCount,ErrInvalidEffect};value,err:=strconv.ParseFloat(fields[0],64);return value,UnitCount,err
 	case MetricMemoryUsage:
 		values, err := readMeminfo(); if err != nil { return 0, UnitBytes, err }; return float64((values["MemTotal"]-values["MemAvailable"])*1024), UnitBytes, nil
 	case MetricDiskUsage, MetricInodeUsage:
@@ -203,7 +237,6 @@ func (executor *LinuxOperationsExecutor) metricValue(ctx context.Context, scope 
 	case MetricIOBytes:
 		content, err := os.ReadFile("/proc/diskstats"); if err != nil { return 0, UnitBytes, err }; var sectors uint64; for _, line := range strings.Split(string(content), "\n") { fields := strings.Fields(line); if len(fields) >= 10 { read, _ := strconv.ParseUint(fields[5],10,64); written, _ := strconv.ParseUint(fields[9],10,64); sectors += read+written } }; return float64(sectors*512), UnitBytes, nil
 	case MetricPHPWorkers: return float64(countProcessesContaining("lsphp")), UnitCount, nil
-	case MetricServiceHealth: return 1, UnitCount, nil
 	default: return 0, "", ErrInvalidEffect
 	}
 }
@@ -211,39 +244,99 @@ func (executor *LinuxOperationsExecutor) metricValue(ctx context.Context, scope 
 func readMeminfo() (map[string]uint64, error) { content, err := os.ReadFile("/proc/meminfo"); if err != nil { return nil, err }; values := map[string]uint64{}; for _, line := range strings.Split(string(content), "\n") { fields := strings.Fields(line); if len(fields) >= 2 { value, parseErr := strconv.ParseUint(fields[1],10,64); if parseErr == nil { values[strings.TrimSuffix(fields[0],":")] = value } } }; return values,nil }
 func countProcessesContaining(needle string) int { entries, _ := os.ReadDir("/proc"); count := 0; for _, entry := range entries { if _, err := strconv.Atoi(entry.Name()); err != nil { continue }; content, err := os.ReadFile(filepath.Join("/proc",entry.Name(),"comm")); if err == nil && strings.Contains(string(content),needle) { count++ } }; return count }
 
+const operationsLogMaximumBytes=4<<20
+const operationsLogMaximumMessageBytes=16<<10
+const operationsLogMaximumResultBytes=2<<20
+
+var operationsSecretAssignment=regexp.MustCompile(`(?i)\b(authorization|proxy-authorization|cookie|set-cookie|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)`)
+var operationsBearerSecret=regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9+/=_:.-]+`)
+var operationsQuerySecret=regexp.MustCompile(`(?i)([?&](?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)=)[^&\s]+`)
+var operationsURLSecret=regexp.MustCompile(`(?i)(://[^:/\s]+:)[^@\s]+@`)
+var operationsJWTSecret=regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
+var operationsPrivateKey=regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
+
 func (executor *LinuxOperationsExecutor) queryLogs(ctx context.Context, effect LogQueryEffect) (linuxEffectResult, error) {
-	if effect.Limit == 0 || effect.Limit > 5000 || effect.End.Before(effect.Start) || effect.End.Sub(effect.Start) > 31*24*time.Hour { return linuxEffectResult{}, ErrInvalidEffect }
-	arguments := []string{"--output=json", "--no-pager", "--since="+effect.Start.UTC().Format(time.RFC3339Nano), "--until="+effect.End.UTC().Format(time.RFC3339Nano), "--lines="+strconv.FormatUint(uint64(effect.Limit),10)}
+	if effect.Limit == 0 || effect.Limit > 5000 || !effect.End.After(effect.Start) || effect.End.Sub(effect.Start) > 7*24*time.Hour || effect.MinimumSeverity>7 || !validObservationLogScope(effect.TenantID,effect.SiteID) { return linuxEffectResult{}, ErrInvalidEffect }
+	observedAt:=executor.clock.Now().UTC()
+	if fileLogSource(effect.Source){return executor.queryFileLogs(ctx,effect,observedAt)}
+	arguments := []string{"--output=json", "--output-fields=__CURSOR,__REALTIME_TIMESTAMP,PRIORITY,SYSLOG_IDENTIFIER,MESSAGE", "--no-pager", "--since="+effect.Start.UTC().Format(time.RFC3339Nano), "--until="+effect.End.UTC().Format(time.RFC3339Nano), "--lines="+strconv.FormatUint(uint64(effect.Limit)+1,10)}
 	if effect.Cursor!="" { arguments=append(arguments,"--after-cursor="+effect.Cursor) }
 	arguments = append(arguments, journalSelector(effect.Source, effect.Service)...)
 	if effect.TenantID != "" { arguments = append(arguments, "CYBERPANEL_TENANT_ID="+effect.TenantID) }
 	if effect.SiteID != "" { arguments = append(arguments, "CYBERPANEL_SITE_ID="+effect.SiteID) }
-	output, err := executor.runner.Run(ctx, "/usr/bin/journalctl", arguments...); if err != nil { return linuxEffectResult{}, err }
-	entries := parseJournalEntries(output, effect); next:="";if len(entries)>0{next=entries[len(entries)-1].Cursor};return linuxEffectResult{Result:EffectResult{Logs:&LogBatch{Entries:entries,NextCursor:next, Truncated:uint32(len(entries))==effect.Limit}}},nil
+	output,truncated,err:=executor.runBoundedObservation(ctx,"/usr/bin/journalctl",operationsLogMaximumBytes,arguments...)
+	batch:=&LogBatch{ObservedAt:observedAt,BytesRead:uint64(len(output))}
+	if err!=nil{batch.UnavailableReason="journal_unavailable";return linuxEffectResult{Result:EffectResult{Logs:batch}},nil}
+	entries,next,more:=parseJournalEntries(output,effect,int(effect.Limit));batch.Available=true;batch.Truncated=truncated||more;batch.Entries=entries;batch.NextCursor=next
+	return linuxEffectResult{Result:EffectResult{Logs:batch}},nil
 }
+
+func validObservationLogScope(tenantID,siteID string)bool{if tenantID==""{return siteID==""};if _,err:=safeOpaque(tenantID,128);err!=nil{return false};if siteID==""{return true};_,err:=safeOpaque(siteID,128);return err==nil}
+func fileLogSource(source LogSource)bool{return source==LogWebAccess||source==LogWebError||source==LogPHP||source==LogWAF}
+func (executor *LinuxOperationsExecutor)runBoundedObservation(ctx context.Context,binary string,maximum int,arguments ...string)([]byte,bool,error){if runner,ok:=executor.runner.(BoundedFixedCommandRunner);ok{return runner.RunBounded(ctx,binary,maximum,arguments...)};output,err:=executor.runner.Run(ctx,binary,arguments...);truncated:=len(output)>maximum;if truncated{output=output[:maximum]};return output,truncated,err}
 
 func journalSelector(source LogSource, service ServiceName) []string {
 	switch source {
-	case LogPanel: return []string{"--unit=cyberpanel.service"}
+	case LogPanel: return []string{"--unit=panel-core.service"}
 	case LogMariaDB: return []string{"--unit=mariadb.service"}
 	case LogMail: return []string{"--unit=postfix.service", "--unit=dovecot.service"}
 	case LogSSH: return []string{"--unit=sshd.service", "--unit=ssh.service"}
 	case LogFirewall: return []string{"--identifier=kernel", "--grep=cyberpanel-fw"}
 	case LogServiceJournal: if candidates:=operationsServiceUnitCandidates[service];len(candidates)>0{result:=make([]string,len(candidates));for index,unit:=range candidates{result[index]="--unit="+unit};return result}else if unit, ok := operationsServiceUnits[service]; ok { return []string{"--unit="+unit} }
-	case LogWebAccess, LogWebError: return []string{"--unit=lsws.service"}
-	case LogPHP: return []string{"--identifier=lsphp"}
-	case LogWAF: return []string{"--identifier=modsecurity"}
 	}
 	return []string{"--identifier=cyberpanel-none"}
 }
 
-func parseJournalEntries(output []byte, effect LogQueryEffect) []LogEntry {
-	entries := make([]LogEntry,0); scanner := bufio.NewScanner(bytes.NewReader(output)); scanner.Buffer(make([]byte,4096),1<<20)
-	for scanner.Scan() { var value map[string]any; if json.Unmarshal(scanner.Bytes(),&value)!=nil { continue }; timestamp,_:=strconv.ParseInt(textValue(value["__REALTIME_TIMESTAMP"]),10,64); at:=time.UnixMicro(timestamp).UTC(); severity64,_:=strconv.ParseUint(textValue(value["PRIORITY"]),10,8); severity:=uint8(severity64); if at.Before(effect.Start)||at.After(effect.End)||severity<effect.MinimumSeverity { continue }; cursor:=textValue(value["__CURSOR"]); message:=textValue(value["MESSAGE"]); if cursor==""||len(cursor)>512||len(message)>65536 { continue }; code:=textValue(value["SYSLOG_IDENTIFIER"]); if code=="" { code="journal" }; if len(code)>128 { code=code[:128] }; entries=append(entries,LogEntry{Cursor:cursor,At:at,Source:effect.Source,Severity:severity,EventCode:code,Message:message}); if len(entries)>=int(effect.Limit){break} }
-	return entries
+func parseJournalEntries(output []byte,effect LogQueryEffect,maximum int)([]LogEntry,string,bool){
+	entries:=make([]LogEntry,0,maximum);next:="";more:=false;used:=0;scanner:=bufio.NewScanner(bytes.NewReader(output));scanner.Buffer(make([]byte,4096),256<<10)
+	for scanner.Scan(){var value map[string]any;if json.Unmarshal(scanner.Bytes(),&value)!=nil{continue};cursor:=textValue(value["__CURSOR"]);if cursor==""||len(cursor)>512{continue};timestamp,parseErr:=strconv.ParseInt(textValue(value["__REALTIME_TIMESTAMP"]),10,64);if parseErr!=nil||timestamp<=0{continue};at:=time.UnixMicro(timestamp).UTC();severity64,parseErr:=strconv.ParseUint(textValue(value["PRIORITY"]),10,8);if parseErr!=nil||severity64>7{continue};severity:=uint8(severity64);if at.Before(effect.Start)||at.After(effect.End)||severity<effect.MinimumSeverity{next=cursor;continue};message:=redactOperationsLog(textValue(value["MESSAGE"]));code:=textValue(value["SYSLOG_IDENTIFIER"]);if code==""{code="journal"};if len(code)>128{code=code[:128]};cost:=len(cursor)+len(code)+len(message)+128;if len(entries)>=maximum||used+cost>operationsLogMaximumResultBytes{more=true;break};entries=append(entries,LogEntry{Cursor:cursor,At:at,Source:effect.Source,Severity:severity,EventCode:code,Message:message});used+=cost;next=cursor};if scanner.Err()!=nil{more=true}
+	return entries,next,more
 }
 
 func textValue(value any) string { switch typed:=value.(type){case string:return typed;case float64:return strconv.FormatInt(int64(typed),10);default:return ""} }
+
+func redactOperationsLog(message string)string{message=strings.ReplaceAll(message,"\x00","");message=operationsSecretAssignment.ReplaceAllString(message,"$1$2[REDACTED]");message=operationsBearerSecret.ReplaceAllString(message,"$1 [REDACTED]");message=operationsQuerySecret.ReplaceAllString(message,"$1[REDACTED]");message=operationsURLSecret.ReplaceAllString(message,"$1[REDACTED]@");message=operationsJWTSecret.ReplaceAllString(message,"[REDACTED]");message=operationsPrivateKey.ReplaceAllString(message,"[REDACTED]");if len(message)>operationsLogMaximumMessageBytes{message=message[:operationsLogMaximumMessageBytes]};return message}
+
+type operationsFileLogCursor struct{Version uint8 `json:"v"`;Source LogSource `json:"s"`;TenantID string `json:"t,omitempty"`;SiteID string `json:"i,omitempty"`;Device uint64 `json:"d"`;Inode uint64 `json:"n"`;Offset int64 `json:"o"`}
+
+func (executor *LinuxOperationsExecutor)queryFileLogs(ctx context.Context,effect LogQueryEffect,observedAt time.Time)(linuxEffectResult,error){
+	path,binding,reason,err:=executor.fileLogPath(ctx,effect);batch:=&LogBatch{ObservedAt:observedAt}
+	if err!=nil{return linuxEffectResult{},err};if reason!=""{batch.UnavailableReason=reason;return linuxEffectResult{Result:EffectResult{Logs:batch}},nil}
+	fd,openErr:=openOperationsFileLog(path,binding);if errors.Is(openErr,os.ErrNotExist)||errors.Is(openErr,syscall.ENOENT){batch.UnavailableReason="source_unavailable";return linuxEffectResult{Result:EffectResult{Logs:batch}},nil};if openErr!=nil{return linuxEffectResult{},openErr};file:=os.NewFile(uintptr(fd),path);defer file.Close()
+	var stat syscall.Stat_t;if err=syscall.Fstat(fd,&stat);err!=nil{return linuxEffectResult{},err};if stat.Mode&syscall.S_IFMT!=syscall.S_IFREG||stat.Mode&0002!=0{return linuxEffectResult{},ErrInvalidEffect};if binding!=nil&&(uint32(stat.Uid)!=binding.UID||uint32(stat.Gid)!=binding.GID){return linuxEffectResult{},ErrUnauthorized}
+	start:=stat.Size-int64(operationsLogMaximumBytes);if start<0{start=0};hadCursor:=effect.Cursor!=""
+	if hadCursor{cursor,parseErr:=decodeFileLogCursor(effect.Cursor);if parseErr!=nil||cursor.Source!=effect.Source||cursor.TenantID!=effect.TenantID||cursor.SiteID!=effect.SiteID||cursor.Offset<0{return linuxEffectResult{},ErrInvalidEffect};if cursor.Device!=uint64(stat.Dev)||cursor.Inode!=stat.Ino||cursor.Offset>stat.Size{batch.UnavailableReason="cursor_expired";return linuxEffectResult{Result:EffectResult{Logs:batch}},nil};start=cursor.Offset}
+	wanted:=operationsLogMaximumBytes+1;raw:=make([]byte,wanted);count,readErr:=file.ReadAt(raw,start);if readErr!=nil&&!errors.Is(readErr,io.EOF){return linuxEffectResult{},readErr};raw=raw[:count];byteTruncated:=len(raw)>operationsLogMaximumBytes;if byteTruncated{raw=raw[:operationsLogMaximumBytes]};batch.BytesRead=uint64(len(raw));position:=start
+	if start>0&&!hadCursor{if newline:=bytes.IndexByte(raw,'\n');newline>=0{position+=int64(newline+1);raw=raw[newline+1:]}else{raw=nil}}
+	severity:=fileLogSeverity(effect.Source);entries:=make([]LogEntry,0,effect.Limit);nextCursor:="";more:=byteTruncated;used:=0
+	for len(raw)>0{lineStart:=position;newline:=bytes.IndexByte(raw,'\n');line:=raw;if newline>=0{line=raw[:newline]};consumed:=len(line);if newline>=0{consumed++};position+=int64(consumed);raw=raw[consumed:];cursor:=encodeFileLogCursor(operationsFileLogCursor{Version:1,Source:effect.Source,TenantID:effect.TenantID,SiteID:effect.SiteID,Device:uint64(stat.Dev),Inode:stat.Ino,Offset:position});nextCursor=cursor;if len(line)==0||len(line)>64<<10{continue};at,ok:=fileLogTimestamp(line,observedAt);if !ok||at.Before(effect.Start)||at.After(effect.End)||severity<effect.MinimumSeverity{continue};message:=redactOperationsLog(string(line));cost:=len(cursor)+len(message)+128;if len(entries)>=int(effect.Limit)||used+cost>operationsLogMaximumResultBytes{more=true;nextCursor=encodeFileLogCursor(operationsFileLogCursor{Version:1,Source:effect.Source,TenantID:effect.TenantID,SiteID:effect.SiteID,Device:uint64(stat.Dev),Inode:stat.Ino,Offset:lineStart});break};entries=append(entries,LogEntry{Cursor:cursor,At:at,Source:effect.Source,Severity:severity,EventCode:string(effect.Source),Message:message});used+=cost;if newline<0{break}}
+	batch.Available=true;batch.Entries=entries;batch.NextCursor=nextCursor;batch.Truncated=more;return linuxEffectResult{Result:EffectResult{Logs:batch}},nil
+}
+
+func openOperationsFileLog(path string,binding *LinuxOperationsSiteBinding)(int,error){
+	if binding==nil{return syscall.Open(path,syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,0)}
+	fd,err:=syscall.Open("/var/lib/cyberpanel/sites",syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,0);if err!=nil{return -1,err}
+	for _,component:=range []string{binding.SiteKey,"roots","g"+strconv.FormatUint(binding.Generation,10),"logs"}{next,openErr:=syscall.Openat(fd,component,syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,0);syscall.Close(fd);if openErr!=nil{return -1,openErr};fd=next}
+	result,err:=syscall.Openat(fd,filepath.Base(path),syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,0);syscall.Close(fd);return result,err
+}
+
+func (executor *LinuxOperationsExecutor)fileLogPath(ctx context.Context,effect LogQueryEffect)(string,*LinuxOperationsSiteBinding,string,error){
+	filename:=map[LogSource]string{LogWebAccess:"access.log",LogWebError:"error.log",LogPHP:"php-error.log",LogWAF:"waf-audit.log"}[effect.Source];if filename==""{return "",nil,"",ErrInvalidEffect}
+	if effect.TenantID!=""&&effect.SiteID==""{return "",nil,"tenant_file_scope_unavailable",nil}
+	if effect.SiteID!=""{if executor.sites==nil{return "",nil,"site_resolver_unavailable",nil};binding,err:=executor.sites.ResolveOperationsSite(ctx,effect.SiteID);if err!=nil{return "",nil,"site_unavailable",nil};if binding.TenantID!=effect.TenantID||binding.SiteID!=effect.SiteID||binding.Generation==0||binding.UID<1000||binding.GID!=binding.UID{return "",nil,"",ErrUnauthorized};if _,err=safeOpaque(binding.SiteKey,128);err!=nil{return "",nil,"",ErrInvalidEffect};path:=filepath.Join("/var/lib/cyberpanel/sites",binding.SiteKey,"roots","g"+strconv.FormatUint(binding.Generation,10),"logs",filename);return path,&binding,"",nil}
+	path:=map[LogSource]string{LogWebAccess:"/usr/local/lsws/logs/access.log",LogWebError:"/usr/local/lsws/logs/error.log",LogPHP:"/usr/local/lsws/logs/stderr.log",LogWAF:"/usr/local/lsws/logs/auditmodsec.log"}[effect.Source];return path,nil,"",nil
+}
+
+func encodeFileLogCursor(cursor operationsFileLogCursor)string{raw,_:=json.Marshal(cursor);return base64.RawURLEncoding.EncodeToString(raw)}
+func decodeFileLogCursor(value string)(operationsFileLogCursor,error){var cursor operationsFileLogCursor;raw,err:=base64.RawURLEncoding.DecodeString(value);if err!=nil||len(raw)>384||json.Unmarshal(raw,&cursor)!=nil||cursor.Version!=1{return operationsFileLogCursor{},ErrInvalidEffect};return cursor,nil}
+func fileLogSeverity(source LogSource)uint8{switch source{case LogWebAccess:return 1;case LogWebError,LogPHP:return 4;case LogWAF:return 5};return 0}
+func fileLogTimestamp(line []byte,observedAt time.Time)(time.Time,bool){
+	var record map[string]any;if len(line)>1&&line[0]=='{'&&json.Unmarshal(line,&record)==nil{for _,key:=range []string{"@timestamp","timestamp","time"}{if raw:=textValue(record[key]);raw!=""{if parsed,err:=time.Parse(time.RFC3339Nano,raw);err==nil{return parsed.UTC(),true}}}}
+	text:=string(line);if left:=strings.IndexByte(text,'[');left>=0{if right:=strings.IndexByte(text[left+1:],']');right>=0{candidate:=text[left+1:left+1+right];for _,format:=range []string{"02/Jan/2006:15:04:05 -0700","02-Jan-2006 15:04:05 MST","2006-01-02 15:04:05 MST"}{if parsed,err:=time.Parse(format,candidate);err==nil{return parsed.UTC(),true}}}}
+	maximum:=len(text);if maximum>40{maximum=40};for length:=20;length<=maximum;length++{if parsed,err:=time.Parse(time.RFC3339Nano,text[:length]);err==nil{return parsed.UTC(),true}}
+	for _,format:=range []string{"2006-01-02 15:04:05","Jan 2 15:04:05"}{length:=len(format);if length>len(text){continue};candidate:=text[:length];if parsed,err:=time.Parse(format,candidate);err==nil{if format=="Jan 2 15:04:05"{parsed=parsed.AddDate(observedAt.Year(),0,0);if parsed.After(observedAt.Add(24*time.Hour)){parsed=parsed.AddDate(-1,0,0)}};return parsed.UTC(),true}}
+	return time.Time{},false
+}
 
 func (executor *LinuxOperationsExecutor) querySSHLogins(ctx context.Context, effect SSHLoginQueryEffect) (linuxEffectResult,error){
 	if effect.Limit==0||effect.Limit>5000||effect.End.Before(effect.Start){return linuxEffectResult{},ErrInvalidEffect}; query:=LogQueryEffect{Source:LogSSH,Start:effect.Start,End:effect.End,Limit:effect.Limit}; logs,err:=executor.queryLogs(ctx,query);if err!=nil{return linuxEffectResult{},err};records:=make([]SSHLoginRecord,0)

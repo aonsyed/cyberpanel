@@ -3,6 +3,7 @@
 package operations
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -26,15 +27,27 @@ type FixedCommandRunner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
 }
 
+type BoundedFixedCommandRunner interface { RunBounded(context.Context, string, int, ...string) ([]byte, bool, error) }
+
+type boundedCommandOutput struct { bytes.Buffer; limit int; truncated bool }
+func (output *boundedCommandOutput) Write(value []byte) (int,error) { count:=len(value);remaining:=output.limit-output.Len();if remaining>0{if remaining>count{remaining=count};_,_=output.Buffer.Write(value[:remaining])};if count>remaining{output.truncated=true};return count,nil }
+
 type LinuxFixedCommandRunner struct{}
 
 func (LinuxFixedCommandRunner) Run(ctx context.Context, binary string, arguments ...string) ([]byte, error) {
-	if !allowedOperationsBinary(binary) { return nil, ErrInvalidEffect }
+	output, truncated, err := (LinuxFixedCommandRunner{}).RunBounded(ctx,binary,4<<20,arguments...)
+	if truncated && err == nil { err = errors.New("command output limit exceeded") }
+	return output, err
+}
+
+func (LinuxFixedCommandRunner) RunBounded(ctx context.Context, binary string, maximum int, arguments ...string) ([]byte, bool, error) {
+	if !allowedOperationsBinary(binary) { return nil, false, ErrInvalidEffect }
+	if maximum < 1 || maximum > 4<<20 { return nil, false, ErrInvalidEffect }
 	command := exec.CommandContext(ctx, binary, arguments...)
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
-	output, err := command.CombinedOutput()
-	if len(output) > 4<<20 { output = output[:4<<20]; if err == nil { err = errors.New("command output limit exceeded") } }
-	return output, err
+	output:=&boundedCommandOutput{limit:maximum};command.Stdout=output;command.Stderr=output
+	err:=command.Run()
+	return output.Bytes(), output.truncated, err
 }
 
 func allowedOperationsBinary(binary string) bool {
@@ -67,7 +80,13 @@ type LinuxOperationsConfig struct {
 	Secrets LinuxManagedServiceSecretSource
 	Runner FixedCommandRunner
 	Clock Clock
+	Sites LinuxOperationsSiteResolver
 }
+
+type LinuxOperationsSiteBinding struct { TenantID string; SiteID string; SiteKey string; UID uint32; GID uint32; Generation uint64 }
+type LinuxOperationsSiteResolver interface { ResolveOperationsSite(context.Context,string)(LinuxOperationsSiteBinding,error) }
+type LinuxOperationsSiteResolverFunc func(context.Context,string)(LinuxOperationsSiteBinding,error)
+func(function LinuxOperationsSiteResolverFunc)ResolveOperationsSite(ctx context.Context,siteID string)(LinuxOperationsSiteBinding,error){return function(ctx,siteID)}
 
 func DefaultLinuxOperationsConfig() LinuxOperationsConfig {
 	return LinuxOperationsConfig{
@@ -103,6 +122,7 @@ type LinuxOperationsExecutor struct {
 	secrets LinuxManagedServiceSecretSource
 	runner FixedCommandRunner
 	clock Clock
+	sites LinuxOperationsSiteResolver
 	mu sync.Mutex
 }
 
@@ -138,7 +158,7 @@ func NewLinuxOperationsExecutor(config LinuxOperationsConfig) (*LinuxOperationsE
 	if config.Clock == nil { config.Clock = SystemClock{} }
 	if len(config.Volumes) == 0 || len(config.Packages) == 0 { return nil, ErrInvalidResource }
 	if err := ensureOperationsStateRoot(config.StateRoot); err != nil { return nil, err }
-	return &LinuxOperationsExecutor{stateRoot: config.StateRoot, volumes: cloneVolumes(config.Volumes), packages: clonePackages(config.Packages), wafPacks: cloneStrings(config.WAFPacks), secrets:config.Secrets, runner: config.Runner, clock: config.Clock}, nil
+	return &LinuxOperationsExecutor{stateRoot: config.StateRoot, volumes: cloneVolumes(config.Volumes), packages: clonePackages(config.Packages), wafPacks: cloneStrings(config.WAFPacks), secrets:config.Secrets, runner: config.Runner, clock: config.Clock, sites:config.Sites}, nil
 }
 
 func ensureOperationsStateRoot(root string) error {

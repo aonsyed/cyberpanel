@@ -169,6 +169,7 @@ type MetricName string
 
 const (
 	MetricCPUUsage MetricName = "cpu_usage"
+	MetricLoad1 MetricName = "load_1m"
 	MetricMemoryUsage MetricName = "memory_usage"
 	MetricIOBytes MetricName = "io_bytes"
 	MetricNetworkBytes MetricName = "network_bytes"
@@ -322,10 +323,10 @@ func validateCommandBody(command Command) error {
 		if !validService(value.Service) || !validSHA256(value.DiagnosticProofDigest) || (value.Strategy != RepairReconcileConfig && value.Strategy != RepairResetFailed && value.Strategy != RepairReinstallManagedFiles && value.Strategy != RepairDependencyOrder) { return ErrInvalidCommand }
 	case QueryMetrics:
 		if value.Scope.Validate() != nil || value.Scope.NodeID != value.Header.NodeID || value.Scope.TenantID.String() != value.Header.TenantID.String() || value.Scope.SiteID.String() != value.Header.SiteID.String() ||
-			!value.End.After(value.Start) || value.End.Sub(value.Start) > 31*24*time.Hour || value.Step < time.Second || value.Limit == 0 || value.Limit > 100000 || len(value.Names) == 0 || len(value.Names) > 32 { return ErrInvalidCommand }
+			!value.End.After(value.Start) || value.End.Sub(value.Start) > 31*24*time.Hour || value.Step < time.Second || value.Step > 24*time.Hour || value.Limit == 0 || value.Limit > 256 || len(value.Names) == 0 || len(value.Names) > 32 { return ErrInvalidCommand }
 		for _, name := range value.Names { if !validMetric(name) { return ErrInvalidCommand } }
 	case OpenLogStream:
-		if !validLogSource(value.Source) || !value.End.After(value.Start) || value.End.Sub(value.Start) > 7*24*time.Hour || value.MinimumSeverity > 7 || len(value.Cursor) > 512 || value.Limit == 0 || value.Limit > 10000 || (value.Source == LogServiceJournal && !validService(value.Service)) { return ErrInvalidCommand }
+		if !validLogSource(value.Source) || !value.End.After(value.Start) || value.End.Sub(value.Start) > 7*24*time.Hour || value.MinimumSeverity > 7 || len(value.Cursor) > 512 || value.Limit == 0 || value.Limit > 2000 || (value.Source == LogServiceJournal && !validService(value.Service)) || (value.Source != LogServiceJournal && value.Service != "") { return ErrInvalidCommand }
 	case QuerySSHLogins:
 		if !value.End.After(value.Start) || value.End.Sub(value.Start) > 31*24*time.Hour || value.Limit == 0 || value.Limit > 10000 || value.SourceCIDR != nil && !validPrefix(*value.SourceCIDR) { return ErrInvalidCommand }
 	case QuerySSHSessions:
@@ -397,7 +398,7 @@ func validateProcessIdentity(identity ProcessIdentity) error {
 }
 
 func validMetric(name MetricName) bool {
-	switch name { case MetricCPUUsage, MetricMemoryUsage, MetricIOBytes, MetricNetworkBytes, MetricDiskUsage, MetricInodeUsage, MetricPHPWorkers, MetricServiceHealth: return true }
+	switch name { case MetricCPUUsage, MetricLoad1, MetricMemoryUsage, MetricIOBytes, MetricNetworkBytes, MetricDiskUsage, MetricInodeUsage, MetricPHPWorkers, MetricServiceHealth: return true }
 	return false
 }
 

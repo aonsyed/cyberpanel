@@ -99,7 +99,7 @@ const (
 	EffectAmbiguous EffectOutcome = "ambiguous"
 )
 
-type MetricPoint struct { Name MetricName `json:"name"`; At time.Time `json:"at"`; Value float64 `json:"value"`; Unit MetricUnit `json:"unit"` }
+type MetricPoint struct { Name MetricName `json:"name"`; Service ServiceName `json:"service,omitempty"`; At time.Time `json:"at"`; Value float64 `json:"value"`; Unit MetricUnit `json:"unit"`; Available bool `json:"available"`; Status string `json:"status,omitempty"`; UnavailableReason string `json:"unavailable_reason,omitempty"` }
 type MetricUnit string
 const (
 	UnitRatio MetricUnit = "ratio"
@@ -108,7 +108,7 @@ const (
 	UnitBytesPerSecond MetricUnit = "bytes_per_second"
 )
 
-type MetricsBatch struct { Scope EnforcementScope `json:"scope"`; Points []MetricPoint `json:"points"`; Truncated bool `json:"truncated"` }
+type MetricsBatch struct { Scope EnforcementScope `json:"scope"`; ObservedAt time.Time `json:"observed_at"`; Points []MetricPoint `json:"points"`; Available bool `json:"available"`; UnavailableReason string `json:"unavailable_reason,omitempty"`; Truncated bool `json:"truncated"` }
 
 type LogEntry struct {
 	Cursor string `json:"cursor"`
@@ -119,7 +119,7 @@ type LogEntry struct {
 	Message string `json:"message"`
 	Process ProcessIdentity `json:"process,omitempty"`
 }
-type LogBatch struct { Entries []LogEntry `json:"entries"`; NextCursor string `json:"next_cursor,omitempty"`; Truncated bool `json:"truncated"` }
+type LogBatch struct { ObservedAt time.Time `json:"observed_at"`; Entries []LogEntry `json:"entries"`; NextCursor string `json:"next_cursor,omitempty"`; BytesRead uint64 `json:"bytes_read"`; Available bool `json:"available"`; UnavailableReason string `json:"unavailable_reason,omitempty"`; Truncated bool `json:"truncated"` }
 
 type SSHLoginOutcome string
 const (
@@ -280,9 +280,9 @@ func validateEffectShape(request EffectRequest) error {
 	case EffectServiceRepair:
 		if request.ServiceRepair == nil || !validService(request.ServiceRepair.Service) || !validSHA256(request.ServiceRepair.DiagnosticProofDigest) { return ErrInvalidCommand }
 	case EffectMetricsQuery:
-		if request.MetricsQuery == nil || request.MetricsQuery.Scope.Validate() != nil { return ErrInvalidCommand }
+		if request.MetricsQuery == nil || request.MetricsQuery.Scope.Validate() != nil || request.MetricsQuery.Scope.NodeID != request.Scope.NodeID || request.MetricsQuery.Scope.TenantID.String() != request.Scope.TenantID.String() || !request.MetricsQuery.End.After(request.MetricsQuery.Start) || request.MetricsQuery.End.Sub(request.MetricsQuery.Start) > 31*24*time.Hour || request.MetricsQuery.Step < time.Second || request.MetricsQuery.Step > 24*time.Hour || request.MetricsQuery.Limit == 0 || request.MetricsQuery.Limit > 256 || len(request.MetricsQuery.Names) == 0 || len(request.MetricsQuery.Names) > 32 { return ErrInvalidCommand }; for _, name := range request.MetricsQuery.Names { if !validMetric(name) { return ErrInvalidCommand } }
 	case EffectLogQuery:
-		if request.LogQuery == nil || !validLogSource(request.LogQuery.Source) || len(request.LogQuery.Cursor) > 512 { return ErrInvalidCommand }
+		if request.LogQuery == nil || !validLogSource(request.LogQuery.Source) || !request.LogQuery.End.After(request.LogQuery.Start) || request.LogQuery.End.Sub(request.LogQuery.Start) > 7*24*time.Hour || request.LogQuery.MinimumSeverity > 7 || len(request.LogQuery.Cursor) > 512 || request.LogQuery.Limit == 0 || request.LogQuery.Limit > 2000 || request.LogQuery.TenantID != request.Scope.TenantID.String() || request.LogQuery.SiteID != "" && request.LogQuery.TenantID == "" || request.LogQuery.Source == LogServiceJournal && !validService(request.LogQuery.Service) || request.LogQuery.Source != LogServiceJournal && request.LogQuery.Service != "" { return ErrInvalidCommand }
 	case EffectSSHLoginQuery:
 		if request.SSHLoginQuery == nil { return ErrInvalidCommand }
 	case EffectSSHSessionQuery:
@@ -387,14 +387,14 @@ func validateEffectResult(request EffectRequest, result EffectResult) error {
 	if !expected || count > 1 { return ErrInvalidEffect }
 	if result.Logs != nil {
 		query := request.LogQuery
-		if query == nil || uint32(len(result.Logs.Entries)) > query.Limit || len(result.Logs.NextCursor) > 512 { return ErrInvalidEffect }
-		for _, entry := range result.Logs.Entries { if len(entry.Cursor) == 0 || len(entry.Cursor) > 512 || entry.At.Before(query.Start) || entry.At.After(query.End) || entry.Source != query.Source || entry.Severity < query.MinimumSeverity || entry.Severity > 7 || len(entry.EventCode) == 0 || len(entry.EventCode) > 128 || len(entry.Message) > 65536 || strings.ContainsRune(entry.Message, '\x00') { return ErrInvalidEffect } }
+		if query == nil || result.Logs.ObservedAt.IsZero() || uint32(len(result.Logs.Entries)) > query.Limit || len(result.Logs.NextCursor) > 512 || result.Logs.BytesRead > 4<<20 || len(result.Logs.UnavailableReason)>64 || result.Logs.Available == (result.Logs.UnavailableReason != "") { return ErrInvalidEffect }
+		resultBytes:=0;for _, entry := range result.Logs.Entries { resultBytes+=len(entry.Cursor)+len(entry.EventCode)+len(entry.Message)+128;if len(entry.Cursor) == 0 || len(entry.Cursor) > 512 || entry.At.Before(query.Start) || entry.At.After(query.End) || entry.Source != query.Source || entry.Severity < query.MinimumSeverity || entry.Severity > 7 || len(entry.EventCode) == 0 || len(entry.EventCode) > 128 || len(entry.Message) > 16384 || strings.ContainsRune(entry.Message, '\x00') { return ErrInvalidEffect } };if resultBytes>2<<20{return ErrInvalidEffect}
 	}
 	if result.Metrics != nil {
 		query := request.MetricsQuery
-		if query == nil || result.Metrics.Scope != query.Scope || uint32(len(result.Metrics.Points)) > query.Limit { return ErrInvalidEffect }
+		if query == nil || result.Metrics.Scope != query.Scope || result.Metrics.ObservedAt.IsZero() || uint32(len(result.Metrics.Points)) > query.Limit || len(result.Metrics.UnavailableReason)>64 || result.Metrics.Available == (result.Metrics.UnavailableReason != "") { return ErrInvalidEffect }
 		allowed := make(map[MetricName]struct{}, len(query.Names)); for _, name := range query.Names { allowed[name] = struct{}{} }
-		for _, point := range result.Metrics.Points { if _, ok := allowed[point.Name]; !ok || point.At.Before(query.Start) || point.At.After(query.End) || !validMetricUnit(point.Name, point.Unit) { return ErrInvalidEffect } }
+		for _, point := range result.Metrics.Points { if _, ok := allowed[point.Name]; !ok || !point.At.Equal(result.Metrics.ObservedAt) || !validMetricUnit(point.Name, point.Unit) || len(point.UnavailableReason)>64 || point.Available == (point.UnavailableReason != "") || point.Name == MetricServiceHealth && !validService(point.Service) || point.Name != MetricServiceHealth && point.Service != "" || len(point.Status) > 64 { return ErrInvalidEffect } }
 	}
 	if result.SSHLogins != nil {
 		query := request.SSHLoginQuery
@@ -428,6 +428,7 @@ func validateEffectResult(request EffectRequest, result EffectResult) error {
 func validMetricUnit(name MetricName, unit MetricUnit) bool {
 	switch name {
 	case MetricCPUUsage: return unit == UnitRatio
+	case MetricLoad1: return unit == UnitCount
 	case MetricMemoryUsage, MetricDiskUsage: return unit == UnitBytes
 	case MetricIOBytes, MetricNetworkBytes: return unit == UnitBytes || unit == UnitBytesPerSecond
 	case MetricInodeUsage, MetricPHPWorkers, MetricServiceHealth: return unit == UnitCount
