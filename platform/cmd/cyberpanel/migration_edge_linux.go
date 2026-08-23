@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
@@ -32,7 +33,7 @@ func newMigrationEdge(runtime *localmigration.Runtime, now func() time.Time) (*m
 }
 
 func (*migrationEdge) MigrationCapabilities() apiserver.MigrationEdgeCapabilities {
-	return apiserver.MigrationEdgeCapabilities{List:true,Create:true,Inventory:true,Plan:true,Sync:false,Cutover:false}
+	return apiserver.MigrationEdgeCapabilities{List:true,Create:true,Inventory:true,Plan:true,Sync:true,Cutover:true}
 }
 
 func (edge *migrationEdge) ListMigrations(ctx context.Context, call apiserver.EdgeCall, payload apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.MigrationProjection], error) {
@@ -160,18 +161,166 @@ func (edge *migrationEdge) Plan(ctx context.Context, call apiserver.EdgeCall, pa
 	return migrationMutation(call.CommandID, value, scope, projection), nil
 }
 
-func (edge *migrationEdge) Sync(ctx context.Context, call apiserver.EdgeCall, _ apiserver.MigrationSyncPayload) (apiserver.EdgeMutation[apiserver.MigrationProjection], error) {
-	if _, _, err := edge.loadScoped(ctx, call); err != nil {
+func (edge *migrationEdge) Sync(ctx context.Context, call apiserver.EdgeCall, payload apiserver.MigrationSyncPayload) (apiserver.EdgeMutation[apiserver.MigrationProjection], error) {
+	value, scope, err := edge.loadScoped(ctx, call)
+	if err != nil {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
 	}
-	return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, errors.Join(migration.ErrBlocked, errors.New("canonical target import handlers are not registered"))
+	if value.Phase == migration.PhaseQuiescing || value.Phase == migration.PhaseFinalSync || value.Phase == migration.PhaseCutoverReady || value.Phase == migration.PhaseCutoverCommitting || value.Phase == migration.PhaseVerifying || value.Phase == migration.PhaseCommitted || value.Phase == migration.PhaseCleanup {
+		return migrationMutation(call.CommandID, value, scope, edge.projection(ctx, value, scope)), nil
+	}
+	if value.Phase != migration.PhasePlanned && value.Phase != migration.PhaseReady && value.Phase != migration.PhaseBaseSync && value.Phase != migration.PhasePausedRetryable {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrConflict
+	}
+	plan, err := edge.runtime.Repository.Plan(ctx, value.PlanDigest)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	if len(plan.Unsupported) != 0 {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrBlocked
+	}
+	manifest, err := edge.runtime.Repository.Manifest(ctx, value.ManifestRoot)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	required, err := migrationTransferBytes(manifest)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	if payload.MaximumBytes != 0 && required > payload.MaximumBytes {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrCapacity
+	}
+	scope, err = edge.runtime.Scopes.Claim(ctx, call.TenantID, value.ID, call.ExpectedGeneration, call.CommandID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	if value.Phase == migration.PhasePlanned {
+		approvalDigest := migrationApprovalDigest("base-sync", call, value.ID, plan.DryRunDigest, "", payload.MaximumBytes)
+		value, err = edge.runtime.Orchestrator.Approve(ctx, value.ID, approvalDigest)
+		if err != nil {
+			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+		}
+	}
+	value, err = edge.runtime.Orchestrator.BaseSync(ctx, value.ID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	return migrationMutation(call.CommandID, value, scope, edge.projection(ctx, value, scope)), nil
 }
 
-func (edge *migrationEdge) Cutover(ctx context.Context, call apiserver.EdgeCall, _ apiserver.MigrationCutoverPayload) (apiserver.EdgeMutation[apiserver.MigrationProjection], error) {
-	if _, _, err := edge.loadScoped(ctx, call); err != nil {
+func (edge *migrationEdge) Cutover(ctx context.Context, call apiserver.EdgeCall, payload apiserver.MigrationCutoverPayload) (apiserver.EdgeMutation[apiserver.MigrationProjection], error) {
+	if !validMigrationApprovalRef(payload.ApprovalRef) {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrInvalid
+	}
+	value, scope, err := edge.loadScoped(ctx, call)
+	if err != nil {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
 	}
-	return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, errors.Join(migration.ErrBlocked, errors.New("migration activation and target probes are not registered"))
+	if value.Phase == migration.PhaseCleanup || value.Phase == migration.PhaseRolledBack {
+		return migrationMutation(call.CommandID, value, scope, edge.projection(ctx, value, scope)), nil
+	}
+	if value.Phase != migration.PhaseQuiescing && value.Phase != migration.PhaseFinalSync && value.Phase != migration.PhaseCutoverReady && value.Phase != migration.PhaseCutoverCommitting && value.Phase != migration.PhaseVerifying && value.Phase != migration.PhaseCommitted && value.Phase != migration.PhasePausedRetryable {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrConflict
+	}
+	plan, err := edge.runtime.Repository.Plan(ctx, value.PlanDigest)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	if plan.ApprovedAt == nil || plan.ApprovedAt.IsZero() || !validMigrationDigest(plan.ApprovalDigest) || len(plan.Unsupported) != 0 {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrBlocked
+	}
+	scope, err = edge.runtime.Scopes.Claim(ctx, call.TenantID, value.ID, call.ExpectedGeneration, call.CommandID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	if err = edge.bindCutoverApproval(ctx, call, value, plan, payload.ApprovalRef); err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	value, err = edge.runtime.Orchestrator.Cutover(ctx, value.ID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	return migrationMutation(call.CommandID, value, scope, edge.projection(ctx, value, scope)), nil
+}
+
+type migrationCutoverApprovalReceipt struct {
+	Version        uint8     `json:"version"`
+	PlanDigest     string    `json:"plan_digest"`
+	ApprovalDigest string    `json:"approval_digest"`
+	AuthorizedBy   string    `json:"authorized_by"`
+	AuthorizedAt   time.Time `json:"authorized_at"`
+}
+
+func (edge *migrationEdge) bindCutoverApproval(ctx context.Context, call apiserver.EdgeCall, value migration.Migration, plan migration.Plan, approvalRef string) error {
+	digest := migrationApprovalDigest("cutover", call, value.ID, plan.DryRunDigest, approvalRef, 0)
+	receipt := migrationCutoverApprovalReceipt{Version:1,PlanDigest:plan.DryRunDigest,ApprovalDigest:digest,AuthorizedBy:call.PrincipalID,AuthorizedAt:edge.now().UTC()}
+	var existing migrationCutoverApprovalReceipt
+	if err := edge.runtime.Repository.Receipt(ctx, value.ID, "cutover_approval", &existing); err == nil {
+		if existing.Version != 1 || existing.PlanDigest != receipt.PlanDigest || existing.ApprovalDigest != receipt.ApprovalDigest || existing.AuthorizedBy != receipt.AuthorizedBy || existing.AuthorizedAt.IsZero() {
+			return migration.ErrConflict
+		}
+		return nil
+	} else if !errors.Is(err, migration.ErrNotFound) {
+		return err
+	}
+	return edge.runtime.Repository.PutReceipt(ctx, value.ID, "cutover_approval", receipt)
+}
+
+func migrationTransferBytes(manifest migration.Manifest) (uint64, error) {
+	var total uint64
+	for _, chunk := range manifest.Chunks {
+		if total > ^uint64(0)-chunk.Size {
+			return 0, migration.ErrCapacity
+		}
+		total += chunk.Size
+	}
+	return total, nil
+}
+
+func migrationApprovalDigest(kind string, call apiserver.EdgeCall, id migration.ID, planDigest, approvalRef string, maximumBytes uint64) string {
+	sessionID, credentialID, commandID, authzEpoch := call.SessionID, call.CredentialID, call.CommandID, call.AuthzEpoch
+	if kind == "cutover" {
+		// The human change reference is the resumable cutover authority. A
+		// retry after a fenced pause necessarily has a new API command/session,
+		// so those transport identities must not invalidate the same approval.
+		sessionID, credentialID, commandID, authzEpoch = "", "", "", 0
+	}
+	raw, _ := json.Marshal(struct {
+		Domain        string `json:"domain"`
+		Kind          string `json:"kind"`
+		MigrationID   string `json:"migration_id"`
+		PlanDigest    string `json:"plan_digest"`
+		ApprovalRef   string `json:"approval_ref,omitempty"`
+		TenantID      string `json:"tenant_id"`
+		PrincipalID   string `json:"principal_id"`
+		SessionID     string `json:"session_id"`
+		CredentialID  string `json:"credential_id"`
+		CommandID     string `json:"command_id"`
+		AuthzEpoch    uint64 `json:"authz_epoch"`
+		MaximumBytes  uint64 `json:"maximum_bytes,omitempty"`
+	}{"cyberpanel-migration-approval-v1",kind,id.String(),planDigest,approvalRef,call.TenantID,call.PrincipalID,sessionID,credentialID,commandID,authzEpoch,maximumBytes})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func validMigrationApprovalRef(value string) bool {
+	if len(value) < 3 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '-' && character != '_' && character != '.' && character != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+func validMigrationDigest(value string) bool {
+	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
 }
 
 func (edge *migrationEdge) loadScoped(ctx context.Context, call apiserver.EdgeCall) (migration.Migration, migration.RuntimeScope, error) {

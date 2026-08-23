@@ -68,10 +68,26 @@ type ResourceCapacity struct { CPUCores uint32 `json:"cpu_cores"`; MemoryBytes u
 type NodeCapabilities struct { SchemaVersion uint32 `json:"schema_version"`; OS string `json:"os"`; Architecture string `json:"architecture"`; WebEngines []string `json:"web_engines"`; Services []string `json:"services"`; ProviderCapabilities []string `json:"provider_capabilities"`; ContainerRuntime string `json:"container_runtime,omitempty"`; VersionDigest string `json:"version_digest"`; ObservedAt time.Time `json:"observed_at"` }
 type NodeMember struct { ID NodeID `json:"id"`; GroupID NodeGroupID `json:"group_id"`; Roles []NodeRole `json:"roles"`; Labels map[string]string `json:"labels"`; FailureDomain string `json:"failure_domain"`; Capacity ResourceCapacity `json:"capacity"`; Capabilities NodeCapabilities `json:"capabilities"`; WorkloadIdentity string `json:"workload_identity"`; State NodeState `json:"state"`; Generation uint64 `json:"generation"`; JoinedAt time.Time `json:"joined_at"`; UpdatedAt time.Time `json:"updated_at"` }
 
-func (node NodeMember) Validate() error { if err := requireID("node", string(node.ID)); err != nil { return err }; if err := requireID("node group", string(node.GroupID)); err != nil { return err }; if len(node.Roles) == 0 || node.FailureDomain == "" || node.WorkloadIdentity == "" || node.Generation == 0 || node.JoinedAt.IsZero() || node.UpdatedAt.IsZero() || node.Capabilities.SchemaVersion == 0 || !validDigest(node.Capabilities.VersionDigest) || node.Capacity.ReservedCPU>node.Capacity.CPUCores || node.Capacity.ReservedMemory>node.Capacity.MemoryBytes || node.Capacity.ReservedDisk>node.Capacity.DiskBytes { return ErrInvalid }; switch node.State { case NodeJoining, NodeReady, NodeDraining, NodeFenced, NodeDegraded, NodeOffline, NodeRetired: default: return ErrInvalid }; for key, value := range node.Labels { if !validID(key) || len(value) > 256 { return ErrInvalid } }; return nil }
+func (node NodeMember) Validate() error {
+	if err := requireID("node", string(node.ID)); err != nil { return err }
+	if err := requireID("node group", string(node.GroupID)); err != nil { return err }
+	if len(node.Roles) == 0 || len(node.Roles) > 5 || node.FailureDomain == "" || len(node.FailureDomain) > 128 || strings.TrimSpace(node.WorkloadIdentity) != node.WorkloadIdentity || len(node.WorkloadIdentity) < 3 || len(node.WorkloadIdentity) > 512 || strings.ContainsAny(node.WorkloadIdentity, "\x00\r\n\t ") || node.Generation == 0 || node.JoinedAt.IsZero() || node.UpdatedAt.IsZero() || node.UpdatedAt.Before(node.JoinedAt) || node.Capabilities.SchemaVersion == 0 || node.Capabilities.ObservedAt.IsZero() || !validDigest(node.Capabilities.VersionDigest) || node.Capacity.ReservedCPU>node.Capacity.CPUCores || node.Capacity.ReservedMemory>node.Capacity.MemoryBytes || node.Capacity.ReservedDisk>node.Capacity.DiskBytes { return ErrInvalid }
+	switch node.State { case NodeJoining, NodeReady, NodeDraining, NodeFenced, NodeDegraded, NodeOffline, NodeRetired: default: return ErrInvalid }
+	roles:=map[NodeRole]bool{};for _,role:=range node.Roles{if roles[role]||!validNodeRole(role){return ErrInvalid};roles[role]=true}
+	for key, value := range node.Labels { if !validID(key) || len(value) > 256 || strings.ContainsAny(value,"\x00\r\n") { return ErrInvalid } }
+	return nil
+}
+
+func validNodeRole(role NodeRole) bool { switch role { case RoleManager,RoleWorker,RoleData,RoleIngress,RoleMail:return true;default:return false } }
 
 type NodeGroup struct { ID NodeGroupID `json:"id"`; Name string `json:"name"`; CoordinatorID string `json:"coordinator_id"`; MinimumManagers uint8 `json:"minimum_managers"`; AutomaticFailover bool `json:"automatic_failover"`; RequiredFenceClasses []FenceClass `json:"required_fence_classes"`; State string `json:"state"`; Generation uint64 `json:"generation"`; CreatedAt time.Time `json:"created_at"`; UpdatedAt time.Time `json:"updated_at"` }
-func (group NodeGroup) Validate() error { if !validID(string(group.ID))||group.Name==""||!validID(group.CoordinatorID)||group.MinimumManagers==0||group.MinimumManagers%2==0||len(group.RequiredFenceClasses)==0||group.Generation==0||group.CreatedAt.IsZero()||group.UpdatedAt.IsZero(){return ErrInvalid};return nil }
+func (group NodeGroup) Validate() error {
+	if !validID(string(group.ID))||strings.TrimSpace(group.Name)==""||len(group.Name)>128||strings.ContainsAny(group.Name,"\x00\r\n")||!validID(group.CoordinatorID)||group.MinimumManagers==0||group.MinimumManagers%2==0||len(group.RequiredFenceClasses)==0||len(group.RequiredFenceClasses)>5||(group.State!="active"&&group.State!="forming")||group.Generation==0||group.CreatedAt.IsZero()||group.UpdatedAt.IsZero()||group.UpdatedAt.Before(group.CreatedAt){return ErrInvalid}
+	seen:=map[FenceClass]bool{};for _,class:=range group.RequiredFenceClasses{if seen[class]||!validFenceClass(class){return ErrInvalid};seen[class]=true}
+	return nil
+}
+
+func validFenceClass(class FenceClass)bool{switch class{case FencePower,FenceStorage,FenceDatabase,FenceMandatoryLease,FenceAdministrative:return true;default:return false}}
 
 type HealthState string
 const ( HealthHealthy HealthState = "healthy"; HealthDegraded HealthState = "degraded"; HealthUnreachable HealthState = "unreachable"; HealthFenced HealthState = "fenced"; HealthUnknown HealthState = "unknown" )

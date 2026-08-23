@@ -73,6 +73,11 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	webmailKey,err:=mail.LoadMailSessionCredential(mail.MailSessionCredentialPath);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("load webmail session authority: %w",err)};defer func(){for index:=range webmailKey{webmailKey[index]=0}}()
 	webmailService,mailSessions,err:=mail.NewLocalWebmailService(webmailKey,"cyberpanel-webmail",mailHostname,repositories.Webmail,repositories.MailControl);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize webmail runtime: %w",err)}
 	webmailConsoleEdge,err:=newWebmailEdge(webmailService,repositories.Webmail);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize webmail console edge: %w",err)}
+	repositories.MailDeliveryPolicy.ResolveLimit=mail.ControlDeliveryLimitResolver(repositories.MailControl,mail.DeliveryLimit{HourlyMessages:500,MonthlyMessages:100000,HourlyRecipients:500,MonthlyRecipients:100000,MaxMessageBytes:16<<20,MaxRecipientsPerMessage:1})
+	unsubscribeKey,err:=mail.LoadCampaignUnsubscribeCredential(mail.CampaignUnsubscribeCredentialPath);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("load campaign unsubscribe authority: %w",err)};defer func(){for index:=range unsubscribeKey{unsubscribeKey[index]=0}}()
+	campaignSender,err:=mail.NewLocalCampaignSender(repositories.Marketing,repositories.MailControl,repositories.MailDeliveryPolicy,mailHostname,unsubscribeKey,"https://"+panelRegistrableDomain+"/unsubscribe");if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize campaign delivery runtime: %w",err)}
+	campaignCoordinator:=&mail.CampaignCoordinator{Store:repositories.Marketing,Sender:campaignSender}
+	unsubscribeService:=&mail.UnsubscribeService{Store:repositories.Marketing,Signer:campaignSender.Signer,Now:runtimeClock{}.Now}
 	dnsAuthority := dns.NewLocalPowerDNSControlClient()
 	dnssecCoordinator:=&dns.DNSSECCoordinator{Store:repositories.DNSSEC,Executor:dnsAuthority,Observer:dnsAuthority,Now:runtimeClock{}.Now}
 	dnsConsoleEdge,err:=newDNSEdge(dnsAuthority,dnssecCoordinator);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize DNS console edge: %w",err)}
@@ -267,6 +272,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		IdentityEdge:      identityConsoleEdge,
 		IntegrationEdge:   integrationConsoleEdge,
 		Marketing:         &repositories.Marketing,
+		Campaigns:         campaignCoordinator,
+		Unsubscribe:       unsubscribeService,
 		Audit:             auditService,
 		SecretEnrollment:  secretEnrollment,
 	}, nil

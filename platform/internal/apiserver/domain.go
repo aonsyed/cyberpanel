@@ -58,6 +58,7 @@ type DomainServices struct {
 	MailSessions *mail.MailSessionAuthority
 	Marketing *mail.MarketingStore
 	Campaigns *mail.CampaignCoordinator
+	Unsubscribe *mail.UnsubscribeService
 	Backup *backup.Coordinator
 	BackupPromoter backup.Promoter
 	BackupMover backup.Mover
@@ -133,6 +134,7 @@ func mapDomainError(err error)error{
 	case errors.Is(err,database.ErrUnauthorized),errors.Is(err,containers.ErrForbidden),errors.Is(err,apps.ErrPolicyDenied),errors.Is(err,mail.ErrUnauthorized),errors.Is(err,access.ErrUnauthorized),errors.Is(err,accesspolicy.ErrForbidden),errors.Is(err,integrations.ErrUnauthorized),errors.Is(err,integrations.ErrPolicyDenied),errors.Is(err,ha.ErrForbidden),errors.Is(err,identity.ErrForbidden),errors.Is(err,identity.ErrDelegationExceeded),errors.Is(err,identity.ErrSuspended):return ErrForbidden
 	case errors.Is(err,database.ErrNotFound),errors.Is(err,containers.ErrNotFound),errors.Is(err,apps.ErrNotFound),errors.Is(err,access.ErrNotFound),errors.Is(err,accesspolicy.ErrNotFound),errors.Is(err,preview.ErrNotFound),errors.Is(err,management.ErrNotFound),errors.Is(err,mail.ErrNotFound),errors.Is(err,integrations.ErrNotFound),errors.Is(err,migration.ErrNotFound),errors.Is(err,ha.ErrNotFound),errors.Is(err,identity.ErrNotFound):return ErrNotFound
 	case errors.Is(err,database.ErrConflict),errors.Is(err,database.ErrIdempotency),errors.Is(err,containers.ErrConflict),errors.Is(err,containers.ErrStale),errors.Is(err,apps.ErrConflict),errors.Is(err,apps.ErrStaleGeneration),errors.Is(err,access.ErrConflict),errors.Is(err,access.ErrStaleGeneration),errors.Is(err,access.ErrInvalidTransition),errors.Is(err,accesspolicy.ErrConflict),errors.Is(err,preview.ErrConflict),errors.Is(err,preview.ErrExpired),errors.Is(err,preview.ErrBudgetExhausted),errors.Is(err,management.ErrConflict),errors.Is(err,mail.ErrConflict),errors.Is(err,integrations.ErrConflict),errors.Is(err,integrations.ErrStaleGeneration),errors.Is(err,migration.ErrConflict),errors.Is(err,migration.ErrWriteFrontier),errors.Is(err,ha.ErrConflict),errors.Is(err,ha.ErrStaleGeneration),errors.Is(err,ha.ErrExpired),errors.Is(err,identity.ErrConflict),errors.Is(err,identity.ErrStaleGeneration),errors.Is(err,identity.ErrQuotaExceeded):return ErrConflict
+	case errors.Is(err,mail.ErrRateLimited):return ErrRateLimited
 	case errors.Is(err,migration.ErrBlocked),errors.Is(err,migration.ErrCapacity):return ErrOperationUnavailable
 	case errors.Is(err,containers.ErrAmbiguous),errors.Is(err,accesspolicy.ErrAmbiguous),errors.Is(err,preview.ErrRecoveryRequired),errors.Is(err,management.ErrAmbiguous),errors.Is(err,apps.ErrRecoveryRequired),errors.Is(err,apps.ErrUnsupported),errors.Is(err,mail.ErrAmbiguous),errors.Is(err,mail.ErrInvalidReceipt),errors.Is(err,integrations.ErrUnavailable),errors.Is(err,integrations.ErrRateLimited),errors.Is(err,integrations.ErrPartial),errors.Is(err,integrations.ErrAmbiguous),errors.Is(err,integrations.ErrUnsupported),errors.Is(err,ha.ErrUnsupported),errors.Is(err,ha.ErrProviderAmbiguous),errors.Is(err,ha.ErrNoQuorum),errors.Is(err,ha.ErrFenceRequired),errors.Is(err,ha.ErrUnsafePromotion):return ErrUnavailable
 	default:return err

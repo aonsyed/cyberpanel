@@ -69,7 +69,7 @@ func (verifier EnrollmentVerifier) Verify(raw []byte, expectedFingerprint string
 		return result, ErrInvalid
 	}
 	fingerprint := sha256.Sum256(certificateDER)
-	wanted := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(expectedFingerprint), "sha256:"))
+	wanted := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(expectedFingerprint)), "sha256:")
 	if len(wanted) != sha256.Size*2 || hex.EncodeToString(fingerprint[:]) != wanted {
 		return result, ErrForbidden
 	}
@@ -78,7 +78,7 @@ func (verifier EnrollmentVerifier) Verify(raw []byte, expectedFingerprint string
 		return result, ErrInvalid
 	}
 	publicKey, ok := certificate.PublicKey.(ed25519.PublicKey)
-	if !ok || len(publicKey) != ed25519.PublicKeySize {
+	if !ok || len(publicKey) != ed25519.PublicKeySize || certificate.IsCA || certificate.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
 		return result, ErrUnsupported
 	}
 	signature, err := decodeEnrollmentBase64(token.Signature)
@@ -94,7 +94,7 @@ func (verifier EnrollmentVerifier) Verify(raw []byte, expectedFingerprint string
 		now = verifier.Now().UTC()
 	}
 	claims := token.Claims
-	if claims.SchemaVersion != 1 || claims.Audience != enrollmentAudience || !validID(claims.TokenID) || claims.IssuedAt.IsZero() || claims.ExpiresAt.IsZero() || claims.ExpiresAt.Sub(claims.IssuedAt) <= 0 || claims.ExpiresAt.Sub(claims.IssuedAt) > time.Hour || now.Before(claims.IssuedAt.Add(-time.Minute)) || !now.Before(claims.ExpiresAt) || claims.IssuedAt.Before(certificate.NotBefore.Add(-time.Minute)) || claims.ExpiresAt.After(certificate.NotAfter) {
+	if claims.SchemaVersion != 1 || claims.Audience != enrollmentAudience || !validID(claims.TokenID) || claims.IssuedAt.IsZero() || claims.ExpiresAt.IsZero() || claims.ExpiresAt.Sub(claims.IssuedAt) <= 0 || claims.ExpiresAt.Sub(claims.IssuedAt) > time.Hour || now.Before(claims.IssuedAt.Add(-time.Minute)) || !now.Before(claims.ExpiresAt) || now.Before(certificate.NotBefore.Add(-time.Minute)) || !now.Before(certificate.NotAfter) || claims.IssuedAt.Before(certificate.NotBefore.Add(-time.Minute)) || claims.ExpiresAt.After(certificate.NotAfter) {
 		return result, ErrExpired
 	}
 	group := claims.Group

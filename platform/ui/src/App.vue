@@ -5,11 +5,13 @@ import { sessionStore, type ViewerProjection } from "./store";
 import AppShell from "./components/AppShell.vue";
 import LoginPage from "./components/LoginPage.vue";
 import NoticeStack from "./components/NoticeStack.vue";
+import UnsubscribePage from "./components/UnsubscribePage.vue";
 
 const api = new APIClient();
 provide("api", api);
 const booting = ref(true);
 const bootError = ref("");
+const publicUnsubscribe = window.location.pathname === "/unsubscribe";
 
 async function bootstrap(): Promise<void> {
   booting.value = true; bootError.value = "";
@@ -41,6 +43,7 @@ onBeforeUnmount(() => { window.removeEventListener("online", online); window.rem
     <p>{{ bootError }}</p>
     <button class="button button-primary" type="button" @click="bootstrap">Retry connection</button>
   </main>
+  <UnsubscribePage v-else-if="publicUnsubscribe" />
   <LoginPage v-else-if="!sessionStore.authenticated.value" />
   <AppShell v-else />
   <NoticeStack />

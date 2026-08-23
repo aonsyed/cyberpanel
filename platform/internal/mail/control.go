@@ -16,6 +16,8 @@ var (
 	ErrInvalidCommand = errors.New("invalid mail command")
 	ErrUnauthorized = errors.New("mail command is outside the tenant scope")
 	ErrConflict = errors.New("mail resource generation conflict")
+	ErrRateLimited = errors.New("mail delivery admission limit reached")
+	ErrSuppressed = errors.New("mail recipient is currently suppressed")
 	ErrNotFound = errors.New("mail resource not found")
 	ErrAmbiguous = errors.New("mail effect outcome is ambiguous")
 	ErrInvalidReceipt = errors.New("invalid mail effect receipt")

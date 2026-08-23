@@ -58,6 +58,20 @@ export class APIClient {
     return await response.json() as ResponseEnvelope<T>;
   }
 
+  async invokePublic<T>(operation: string, payload: unknown, signal?: AbortSignal): Promise<ResponseEnvelope<T>> {
+    const description = this.catalog.get(operation);
+    if (!description || description.auth !== "none") throw new Error(`Public operation ${operation} is not available on this node.`);
+    const requestID = opaqueID("req");
+    const headers = new Headers({ "Content-Type": "application/json", Accept: "application/json", "X-Request-ID": requestID });
+    if (description.mutating) headers.set("Idempotency-Key", opaqueID("idem"));
+    const response = await fetch(`${this.baseURL}/api/v1/operations`, {
+      method: "POST", credentials: "omit", headers, signal,
+      body: JSON.stringify({ api_version:"panel.cyberpanel.io/v1", request_id:requestID, operation, payload })
+    });
+    if (!response.ok) throw await this.problem(response);
+    return await response.json() as ResponseEnvelope<T>;
+  }
+
   async exchangeContainerExec<T>(grantID: string, token: string, signal?: AbortSignal): Promise<ResponseEnvelope<T>> {
     if (!this.catalog.has("container.exec.exchange")) throw new Error("Container exec exchange is not available on this node.");
     const requestID = opaqueID("req");

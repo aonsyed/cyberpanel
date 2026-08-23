@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-type DomainID string; type MailboxID string; type AliasID string; type PolicyID string; type QueueID string; type EventID string; type ContactID string; type ListID string; type CampaignID string; type AttemptID string
+type DomainID string; type MailboxID string; type AliasID string; type PolicyID string; type QueueID string; type EventID string; type ContactID string; type ListID string; type CampaignID string; type CampaignTemplateID string; type AttemptID string
 type Address string; type Capability string
 const ( CapabilityPlus Capability = "plus"; CapabilityPattern Capability = "pattern"; CapabilityPipe Capability = "pipe" )
 type Domain struct { ID DomainID `json:"id"`; Name string `json:"name"`; Tenant string `json:"tenant"`; DKIM DKIM `json:"dkim"`; Relay Relay `json:"relay"`; Policy PolicyID `json:"policy"` }
@@ -52,8 +52,13 @@ type SieveRule struct { ID SieveID `json:"id"`; Mailbox MailboxID `json:"mailbox
 type Webmail interface { Folders(context.Context, MailboxID) ([]Folder, error); Search(context.Context, MailboxID, string) ([]Message, error); Message(context.Context, MessageID) (Message, error); Attachments(context.Context, MessageID) ([]Attachment, error); SaveDraft(context.Context, Draft) error; Send(context.Context, DraftID) error; Move(context.Context, MessageID, FolderID) error; SetFlags(context.Context, MessageID, []string) error; Contacts(context.Context, MailboxID) ([]Contact, error); Groups(context.Context, MailboxID) ([]Group, error); PutSieve(context.Context, SieveRule) error }
 
 type ConsentState string; const ( Consented ConsentState = "consented"; Suppressed ConsentState = "suppressed" )
-type MarketingContact struct { ID ContactID `json:"id"`; Address Address `json:"address"`; Consent ConsentState `json:"consent"`; At time.Time `json:"at"` }
+type SubscriberState string; const ( SubscriberActive SubscriberState = "active"; SubscriberArchived SubscriberState = "archived" )
+type VerificationState string; const ( VerificationUnverified VerificationState = "unverified"; VerificationVerified VerificationState = "verified"; VerificationInvalid VerificationState = "invalid"; VerificationRisky VerificationState = "risky"; VerificationUnknown VerificationState = "unknown" )
+type Subscriber struct { ID ContactID `json:"id"`; Address Address `json:"address"`; Name string `json:"name,omitempty"`; Tags []string `json:"tags,omitempty"`; State SubscriberState `json:"state"`; Verification VerificationState `json:"verification"`; VerificationRef string `json:"verification_ref,omitempty"`; Generation uint64 `json:"generation"`; CreatedAt time.Time `json:"created_at"`; UpdatedAt time.Time `json:"updated_at"` }
 type Suppression struct { Address Address `json:"address"`; Reason string `json:"reason"`; At time.Time `json:"at"` }
 type List struct { ID ListID `json:"id"`; Name string `json:"name"`; Contacts []ContactID `json:"contacts"` }
-type Campaign struct { ID CampaignID `json:"id"`; List ListID `json:"list"`; Subject string `json:"subject"`; TemplateRef string `json:"template_ref"`; Schedule string `json:"schedule,omitempty"`; State string `json:"state"`; Generation uint64 `json:"generation"` }
+type CampaignTemplate struct { ID CampaignTemplateID `json:"id"`; Name string `json:"name"`; Text string `json:"text"`; State string `json:"state"`; Generation uint64 `json:"generation"`; UpdatedAt time.Time `json:"updated_at"` }
+type CampaignRecipient struct { ContactID ContactID `json:"contact_id"`; Address Address `json:"address"`; SubscriberGeneration uint64 `json:"subscriber_generation"`; ConsentEventID string `json:"consent_event_id"` }
+type CampaignSnapshot struct { ID string `json:"id"`; CampaignID CampaignID `json:"campaign_id"`; ListID ListID `json:"list_id"`; ListDigest string `json:"list_digest"`; RecipientDigest string `json:"recipient_digest"`; Requested uint64 `json:"requested"`; Eligible uint64 `json:"eligible"`; Excluded map[string]uint64 `json:"excluded"`; CreatedAt time.Time `json:"created_at"`; ApprovedBy string `json:"approved_by"` }
+type Campaign struct { ID CampaignID `json:"id"`; List ListID `json:"list"`; Subject string `json:"subject"`; TemplateRef string `json:"template_ref"`; FromMailbox MailboxID `json:"from_mailbox"`; ReplyTo Address `json:"reply_to,omitempty"`; Schedule string `json:"schedule,omitempty"`; SnapshotRef string `json:"snapshot_ref,omitempty"`; RecipientCount uint64 `json:"recipient_count,omitempty"`; ApprovedAt *time.Time `json:"approved_at,omitempty"`; ApprovedBy string `json:"approved_by,omitempty"`; State string `json:"state"`; Generation uint64 `json:"generation"` }
 type Attempt struct { ID AttemptID `json:"id"`; Campaign CampaignID `json:"campaign"`; Contact ContactID `json:"contact"`; State string `json:"state"`; At time.Time `json:"at"` }

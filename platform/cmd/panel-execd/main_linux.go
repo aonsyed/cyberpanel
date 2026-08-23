@@ -91,7 +91,7 @@ func main() {
 	mailHost, err := mail.OpenLinuxMailHost(mailPlatform,mailOwnership); if err != nil { log.Fatalf("initialize mail host: %v", err) }; defer mailHost.Close()
 	mailPolicy, err := mail.NewMailDaemonPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize mail peer policy: %v", err) }
 	mailListener, err := mail.ListenMailDaemon(controlGID); if err != nil { log.Fatalf("listen on mail daemon socket: %v", err) }; defer mailListener.Close()
-	mailServer, err := mail.NewMailDaemonServer(mailHost,mailPolicy); if err != nil { log.Fatalf("initialize mail daemon server: %v", err) }; mailServer.MaximumConcurrent=32
+	mailServer, err := mail.NewMailDaemonServer(mailHost,mailPolicy); if err != nil { log.Fatalf("initialize mail daemon server: %v", err) }; mailServer.MaximumConcurrent=32;mailServer.MaximumCampaignConcurrent=4
 	pdnsPlatform:=dns.PowerDNSUbuntuNoble;if mailPlatform==mail.MailAlma9{pdnsPlatform=dns.PowerDNSAlma9};pdnsGID,err:=lookupFirstGroup("pdns");if err!=nil{log.Fatalf("resolve PowerDNS ownership: %v",err)}
 	pdnsMaterial,err:=dns.NewPowerDNSMaterialResolver(materialClient,installationOwner);if err!=nil{log.Fatalf("initialize PowerDNS material source: %v",err)}
 	pdnsHost,err:=dns.OpenLinuxPowerDNSHost(pdnsPlatform,dns.PowerDNSOwnership{PDNSGID:pdnsGID},pdnsMaterial,dns.LocalPowerDNSControlFingerprint());if err!=nil{log.Fatalf("initialize PowerDNS host: %v",err)};defer pdnsHost.Close()

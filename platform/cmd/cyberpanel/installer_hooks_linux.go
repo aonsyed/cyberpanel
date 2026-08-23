@@ -3,14 +3,21 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -84,7 +91,7 @@ func applyHook(invocation hookInvocation)([]string,error){
 }
 
 func initializeAuthority()([]string,error){
-	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};paths:=[]string{"/var/lib/cyberpanel/control","/var/lib/cyberpanel/control/runtime","/var/lib/cyberpanel/control/trust","/var/lib/cyberpanel/control/recovery","/var/lib/cyberpanel/audit","/var/lib/cyberpanel/audit/segments","/var/lib/cyberpanel/audit/emergency","/var/lib/cyberpanel/backup-spool","/var/backups/cyberpanel/repositories"}
+	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};paths:=[]string{"/var/lib/cyberpanel/control","/var/lib/cyberpanel/control/runtime","/var/lib/cyberpanel/control/trust","/var/lib/cyberpanel/control/recovery","/var/lib/cyberpanel/audit","/var/lib/cyberpanel/audit/segments","/var/lib/cyberpanel/audit/emergency","/var/lib/cyberpanel/backup-spool","/var/lib/cyberpanel/migration","/var/lib/cyberpanel/migration/chunks","/var/backups/cyberpanel/repositories"}
 	if err=ensureOwnedDirectory("/var/backups/cyberpanel",0750,0,gid);err!=nil{return nil,err}
 	for _,path:=range paths{if err=ensureOwnedDirectory(path,0700,uid,gid);err!=nil{return nil,err}}
 	databasePath:="/var/lib/cyberpanel/control/control.db";created,err:=ensureOwnedFile(databasePath,0600,uid,gid,nil);if err!=nil{return nil,err}
@@ -107,6 +114,7 @@ func bootstrapSecrets()([]string,error){
 	secretRoot:="/etc/cyberpanel/secrets";if err=ensureOwnedDirectory(secretRoot,0700,0,0);err!=nil{return nil,err}
 	auditKey:=filepath.Join(secretRoot,"audit-signing.key");if _,err=ensureRandomFile(auditKey,ed25519.PrivateKeySize,0600,0,0,func()([]byte,error){_,private,keyErr:=ed25519.GenerateKey(rand.Reader);return private,keyErr});err!=nil{return nil,err}
 	webmailSessionKey:=filepath.Join(secretRoot,"webmail-session.key");if _,err=ensureRandomFile(webmailSessionKey,32,0600,0,0,nil);err!=nil{return nil,err}
+	marketingUnsubscribeKey:=filepath.Join(secretRoot,"marketing-unsubscribe.key");if _,err=ensureRandomFile(marketingUnsubscribeKey,32,0600,0,0,nil);err!=nil{return nil,err}
 	webmailMaster:=filepath.Join(secretRoot,"mail-webmail-master");if _,err=ensureRandomFile(webmailMaster,91,0400,0,0,func()([]byte,error){raw:=make([]byte,48);if _,readErr:=io.ReadFull(rand.Reader,raw);readErr!=nil{return nil,readErr};encoded:=base64.RawURLEncoding.EncodeToString(raw);wipeBytes(raw);return []byte("cyberpanel-webmail:{PLAIN}"+encoded+"\n"),nil});err!=nil{return nil,err}
 	secretKey:=filepath.Join(secretRoot,"wrapping.key");if _,err=ensureRandomFile(secretKey,32,0400,secretUID,secretGID,nil);err!=nil{return nil,err}
 	secretStateRoot:="/var/lib/cyberpanel-secrets";if err=ensureOwnedDirectory(secretStateRoot,0700,secretUID,secretGID);err!=nil{return nil,err}
@@ -114,8 +122,39 @@ func bootstrapSecrets()([]string,error){
 	secretEpoch:=filepath.Join(secretStateRoot,"key-epoch");if _,err=ensureOwnedFile(secretEpoch,0400,secretUID,secretGID,[]byte("1\n"));err!=nil{return nil,err}
 	authRoot:="/etc/cyberpanel/authn";if err=ensureOwnedDirectory(authRoot,0700,0,0);err!=nil{return nil,err}
 	for _,path:=range []string{filepath.Join(authRoot,"wrapping.key"),filepath.Join(authRoot,"lookup.pepper")}{if _,err=ensureRandomFile(path,32,0400,0,0,nil);err!=nil{return nil,err}}
-	return []string{paths.SignerPath,paths.TrustPath,auditKey,webmailSessionKey,webmailMaster,secretKey,secretDatabase,secretEpoch,filepath.Join(authRoot,"wrapping.key"),filepath.Join(authRoot,"lookup.pepper")},nil
+	defaultCertificatePaths,err:=bootstrapDefaultWebCertificate();if err!=nil{return nil,err}
+	changed:=[]string{paths.SignerPath,paths.TrustPath,auditKey,webmailSessionKey,marketingUnsubscribeKey,webmailMaster,secretKey,secretDatabase,secretEpoch,filepath.Join(authRoot,"wrapping.key"),filepath.Join(authRoot,"lookup.pepper")}
+	return append(changed,defaultCertificatePaths...),nil
 }
+
+// bootstrapDefaultWebCertificate creates the root-owned fallback identity
+// referenced by the immutable web-engine configuration. Real site and panel
+// names still receive their own ACME-managed certificates; this certificate
+// exists only so a fresh OLS/LSE listener never starts with a dangling key
+// reference before the first tenant certificate is deployed.
+func bootstrapDefaultWebCertificate()([]string,error){
+	root:="/var/lib/cyberpanel/certificates";generationParent:=filepath.Join(root,"generations","webengine","preview-default");consumerRoot:=filepath.Join(root,"consumers","webengine","preview-default");current:=filepath.Join(consumerRoot,"current")
+	for _,directory:=range []struct{path string;mode os.FileMode}{{root,0711},{filepath.Join(root,"generations"),0711},{filepath.Join(root,"generations","webengine"),0711},{generationParent,0711},{filepath.Join(root,"consumers"),0711},{filepath.Join(root,"consumers","webengine"),0711},{consumerRoot,0750}}{if err:=ensureOwnedDirectory(directory.path,directory.mode,0,0);err!=nil{return nil,err}}
+	if paths,found,err:=existingDefaultWebCertificate(current,generationParent);err!=nil{return nil,err}else if found{return paths,nil}
+	key,err:=ecdsa.GenerateKey(elliptic.P256(),rand.Reader);if err!=nil{return nil,err}
+	maximum:=new(big.Int).Lsh(big.NewInt(1),128);serial,err:=rand.Int(rand.Reader,maximum);if err!=nil||serial.Sign()==0{if err==nil{err=errors.New("zero certificate serial")};return nil,err}
+	now:=time.Now().UTC();template:=x509.Certificate{SerialNumber:serial,Subject:pkix.Name{CommonName:"CyberPanel bootstrap fallback"},DNSNames:[]string{"cyberpanel.invalid"},NotBefore:now.Add(-5*time.Minute),NotAfter:now.AddDate(10,0,0),KeyUsage:x509.KeyUsageDigitalSignature,ExtKeyUsage:[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},BasicConstraintsValid:true}
+	der,err:=x509.CreateCertificate(rand.Reader,&template,&template,&key.PublicKey,key);if err!=nil{return nil,err};certificatePEM:=pem.EncodeToMemory(&pem.Block{Type:"CERTIFICATE",Bytes:der});keyDER,err:=x509.MarshalPKCS8PrivateKey(key);if err!=nil{return nil,err};privateKeyPEM:=pem.EncodeToMemory(&pem.Block{Type:"PRIVATE KEY",Bytes:keyDER});if _,err=tls.X509KeyPair(certificatePEM,privateKeyPEM);err!=nil{return nil,err}
+	digest:=sha256.Sum256(der);candidate:=filepath.Join(generationParent,"bootstrap-"+hex.EncodeToString(digest[:16]));if err=ensureOwnedDirectory(candidate,0750,0,0);err!=nil{return nil,err}
+	files:=[]struct{name string;content []byte}{{"certificate.pem",certificatePEM},{"chain.pem",nil},{"fullchain.pem",certificatePEM},{"private.key",privateKeyPEM}};changed:=[]string{candidate};for _,item:=range files{path:=filepath.Join(candidate,item.name);if _,err=ensureOwnedFile(path,0440,0,0,item.content);err!=nil{return nil,err};changed=append(changed,path)}
+	if err=installDefaultCertificateLink(current,candidate);err!=nil{return nil,err};changed=append(changed,current);return changed,nil
+}
+
+func existingDefaultWebCertificate(current,generationParent string)([]string,bool,error){
+	info,err:=os.Lstat(current);if errors.Is(err,os.ErrNotExist){return nil,false,nil};if err!=nil{return nil,false,err};if info.Mode()&os.ModeSymlink==0{return nil,false,errors.New("default certificate current path is not a symlink")}
+	target,err:=os.Readlink(current);if err!=nil{return nil,false,err};if !filepath.IsAbs(target){target=filepath.Join(filepath.Dir(current),target)};target=filepath.Clean(target);relative,err:=filepath.Rel(generationParent,target);if err!=nil||relative=="."||relative==".."||strings.HasPrefix(relative,".."+string(os.PathSeparator)){return nil,false,errors.New("default certificate target escaped its generation")}
+	certificatePath:=filepath.Join(target,"fullchain.pem");keyPath:=filepath.Join(target,"private.key");certificatePEM,err:=readRootCertificateFile(certificatePath);if err!=nil{return nil,false,err};privateKeyPEM,err:=readRootCertificateFile(keyPath);if err!=nil{return nil,false,err};pair,err:=tls.X509KeyPair(certificatePEM,privateKeyPEM);if err!=nil||len(pair.Certificate)==0{return nil,false,errors.New("invalid default web certificate")};certificate,err:=x509.ParseCertificate(pair.Certificate[0]);if err!=nil||!time.Now().UTC().Before(certificate.NotAfter){return nil,false,errors.New("expired default web certificate")}
+	return []string{target,certificatePath,keyPath,current},true,nil
+}
+
+func readRootCertificateFile(path string)([]byte,error){info,err:=os.Lstat(path);if err!=nil||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()!=0440||info.Size()<=0||info.Size()>1<<20{return nil,errors.New("unsafe default certificate material")};stat,ok:=info.Sys().(*syscall.Stat_t);if !ok||stat.Uid!=0||stat.Gid!=0||stat.Nlink!=1{return nil,errors.New("unsafe default certificate ownership")};return os.ReadFile(path)}
+
+func installDefaultCertificateLink(path,target string)error{random:=make([]byte,8);if _,err:=io.ReadFull(rand.Reader,random);err!=nil{return err};temporary:=path+".new-"+hex.EncodeToString(random);if err:=os.Symlink(target,temporary);err!=nil{return err};if err:=os.Lchown(temporary,0,0);err!=nil{_=os.Remove(temporary);return err};if err:=os.Rename(temporary,path);err!=nil{_=os.Remove(temporary);return err};directory,err:=os.Open(filepath.Dir(path));if err!=nil{return err};defer directory.Close();return directory.Sync()}
 
 func bootstrapAuthn()([]string,error){uid,gid,err:=lookupIdentity("cyberpanel-auth");if err!=nil{return nil,err};root:="/var/lib/cyberpanel-auth";if err=ensureOwnedDirectory(root,0700,uid,gid);err!=nil{return nil,err};database:=filepath.Join(root,"authn.db");if _,err=ensureOwnedFile(database,0600,uid,gid,nil);err!=nil{return nil,err};return []string{root,database},nil}
 func bootstrapDatabaseAuthority()([]string,error){return ensureAuthorityMarker("database","mariadb-local-v1")}

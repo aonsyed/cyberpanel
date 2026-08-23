@@ -44,6 +44,19 @@ func (host *LinuxMailHost) WebmailDelete(ctx context.Context,binding WebmailBind
 func (host *LinuxMailHost) WebmailFlags(ctx context.Context,binding WebmailBinding,message MessageID,flags []string)error{client,err:=openLocalIMAP(ctx,binding);if err!=nil{return err};defer client.close();folder,uid,err:=client.resolveMessage(binding,message);if err!=nil{return err};imapFlags:=make([]string,0,len(flags));allowed:=map[string]string{"seen":"\\Seen","answered":"\\Answered","flagged":"\\Flagged","deleted":"\\Deleted","draft":"\\Draft"};for _,flag:=range flags{value,ok:=allowed[strings.ToLower(flag)];if !ok{return ErrInvalidCommand};imapFlags=append(imapFlags,value)};if _,err=client.command("SELECT "+imapQuote(folder));err!=nil{return err};_,err=client.command("UID STORE "+strconv.FormatUint(uid,10)+" FLAGS.SILENT ("+strings.Join(imapFlags," ")+")");return err}
 func (host *LinuxMailHost) WebmailSubmit(ctx context.Context,binding WebmailBinding,message ComposeMessage)(QueueID,error){if binding.Validate()!=nil||message.From!=binding.MailboxID||len(message.AttachmentBlobRefs)!=0{return "",ErrInvalidCommand};raw,err:=renderSubmission(binding,message);if err!=nil{return "",err};defer wipeMailBytes(raw);return submitLocalSMTP(ctx,binding,raw,message)}
 
+func (host *LinuxMailHost) CampaignSubmit(ctx context.Context, submission CampaignSubmission) (QueueID, error) {
+	if host == nil || host.Store == nil || ctx == nil || submission.Validate() != nil {
+		return "", ErrInvalidCommand
+	}
+	raw, err := renderCampaignSubmission(submission)
+	if err != nil {
+		return "", err
+	}
+	defer wipeMailBytes(raw)
+	message := ComposeMessage{From:submission.Sender.MailboxID, To:[]Address{submission.Recipient}, Subject:submission.Subject, Text:submission.Text, SanitizedHTML:submission.SanitizedHTML}
+	return submitLocalSMTP(ctx, submission.Sender, raw, message)
+}
+
 func openLocalIMAP(ctx context.Context,binding WebmailBinding)(*localIMAPClient,error){if ctx==nil||binding.Validate()!=nil{return nil,ErrInvalidCommand};password,err:=loadWebmailMaster();if err!=nil{return nil,err};defer wipeMailBytes(password);serverName:=webmailServerName(binding);dialer:=tls.Dialer{NetDialer:&net.Dialer{},Config:&tls.Config{MinVersion:tls.VersionTLS12,ServerName:serverName}};connection,err:=dialer.DialContext(ctx,"tcp","127.0.0.1:993");if err!=nil{return nil,err};stop:=context.AfterFunc(ctx,func(){_=connection.SetDeadline(time.Now())});client:=&localIMAPClient{connection:connection,reader:bufio.NewReaderSize(connection,64<<10),writer:bufio.NewWriterSize(connection,64<<10),stop:stop};line,err:=client.reader.ReadString('\n');if err!=nil||!strings.HasPrefix(line,"* OK"){stop();connection.Close();return nil,ErrUnauthorized};login:=string(binding.Address)+"*"+webmailMasterUser;if _,err=client.command("LOGIN "+imapQuote(login)+" "+imapQuote(string(password)));err!=nil{stop();connection.Close();return nil,ErrUnauthorized};return client,nil}
 func (client *localIMAPClient)close(){if client==nil||client.connection==nil{return};if client.stop!=nil{client.stop()};_,_=client.command("LOGOUT");_=client.connection.Close()}
 func (client *localIMAPClient)command(command string)([]imapReply,error){if client==nil||client.connection==nil||strings.ContainsAny(command,"\x00\r\n")||len(command)>4096{return nil,ErrInvalidCommand};client.sequence++;tag:=fmt.Sprintf("C%06d",client.sequence);if _,err:=client.writer.WriteString(tag+" "+command+"\r\n");err!=nil{return nil,err};if err:=client.writer.Flush();err!=nil{return nil,err};replies:=[]imapReply{};for{line,err:=client.reader.ReadString('\n');if err!=nil{return nil,err};line=strings.TrimSuffix(strings.TrimSuffix(line,"\n"),"\r");if strings.HasPrefix(line,tag+" "){fields:=strings.Fields(line);if len(fields)<2||strings.ToUpper(fields[1])!="OK"{return nil,ErrNotFound};return replies,nil};reply:=imapReply{line:line};if size,ok:=imapLiteralSize(line);ok{if size>16<<20{return nil,ErrInvalidReceipt};reply.literal=make([]byte,size);if _,err=io.ReadFull(client.reader,reply.literal);err!=nil{return nil,err}};replies=append(replies,reply);if len(replies)>20000{return nil,ErrInvalidReceipt}}}
@@ -77,6 +90,42 @@ func loadWebmailMaster()([]byte,error){info,err:=os.Lstat(webmailMasterPath);if 
 func webmailServerName(binding WebmailBinding)string{return binding.ServerName}
 
 func renderSubmission(binding WebmailBinding,message ComposeMessage)([]byte,error){if len(message.Subject)>998||strings.ContainsAny(message.Subject,"\r\n\x00"){return nil,ErrInvalidCommand};var out bytes.Buffer;domain:=strings.SplitN(string(binding.Address),"@",2)[1];messageIDSum:=sha256.Sum256([]byte(string(binding.Address)+"\x00"+time.Now().UTC().Format(time.RFC3339Nano)));fmt.Fprintf(&out,"From: %s\r\n",binding.Address);fmt.Fprintf(&out,"To: %s\r\n",joinAddresses(message.To));if len(message.CC)>0{fmt.Fprintf(&out,"Cc: %s\r\n",joinAddresses(message.CC))};fmt.Fprintf(&out,"Subject: %s\r\n",mime.QEncoding.Encode("utf-8",message.Subject));fmt.Fprintf(&out,"Date: %s\r\n",time.Now().UTC().Format(time.RFC1123Z));fmt.Fprintf(&out,"Message-ID: <%s@%s>\r\n",hex.EncodeToString(messageIDSum[:16]),domain);if message.InReplyTo!=""{fmt.Fprintf(&out,"In-Reply-To: <%s@%s>\r\n",message.InReplyTo,domain)};fmt.Fprint(&out,"MIME-Version: 1.0\r\n");if message.SanitizedHTML==""{fmt.Fprint(&out,"Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n");writer:=quotedprintable.NewWriter(&out);_,_=writer.Write([]byte(message.Text));_=writer.Close()}else{boundary:="cp_"+hex.EncodeToString(messageIDSum[:12]);fmt.Fprintf(&out,"Content-Type: multipart/alternative; boundary=%q\r\n\r\n",boundary);fmt.Fprintf(&out,"--%s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n",boundary);writer:=quotedprintable.NewWriter(&out);_,_=writer.Write([]byte(message.Text));_=writer.Close();fmt.Fprintf(&out,"\r\n--%s\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n",boundary);writer=quotedprintable.NewWriter(&out);_,_=writer.Write([]byte(message.SanitizedHTML));_=writer.Close();fmt.Fprintf(&out,"\r\n--%s--\r\n",boundary)};if out.Len()>16<<20{return nil,ErrInvalidCommand};return out.Bytes(),nil}
+
+func renderCampaignSubmission(submission CampaignSubmission) ([]byte, error) {
+	if submission.Validate() != nil {
+		return nil, ErrInvalidCommand
+	}
+	var out bytes.Buffer
+	domain := strings.SplitN(string(submission.Sender.Address), "@", 2)[1]
+	messageIDSum := sha256.Sum256([]byte("cyberpanel-campaign-v1\x00" + submission.IdempotencyKey))
+	fmt.Fprintf(&out, "From: %s\r\n", submission.Sender.Address)
+	fmt.Fprintf(&out, "To: %s\r\n", submission.Recipient)
+	if submission.ReplyTo != "" {
+		fmt.Fprintf(&out, "Reply-To: %s\r\n", submission.ReplyTo)
+	}
+	fmt.Fprintf(&out, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", submission.Subject))
+	fmt.Fprintf(&out, "Date: %s\r\n", time.Now().UTC().Format(time.RFC1123Z))
+	fmt.Fprintf(&out, "Message-ID: <%s@%s>\r\n", hex.EncodeToString(messageIDSum[:16]), domain)
+	fmt.Fprintf(&out, "List-ID: <%s.%s>\r\n", submission.CampaignID, domain)
+	fmt.Fprintf(&out, "List-Unsubscribe: <%s>\r\n", submission.UnsubscribeURL)
+	fmt.Fprint(&out, "List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n")
+	fmt.Fprint(&out, "Precedence: bulk\r\nAuto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\n")
+	boundary := "cp_campaign_" + hex.EncodeToString(messageIDSum[:12])
+	fmt.Fprintf(&out, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", boundary)
+	fmt.Fprintf(&out, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n", boundary)
+	writer := quotedprintable.NewWriter(&out)
+	_, _ = writer.Write([]byte(submission.Text))
+	_ = writer.Close()
+	fmt.Fprintf(&out, "\r\n--%s\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n", boundary)
+	writer = quotedprintable.NewWriter(&out)
+	_, _ = writer.Write([]byte(submission.SanitizedHTML))
+	_ = writer.Close()
+	fmt.Fprintf(&out, "\r\n--%s--\r\n", boundary)
+	if out.Len() > 16<<20 {
+		return nil, ErrInvalidCommand
+	}
+	return out.Bytes(), nil
+}
 func joinAddresses(values []Address)string{result:=make([]string,len(values));for index:=range values{result[index]=string(values[index])};return strings.Join(result,", ")}
 func submitLocalSMTP(ctx context.Context,binding WebmailBinding,raw []byte,message ComposeMessage)(QueueID,error){password,err:=loadWebmailMaster();if err!=nil{return "",err};defer wipeMailBytes(password);serverName:=webmailServerName(binding);connection,err:=(&net.Dialer{}).DialContext(ctx,"tcp","127.0.0.1:587");if err!=nil{return "",err};defer connection.Close();stop:=context.AfterFunc(ctx,func(){_=connection.SetDeadline(time.Now())});defer stop();protocol:=textproto.NewConn(connection);if _,_,err=protocol.ReadResponse(220);err!=nil{return "",err};if err=smtpCommand(protocol,250,"EHLO localhost");err!=nil{return "",err};if err=smtpCommand(protocol,220,"STARTTLS");err!=nil{return "",err};tlsConnection:=tls.Client(connection,&tls.Config{MinVersion:tls.VersionTLS12,ServerName:serverName});if err=tlsConnection.HandshakeContext(ctx);err!=nil{return "",err};protocol=textproto.NewConn(tlsConnection);if err=smtpCommand(protocol,250,"EHLO localhost");err!=nil{return "",err};login:=string(binding.Address)+"*"+webmailMasterUser;auth:=base64.StdEncoding.EncodeToString([]byte("\x00"+login+"\x00"+string(password)));if err=smtpCommand(protocol,235,"AUTH PLAIN "+auth);err!=nil{return "",ErrUnauthorized};if err=smtpCommand(protocol,250,"MAIL FROM:<"+string(binding.Address)+">");err!=nil{return "",err};recipients:=append(append(append([]Address{},message.To...),message.CC...),message.BCC...);for _,recipient:=range recipients{if err=smtpCommand(protocol,250,"RCPT TO:<"+string(recipient)+">");err!=nil{return "",err}};if err=smtpCommand(protocol,354,"DATA");err!=nil{return "",err};writer:=protocol.DotWriter();if _,err=writer.Write(raw);err==nil{err=writer.Close()};if err!=nil{return "",err};_,reply,err:=protocol.ReadResponse(250);if err!=nil{return "",err};_,_=protocol.Cmd("QUIT");marker:="queued as ";index:=strings.LastIndex(strings.ToLower(reply),marker);if index<0{return "",ErrInvalidReceipt};queue:=strings.Fields(reply[index+len(marker):]);if len(queue)==0{return "",ErrInvalidReceipt};id:=QueueID(strings.Trim(queue[0],".[]()"));if !validPostfixQueueID(id){return "",ErrInvalidReceipt};return id,nil}
 func smtpCommand(connection *textproto.Conn,code int,command string)error{id,err:=connection.Cmd("%s",command);if err!=nil{return err};connection.StartResponse(id);defer connection.EndResponse(id);_,_,err=connection.ReadResponse(code);return err}
