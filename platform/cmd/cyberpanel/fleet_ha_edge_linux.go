@@ -61,15 +61,22 @@ type localMariaDBHAProviders struct {
 	manualFence    ha.ManualFenceConfirmer
 }
 
-func newLocalMariaDBHAProviders(ctx context.Context, repository *ha.SQLRepository, database ha.DatabaseReplicationExecutor, signer ha.WritePermitSigner, catalog *webcatalog.SQLCatalog, activator *webactivation.Client, listeners []composer.ListenerInput, now func() time.Time) (*localMariaDBHAProviders, error) {
+func newLocalMariaDBHAProviders(ctx context.Context, repository *ha.SQLRepository, database ha.DatabaseReplicationExecutor, signer ha.WritePermitSigner, catalog *webcatalog.SQLCatalog, activator *webactivation.Client, listeners []composer.ListenerInput, sender ha.FederatedHAIntentSender, now func() time.Time) (*localMariaDBHAProviders, error) {
 	if ctx == nil || repository == nil || repository.DB == nil || database == nil || signer == nil || catalog == nil || activator == nil { return nil, ha.ErrInvalid }
 	leaseAuthority, err := ha.NewLocalSQLLeaseAuthority(ctx, repository, now)
 	if err != nil { return nil, err }
-	gate, err := ha.NewLocalMariaDBWriterGate(*repository, database, signer, now)
+	localGate, err := ha.NewLocalMariaDBWriterGate(*repository, database, signer, now)
 	if err != nil { return nil, err }
-	promotion, err := ha.NewLocalMariaDBPromotionExecutor(*repository, database, now)
+	localPromotion, err := ha.NewLocalMariaDBPromotionExecutor(*repository, database, now)
 	if err != nil { return nil, err }
-	traffic, err := newLocalOLSListenerTrafficProvider(ctx, repository.DB, catalog, activator, listeners, now)
+	localTraffic, err := newLocalOLSListenerTrafficProvider(ctx, repository.DB, catalog, activator, listeners, now)
+	if err != nil { return nil, err }
+	dispatcher := &ha.FederatedHADispatcher{Sender:sender, Now:now}
+	gate, err := ha.NewOwningNodeWriterGate(ha.NodeID(localFederationNodeID), localGate, dispatcher)
+	if err != nil { return nil, err }
+	promotion, err := ha.NewOwningNodePromotionExecutor(ha.NodeID(localFederationNodeID), localPromotion, dispatcher)
+	if err != nil { return nil, err }
+	traffic, err := ha.NewOwningNodeTrafficProvider(ha.NodeID(localFederationNodeID), localTraffic, dispatcher)
 	if err != nil { return nil, err }
 	return &localMariaDBHAProviders{leases:leaseAuthority,gate:gate,promotion:promotion,traffic:traffic,fences:map[ha.FenceClass]ha.FenceProvider{}},nil
 }
