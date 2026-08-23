@@ -41,6 +41,7 @@ const (
 	serverCertificatePath       = credentialRoot + "/server.crt"
 	serverPrivateKeyPath        = credentialRoot + "/server.key"
 	clientCAPath                = credentialRoot + "/client-ca.pem"
+	operatorCAPath              = credentialRoot + "/operator-ca.pem"
 	intentSigningKeyPath        = credentialRoot + "/intent-signing.key"
 	revocationSigningKeyPath    = credentialRoot + "/revocation-signing.key"
 	enrollmentBundlePath        = credentialRoot + "/enrollments.json"
@@ -57,6 +58,9 @@ type configuration struct {
 	IntentSigningKeyID         string `json:"intent_signing_key_id"`
 	RevocationSigningKeyID     string `json:"revocation_signing_key_id"`
 	ClientCAFingerprintSHA256  string `json:"client_ca_fingerprint_sha256"`
+	OperatorEnabled            bool   `json:"operator_enabled"`
+	OperatorListen             string `json:"operator_listen"`
+	OperatorCAFingerprintSHA256 string `json:"operator_ca_fingerprint_sha256"`
 	MaximumSessions            uint32 `json:"maximum_sessions"`
 	ShutdownTimeoutSeconds     uint32 `json:"shutdown_timeout_seconds"`
 }
@@ -64,6 +68,7 @@ type configuration struct {
 type enrollmentBundle struct {
 	Version     uint32                                   `json:"version"`
 	Enrollments []controlplane.ProvisionedEnrollment    `json:"enrollments"`
+	OperatorGrants []controlplane.OperatorGrant          `json:"operator_grants"`
 }
 
 func main() {
@@ -116,6 +121,31 @@ func run(config configuration) error {
 			return fmt.Errorf("persist enrollment for %s: %w", enrollment.Node.ID, err)
 		}
 	}
+	var serviceAuthorizer controlplane.Authorizer = denyAuthorizer{}
+	var serviceAudit controlplane.Audit = discardAudit{}
+	var operatorAuthority *controlplane.OperatorAuthority
+	var operatorAudit *controlplane.OperatorAudit
+	if config.OperatorEnabled {
+		if err = store.BootstrapOperator(ctx); err != nil {
+			return fmt.Errorf("migrate operator authority: %w", err)
+		}
+		if len(bundle.OperatorGrants) == 0 {
+			return errors.New("operator listener requires at least one provisioned grant")
+		}
+		if err = store.ProvisionOperatorGrants(ctx, bundle.OperatorGrants); err != nil {
+			return fmt.Errorf("persist operator grants: %w", err)
+		}
+		operatorAuthority, err = controlplane.NewOperatorAuthority(store)
+		if err != nil {
+			return err
+		}
+		operatorAudit, err = controlplane.NewOperatorAudit(store)
+		if err != nil {
+			return err
+		}
+		serviceAuthorizer = operatorAuthority
+		serviceAudit = operatorAudit
+	}
 	intentKey, err := loadEd25519PrivateKey(intentSigningKeyPath)
 	if err != nil {
 		return fmt.Errorf("load intent signing key: %w", err)
@@ -137,7 +167,7 @@ func run(config configuration) error {
 	if err != nil {
 		return fmt.Errorf("assemble node evidence verifier: %w", err)
 	}
-	service, err := controlplane.NewService(store, denyAuthorizer{}, signer, randomIDGenerator{}, discardAudit{}, peerID)
+	service, err := controlplane.NewService(store, serviceAuthorizer, signer, randomIDGenerator{}, serviceAudit, peerID)
 	if err != nil {
 		return fmt.Errorf("assemble control-plane service: %w", err)
 	}
@@ -146,7 +176,7 @@ func run(config configuration) error {
 	if err != nil {
 		return fmt.Errorf("assemble federation endpoint: %w", err)
 	}
-	tlsConfig, err := loadTLSConfiguration(config.ClientCAFingerprintSHA256, time.Now().UTC())
+	tlsConfig, err := loadTLSConfiguration(clientCAPath, config.ClientCAFingerprintSHA256, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("load federation TLS policy: %w", err)
 	}
@@ -159,6 +189,26 @@ func run(config configuration) error {
 		return fmt.Errorf("listen for federation nodes: %w", err)
 	}
 	defer listener.Close()
+	if config.OperatorEnabled {
+		operatorTLS, loadErr := loadTLSConfiguration(operatorCAPath, config.OperatorCAFingerprintSHA256, time.Now().UTC())
+		if loadErr != nil {
+			return fmt.Errorf("load operator TLS policy: %w", loadErr)
+		}
+		operatorAPI, apiErr := controlplane.NewOperatorAPI(service, store, operatorAuthority, operatorAudit)
+		if apiErr != nil {
+			return fmt.Errorf("assemble operator API: %w", apiErr)
+		}
+		operatorServer, serverErr := controlplane.NewOperatorServer(operatorAPI, operatorTLS, config.MaximumSessions, time.Duration(config.ShutdownTimeoutSeconds)*time.Second)
+		if serverErr != nil {
+			return fmt.Errorf("assemble operator listener: %w", serverErr)
+		}
+		operatorListener, listenErr := net.Listen("tcp", config.OperatorListen)
+		if listenErr != nil {
+			return fmt.Errorf("listen for central operators: %w", listenErr)
+		}
+		defer operatorListener.Close()
+		return serveCentralListeners(ctx, cancel, server, listener, operatorServer, operatorListener)
+	}
 	if err = server.Serve(ctx, listener); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("serve federation nodes: %w", err)
 	}
@@ -191,6 +241,9 @@ func loadConfiguration(path string) (configuration, error) {
 		return configuration{}, errors.New("invalid central listener port")
 	}
 	if !config.Enabled {
+		if config.OperatorEnabled {
+			return configuration{}, errors.New("operator listener requires central runtime enablement")
+		}
 		return config, nil
 	}
 	peerID, peerErr := federation.NewID(config.PeerID)
@@ -199,7 +252,43 @@ func loadConfiguration(path string) (configuration, error) {
 	if peerErr != nil || intentErr != nil || revocationErr != nil || peerID == intentID || peerID == revocationID || intentID == revocationID || !validSHA256(config.ClientCAFingerprintSHA256) || config.MaximumSessions == 0 || config.MaximumSessions > 4096 || config.ShutdownTimeoutSeconds < 5 || config.ShutdownTimeoutSeconds > 120 {
 		return configuration{}, errors.New("invalid enabled central trust policy")
 	}
+	if config.OperatorEnabled {
+		host, port, listenErr := net.SplitHostPort(config.OperatorListen)
+		parsedPort, portErr := strconv.ParseUint(port, 10, 16)
+		if listenErr != nil || host == "" || port == "" || portErr != nil || parsedPort == 0 || config.OperatorListen == config.Listen || !validSHA256(config.OperatorCAFingerprintSHA256) {
+			return configuration{}, errors.New("invalid operator listener trust policy")
+		}
+	}
 	return config, nil
+}
+
+func serveCentralListeners(ctx context.Context, cancel context.CancelFunc, nodeServer *controlplane.TLSServer, nodeListener net.Listener, operatorServer *controlplane.OperatorServer, operatorListener net.Listener) error {
+	errorsChannel := make(chan error, 2)
+	go func() { errorsChannel <- nodeServer.Serve(ctx, nodeListener) }()
+	go func() { errorsChannel <- operatorServer.Serve(ctx, operatorListener) }()
+	received := 0
+	var first error
+	select {
+	case <-ctx.Done():
+	case first = <-errorsChannel:
+		received = 1
+		if first == nil {
+			first = errors.New("central listener stopped unexpectedly")
+		} else if ctx.Err() != nil && (errors.Is(first, context.Canceled) || errors.Is(first, net.ErrClosed)) {
+			first = nil
+		}
+		cancel()
+	}
+	_ = nodeListener.Close()
+	_ = operatorListener.Close()
+	for received < 2 {
+		err := <-errorsChannel
+		received++
+		if first == nil && err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+			first = err
+		}
+	}
+	return first
 }
 
 func openDatabase(path string) (*sql.DB, error) {
@@ -281,7 +370,7 @@ func loadEd25519PrivateKey(path string) (ed25519.PrivateKey, error) {
 	return ed25519.PrivateKey(content), nil
 }
 
-func loadTLSConfiguration(expectedFingerprint string, now time.Time) (*tls.Config, error) {
+func loadTLSConfiguration(caPath, expectedFingerprint string, now time.Time) (*tls.Config, error) {
 	certificatePEM, err := readProtectedFile(serverCertificatePath, maximumCertificateBytes, false)
 	if err != nil {
 		return nil, err
@@ -300,7 +389,7 @@ func loadTLSConfiguration(expectedFingerprint string, now time.Time) (*tls.Confi
 		return nil, errors.New("central server certificate is not valid for server authentication")
 	}
 	certificate.Leaf = leaf
-	caPEM, err := readProtectedFile(clientCAPath, maximumCertificateBytes, false)
+	caPEM, err := readProtectedFile(caPath, maximumCertificateBytes, false)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +433,7 @@ func loadTLSConfiguration(expectedFingerprint string, now time.Time) (*tls.Confi
 }
 
 func readProtectedFile(path string, maximum int64, secret bool) ([]byte, error) {
-	registered := path == configPath || path == serverCertificatePath || path == serverPrivateKeyPath || path == clientCAPath || path == intentSigningKeyPath || path == revocationSigningKeyPath || path == enrollmentBundlePath
+	registered := path == configPath || path == serverCertificatePath || path == serverPrivateKeyPath || path == clientCAPath || path == operatorCAPath || path == intentSigningKeyPath || path == revocationSigningKeyPath || path == enrollmentBundlePath
 	if !registered || maximum <= 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errors.New("unregistered protected file")
 	}

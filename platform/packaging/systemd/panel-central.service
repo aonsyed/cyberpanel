@@ -13,6 +13,7 @@ ExecStart=/usr/lib/cyberpanel/bin/panel-central -config /etc/cyberpanel/panel-ce
 LoadCredential=server.crt:/etc/cyberpanel/central/server.crt
 LoadCredential=server.key:/etc/cyberpanel/central/server.key
 LoadCredential=client-ca.pem:/etc/cyberpanel/central/client-ca.pem
+LoadCredential=operator-ca.pem:/etc/cyberpanel/central/operator-ca.pem
 LoadCredential=intent-signing.key:/etc/cyberpanel/central/intent-signing.key
 LoadCredential=revocation-signing.key:/etc/cyberpanel/central/revocation-signing.key
 LoadCredential=enrollments.json:/etc/cyberpanel/central/enrollments.json
