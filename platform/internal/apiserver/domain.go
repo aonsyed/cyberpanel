@@ -37,6 +37,7 @@ type HostingQueryService interface {
 }
 type DatabaseCommandService interface { Handle(context.Context, database.Command) (database.OperationReceipt,error) }
 type OperationsCommandService interface { Handle(context.Context, operations.Command) (operations.OperationReceipt,error) }
+type CertificateMaterialUploadBroker interface { OpenCertificateMaterialUpload(context.Context,string,string,string,uint64) (certificates.OneUseCertificateMaterial,error) }
 
 type DomainServices struct {
 	Identity *identity.Service
@@ -56,6 +57,8 @@ type DomainServices struct {
 	CertificateStore *certificates.IssuanceStore
 	CertificateIssuance *certificates.IssuanceCoordinator
 	CertificateDeployment *certificates.DeploymentCoordinator
+	CertificateMaterials *certificates.MaterialService
+	CertificateMaterialUploads CertificateMaterialUploadBroker
 	Mail *mail.Service
 	MailDelivery *maildelivery.Service
 	MailControl *mail.Coordinator

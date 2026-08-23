@@ -4,6 +4,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -85,6 +88,13 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	dnssecCoordinator:=&dns.DNSSECCoordinator{Store:repositories.DNSSEC,Executor:dnsAuthority,Observer:dnsAuthority,Now:runtimeClock{}.Now}
 	dnsConsoleEdge,err:=newDNSEdge(dnsAuthority,dnssecCoordinator);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize DNS console edge: %w",err)}
 	certificateRuntime,err:=certificates.NewLocalLinuxClientRuntimeForCurrentExecutable(nil,false,dnsAuthority);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize certificate runtime: %w",err)}
+	var certificateMaterials *certificates.MaterialService
+	if auditService!=nil&&auditService.Writer!=nil{
+		materialRepository:=certificates.MaterialRepository{DB:repositories.ControlDB};if err=materialRepository.Bootstrap(ctx);err!=nil{return apiserver.DomainServices{},fmt.Errorf("bootstrap certificate material catalog: %w",err)}
+		trustRoots,rootErr:=x509.SystemCertPool();if rootErr!=nil{return apiserver.DomainServices{},fmt.Errorf("load certificate material trust roots: %w",rootErr)};if trustRoots==nil{return apiserver.DomainServices{},fmt.Errorf("certificate material trust roots unavailable")}
+		policy:=certificateMaterialPolicy{trustRoots:trustRoots}
+		certificateMaterials=&certificates.MaterialService{Repository:materialRepository,Secrets:certificateRuntime.Secrets,ImportPolicies:policy,SelfSignedPolicy:policy,Audit:certificateMaterialAuditSink{service:auditService},Now:runtimeClock{}.Now}
+	}
 	certificateIssuance:=certificateRuntime.Issuance(repositories.CertificateIssuance)
 	certificateDeployment:=certificateRuntime.Deployment(repositories.Certificates)
 	certificateRenewal:=&certificates.RenewalCoordinator{Store:repositories.CertificateIssuance,Deployments:repositories.Certificates,Issuance:certificateIssuance,Deployment:certificateDeployment,Now:runtimeClock{}.Now}
@@ -264,6 +274,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		DNS01:            certificateRuntime.DNS01,
 		CertificateIssuance: certificateIssuance,
 		CertificateDeployment: certificateDeployment,
+		CertificateMaterials: certificateMaterials,
+		CertificateMaterialUploads: certificateRuntime.Secrets,
 		CertificateEdge:  certificateConsoleEdge,
 		Files:            fileService,
 		Credentials:      credentialService,
@@ -305,6 +317,33 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		SecretEnrollment:  secretEnrollment,
 	}, nil
 }
+
+type certificateMaterialPolicy struct{trustRoots *x509.CertPool}
+
+func(policy certificateMaterialPolicy)ResolveMaterialImportPolicy(ctx context.Context,principal certificates.MaterialPrincipal,scope certificates.MaterialScope)(certificates.MaterialImportPolicy,error){
+	if ctx==nil||policy.trustRoots==nil||principal.TenantID==""||principal.SubjectID==""||principal.TenantID!=scope.TenantID||scope.ResourceID==""{return certificates.MaterialImportPolicy{},certificates.ErrMaterialUnauthorized}
+	return certificates.MaterialImportPolicy{TrustRoots:policy.trustRoots,TrustLabel:certificates.MaterialTrustPublicValidated,Names:certificates.MaterialNamePolicy{AllowWildcards:true},AllowedKeyAlgorithms:[]certificates.MaterialKeyAlgorithm{certificates.MaterialKeyECDSA,certificates.MaterialKeyRSA,certificates.MaterialKeyEd25519},MinimumRSAKeyBits:2048,MinimumRemainingLifetime:time.Hour,MaximumLifetime:398*24*time.Hour,MaximumFutureSkew:5*time.Minute},nil
+}
+
+func(policy certificateMaterialPolicy)ResolveSelfSignedMaterialPolicy(ctx context.Context,principal certificates.MaterialPrincipal,scope certificates.MaterialScope)(certificates.SelfSignedMaterialPolicy,error){
+	if ctx==nil||policy.trustRoots==nil||principal.TenantID==""||principal.SubjectID==""||principal.TenantID!=scope.TenantID||scope.ResourceID==""{return certificates.SelfSignedMaterialPolicy{},certificates.ErrMaterialUnauthorized}
+	return certificates.SelfSignedMaterialPolicy{DevelopmentEnabled:true,RecoveryEnabled:true,MinimumLifetime:time.Hour,MaximumDevelopmentTTL:7*24*time.Hour,MaximumRecoveryTTL:24*time.Hour,Backdate:5*time.Minute,AllowedKeyAlgorithms:[]certificates.MaterialKeyAlgorithm{certificates.MaterialKeyECDSA,certificates.MaterialKeyRSA},MinimumRSAKeyBits:3072,AllowWildcards:true},nil
+}
+
+type certificateMaterialAuditSink struct{service *audit.Service}
+
+func(sink certificateMaterialAuditSink)RecordMaterialAudit(ctx context.Context,source certificates.MaterialAuditEvent)error{
+	if ctx==nil||sink.service==nil||sink.service.Writer==nil||source.EventID==""||source.TenantID==""||source.SubjectID==""||source.Action==""||source.ResourceID==""||source.OccurredAt.IsZero(){return audit.ErrInvalid}
+	class,outcome:=audit.ClassMutation,audit.OutcomeFailed
+	switch source.Outcome{case "admitted":class,outcome=audit.ClassAuthorization,audit.OutcomeAllowed;case "denied":class,outcome=audit.ClassAuthorization,audit.OutcomeDenied;case "succeeded":outcome=audit.OutcomeApplied;if source.Action==certificates.MaterialActionInspect||source.Action==certificates.MaterialActionList{class=audit.ClassSensitiveRead};case "failed":if source.Action==certificates.MaterialActionInspect||source.Action==certificates.MaterialActionList{class=audit.ClassSensitiveRead};default:return audit.ErrInvalid}
+	targetID:=source.MaterialID;if targetID==""{targetID=source.ResourceID};attributes:=map[string]string{};if source.ReasonCode!=""{attributes["reason_code"]=source.ReasonCode};if source.CertificateFingerprint!=""{attributes["certificate_fingerprint_sha256"]=source.CertificateFingerprint}
+	digest:=sha256.Sum256([]byte("certificate-material-audit-v1\x00"+source.TenantID+"\x00"+source.SubjectID+"\x00"+string(source.Action)+"\x00"+source.ResourceID+"\x00"+source.MaterialID+"\x00"+source.CertificateFingerprint+"\x00"+source.Outcome+"\x00"+source.ReasonCode+"\x00"+source.OccurredAt.UTC().Format(time.RFC3339Nano)))
+	_,err:=sink.service.Writer.Append(ctx,audit.Event{ID:source.EventID,Class:class,Action:string(source.Action),Actor:audit.Actor{PrincipalID:source.SubjectID,TenantID:source.TenantID,Origin:"panel-core"},Target:audit.Target{Kind:"certificate_material",ID:targetID,TenantID:source.TenantID},Outcome:outcome,RequestDigest:hex.EncodeToString(digest[:]),Attributes:attributes,OccurredAt:source.OccurredAt.UTC()});return err
+}
+
+var _ certificates.MaterialImportPolicyResolver = certificateMaterialPolicy{}
+var _ certificates.SelfSignedMaterialPolicyResolver = certificateMaterialPolicy{}
+var _ certificates.MaterialAuditSink = certificateMaterialAuditSink{}
 
 type cyberpanelDKIMRuntime struct{client *mail.MailDaemonClient}
 
