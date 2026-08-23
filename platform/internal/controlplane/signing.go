@@ -78,6 +78,14 @@ func NewEd25519ReceiptVerifier(keys NodeReceiptKeyProvider) (*Ed25519ReceiptVeri
 }
 
 func (verifier *Ed25519ReceiptVerifier) VerifyNodeReceipt(ctx context.Context, nodeID federation.ID, keyID string, message, signature []byte) error {
+	return verifier.verify(ctx, nodeID, keyID, message, signature)
+}
+
+func (verifier *Ed25519ReceiptVerifier) VerifyNodeEvent(ctx context.Context, nodeID federation.ID, keyID string, message, signature []byte) error {
+	return verifier.verify(ctx, nodeID, keyID, message, signature)
+}
+
+func (verifier *Ed25519ReceiptVerifier) verify(ctx context.Context, nodeID federation.ID, keyID string, message, signature []byte) error {
 	if verifier == nil || verifier.keys == nil || ctx == nil || !nodeID.Valid() || keyID == "" || len(message) == 0 || len(signature) != ed25519.SignatureSize {
 		return ErrInvalid
 	}
