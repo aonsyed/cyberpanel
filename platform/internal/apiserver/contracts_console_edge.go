@@ -16,6 +16,7 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
 	"github.com/aonsyed/cyberpanel/platform/internal/database"
+	"github.com/aonsyed/cyberpanel/platform/internal/federation"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
@@ -633,19 +634,27 @@ type SecuritySuppressPayload struct {
 }
 
 type FleetNodeProjection struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	State          string    `json:"state"`
-	Roles          []string  `json:"roles"`
-	Architecture   string    `json:"architecture"`
-	Version        string    `json:"version"`
-	FailureDomain  string    `json:"failure_domain"`
-	LastSeenAt     time.Time `json:"last_seen_at,omitempty"`
-	Generation     uint64    `json:"generation"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	State               string    `json:"state"`
+	PeerID              string    `json:"peer_id,omitempty"`
+	CentralEndpoint     string    `json:"central_endpoint,omitempty"`
+	CAFingerprint       string    `json:"ca_fingerprint,omitempty"`
+	AuthorityEpoch      uint64    `json:"authority_epoch,omitempty"`
+	EnrollmentExpiresAt time.Time `json:"enrollment_expires_at,omitempty"`
+	Roles               []string  `json:"roles"`
+	Architecture        string    `json:"architecture"`
+	Version             string    `json:"version"`
+	FailureDomain       string    `json:"failure_domain"`
+	LastSeenAt          time.Time `json:"last_seen_at,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+	Generation          uint64    `json:"generation"`
 }
 
 type FleetEnrollPayload struct {
-	EnrollmentToken   string `json:"enrollment_token"`
+	PeerID              string `json:"peer_id"`
+	CentralEndpoint     string `json:"central_endpoint"`
+	EnrollmentToken     string `json:"enrollment_token"`
 	CentralFingerprint string `json:"central_fingerprint"`
 }
 
@@ -1564,8 +1573,16 @@ func validateSecuritySuppress(value any) error {
 
 func validateFleetEnroll(value any) error {
 	payload := value.(*FleetEnrollPayload)
-	if len(payload.EnrollmentToken) < 32 || len(payload.EnrollmentToken) > 4096 || !validFingerprint(payload.CentralFingerprint) { return invalid("fleet enrollment") }
+	payload.PeerID = strings.TrimSpace(payload.PeerID)
+	payload.CentralEndpoint = strings.TrimSpace(payload.CentralEndpoint)
+	payload.CentralFingerprint = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(payload.CentralFingerprint)), "sha256:")
+	if _, err := federation.NewID(payload.PeerID); err != nil || !validFederationEndpoint(payload.CentralEndpoint) || len(payload.EnrollmentToken) < 32 || len(payload.EnrollmentToken) > 4096 || !validDigestReference(payload.CentralFingerprint) { return invalid("fleet enrollment") }
 	return nil
+}
+
+func validFederationEndpoint(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.Hostname() != "" && parsed.User == nil && parsed.Fragment == "" && parsed.RawQuery == "" && len(value) <= 2048
 }
 
 func validateHANodeDrain(value any) error {
