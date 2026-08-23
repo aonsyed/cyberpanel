@@ -21,6 +21,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
+	"github.com/aonsyed/cyberpanel/platform/internal/maildelivery"
 	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	"github.com/aonsyed/cyberpanel/platform/internal/sitepreview"
@@ -55,6 +56,7 @@ type DomainServices struct {
 	CertificateIssuance *certificates.IssuanceCoordinator
 	CertificateDeployment *certificates.DeploymentCoordinator
 	Mail *mail.Service
+	MailDelivery *maildelivery.Service
 	MailControl *mail.Coordinator
 	MailQueue mail.QueueRuntime
 	Webmail *mail.WebmailService
@@ -112,13 +114,13 @@ type DomainServices struct {
 
 func NewDomainRegistry() (*Registry,error) {
 	registry:=NewRegistry()
-	for _,register:=range []func(*Registry)error{registerIdentityContracts,registerHostingContracts,registerDatabaseContracts,registerFoundationContracts,registerCertificateContracts,registerBackupContracts,registerDNSContracts,registerMailContracts,registerMarketingContracts,registerAccessContracts,registerAccessFileContracts,registerAccessDeveloperContracts,registerApplicationContracts,registerContainerContracts,registerOperationsContracts,registerWebEngineContracts,registerSitePreviewContracts,registerAuditContracts,registerConsoleEdgeContracts,registerNotificationContracts,registerSecretEnrollmentContracts}{if err:=register(registry);err!=nil{return nil,err}}
+	for _,register:=range []func(*Registry)error{registerIdentityContracts,registerHostingContracts,registerDatabaseContracts,registerFoundationContracts,registerCertificateContracts,registerBackupContracts,registerDNSContracts,registerMailContracts,registerMailDeliveryContracts,registerMarketingContracts,registerAccessContracts,registerAccessFileContracts,registerAccessDeveloperContracts,registerApplicationContracts,registerContainerContracts,registerOperationsContracts,registerWebEngineContracts,registerSitePreviewContracts,registerAuditContracts,registerConsoleEdgeContracts,registerNotificationContracts,registerSecretEnrollmentContracts}{if err:=register(registry);err!=nil{return nil,err}}
 	return registry,nil
 }
 
 func (services DomainServices) Bind(registry *Registry) error {
 	if registry==nil{return invalid("domain registry")}
-	for _,bind:=range []func(*Registry,DomainServices)error{bindIdentity,bindHosting,bindDatabase,bindFoundation,bindCertificates,bindBackup,bindDNS,bindMail,bindMarketing,bindAccess,bindAccessFileDomains,bindAccessDeveloper,bindApplications,bindContainers,bindOperations,bindWebEngine,bindSitePreviewContracts,bindAudit,bindConsoleEdgeContracts,bindNotificationContracts,bindSecretEnrollmentContracts}{if err:=bind(registry,services);err!=nil{return err}}
+	for _,bind:=range []func(*Registry,DomainServices)error{bindIdentity,bindHosting,bindDatabase,bindFoundation,bindCertificates,bindBackup,bindDNS,bindMail,bindMailDelivery,bindMarketing,bindAccess,bindAccessFileDomains,bindAccessDeveloper,bindApplications,bindContainers,bindOperations,bindWebEngine,bindSitePreviewContracts,bindAudit,bindConsoleEdgeContracts,bindNotificationContracts,bindSecretEnrollmentContracts}{if err:=bind(registry,services);err!=nil{return err}}
 	return nil
 }
 

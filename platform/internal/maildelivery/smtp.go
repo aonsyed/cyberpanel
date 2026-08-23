@@ -25,11 +25,11 @@ const (
 )
 
 type SMTPRelayOrigin struct {
-	Host string
-	Port uint16
-	ServerName string
-	HelloName string
-	TLSMode SMTPTLSMode
+	Host string `json:"host"`
+	Port uint16 `json:"port"`
+	ServerName string `json:"server_name"`
+	HelloName string `json:"hello_name"`
+	TLSMode SMTPTLSMode `json:"tls_mode"`
 }
 
 func (origin SMTPRelayOrigin) Validate() error {
@@ -549,17 +549,17 @@ func (failure smtpSubmissionError) MayHaveSubmitted() bool { return failure.ambi
 func smtpFailure(ambiguous bool) error { return smtpSubmissionError{ambiguous: ambiguous} }
 
 type PostfixRelaySpec struct {
-	Generation uint64
-	BindingID BindingID
-	TenantID TenantID
-	Origin SMTPRelayOrigin
-	Credential EncryptedCredentialReference
-	DomainIDs []DomainID
-	MaximumMessageBytes int64
-	MaximumRecipients uint16
-	RatePerMinute uint32
-	Concurrency uint16
-	CreatedAt time.Time
+	Generation uint64 `json:"generation"`
+	BindingID BindingID `json:"binding_id"`
+	TenantID TenantID `json:"tenant_id"`
+	Origin SMTPRelayOrigin `json:"origin"`
+	Credential EncryptedCredentialReference `json:"credential"`
+	DomainIDs []DomainID `json:"domain_ids"`
+	MaximumMessageBytes int64 `json:"maximum_message_bytes"`
+	MaximumRecipients uint16 `json:"maximum_recipients"`
+	RatePerMinute uint32 `json:"rate_per_minute"`
+	Concurrency uint16 `json:"concurrency"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (spec PostfixRelaySpec) Validate() error {
@@ -583,12 +583,12 @@ func (spec PostfixRelaySpec) Validate() error {
 }
 
 type PostfixRelayGeneration struct {
-	ID string
-	Spec PostfixRelaySpec
-	ManifestDigest string
-	CredentialMapReference string
-	TransportArtifactDigest string
-	TLSArtifactDigest string
+	ID string `json:"id"`
+	Spec PostfixRelaySpec `json:"spec"`
+	ManifestDigest string `json:"manifest_digest"`
+	CredentialMapReference string `json:"credential_map_reference"`
+	TransportArtifactDigest string `json:"transport_artifact_digest"`
+	TLSArtifactDigest string `json:"tls_artifact_digest"`
 }
 
 func (generation PostfixRelayGeneration) Validate() error {
@@ -600,23 +600,35 @@ func (generation PostfixRelayGeneration) Validate() error {
 }
 
 type PostfixRelayStageReceipt struct {
-	GenerationID string
-	StageDigest string
-	StagedAt time.Time
+	GenerationID string `json:"generation_id"`
+	StageDigest string `json:"stage_digest"`
+	StagedAt time.Time `json:"staged_at"`
 }
 
 type PostfixRelayValidationReceipt struct {
-	GenerationID string
-	ValidationDigest string
-	ValidatedAt time.Time
+	GenerationID string `json:"generation_id"`
+	ValidationDigest string `json:"validation_digest"`
+	ValidatedAt time.Time `json:"validated_at"`
 }
 
 type PostfixRelayActivationReceipt struct {
-	GenerationID string
-	PreviousGenerationID string
-	ActivationDigest string
-	ReloadDigest string
-	ActivatedAt time.Time
+	GenerationID string `json:"generation_id"`
+	PreviousGenerationID string `json:"previous_generation_id,omitempty"`
+	ActivationDigest string `json:"activation_digest"`
+	ReloadDigest string `json:"reload_digest"`
+	RollbackDigest string `json:"rollback_digest,omitempty"`
+	RolledBack bool `json:"rolled_back"`
+	Ambiguous bool `json:"ambiguous"`
+	ActivatedAt time.Time `json:"activated_at"`
+}
+
+type PostfixRelayObservation struct {
+	GenerationID string `json:"generation_id"`
+	CurrentGenerationID string `json:"current_generation_id,omitempty"`
+	Active bool `json:"active"`
+	Valid bool `json:"valid"`
+	EvidenceDigest string `json:"evidence_digest"`
+	ObservedAt time.Time `json:"observed_at"`
 }
 
 type PostfixRelayRenderer interface {
@@ -633,4 +645,16 @@ type PostfixRelayValidator interface {
 
 type PostfixRelayActivator interface {
 	ActivatePostfixRelay(context.Context, PostfixRelayGeneration, PostfixRelayStageReceipt, PostfixRelayValidationReceipt, string) (PostfixRelayActivationReceipt, error)
+}
+
+type PostfixRelayReconciler interface {
+	ObservePostfixRelay(context.Context, PostfixRelayGeneration) (PostfixRelayObservation, error)
+}
+
+type PostfixRelayController interface {
+	PostfixRelayRenderer
+	PostfixRelayStager
+	PostfixRelayValidator
+	PostfixRelayActivator
+	PostfixRelayReconciler
 }
