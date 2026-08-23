@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS identity_support_grants (
 CREATE INDEX IF NOT EXISTS identity_support_grants_tenant ON identity_support_grants(target_tenant_id,id);
 CREATE UNIQUE INDEX IF NOT EXISTS identity_support_grants_secret ON identity_support_grants(secret_digest) WHERE secret_digest <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS identity_support_grants_context ON identity_support_grants(context_id) WHERE context_id <> '';
+CREATE TABLE IF NOT EXISTS identity_profile_preferences (
+ principal_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, locale TEXT NOT NULL,
+ timezone TEXT NOT NULL, appearance TEXT NOT NULL, date_format TEXT NOT NULL,
+ time_format TEXT NOT NULL, notification_channels_json TEXT NOT NULL,
+ notification_categories_json TEXT NOT NULL, notification_minimum_severity TEXT NOT NULL,
+ reduced_motion TEXT NOT NULL, revision BIGINT NOT NULL, created_at TIMESTAMP NOT NULL,
+ updated_at TIMESTAMP NOT NULL, updated_by_id TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS identity_roles (
  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL,
  permissions_json TEXT NOT NULL, builtin INTEGER NOT NULL, generation BIGINT NOT NULL,

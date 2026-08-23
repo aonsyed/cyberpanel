@@ -585,6 +585,119 @@ type SessionMetadata struct {
 	RevokedAt         *time.Time
 }
 
+type ProfileDateFormat string
+
+const (
+	ProfileDateLocaleDefault ProfileDateFormat = "locale_default"
+	ProfileDateYearMonthDay  ProfileDateFormat = "year_month_day"
+	ProfileDateDayMonthYear  ProfileDateFormat = "day_month_year"
+	ProfileDateMonthDayYear  ProfileDateFormat = "month_day_year"
+)
+
+type ProfileTimeFormat string
+
+const (
+	ProfileTimeLocaleDefault ProfileTimeFormat = "locale_default"
+	ProfileTime12Hour        ProfileTimeFormat = "hour_12"
+	ProfileTime24Hour        ProfileTimeFormat = "hour_24"
+)
+
+type NotificationChannel string
+
+const (
+	NotificationChannelEmail NotificationChannel = "email"
+	NotificationChannelInApp NotificationChannel = "in_app"
+)
+
+type NotificationCategory string
+
+const (
+	NotificationCategoryAccount    NotificationCategory = "account"
+	NotificationCategoryBilling    NotificationCategory = "billing"
+	NotificationCategoryOperations NotificationCategory = "operations"
+	NotificationCategoryProduct    NotificationCategory = "product"
+	NotificationCategorySecurity   NotificationCategory = "security"
+)
+
+type NotificationSeverity string
+
+const (
+	NotificationSeverityInfo     NotificationSeverity = "info"
+	NotificationSeverityWarning  NotificationSeverity = "warning"
+	NotificationSeverityCritical NotificationSeverity = "critical"
+)
+
+type ReducedMotionPreference string
+
+const (
+	ReducedMotionSystem       ReducedMotionPreference = "system"
+	ReducedMotionReduce       ReducedMotionPreference = "reduce"
+	ReducedMotionNoPreference ReducedMotionPreference = "no_preference"
+)
+
+type ProfileField string
+
+const (
+	ProfileFieldDisplayName          ProfileField = "display_name"
+	ProfileFieldLocale               ProfileField = "locale"
+	ProfileFieldTimezone             ProfileField = "timezone"
+	ProfileFieldAppearance           ProfileField = "appearance"
+	ProfileFieldDateFormat           ProfileField = "date_format"
+	ProfileFieldTimeFormat           ProfileField = "time_format"
+	ProfileFieldNotificationChannels ProfileField = "notification_channels"
+	ProfileFieldNotificationCategories ProfileField = "notification_categories"
+	ProfileFieldNotificationSeverity ProfileField = "notification_minimum_severity"
+	ProfileFieldReducedMotion        ProfileField = "reduced_motion"
+)
+
+type ProfilePreferences struct {
+	PrincipalID                ID
+	DisplayName                string
+	Locale                     string
+	Timezone                   string
+	Appearance                 Theme
+	DateFormat                 ProfileDateFormat
+	TimeFormat                 ProfileTimeFormat
+	NotificationChannels       []NotificationChannel
+	NotificationCategories     []NotificationCategory
+	NotificationMinimumSeverity NotificationSeverity
+	ReducedMotion              ReducedMotionPreference
+	Revision                   uint64
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
+	UpdatedByID                ID
+}
+
+func (p ProfilePreferences) Validate() error {
+	if !p.PrincipalID.Valid() || p.Revision == 0 || p.CreatedAt.IsZero() || p.UpdatedAt.Before(p.CreatedAt) || !p.UpdatedByID.Valid() { return fmt.Errorf("%w: profile metadata", ErrInvalid) }
+	if !validProfileDisplayName(p.DisplayName) { return fmt.Errorf("%w: profile display name", ErrInvalid) }
+	if locale, ok := canonicalProfileLocale(p.Locale); !ok || locale != p.Locale { return fmt.Errorf("%w: profile locale", ErrInvalid) }
+	if !validProfileTimezone(p.Timezone) { return fmt.Errorf("%w: profile timezone", ErrInvalid) }
+	if p.Appearance != ThemeSystem && p.Appearance != ThemeLight && p.Appearance != ThemeDark { return fmt.Errorf("%w: profile appearance", ErrInvalid) }
+	switch p.DateFormat { case ProfileDateLocaleDefault, ProfileDateYearMonthDay, ProfileDateDayMonthYear, ProfileDateMonthDayYear: default: return fmt.Errorf("%w: profile date format", ErrInvalid) }
+	switch p.TimeFormat { case ProfileTimeLocaleDefault, ProfileTime12Hour, ProfileTime24Hour: default: return fmt.Errorf("%w: profile time format", ErrInvalid) }
+	if len(p.NotificationChannels) > 2 || !validNotificationChannels(p.NotificationChannels) { return fmt.Errorf("%w: profile notification channels", ErrInvalid) }
+	if len(p.NotificationCategories) > 5 || !validNotificationCategories(p.NotificationCategories) { return fmt.Errorf("%w: profile notification categories", ErrInvalid) }
+	switch p.NotificationMinimumSeverity { case NotificationSeverityInfo, NotificationSeverityWarning, NotificationSeverityCritical: default: return fmt.Errorf("%w: profile notification severity", ErrInvalid) }
+	switch p.ReducedMotion { case ReducedMotionSystem, ReducedMotionReduce, ReducedMotionNoPreference: default: return fmt.Errorf("%w: profile reduced motion", ErrInvalid) }
+	return nil
+}
+
+type ProfilePreferencesPatch struct {
+	FieldMask   []ProfileField
+	ResetFields []ProfileField
+	Values      ProfilePreferences
+}
+
+type AdminProfilePreferences struct {
+	PrincipalID ID
+	DisplayName string
+	Locale      string
+	Timezone    string
+	Revision    uint64
+	UpdatedAt   time.Time
+}
+
 type SupportGrantState string
 
 const (
