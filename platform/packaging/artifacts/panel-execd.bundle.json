@@ -11,6 +11,13 @@
       "mode": "0755"
     },
     {
+      "path_id": "panel_updated",
+      "command": "./cmd/panel-updated",
+      "archive_path": "panel-updated",
+      "install_path": "/usr/local/libexec/cyberpanel/panel-updated",
+      "mode": "0755"
+    },
+    {
       "path_id": "panel_cron_exec",
       "command": "./cmd/panel-cron-exec",
       "archive_path": "panel-cron-exec",

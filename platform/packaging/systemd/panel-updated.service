@@ -1,0 +1,45 @@
+[Unit]
+Description=CyberPanel isolated product updater
+Documentation=https://github.com/aonsyed/cyberpanel
+After=local-fs.target systemd-user-sessions.service
+Before=panel-execd.service panel-core.service panel-gateway.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/cyberpanel/panel-updated
+User=root
+Group=root
+UMask=0077
+RuntimeDirectory=cyberpanel-product-updater
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StateDirectory=cyberpanel/product-updater
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=10min
+TimeoutStopSec=45s
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+ReadWritePaths=/opt/cyberpanel /usr/local/libexec/cyberpanel /var/lib/cyberpanel/product-updater /var/backups/cyberpanel/product-updates /etc/cyberpanel /etc/systemd/system /etc/tmpfiles.d /run/cyberpanel-product-updater
+LimitNOFILE=1024
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
