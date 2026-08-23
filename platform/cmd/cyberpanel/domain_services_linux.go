@@ -113,6 +113,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err=secureWebmailService.Bootstrap(ctx);err!=nil{return apiserver.DomainServices{},fmt.Errorf("bootstrap secure webmail: %w",err)}
 	if err=bootstrapWebmailDovecotTokens(ctx,repositories.ControlDB);err!=nil{return apiserver.DomainServices{},fmt.Errorf("bootstrap Dovecot token bridge: %w",err)}
 	if err=serveWebmailTokenInfo(ctx,repositories.ControlDB,repositories.MailControl);err!=nil{return apiserver.DomainServices{},fmt.Errorf("start Dovecot token introspection: %w",err)}
+	if err=activateWebmailDovecotOAuth(ctx,mailProjector,mailClient);err!=nil{return apiserver.DomainServices{},fmt.Errorf("activate Dovecot OAuth passdb: %w",err)}
 	webmailConsoleEdge:=integratedWebmailEdge{secure:secureWebmailService,legacy:legacyWebmailEdge}
 	repositories.MailDeliveryPolicy.ResolveLimit=mail.ControlDeliveryLimitResolver(repositories.MailControl,mail.DeliveryLimit{HourlyMessages:500,MonthlyMessages:100000,HourlyRecipients:500,MonthlyRecipients:100000,MaxMessageBytes:16<<20,MaxRecipientsPerMessage:1})
 	unsubscribeKey,err:=mail.LoadCampaignUnsubscribeCredential(mail.CampaignUnsubscribeCredentialPath);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("load campaign unsubscribe authority: %w",err)};defer func(){for index:=range unsubscribeKey{unsubscribeKey[index]=0}}()
@@ -540,6 +541,12 @@ type failClosedSpamReporter struct{}
 func(failClosedSpamReporter)Report(context.Context,securewebmail.BlobOwner,[]securewebmail.MessageIdentity,bool)error{return securewebmail.ErrUnavailable}
 
 type webmailTokenInfo struct{database *sql.DB;directory secureWebmailDirectory}
+
+func activateWebmailDovecotOAuth(ctx context.Context,projector mail.RepositorySnapshotProjector,client *mail.MailDaemonClient)error{
+	if ctx==nil||client==nil{return mail.ErrInvalidCommand};request:=mail.EffectRequest{CommandID:"startup-webmail-dovecot-oauth",TenantID:"system",Kind:mail.ResourcePolicy,ResourceID:"webmail-dovecot-oauth",Generation:1,Action:mail.ActionUpdate}
+	snapshot,err:=projector.ProjectMail(ctx,request);if err!=nil{return err};generation,err:=(mail.ConfigRenderer{}).Render(snapshot);if err!=nil{return err};binding:=sha256.Sum256([]byte("webmail-dovecot-oauth-activation-v1\x00"+generation.Digest));request.EffectID="mailfx_"+hex.EncodeToString(binding[:])[:48];request.CommandDigest=generation.Digest;request.DesiredDigest=generation.Digest
+	effect,activation,err:=client.ApplyGeneration(ctx,request,generation);if err!=nil{return err};if effect.Outcome!=mail.EffectConfirmed||effect.AppliedGeneration!=activation.GenerationDigest||effect.ProbeDigest==""{return mail.ErrInvalidReceipt};return nil
+}
 
 func bootstrapWebmailDovecotTokens(ctx context.Context,database *sql.DB)error{if ctx==nil||database==nil{return securewebmail.ErrInvalid};_,err:=database.ExecContext(ctx,`CREATE TABLE IF NOT EXISTS webmail_dovecot_tokens_v1(token_digest TEXT PRIMARY KEY CHECK(length(token_digest)=64),tenant_id TEXT NOT NULL,mailbox_id TEXT NOT NULL,authz_epoch INTEGER NOT NULL,expires_at INTEGER NOT NULL,consumed_at INTEGER NOT NULL);
 CREATE TRIGGER IF NOT EXISTS webmail_dovecot_grant_consumed_v1 AFTER UPDATE OF consumed_at ON webmail_grants_v1 WHEN NEW.consumed_at IS NOT NULL AND OLD.consumed_at IS NULL BEGIN INSERT OR REPLACE INTO webmail_dovecot_tokens_v1(token_digest,tenant_id,mailbox_id,authz_epoch,expires_at,consumed_at) VALUES(NEW.token_digest,NEW.tenant_id,NEW.mailbox_id,NEW.authz_epoch,NEW.expires_at,NEW.consumed_at); END;`);if err!=nil{return err};_,err=database.ExecContext(ctx,`DELETE FROM webmail_dovecot_tokens_v1 WHERE expires_at<=?`,time.Now().UTC().UnixNano());return err}
