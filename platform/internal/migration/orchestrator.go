@@ -41,11 +41,7 @@ func (o *Orchestrator) Cutover(ctx context.Context, id ID) (Migration, error) {
 		}
 	}
 	if migration.Phase == PhaseCommitted {
-		if err := o.target.Finalize(ctx, migration); err != nil {
-			_ = o.repository.PutReceipt(ctx, id, "finalize_error", map[string]string{"message": safeError(err)})
-			return migration, err
-		}
-		return o.repository.Transition(ctx, id, PhaseCommitted, PhaseCleanup, "complete", migration.SourceGeneration)
+		return o.complete(ctx, migration, migration.SourceGeneration)
 	}
 	if migration.Phase != PhaseQuiescing && migration.Phase != PhaseFinalSync && migration.Phase != PhaseCutoverReady && migration.Phase != PhaseCutoverCommitting && migration.Phase != PhaseVerifying {
 		return migration, ErrConflict
@@ -158,11 +154,20 @@ func (o *Orchestrator) Cutover(ctx context.Context, id ID) (Migration, error) {
 	if err != nil {
 		return migration, err
 	}
+	return o.complete(ctx, migration, fence.Generation)
+}
+
+func (o *Orchestrator) complete(ctx context.Context, migration Migration, generation uint64) (Migration, error) {
 	if err := o.target.Finalize(ctx, migration); err != nil {
-		_ = o.repository.PutReceipt(ctx, id, "finalize_error", map[string]string{"message": safeError(err)})
+		_ = o.repository.PutReceipt(ctx, migration.ID, "finalize_error", map[string]string{"message": safeError(err)})
 		return migration, err
 	}
-	return o.repository.Transition(ctx, id, PhaseCommitted, PhaseCleanup, "complete", fence.Generation)
+	if o.stager != nil {
+		if err := o.stager.Release(ctx, migration.ID, ChunkReleaseCompleted); err != nil {
+			return migration, err
+		}
+	}
+	return o.repository.Transition(ctx, migration.ID, PhaseCommitted, PhaseCleanup, "complete", generation)
 }
 
 const CancelReconciliationRequiredCode = "CANCEL_RECONCILIATION_REQUIRED"
@@ -270,6 +275,11 @@ func (o *Orchestrator) Cancel(ctx context.Context, id ID) (Migration, error) {
 	}
 	if err = o.repository.PutReceipt(ctx, id, "cancel_cleanup", cleanup); err != nil {
 		return migration, err
+	}
+	if o.stager != nil {
+		if err = o.stager.Release(ctx, id, ChunkReleaseCanceled); err != nil {
+			return migration, err
+		}
 	}
 	return o.repository.Transition(ctx, id, PhaseRollingBack, PhaseCanceled, "canceled:"+string(request.From), migration.SourceGeneration)
 }

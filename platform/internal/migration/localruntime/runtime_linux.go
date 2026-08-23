@@ -118,6 +118,7 @@ func NewWithConfig(ctx context.Context, db *sql.DB, repository *migration.SQLRep
 			return nil, err
 		}
 	}
+	stager.WithReferenceStore(scopes)
 	source := &scopedExtractorSource{scopes:scopes, cpanel:cpanelIntake, clients:map[migration.ID]scopedClient{}, chunks:map[string][]migration.ID{}}
 	orchestrator, err := migration.NewOrchestrator(repository, verifier, source, source, target)
 	if err != nil {

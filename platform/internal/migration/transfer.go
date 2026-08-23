@@ -17,16 +17,25 @@ type ChunkProgressSink interface {
 // channel as a path oracle because reads are expressed solely by signed chunk
 // digest and bounded byte ranges.
 type ChunkStager struct {
-	store    *ChunkStore
-	progress ChunkProgressSink
-	clock    func() time.Time
+	store           *ChunkStore
+	progress        ChunkProgressSink
+	references      ChunkReferenceStore
+	quarantineDelay time.Duration
+	clock           func() time.Time
 }
 
 func NewChunkStager(store *ChunkStore, progress ChunkProgressSink) (*ChunkStager, error) {
 	if store == nil {
 		return nil, ErrInvalid
 	}
-	return &ChunkStager{store: store, progress: progress, clock: time.Now}, nil
+	return &ChunkStager{store: store, progress: progress, quarantineDelay: DefaultChunkQuarantineDelay, clock: time.Now}, nil
+}
+
+func (s *ChunkStager) WithReferenceStore(references ChunkReferenceStore) *ChunkStager {
+	if s != nil {
+		s.references = references
+	}
+	return s
 }
 
 func (s *ChunkStager) Stage(ctx context.Context, migrationID ID, manifest Manifest, source SourceReader) error {
@@ -34,17 +43,39 @@ func (s *ChunkStager) Stage(ctx context.Context, migrationID ID, manifest Manife
 		return ErrInvalid
 	}
 	for _, descriptor := range canonicalChunks(manifest.Chunks) {
+		reference := ChunkReference{}
+		if s.references != nil {
+			var err error
+			reference, err = s.references.AcquireChunkReference(ctx, migrationID, descriptor)
+			if err != nil {
+				return err
+			}
+			if reference.MigrationID != migrationID || reference.Digest != descriptor.Digest || reference.Size != descriptor.Size || reference.ObjectEpoch == 0 || !runtimeScopeText(reference.TenantID, 128) {
+				return ErrAmbiguous
+			}
+		}
 		present, err := s.store.Has(ctx, descriptor)
 		if err != nil {
+			if s.references != nil {
+				return errors.Join(ErrAmbiguous, err)
+			}
 			return err
 		}
 		if present {
+			if s.references != nil && !reference.Materialized {
+				if err := s.references.ConfirmChunkReference(ctx, migrationID, descriptor); err != nil {
+					return err
+				}
+			}
 			if s.progress != nil {
 				if err := s.progress.RecordChunkProgress(ctx, migrationID, descriptor.Digest, descriptor.Size, descriptor.Size, "verified"); err != nil {
 					return err
 				}
 			}
 			continue
+		}
+		if s.references != nil && reference.Materialized {
+			return errors.Join(ErrAmbiguous, ErrNotFound)
 		}
 		reader := &remoteChunkReader{ctx: ctx, source: source, digest: descriptor.Digest, size: descriptor.Size}
 		if err := s.store.Put(ctx, descriptor, reader); err != nil {
@@ -53,6 +84,11 @@ func (s *ChunkStager) Stage(ctx context.Context, migrationID ID, manifest Manife
 			}
 			return err
 		}
+		if s.references != nil {
+			if err := s.references.ConfirmChunkReference(ctx, migrationID, descriptor); err != nil {
+				return err
+			}
+		}
 		if s.progress != nil {
 			if err := s.progress.RecordChunkProgress(ctx, migrationID, descriptor.Digest, descriptor.Size, descriptor.Size, "verified"); err != nil {
 				return err
@@ -60,6 +96,17 @@ func (s *ChunkStager) Stage(ctx context.Context, migrationID ID, manifest Manife
 		}
 	}
 	return nil
+}
+
+func (s *ChunkStager) Release(ctx context.Context, migrationID ID, reason ChunkReleaseReason) error {
+	if s == nil || s.store == nil || ctx == nil || !migrationID.Valid() || !validChunkReleaseReason(reason) || s.quarantineDelay <= 0 || s.quarantineDelay > maximumChunkQuarantineDelay {
+		return ErrInvalid
+	}
+	if s.references == nil {
+		return nil
+	}
+	_, err := s.references.ReleaseChunkReferences(ctx, migrationID, reason, s.quarantineDelay)
+	return err
 }
 
 type remoteChunkReader struct {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,7 @@ func OpenChunkStore(rootPath string, maximumBytes uint64) (*ChunkStore, error) {
 	if maximumBytes == 0 {
 		maximumBytes = defaultMaximumChunkSize
 	}
-	if maximumBytes < 1<<20 {
+	if maximumBytes < 1<<20 || maximumBytes > uint64(math.MaxInt64) {
 		root.Close()
 		return nil, ErrInvalid
 	}
@@ -74,11 +75,14 @@ func (s *ChunkStore) Put(ctx context.Context, descriptor Chunk, source io.Reader
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	prefix, final := chunkNames(descriptor.Digest)
+	prefix, final, err := chunkNames(descriptor.Digest)
+	if err != nil {
+		return err
+	}
 	if err := s.ensureDirectory(prefix); err != nil {
 		return err
 	}
-	if present, err := s.verifyExisting(final, descriptor); err != nil || present {
+	if present, err := s.verifyExisting(ctx, final, descriptor); err != nil || present {
 		return err
 	}
 	temporary, err := temporaryName(prefix, descriptor.Digest)
@@ -114,7 +118,7 @@ func (s *ChunkStore) Put(ctx context.Context, descriptor Chunk, source io.Reader
 		return err
 	}
 	if err := s.root.Link(temporary, final); err != nil {
-		if present, verifyErr := s.verifyExisting(final, descriptor); verifyErr != nil || !present {
+		if present, verifyErr := s.verifyExisting(ctx, final, descriptor); verifyErr != nil || !present {
 			return errors.Join(err, verifyErr)
 		}
 	}
@@ -134,15 +138,21 @@ func (s *ChunkStore) Has(ctx context.Context, descriptor Chunk) (bool, error) {
 		return false, ctx.Err()
 	default:
 	}
-	_, final := chunkNames(descriptor.Digest)
-	return s.verifyExisting(final, descriptor)
+	_, final, err := chunkNames(descriptor.Digest)
+	if err != nil {
+		return false, err
+	}
+	return s.verifyExisting(ctx, final, descriptor)
 }
 
 func (s *ChunkStore) ReadRange(ctx context.Context, digest string, offset, length uint64) ([]byte, error) {
 	if s == nil || s.root == nil || ctx == nil || !isDigest(digest) || length == 0 || length > maximumRangeRead || offset > ^uint64(0)-length {
 		return nil, ErrInvalid
 	}
-	_, name := chunkNames(digest)
+	_, name, err := chunkNames(digest)
+	if err != nil {
+		return nil, err
+	}
 	file, err := s.openRegular(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound
@@ -179,7 +189,10 @@ func (s *ChunkStore) Verify(ctx context.Context, descriptor Chunk) error {
 	if s == nil || s.root == nil || ctx == nil || !validChunk(descriptor, s.maximumBytes) {
 		return ErrInvalid
 	}
-	_, name := chunkNames(descriptor.Digest)
+	_, name, err := chunkNames(descriptor.Digest)
+	if err != nil {
+		return err
+	}
 	file, err := s.openRegular(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return ErrNotFound
@@ -202,7 +215,73 @@ func (s *ChunkStore) Verify(ctx context.Context, descriptor Chunk) error {
 	return nil
 }
 
-func (s *ChunkStore) verifyExisting(name string, descriptor Chunk) (bool, error) {
+// deleteQuarantined removes only the canonical path derived from digest. The
+// caller may allow an absent path solely when it has already persisted a
+// deletion intent or when the object was never confirmed as materialized.
+func (s *ChunkStore) deleteQuarantined(ctx context.Context, digest string, size uint64, allowMissing bool) error {
+	if s == nil || s.root == nil || ctx == nil || !isDigest(digest) || size > s.maximumBytes {
+		return ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	prefix, name, err := chunkNames(digest)
+	if err != nil {
+		return err
+	}
+	descriptor := Chunk{Digest: digest, Size: size}
+	present, err := s.verifyExisting(ctx, name, descriptor)
+	if err != nil {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	if !present {
+		if !allowMissing {
+			return errors.Join(ErrAmbiguous, ErrNotFound)
+		}
+		if err := s.syncDirectory(prefix); err != nil {
+			return errors.Join(ErrAmbiguous, err)
+		}
+		return nil
+	}
+	if err := s.root.Remove(name); err != nil {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	if err := s.syncDirectory(prefix); err != nil {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	if _, err := s.root.Lstat(name); err == nil {
+		return ErrAmbiguous
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	return nil
+}
+
+func (s *ChunkStore) inspectForGarbageCollection(ctx context.Context, digest string, size uint64, allowMissing bool) error {
+	if s == nil || s.root == nil || ctx == nil || !isDigest(digest) || size > s.maximumBytes {
+		return ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, name, err := chunkNames(digest)
+	if err != nil {
+		return err
+	}
+	present, err := s.verifyExisting(ctx, name, Chunk{Digest: digest, Size: size})
+	if err != nil {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	if !present && !allowMissing {
+		return errors.Join(ErrAmbiguous, ErrNotFound)
+	}
+	return nil
+}
+
+func (s *ChunkStore) verifyExisting(ctx context.Context, name string, descriptor Chunk) (bool, error) {
 	file, err := s.openRegular(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -216,7 +295,7 @@ func (s *ChunkStore) verifyExisting(name string, descriptor Chunk) (bool, error)
 		return false, ErrConflict
 	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, io.LimitReader(file, int64(descriptor.Size)+1)); err != nil {
+	if _, err := copyContext(ctx, hash, io.LimitReader(file, int64(descriptor.Size)+1)); err != nil {
 		return false, err
 	}
 	if subtle.ConstantTimeCompare(hash.Sum(nil), mustDecodeDigest(descriptor.Digest)) != 1 {
@@ -226,6 +305,9 @@ func (s *ChunkStore) verifyExisting(name string, descriptor Chunk) (bool, error)
 }
 
 func (s *ChunkStore) openRegular(name string) (*os.File, error) {
+	if !validChunkPath(name) {
+		return nil, ErrInvalid
+	}
 	before, err := s.root.Lstat(name)
 	if err != nil {
 		return nil, err
@@ -271,9 +353,24 @@ func (s *ChunkStore) syncDirectory(name string) error {
 	return directory.Sync()
 }
 
-func chunkNames(digest string) (string, string) {
+func chunkNames(digest string) (string, string, error) {
+	if !isDigest(digest) {
+		return "", "", ErrInvalid
+	}
 	prefix := filepath.Join("sha256", digest[:2])
-	return prefix, filepath.Join(prefix, digest)
+	name := filepath.Join(prefix, digest)
+	if !validChunkPath(prefix) || !validChunkPath(name) {
+		return "", "", ErrInvalid
+	}
+	return prefix, name, nil
+}
+
+func validChunkPath(name string) bool {
+	if name == "" || filepath.IsAbs(name) || filepath.Clean(name) != name {
+		return false
+	}
+	separator := string(filepath.Separator)
+	return name == "sha256" || strings.HasPrefix(name, "sha256"+separator) && !strings.Contains(name, "..")
 }
 
 func temporaryName(prefix, digest string) (string, error) {
