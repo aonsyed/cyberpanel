@@ -3,11 +3,14 @@ package apiserver
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	marketing "github.com/aonsyed/cyberpanel/platform/internal/emailmarketing"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
 )
@@ -31,10 +34,39 @@ type MarketingCampaignPage struct{Items []mail.Campaign `json:"items"`;NextCurso
 type MarketingAttemptPage struct{Items []mail.CampaignAttempt `json:"items"`;NextCursor string `json:"next_cursor,omitempty"`}
 type MarketingConsentPage struct{Items []mail.ConsentEvent `json:"items"`;NextCursor string `json:"next_cursor,omitempty"`}
 type MarketingConsentCurrent struct{Found bool `json:"found"`;Event mail.ConsentEvent `json:"event,omitempty"`}
+type MarketingDeliveryEventPayload struct{Source marketing.DeliveryEventSource `json:"source"`;ProviderRef string `json:"provider_ref"`;KeyID string `json:"key_id"`;EventID string `json:"event_id"`;Nonce string `json:"nonce"`;SignedAt time.Time `json:"signed_at"`;PayloadBase64 string `json:"payload_base64"`;SignatureBase64 string `json:"signature_base64"`}
+type MarketingMetricsPayload struct{Start time.Time `json:"start,omitempty"`;End time.Time `json:"end,omitempty"`;BucketHours uint16 `json:"bucket_hours,omitempty"`;MaximumBuckets uint16 `json:"maximum_buckets,omitempty"`;MaximumProviders uint8 `json:"maximum_providers,omitempty"`;MinimumReportPopulation uint32 `json:"minimum_report_population,omitempty"`}
+type MarketingPolicyPutPayload struct{ExpectedGeneration uint64 `json:"expected_generation"`;MaxRecipientsPerCampaign uint64 `json:"max_recipients_per_campaign"`;MaxRecipientsPerHour uint64 `json:"max_recipients_per_hour"`;MaxRecipientsPerDay uint64 `json:"max_recipients_per_day"`;MaxConcurrentCampaigns uint32 `json:"max_concurrent_campaigns"`;WarmupStartedAt time.Time `json:"warmup_started_at"`;WarmupInitialDailyLimit uint64 `json:"warmup_initial_daily_limit"`;WarmupDoublingHours uint16 `json:"warmup_doubling_hours"`;MinimumApprovals uint8 `json:"minimum_approvals"`;CapacityMaximumAgeSeconds uint32 `json:"capacity_maximum_age_seconds"`;Abuse marketing.AbuseDisposition `json:"abuse"`;AbuseEvidenceDigest string `json:"abuse_evidence_digest"`;LocalAuthorityReady bool `json:"local_authority_ready"`}
+type MarketingSenderRefreshPayload struct{ExpectedGeneration uint64 `json:"expected_generation"`;Domain string `json:"domain"`}
+type MarketingCapacityPutPayload struct{ExpectedGeneration uint64 `json:"expected_generation"`;ProfileRef string `json:"profile_ref"`;Kind marketing.DeliveryCapacityKind `json:"kind"`;Online bool `json:"online"`;MaximumConcurrency uint32 `json:"maximum_concurrency"`;MaximumRecipientsPerHour uint64 `json:"maximum_recipients_per_hour"`;ReservedTransactionalConcurrency uint32 `json:"reserved_transactional_concurrency"`;ReservedTransactionalPerHour uint64 `json:"reserved_transactional_per_hour"`;ObservedAt time.Time `json:"observed_at"`}
+type MarketingAdmissionPayload struct{CampaignRevision uint64 `json:"campaign_revision"`;RecipientCount uint64 `json:"recipient_count"`;DeliveryProfileRef string `json:"delivery_profile_ref"`;VerifiedSenderDomain string `json:"verified_sender_domain"`;SenderEvidenceDigest string `json:"sender_evidence_digest"`;PolicyGeneration uint64 `json:"policy_generation"`;TenantPolicyDigest string `json:"tenant_policy_digest"`;SenderGeneration uint64 `json:"sender_generation"`;CapacityGeneration uint64 `json:"capacity_generation"`;TTLSeconds uint32 `json:"ttl_seconds"`}
+type MarketingBackupStartPayload struct{RetentionDays uint32 `json:"retention_days"`;MaximumRecords uint64 `json:"maximum_records"`;MaximumBytes int64 `json:"maximum_bytes"`}
+type MarketingRestoreStartPayload struct{SourceJobID string `json:"source_job_id"`;ExpectedActivationGeneration uint64 `json:"expected_activation_generation"`}
+type MarketingReconcileStartPayload struct{SourceJobID string `json:"source_job_id"`}
+type MarketingDeliveryEventResult struct{Accepted bool `json:"accepted"`;Duplicate bool `json:"duplicate"`;Delayed bool `json:"delayed"`;OutOfOrder bool `json:"out_of_order"`;ReceiptID string `json:"receipt_id,omitempty"`}
+type MarketingMetricCounts struct{Denominator uint64 `json:"denominator"`;Queued uint64 `json:"queued"`;Sent uint64 `json:"sent"`;Delivered uint64 `json:"delivered"`;Deferred uint64 `json:"deferred"`;Bounced uint64 `json:"bounced"`;Complained uint64 `json:"complained"`;Suppressed uint64 `json:"suppressed"`;Failed uint64 `json:"failed"`}
+type MarketingListMetric struct{ListID string `json:"list_id"`;Denominator uint64 `json:"denominator"`;Counts *MarketingMetricCounts `json:"counts,omitempty"`;SmallCohort bool `json:"small_cohort"`}
+type MarketingProviderMetric struct{ProviderRef string `json:"provider_ref"`;Attempts uint64 `json:"attempts"`;Events uint64 `json:"events"`;Counts MarketingMetricCounts `json:"counts"`}
+type MarketingMetricBucket struct{Start time.Time `json:"start"`;End time.Time `json:"end"`;Delivered uint64 `json:"delivered"`;Deferred uint64 `json:"deferred"`;Bounced uint64 `json:"bounced"`;Complained uint64 `json:"complained"`;Failed uint64 `json:"failed"`}
+type MarketingMetricQuality struct{EventWatermark *time.Time `json:"event_watermark,omitempty"`;LatestReceivedAt *time.Time `json:"latest_received_at,omitempty"`;WatermarkLagSeconds uint64 `json:"watermark_lag_seconds"`;DelayedEvents uint64 `json:"delayed_events"`;OutOfOrderEvents uint64 `json:"out_of_order_events"`;AwaitingReceipts uint64 `json:"awaiting_receipts"`;MissingProviderData bool `json:"missing_provider_data"`;ProviderCardinalityTruncated bool `json:"provider_cardinality_truncated"`}
+type MarketingCampaignMetricsResult struct{CampaignID string `json:"campaign_id"`;Counts MarketingMetricCounts `json:"counts"`;Lists []MarketingListMetric `json:"lists"`;Providers []MarketingProviderMetric `json:"providers"`;TimeSeries []MarketingMetricBucket `json:"time_series,omitempty"`;Quality MarketingMetricQuality `json:"quality"`;SmallCohort bool `json:"small_cohort"`;AsOf time.Time `json:"as_of"`}
+type MarketingAdmissionResult struct{Admitted bool `json:"admitted"`;Waiting bool `json:"waiting"`;WaitReason string `json:"wait_reason,omitempty"`;Reservation MarketingReservationProjection `json:"reservation,omitempty"`}
 
 func registerMarketingContracts(registry *Registry)error{
 	permission:=identity.MustPermission("mail:manage")
 	definitions:=[]Operation{
+		{Name:"marketing.delivery_event.ingest",Auth:AuthNone,Mutating:true,MaximumBodyBytes:2<<20,NewPayload:func()any{return &MarketingDeliveryEventPayload{}},ValidatePayload:validateMarketingDeliveryEvent,ResolveScope:installationScope},
+		{Name:"marketing.campaign.metrics",Permission:permission,Assurance:identity.AssurancePassword,Auth:AuthRequired,NewPayload:func()any{return &MarketingMetricsPayload{}},ValidatePayload:validateMarketingMetrics,ResolveScope:marketingResourceScope},
+		{Name:"marketing.policy.status",Permission:permission,Assurance:identity.AssurancePassword,Auth:AuthRequired,NewPayload:func()any{return &EmptyPayload{}},ResolveScope:tenantScope},
+		{Name:"marketing.policy.put",Permission:permission,Assurance:identity.AssurancePhishingResistant,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &MarketingPolicyPutPayload{}},ValidatePayload:validateMarketingPolicyPut,ResolveScope:tenantScope},
+		{Name:"marketing.sender.refresh",Permission:permission,Assurance:identity.AssurancePhishingResistant,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &MarketingSenderRefreshPayload{}},ValidatePayload:validateMarketingSenderRefresh,ResolveScope:tenantScope},
+		{Name:"marketing.capacity.put",Permission:permission,Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &MarketingCapacityPutPayload{}},ValidatePayload:validateMarketingCapacityPut,ResolveScope:tenantScope},
+		{Name:"marketing.admission.status",Permission:permission,Assurance:identity.AssurancePassword,Auth:AuthRequired,NewPayload:func()any{return &EmptyPayload{}},ResolveScope:marketingResourceScope},
+		{Name:"marketing.admission.reserve",Permission:permission,Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &MarketingAdmissionPayload{}},ValidatePayload:validateMarketingAdmission,ResolveScope:marketingResourceScope},
+		{Name:"marketing.backup.start",Permission:permission,Assurance:identity.AssurancePhishingResistant,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &MarketingBackupStartPayload{}},ValidatePayload:validateMarketingBackupStart,ResolveScope:tenantScope},
+		{Name:"marketing.restore.start",Permission:permission,Assurance:identity.AssurancePhishingResistant,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &MarketingRestoreStartPayload{}},ValidatePayload:validateMarketingRestoreStart,ResolveScope:tenantScope},
+		{Name:"marketing.reconcile.start",Permission:permission,Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &MarketingReconcileStartPayload{}},ValidatePayload:validateMarketingReconcileStart,ResolveScope:tenantScope},
+		{Name:"marketing.archive_job.status",Permission:permission,Assurance:identity.AssurancePassword,Auth:AuthRequired,NewPayload:func()any{return &EmptyPayload{}},ResolveScope:marketingResourceScope},
 		{Name:"marketing.unsubscribe",Auth:AuthNone,Mutating:true,NewPayload:func()any{return &MarketingUnsubscribePayload{}},ValidatePayload:validateMarketingUnsubscribe,ResolveScope:installationScope},
 		{Name:"marketing.subscriber.list",Permission:permission,Assurance:identity.AssurancePassword,Auth:AuthRequired,NewPayload:func()any{return &MarketingSubscriberPagePayload{}},ValidatePayload:validateMarketingSubscriberPage,ResolveScope:mailListScope},
 		{Name:"marketing.subscriber.get",Permission:permission,Assurance:identity.AssurancePassword,Auth:AuthRequired,NewPayload:func()any{return &EmptyPayload{}},ResolveScope:mailGetScope},
@@ -81,6 +113,40 @@ func registerMarketingContracts(registry *Registry)error{
 }
 
 func validateMarketingPage(value any)error{payload:=value.(*MarketingStatePagePayload);if payload.Limit>500||len(payload.Cursor)>1024{return invalid("marketing page")};return nil}
+func validateMarketingDeliveryEvent(value any)error{
+	payload:=value.(*MarketingDeliveryEventPayload)
+	if (payload.Source!=marketing.DeliveryEventProvider&&payload.Source!=marketing.DeliveryEventLocal)||!safeMailOpaque(payload.ProviderRef)||!safeMailOpaque(payload.KeyID)||!safeMailOpaque(payload.EventID)||len(payload.Nonce)<16||len(payload.Nonce)>256||strings.ContainsAny(payload.Nonce,"\x00\r\n\t")||payload.SignedAt.IsZero()||len(payload.PayloadBase64)>2<<20||len(payload.SignatureBase64)>128{return invalid("marketing delivery event")}
+	document,documentErr:=base64.RawStdEncoding.DecodeString(payload.PayloadBase64);signature,signatureErr:=base64.RawStdEncoding.DecodeString(payload.SignatureBase64)
+	defer clearSecret(document);defer clearSecret(signature)
+	if documentErr!=nil||signatureErr!=nil||len(document)==0||len(document)>1<<20||len(signature)!=sha256.Size{return invalid("marketing delivery event")}
+	return nil
+}
+func validateMarketingMetrics(value any)error{
+	payload:=value.(*MarketingMetricsPayload)
+	if payload.Start.IsZero()!=payload.End.IsZero()||!payload.Start.IsZero()&&!payload.End.After(payload.Start)||payload.BucketHours>24||payload.MaximumBuckets>168||payload.MaximumProviders>32||payload.MinimumReportPopulation!=0&&payload.MinimumReportPopulation<10||payload.MinimumReportPopulation>100000{return invalid("marketing metrics")}
+	return nil
+}
+func validateMarketingPolicyPut(value any)error{
+	payload:=value.(*MarketingPolicyPutPayload)
+	if payload.MaxRecipientsPerCampaign==0||payload.MaxRecipientsPerHour<payload.MaxRecipientsPerCampaign||payload.MaxRecipientsPerDay<payload.MaxRecipientsPerHour||payload.MaxConcurrentCampaigns==0||payload.WarmupStartedAt.IsZero()||payload.WarmupInitialDailyLimit==0||payload.WarmupInitialDailyLimit>payload.MaxRecipientsPerDay||payload.WarmupDoublingHours<24||payload.WarmupDoublingHours>720||payload.MinimumApprovals==0||payload.MinimumApprovals>8||payload.CapacityMaximumAgeSeconds<60||payload.CapacityMaximumAgeSeconds>86400||!validMarketingDigest(payload.AbuseEvidenceDigest)||(payload.Abuse!=marketing.AbuseClear&&payload.Abuse!=marketing.AbuseReview&&payload.Abuse!=marketing.AbuseBlock){return invalid("marketing policy")}
+	return nil
+}
+func validateMarketingSenderRefresh(value any)error{payload:=value.(*MarketingSenderRefreshPayload);payload.Domain=strings.TrimSuffix(strings.ToLower(strings.TrimSpace(payload.Domain)),".");if !validMailHostname(payload.Domain){return invalid("marketing sender")};return nil}
+func validateMarketingCapacityPut(value any)error{
+	payload:=value.(*MarketingCapacityPutPayload)
+	if !safeMailOpaque(payload.ProfileRef)||(payload.Kind!=marketing.CapacityLocal&&payload.Kind!=marketing.CapacityProvider)||payload.MaximumConcurrency==0||payload.MaximumRecipientsPerHour==0||payload.ReservedTransactionalConcurrency>=payload.MaximumConcurrency||payload.ReservedTransactionalPerHour>=payload.MaximumRecipientsPerHour||payload.ObservedAt.IsZero()||payload.ObservedAt.After(time.Now().UTC().Add(time.Minute)){return invalid("marketing capacity")}
+	return nil
+}
+func validateMarketingAdmission(value any)error{
+	payload:=value.(*MarketingAdmissionPayload)
+	payload.VerifiedSenderDomain=strings.TrimSuffix(strings.ToLower(strings.TrimSpace(payload.VerifiedSenderDomain)),".")
+	if payload.CampaignRevision==0||payload.RecipientCount==0||!safeMailOpaque(payload.DeliveryProfileRef)||!validMailHostname(payload.VerifiedSenderDomain)||!validMarketingDigest(payload.SenderEvidenceDigest)||payload.PolicyGeneration==0||!validMarketingDigest(payload.TenantPolicyDigest)||payload.SenderGeneration==0||payload.CapacityGeneration==0||payload.TTLSeconds<60||payload.TTLSeconds>86400{return invalid("marketing admission")}
+	return nil
+}
+func validateMarketingBackupStart(value any)error{payload:=value.(*MarketingBackupStartPayload);if payload.RetentionDays==0||payload.RetentionDays>3650||payload.MaximumRecords==0||payload.MaximumRecords>100000000||payload.MaximumBytes<1024||payload.MaximumBytes>1<<40{return invalid("marketing backup")};return nil}
+func validateMarketingRestoreStart(value any)error{payload:=value.(*MarketingRestoreStartPayload);if !safeMailOpaque(payload.SourceJobID)||payload.ExpectedActivationGeneration!=0{return invalid("marketing restore")};return nil}
+func validateMarketingReconcileStart(value any)error{if !safeMailOpaque(value.(*MarketingReconcileStartPayload).SourceJobID){return invalid("marketing reconcile")};return nil}
+func validMarketingDigest(value string)bool{if len(value)!=sha256.Size*2{return false};_,err:=hex.DecodeString(value);return err==nil&&value==strings.ToLower(value)}
 func validateMarketingUnsubscribe(value any)error{token:=value.(*MarketingUnsubscribePayload).Token;if len(token)<32||len(token)>4096||strings.ContainsAny(token,"\x00\r\n\t "){return invalid("unsubscribe token")};return nil}
 func validateMarketingSubscriberCreate(value any)error{return validateMarketingSubscriberPayload(value.(*MarketingSubscriberPayload),true)}
 func validateMarketingSubscriber(value any)error{return validateMarketingSubscriberPayload(value.(*MarketingSubscriberPayload),false)}
@@ -141,8 +207,78 @@ func bindMarketing(registry *Registry,services DomainServices)error{
 		if err:=registry.Bind("marketing.consent.record",marketingConsentWriter(services.Marketing,mail.Consented));err!=nil{return err}
 		if err:=registry.Bind("marketing.suppression.record",marketingConsentWriter(services.Marketing,mail.Suppressed));err!=nil{return err}
 	}
-	if services.Campaigns!=nil{return registry.Bind("marketing.attempt.send",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){payload:=value.(*MarketingSendPayload);campaign,found,err:=services.Campaigns.Store.Campaign(ctx,inv.Request.TenantID,payload.CampaignID);if err!=nil{return OperationResult{},mapMailError(err)};if !found{return OperationResult{},ErrNotFound};recipient,found,err:=services.Campaigns.Store.CampaignRecipient(ctx,inv.Request.TenantID,campaign,payload.ContactID);if err!=nil{return OperationResult{},mapMailError(err)};if !found{return OperationResult{},ErrForbidden};sum:=sha256.Sum256([]byte(inv.Request.TenantID+"\x00"+inv.Actor.PrincipalID.String()+"\x00"+inv.IdempotencyKey));attempt:=mail.CampaignAttempt{ID:mail.AttemptID(inv.Request.ResourceID),TenantID:inv.Request.TenantID,CampaignID:campaign.ID,ContactID:recipient.ContactID,Address:recipient.Address,IdempotencyKey:"api_"+hex.EncodeToString(sum[:])};result,err:=services.Campaigns.SendOne(ctx,inv.Request.TenantID,campaign,recipient,attempt);if err!=nil{return OperationResult{},mapMailError(err)};return OperationResult{Status:http.StatusAccepted,Value:result},nil})}
+	if services.Campaigns!=nil{if err:=registry.Bind("marketing.attempt.send",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){payload:=value.(*MarketingSendPayload);campaign,found,err:=services.Campaigns.Store.Campaign(ctx,inv.Request.TenantID,payload.CampaignID);if err!=nil{return OperationResult{},mapMailError(err)};if !found{return OperationResult{},ErrNotFound};recipient,found,err:=services.Campaigns.Store.CampaignRecipient(ctx,inv.Request.TenantID,campaign,payload.ContactID);if err!=nil{return OperationResult{},mapMailError(err)};if !found{return OperationResult{},ErrForbidden};sum:=sha256.Sum256([]byte(inv.Request.TenantID+"\x00"+inv.Actor.PrincipalID.String()+"\x00"+inv.IdempotencyKey));attempt:=mail.CampaignAttempt{ID:mail.AttemptID(inv.Request.ResourceID),TenantID:inv.Request.TenantID,CampaignID:campaign.ID,ContactID:recipient.ContactID,Address:recipient.Address,IdempotencyKey:"api_"+hex.EncodeToString(sum[:])};result,err:=services.Campaigns.SendOne(ctx,inv.Request.TenantID,campaign,recipient,attempt);if err!=nil{return OperationResult{},mapMailError(err)};return OperationResult{Status:http.StatusAccepted,Value:result},nil});err!=nil{return err}}
+	if services.EmailMarketing!=nil{return bindEmailMarketingOperations(registry,services.EmailMarketing)}
 	return nil
+}
+
+func bindEmailMarketingOperations(registry *Registry,operations *EmailMarketingOperations)error{
+	if err:=registry.Bind("marketing.delivery_event.ingest",func(ctx context.Context,_ Invocation,value any)(OperationResult,error){
+		payload:=value.(*MarketingDeliveryEventPayload)
+		document,documentErr:=base64.RawStdEncoding.DecodeString(payload.PayloadBase64);signature,signatureErr:=base64.RawStdEncoding.DecodeString(payload.SignatureBase64)
+		payload.PayloadBase64="";payload.SignatureBase64=""
+		defer clearSecret(document);defer clearSecret(signature)
+		if documentErr!=nil||signatureErr!=nil{return OperationResult{},ErrInvalidRequest}
+		result,err:=operations.IngestDeliveryEvent(ctx,marketing.SignedDeliveryEvent{Source:payload.Source,ProviderRef:payload.ProviderRef,KeyID:payload.KeyID,EventID:payload.EventID,Nonce:payload.Nonce,SignedAt:payload.SignedAt,Payload:document,Signature:signature})
+		if err!=nil{return OperationResult{},mapEmailMarketingError(err)}
+		status:=http.StatusAccepted;if result.Duplicate{status=http.StatusOK}
+		return OperationResult{Status:status,Value:MarketingDeliveryEventResult{Accepted:result.Accepted,Duplicate:result.Duplicate,Delayed:result.Delayed,OutOfOrder:result.OutOfOrder,ReceiptID:result.ReceiptID}},nil
+	});err!=nil{return err}
+	if err:=registry.Bind("marketing.campaign.metrics",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){
+		payload:=value.(*MarketingMetricsPayload);end:=payload.End;if end.IsZero(){end=time.Now().UTC()};start:=payload.Start;if start.IsZero(){start=end.Add(-24*time.Hour)};bucketHours:=payload.BucketHours;if bucketHours==0{bucketHours=1};maximumBuckets:=payload.MaximumBuckets;if maximumBuckets==0{maximumBuckets=168};maximumProviders:=payload.MaximumProviders;if maximumProviders==0{maximumProviders=16};minimumPopulation:=payload.MinimumReportPopulation;if minimumPopulation==0{minimumPopulation=10}
+		snapshot,err:=operations.CampaignMetrics(ctx,inv,marketing.CampaignID(inv.Request.ResourceID),marketing.CampaignMetricsQuery{Start:start,End:end,BucketWidth:time.Duration(bucketHours)*time.Hour,MaximumBuckets:int(maximumBuckets),MaximumProviders:int(maximumProviders),MinimumReportPopulation:uint64(minimumPopulation)})
+		if err!=nil{return OperationResult{},mapEmailMarketingError(err)}
+		return OperationResult{Status:http.StatusOK,Value:projectMarketingMetrics(snapshot)},nil
+	});err!=nil{return err}
+	if err:=registry.Bind("marketing.policy.status",func(ctx context.Context,inv Invocation,_ any)(OperationResult,error){status,err:=operations.PolicyStatus(ctx,inv);if err!=nil{return OperationResult{},mapEmailMarketingError(err)};generation:=uint64(0);if status.Policy!=nil{generation=status.Policy.Generation};return OperationResult{Status:http.StatusOK,Value:status,Generation:generation},nil});err!=nil{return err}
+	if err:=registry.Bind("marketing.policy.put",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){
+		payload:=value.(*MarketingPolicyPutPayload);expected,err:=marketingExpectedGeneration(inv.Request.ExpectedGeneration,payload.ExpectedGeneration);if err!=nil{return OperationResult{},err};now:=time.Now().UTC()
+		policy:=marketing.TenantCampaignPolicy{TenantID:marketing.TenantID(inv.Request.TenantID),Generation:expected+1,MaxRecipientsPerCampaign:payload.MaxRecipientsPerCampaign,MaxRecipientsPerHour:payload.MaxRecipientsPerHour,MaxRecipientsPerDay:payload.MaxRecipientsPerDay,MaxConcurrentCampaigns:payload.MaxConcurrentCampaigns,WarmupStartedAt:payload.WarmupStartedAt,WarmupInitialDailyLimit:payload.WarmupInitialDailyLimit,WarmupDoublingPeriod:time.Duration(payload.WarmupDoublingHours)*time.Hour,MinimumApprovals:payload.MinimumApprovals,CapacityMaximumAge:time.Duration(payload.CapacityMaximumAgeSeconds)*time.Second,Abuse:payload.Abuse,AbuseEvidenceDigest:payload.AbuseEvidenceDigest,LocalAuthorityReady:payload.LocalAuthorityReady,UpdatedAt:now}
+		status,err:=operations.PutPolicy(ctx,inv,policy,expected);if err!=nil{return OperationResult{},mapEmailMarketingError(err)}
+		return OperationResult{Status:http.StatusOK,Value:status,Generation:policy.Generation},nil
+	});err!=nil{return err}
+	if err:=registry.Bind("marketing.sender.refresh",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){payload:=value.(*MarketingSenderRefreshPayload);expected,err:=marketingExpectedGeneration(inv.Request.ExpectedGeneration,payload.ExpectedGeneration);if err!=nil{return OperationResult{},err};status,err:=operations.RefreshSender(ctx,inv,payload.Domain,expected);if err!=nil{return OperationResult{},mapEmailMarketingError(err)};generation:=expected+1;return OperationResult{Status:http.StatusOK,Value:status,Generation:generation},nil});err!=nil{return err}
+	if err:=registry.Bind("marketing.capacity.put",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){
+		payload:=value.(*MarketingCapacityPutPayload);expected,err:=marketingExpectedGeneration(inv.Request.ExpectedGeneration,payload.ExpectedGeneration);if err!=nil{return OperationResult{},err};updatedAt:=time.Now().UTC();if payload.ObservedAt.After(updatedAt){updatedAt=payload.ObservedAt}
+		capacity:=marketing.CampaignDeliveryCapacity{TenantID:marketing.TenantID(inv.Request.TenantID),ProfileRef:payload.ProfileRef,Generation:expected+1,Kind:payload.Kind,Online:payload.Online,MaximumConcurrency:payload.MaximumConcurrency,MaximumRecipientsPerHour:payload.MaximumRecipientsPerHour,ReservedTransactionalConcurrency:payload.ReservedTransactionalConcurrency,ReservedTransactionalPerHour:payload.ReservedTransactionalPerHour,ObservedAt:payload.ObservedAt,UpdatedAt:updatedAt}
+		status,err:=operations.PutCapacity(ctx,inv,capacity,expected);if err!=nil{return OperationResult{},mapEmailMarketingError(err)}
+		return OperationResult{Status:http.StatusOK,Value:status,Generation:capacity.Generation},nil
+	});err!=nil{return err}
+	if err:=registry.Bind("marketing.admission.status",func(ctx context.Context,inv Invocation,_ any)(OperationResult,error){status,err:=operations.AdmissionStatus(ctx,inv,marketing.CampaignID(inv.Request.ResourceID));if err!=nil{return OperationResult{},mapEmailMarketingError(err)};return OperationResult{Status:http.StatusOK,Value:status},nil});err!=nil{return err}
+	if err:=registry.Bind("marketing.admission.reserve",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){
+		payload:=value.(*MarketingAdmissionPayload);now:=time.Now().UTC();result,err:=operations.ReserveAdmission(ctx,inv,marketing.CampaignAdmissionRequest{TenantID:marketing.TenantID(inv.Request.TenantID),CampaignID:marketing.CampaignID(inv.Request.ResourceID),CampaignRevision:payload.CampaignRevision,ReservationID:effectID(inv),RecipientCount:payload.RecipientCount,DeliveryProfileRef:payload.DeliveryProfileRef,VerifiedSenderDomain:strings.ToLower(payload.VerifiedSenderDomain),SenderEvidenceDigest:payload.SenderEvidenceDigest,PolicyGeneration:payload.PolicyGeneration,TenantPolicyDigest:payload.TenantPolicyDigest,SenderGeneration:payload.SenderGeneration,CapacityGeneration:payload.CapacityGeneration,AllowFallback:false,RequestedAt:now,ExpiresAt:now.Add(time.Duration(payload.TTLSeconds)*time.Second)})
+		if err!=nil{return OperationResult{},mapEmailMarketingError(err)}
+		projection:=MarketingAdmissionResult{Admitted:result.Admitted,Waiting:result.Waiting,WaitReason:result.WaitReason};if result.Reservation.ID!=""{projection.Reservation=projectMarketingReservation(result.Reservation)}
+		return OperationResult{Status:http.StatusAccepted,Value:projection},nil
+	});err!=nil{return err}
+	if err:=registry.Bind("marketing.backup.start",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){payload:=value.(*MarketingBackupStartPayload);job,err:=operations.StartBackup(ctx,inv,payload.RetentionDays,payload.MaximumRecords,payload.MaximumBytes);if err!=nil{return OperationResult{},mapEmailMarketingError(err)};return OperationResult{Status:http.StatusAccepted,Value:job,Generation:job.Generation},nil});err!=nil{return err}
+	if err:=registry.Bind("marketing.restore.start",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){payload:=value.(*MarketingRestoreStartPayload);job,err:=operations.StartRestore(ctx,inv,payload.SourceJobID,payload.ExpectedActivationGeneration);if err!=nil{return OperationResult{},mapEmailMarketingError(err)};return OperationResult{Status:http.StatusAccepted,Value:job,Generation:job.Generation},nil});err!=nil{return err}
+	if err:=registry.Bind("marketing.reconcile.start",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){job,err:=operations.StartReconcile(ctx,inv,value.(*MarketingReconcileStartPayload).SourceJobID);if err!=nil{return OperationResult{},mapEmailMarketingError(err)};return OperationResult{Status:http.StatusAccepted,Value:job,Generation:job.Generation},nil});err!=nil{return err}
+	return registry.Bind("marketing.archive_job.status",func(ctx context.Context,inv Invocation,_ any)(OperationResult,error){job,err:=operations.ArchiveJob(ctx,inv,inv.Request.ResourceID);if err!=nil{return OperationResult{},mapEmailMarketingError(err)};return OperationResult{Status:http.StatusOK,Value:job,Generation:job.Generation},nil})
+}
+
+func marketingExpectedGeneration(envelope,payload uint64)(uint64,error){if envelope!=0&&payload!=0&&envelope!=payload{return 0,ErrConflict};if envelope!=0{return envelope,nil};return payload,nil}
+
+func projectMarketingMetrics(snapshot marketing.CampaignMetricsSnapshot)MarketingCampaignMetricsResult{
+	result:=MarketingCampaignMetricsResult{CampaignID:string(snapshot.CampaignID),Counts:projectMarketingCounts(snapshot.Counts),Lists:make([]MarketingListMetric,0,len(snapshot.Lists)),Providers:make([]MarketingProviderMetric,0,len(snapshot.Providers)),Quality:MarketingMetricQuality{EventWatermark:snapshot.Quality.EventWatermark,LatestReceivedAt:snapshot.Quality.LatestReceivedAt,WatermarkLagSeconds:uint64(snapshot.Quality.WatermarkLag/time.Second),DelayedEvents:snapshot.Quality.DelayedEvents,OutOfOrderEvents:snapshot.Quality.OutOfOrderEvents,AwaitingReceipts:snapshot.Quality.AwaitingReceipts,MissingProviderData:snapshot.Quality.MissingProviderData,ProviderCardinalityTruncated:snapshot.Quality.ProviderCardinalityTruncated},SmallCohort:snapshot.SmallCohort,AsOf:snapshot.AsOf}
+	for _,metric:=range snapshot.Lists{projected:=MarketingListMetric{ListID:string(metric.ListID),Denominator:metric.Counts.Denominator,SmallCohort:metric.SmallCohort};if !metric.SmallCohort{counts:=projectMarketingCounts(metric.Counts);projected.Counts=&counts};result.Lists=append(result.Lists,projected)}
+	for _,metric:=range snapshot.Providers{result.Providers=append(result.Providers,MarketingProviderMetric{ProviderRef:metric.ProviderRef,Attempts:metric.Attempts,Events:metric.Events,Counts:MarketingMetricCounts{Denominator:metric.Attempts,Queued:metric.Queued,Sent:metric.Sent,Delivered:metric.Delivered,Deferred:metric.Deferred,Bounced:metric.Bounced,Complained:metric.Complained,Suppressed:metric.Suppressed,Failed:metric.Failed}})}
+	if !snapshot.SmallCohort{result.TimeSeries=make([]MarketingMetricBucket,0,len(snapshot.TimeSeries));for _,bucket:=range snapshot.TimeSeries{result.TimeSeries=append(result.TimeSeries,MarketingMetricBucket{Start:bucket.Start,End:bucket.End,Delivered:bucket.Delivered,Deferred:bucket.Deferred,Bounced:bucket.Bounced,Complained:bucket.Complained,Failed:bucket.Failed})}}
+	return result
+}
+
+func projectMarketingCounts(counts marketing.DeliveryStateCounts)MarketingMetricCounts{return MarketingMetricCounts{Denominator:counts.Denominator,Queued:counts.Queued,Sent:counts.Sent,Delivered:counts.Delivered,Deferred:counts.Deferred,Bounced:counts.Bounced,Complained:counts.Complained,Suppressed:counts.Suppressed,Failed:counts.Failed}}
+
+func mapEmailMarketingError(err error)error{
+	switch{
+	case err==nil:return nil
+	case errors.Is(err,marketing.ErrInvalid):return ErrInvalidRequest
+	case errors.Is(err,marketing.ErrUnauthorized),errors.Is(err,marketing.ErrDeliveryEventRejected),errors.Is(err,marketing.ErrCampaignAbuseBlocked):return ErrForbidden
+	case errors.Is(err,marketing.ErrNotFound):return ErrNotFound
+	case errors.Is(err,marketing.ErrConflict),errors.Is(err,marketing.ErrStale),errors.Is(err,marketing.ErrIntegrity):return ErrConflict
+	case errors.Is(err,marketing.ErrCampaignAdmissionWaiting):return ErrUnavailable
+	default:return err
+	}
 }
 
 func marketingListWriter(store *mail.MarketingStore,create bool)OperationHandler{return func(ctx context.Context,inv Invocation,value any)(OperationResult,error){list:=value.(*MarketingListPayload).List;if string(list.ID)!=inv.Request.ResourceID{return OperationResult{},invalid("marketing list identity")};_,found,err:=store.ListByID(ctx,inv.Request.TenantID,list.ID);if err!=nil{return OperationResult{},mapMailError(err)};if create&&found||!create&&!found{return OperationResult{},ErrConflict};if err=store.PutList(ctx,inv.Request.TenantID,list);err!=nil{return OperationResult{},mapMailError(err)};return OperationResult{Status:http.StatusOK,Value:list},nil}}

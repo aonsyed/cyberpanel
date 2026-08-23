@@ -80,6 +80,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	campaignSender,err:=mail.NewLocalCampaignSender(repositories.Marketing,repositories.MailControl,repositories.MailDeliveryPolicy,mailHostname,unsubscribeKey,"https://"+panelRegistrableDomain+"/unsubscribe");if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize campaign delivery runtime: %w",err)}
 	campaignCoordinator:=&mail.CampaignCoordinator{Store:repositories.Marketing,Sender:campaignSender,Now:runtimeClock{}.Now}
 	unsubscribeService:=&mail.UnsubscribeService{Store:repositories.Marketing,Signer:campaignSender.Signer,Now:runtimeClock{}.Now}
+	emailMarketingOperations,err:=apiserver.NewEmailMarketingOperations(ctx,repositories.ControlDB,identityService,auditService,unsubscribeKey,"/var/lib/cyberpanel/control/emailmarketing-archives");if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize email marketing operations: %w",err)}
 	dnsAuthority := dns.NewLocalPowerDNSControlClient()
 	dnssecCoordinator:=&dns.DNSSECCoordinator{Store:repositories.DNSSEC,Executor:dnsAuthority,Observer:dnsAuthority,Now:runtimeClock{}.Now}
 	dnsConsoleEdge,err:=newDNSEdge(dnsAuthority,dnssecCoordinator);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize DNS console edge: %w",err)}
@@ -299,6 +300,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		Marketing:         &repositories.Marketing,
 		Campaigns:         campaignCoordinator,
 		Unsubscribe:       unsubscribeService,
+		EmailMarketing:    emailMarketingOperations,
 		Audit:             auditService,
 		SecretEnrollment:  secretEnrollment,
 	}, nil

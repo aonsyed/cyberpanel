@@ -67,6 +67,7 @@ type DomainServices struct {
 	Marketing *mail.MarketingStore
 	Campaigns *mail.CampaignCoordinator
 	Unsubscribe *mail.UnsubscribeService
+	EmailMarketing *EmailMarketingOperations
 	Backup *backup.Coordinator
 	BackupPromoter backup.Promoter
 	BackupMover backup.Mover
