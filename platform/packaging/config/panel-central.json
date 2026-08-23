@@ -1,0 +1,1 @@
+{"enabled":false,"listen":"[::]:9443","database_path":"/var/lib/cyberpanel-central/controlplane.db","peer_id":"central","intent_signing_key_id":"central_intent_v1","revocation_signing_key_id":"central_revocation_v1","client_ca_fingerprint_sha256":"","maximum_sessions":256,"shutdown_timeout_seconds":30}

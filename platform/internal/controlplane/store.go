@@ -3,14 +3,17 @@ package controlplane
 import(
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/federation"
 )
 const Schema=`
+CREATE TABLE IF NOT EXISTS controlplane_schema_migrations(version INTEGER PRIMARY KEY,applied_at TIMESTAMP NOT NULL);
 CREATE TABLE IF NOT EXISTS fleet_nodes(id TEXT PRIMARY KEY,owner_tenant_id TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,authority_epoch BIGINT NOT NULL,capabilities_json TEXT NOT NULL,projection_sequence BIGINT NOT NULL,snapshot_generation BIGINT NOT NULL,last_seen_at TIMESTAMP NOT NULL,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,certificate_fingerprint TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS fleet_grants(id TEXT PRIMARY KEY,node_id TEXT NOT NULL,peer_id TEXT NOT NULL,authority_epoch BIGINT NOT NULL,state TEXT NOT NULL,grant_json TEXT NOT NULL,expires_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
 CREATE INDEX IF NOT EXISTS fleet_grants_node_epoch ON fleet_grants(node_id,authority_epoch,state,expires_at);
@@ -23,10 +26,13 @@ CREATE TABLE IF NOT EXISTS fleet_events(node_id TEXT NOT NULL,sequence BIGINT NO
 CREATE TABLE IF NOT EXISTS fleet_sagas(id TEXT PRIMARY KEY,owner_tenant_id TEXT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,current_step INTEGER NOT NULL,saga_json TEXT NOT NULL,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,error_code TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS fleet_encrypted_secrets(target_node_id TEXT NOT NULL,secret_id TEXT NOT NULL,version BIGINT NOT NULL,envelope_json TEXT NOT NULL,expires_at TIMESTAMP NOT NULL,consumed_at TIMESTAMP,PRIMARY KEY(target_node_id,secret_id,version));
 CREATE TABLE IF NOT EXISTS fleet_revocations(node_id TEXT NOT NULL,authority_epoch BIGINT NOT NULL,status TEXT NOT NULL,revocation_json TEXT NOT NULL,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,PRIMARY KEY(node_id,authority_epoch));
+CREATE TABLE IF NOT EXISTS fleet_node_evidence_keys(node_id TEXT NOT NULL,key_id TEXT NOT NULL,state TEXT NOT NULL,public_key BLOB NOT NULL,not_before TIMESTAMP NOT NULL,expires_at TIMESTAMP NOT NULL,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,PRIMARY KEY(node_id,key_id));
+CREATE UNIQUE INDEX IF NOT EXISTS fleet_node_evidence_current ON fleet_node_evidence_keys(node_id) WHERE state='current';
+CREATE INDEX IF NOT EXISTS fleet_node_evidence_lookup ON fleet_node_evidence_keys(node_id,key_id,state,not_before,expires_at);
 `
 type Store struct{db *sql.DB;clock func()time.Time}
 func NewStore(db *sql.DB)(*Store,error){if db==nil{return nil,ErrInvalid};return &Store{db:db,clock:time.Now},nil}
-func(s *Store)Bootstrap(ctx context.Context)error{_,err:=s.db.ExecContext(ctx,Schema);return err}
+func(s *Store)Bootstrap(ctx context.Context)error{if s==nil||s.db==nil||ctx==nil{return ErrInvalid};tx,err:=s.db.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return err};defer tx.Rollback();if _,err=tx.ExecContext(ctx,Schema);err!=nil{return err};var migrated int;if err=tx.QueryRowContext(ctx,`SELECT COUNT(*) FROM controlplane_schema_migrations WHERE version=2`).Scan(&migrated);err!=nil{return err};if migrated==0{if err=backfillFederationAdmissions(ctx,tx);err!=nil{return err};if _,err=tx.ExecContext(ctx,`INSERT INTO controlplane_schema_migrations(version,applied_at) VALUES(2,?)`,s.clock().UTC());err!=nil{return err}};return tx.Commit()}
 func(s *Store)PutNode(ctx context.Context,node Node)error{raw,_:=json.Marshal(node.Capabilities);_,err:=s.db.ExecContext(ctx,`INSERT INTO fleet_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,state=excluded.state,authority_epoch=excluded.authority_epoch,capabilities_json=excluded.capabilities_json,projection_sequence=excluded.projection_sequence,snapshot_generation=excluded.snapshot_generation,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at,certificate_fingerprint=excluded.certificate_fingerprint`,node.ID,node.OwnerTenantID,node.Name,node.State,node.AuthorityEpoch,raw,node.ProjectionSequence,node.SnapshotGeneration,node.LastSeenAt,node.CreatedAt,node.UpdatedAt,node.CertificateFingerprint);return err}
 func(s *Store)Node(ctx context.Context,id federation.ID)(Node,error){var node Node;var raw []byte;err:=s.db.QueryRowContext(ctx,`SELECT id,owner_tenant_id,name,state,authority_epoch,capabilities_json,projection_sequence,snapshot_generation,last_seen_at,created_at,updated_at,certificate_fingerprint FROM fleet_nodes WHERE id=?`,id).Scan(&node.ID,&node.OwnerTenantID,&node.Name,&node.State,&node.AuthorityEpoch,&raw,&node.ProjectionSequence,&node.SnapshotGeneration,&node.LastSeenAt,&node.CreatedAt,&node.UpdatedAt,&node.CertificateFingerprint);if errors.Is(err,sql.ErrNoRows){return node,ErrNotFound};if err!=nil{return node,err};err=json.Unmarshal(raw,&node.Capabilities);return node,err}
 func(s *Store)PutGrant(ctx context.Context,grant federation.MutationGrant)error{if s==nil||ctx==nil||grant.Validate(s.clock().UTC())!=nil{return ErrInvalid};raw,err:=json.Marshal(grant);if err!=nil{return err};_,err=s.db.ExecContext(ctx,`INSERT INTO fleet_grants(id,node_id,peer_id,authority_epoch,state,grant_json,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,grant_json=excluded.grant_json,expires_at=excluded.expires_at,updated_at=excluded.updated_at WHERE fleet_grants.node_id=excluded.node_id AND fleet_grants.peer_id=excluded.peer_id AND fleet_grants.authority_epoch=excluded.authority_epoch`,grant.ID,grant.NodeID,grant.PeerID,grant.AuthorityEpoch,"active",raw,grant.ExpiresAt,s.clock().UTC());return err}
@@ -47,6 +53,202 @@ func(s *Store)PutSaga(ctx context.Context,saga Saga)error{raw,_:=json.Marshal(sa
 func(s *Store)Saga(ctx context.Context,id federation.ID)(Saga,error){var saga Saga;var raw []byte;err:=s.db.QueryRowContext(ctx,`SELECT saga_json FROM fleet_sagas WHERE id=?`,id).Scan(&raw);if errors.Is(err,sql.ErrNoRows){return saga,ErrNotFound};if err!=nil{return saga,err};err=json.Unmarshal(raw,&saga);return saga,err}
 func(s *Store)PutEncryptedSecret(ctx context.Context,value EncryptedSecret)error{raw,_:=json.Marshal(value);_,err:=s.db.ExecContext(ctx,`INSERT INTO fleet_encrypted_secrets VALUES(?,?,?,?,?,NULL)`,value.TargetNodeID,value.SecretID,value.Version,raw,value.ExpiresAt);return err}
 func(s *Store)TakeEncryptedSecrets(ctx context.Context,node federation.ID,limit uint32)([]EncryptedSecret,error){if limit==0||limit>100{limit=20};rows,err:=s.db.QueryContext(ctx,`SELECT envelope_json FROM fleet_encrypted_secrets WHERE target_node_id=? AND consumed_at IS NULL AND expires_at>? ORDER BY secret_id,version LIMIT ?`,node,s.clock().UTC(),limit);if err!=nil{return nil,err};defer rows.Close();var out []EncryptedSecret;for rows.Next(){var raw []byte;if err=rows.Scan(&raw);err!=nil{return nil,err};var value EncryptedSecret;if err=json.Unmarshal(raw,&value);err!=nil{return nil,err};out=append(out,value)};return out,rows.Err()}
+
+type NodeEvidenceKey struct {
+	KeyID     string    `json:"key_id"`
+	PublicKey []byte    `json:"public_key"`
+	State     string    `json:"state"`
+	NotBefore time.Time `json:"not_before"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type ProvisionedEnrollment struct {
+	Node         Node                       `json:"node"`
+	Grant        federation.MutationGrant   `json:"grant"`
+	EvidenceKeys []NodeEvidenceKey          `json:"evidence_keys"`
+}
+
+func (s *Store) ProvisionEnrollment(ctx context.Context, enrollment ProvisionedEnrollment) error {
+	if s == nil || s.db == nil || ctx == nil {
+		return ErrInvalid
+	}
+	now := s.clock().UTC()
+	node := enrollment.Node
+	if node.State == "" {
+		node.State = NodeEnrolling
+	}
+	if node.CreatedAt.IsZero() {
+		node.CreatedAt = now
+	}
+	if node.UpdatedAt.IsZero() {
+		node.UpdatedAt = now
+	}
+	if node.LastSeenAt.IsZero() {
+		node.LastSeenAt = node.CreatedAt
+	}
+	grant := enrollment.Grant
+	if !node.ID.Valid() || !node.OwnerTenantID.Valid() || strings.TrimSpace(node.Name) == "" || node.Name != strings.TrimSpace(node.Name) || len(node.Name) > 256 || node.State != NodeEnrolling && node.State != NodeOffline || node.AuthorityEpoch == 0 || !validSHA256(node.CertificateFingerprint) || grant.Validate(now) != nil || grant.NodeID != node.ID || grant.AuthorityEpoch != node.AuthorityEpoch || len(enrollment.EvidenceKeys) == 0 || len(enrollment.EvidenceKeys) > 16 {
+		return ErrInvalid
+	}
+	seen := make(map[string]struct{}, len(enrollment.EvidenceKeys))
+	current := ""
+	for _, key := range enrollment.EvidenceKeys {
+		if _, err := federation.NewID(key.KeyID); err != nil || len(key.PublicKey) != ed25519.PublicKeySize || key.NotBefore.IsZero() || key.ExpiresAt.IsZero() || !key.ExpiresAt.After(key.NotBefore) || key.State != "current" && key.State != "historical" {
+			return ErrInvalid
+		}
+		if _, duplicate := seen[key.KeyID]; duplicate {
+			return ErrConflict
+		}
+		seen[key.KeyID] = struct{}{}
+		if key.State == "current" {
+			if current != "" || now.Before(key.NotBefore) || !now.Before(key.ExpiresAt) {
+				return ErrInvalid
+			}
+			current = key.KeyID
+		}
+	}
+	if current != "fedcert_"+node.CertificateFingerprint[:48] {
+		return ErrForbidden
+	}
+	capabilities, err := json.Marshal(node.Capabilities)
+	if err != nil {
+		return err
+	}
+	grantJSON, err := json.Marshal(grant)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var existingOwner federation.ID
+	var existingEpoch uint64
+	err = tx.QueryRowContext(ctx, `SELECT owner_tenant_id,authority_epoch FROM fleet_nodes WHERE id=?`, node.ID).Scan(&existingOwner, &existingEpoch)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil && (existingOwner != node.OwnerTenantID || existingEpoch > node.AuthorityEpoch) {
+		return ErrStale
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO fleet_nodes(id,owner_tenant_id,name,state,authority_epoch,capabilities_json,projection_sequence,snapshot_generation,last_seen_at,created_at,updated_at,certificate_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,state=CASE WHEN fleet_nodes.certificate_fingerprint=excluded.certificate_fingerprint THEN fleet_nodes.state ELSE 'enrolling' END,authority_epoch=CASE WHEN excluded.authority_epoch>fleet_nodes.authority_epoch THEN excluded.authority_epoch ELSE fleet_nodes.authority_epoch END,updated_at=excluded.updated_at,certificate_fingerprint=excluded.certificate_fingerprint WHERE fleet_nodes.owner_tenant_id=excluded.owner_tenant_id`, node.ID, node.OwnerTenantID, node.Name, node.State, node.AuthorityEpoch, capabilities, node.ProjectionSequence, node.SnapshotGeneration, node.LastSeenAt, node.CreatedAt, node.UpdatedAt, node.CertificateFingerprint)
+	if err != nil {
+		return err
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		return ErrConflict
+	}
+	result, err = tx.ExecContext(ctx, `INSERT INTO fleet_grants(id,node_id,peer_id,authority_epoch,state,grant_json,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state='active',grant_json=excluded.grant_json,expires_at=excluded.expires_at,updated_at=excluded.updated_at WHERE fleet_grants.node_id=excluded.node_id AND fleet_grants.peer_id=excluded.peer_id AND fleet_grants.authority_epoch=excluded.authority_epoch`, grant.ID, grant.NodeID, grant.PeerID, grant.AuthorityEpoch, "active", grantJSON, grant.ExpiresAt, now)
+	if err != nil {
+		return err
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		return ErrConflict
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE fleet_node_evidence_keys SET state='historical',updated_at=? WHERE node_id=? AND state='current' AND key_id<>?`, now, node.ID, current); err != nil {
+		return err
+	}
+	for _, key := range enrollment.EvidenceKeys {
+		result, err = tx.ExecContext(ctx, `INSERT INTO fleet_node_evidence_keys(node_id,key_id,state,public_key,not_before,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(node_id,key_id) DO UPDATE SET state=excluded.state,not_before=excluded.not_before,expires_at=excluded.expires_at,updated_at=excluded.updated_at WHERE fleet_node_evidence_keys.public_key=excluded.public_key`, node.ID, key.KeyID, key.State, key.PublicKey, key.NotBefore.UTC(), key.ExpiresAt.UTC(), now, now)
+		if err != nil {
+			return err
+		}
+		if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+			return ErrConflict
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) NodeReceiptPublicKey(ctx context.Context, nodeID federation.ID, keyID string) (ed25519.PublicKey, error) {
+	if s == nil || s.db == nil || ctx == nil || !nodeID.Valid() || keyID == "" {
+		return nil, ErrInvalid
+	}
+	var raw []byte
+	var state string
+	var notBefore, expiresAt time.Time
+	err := s.db.QueryRowContext(ctx, `SELECT public_key,state,not_before,expires_at FROM fleet_node_evidence_keys WHERE node_id=? AND key_id=?`, nodeID, keyID).Scan(&raw, &state, &notBefore, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	now := s.clock().UTC()
+	if len(raw) != ed25519.PublicKeySize || state != "current" && state != "historical" || now.Before(notBefore) || !now.Before(expiresAt) {
+		return nil, ErrForbidden
+	}
+	return append(ed25519.PublicKey(nil), raw...), nil
+}
+
+func backfillFederationAdmissions(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT intent_json,receipt_json,created_at FROM fleet_intents ORDER BY created_at,id`)
+	if err != nil {
+		return err
+	}
+	type legacyIntent struct {
+		intentJSON  []byte
+		receiptJSON []byte
+		createdAt   time.Time
+	}
+	legacy := make([]legacyIntent, 0)
+	for rows.Next() {
+		var value legacyIntent
+		if err = rows.Scan(&value.intentJSON, &value.receiptJSON, &value.createdAt); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		legacy = append(legacy, value)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, value := range legacy {
+		var intent federation.Intent
+		if err = json.Unmarshal(value.intentJSON, &intent); err != nil || !intent.ID.Valid() || !intent.NodeID.Valid() || !intent.PeerID.Valid() || !intent.GrantID.Valid() || len(intent.ActorChain) != 1 {
+			return ErrConflict
+		}
+		request := IntentRequest{NodeID: intent.NodeID, GrantID: intent.GrantID, CommandType: intent.CommandType, SchemaHash: intent.SchemaHash, Payload: intent.Payload, TenantID: intent.TenantID, ResourceKind: intent.ResourceKind, ResourceID: intent.ResourceID, ExpectedGeneration: intent.ExpectedGeneration, IdempotencyKey: intent.IdempotencyKey, Risk: intent.Risk, Approval: intent.Approval}
+		requestDigest, digestErr := intentAdmissionDigest(intent.PeerID, Node{ID: intent.NodeID, AuthorityEpoch: intent.AuthorityEpoch}, request, federation.Capability{Version: intent.ProtocolVersion}, intent.ActorChain[0], intent.Payload)
+		if digestErr != nil {
+			return digestErr
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO fleet_command_admissions(node_id,idempotency_key,request_digest,intent_id,effect_id,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`, intent.NodeID, intent.IdempotencyKey, requestDigest, intent.ID, intent.EffectID, value.createdAt); err != nil {
+			return err
+		}
+		placeholder, marshalErr := json.Marshal(struct {
+			GrantID federation.ID `json:"grant_id"`
+			Reason  string        `json:"reason"`
+		}{intent.GrantID, "grant_material_unavailable_before_schema_v2"})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO fleet_grants(id,node_id,peer_id,authority_epoch,state,grant_json,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`, intent.GrantID, intent.NodeID, intent.PeerID, intent.AuthorityEpoch, "historical_missing", placeholder, intent.ExpiresAt, value.createdAt); err != nil {
+			return err
+		}
+		if len(value.receiptJSON) == 0 || bytes.Equal(bytes.TrimSpace(value.receiptJSON), []byte(`{}`)) {
+			continue
+		}
+		var receipt federation.Receipt
+		if err = json.Unmarshal(value.receiptJSON, &receipt); err != nil || receipt.NodeID != intent.NodeID || receipt.IntentID != intent.ID || receipt.SignatureKeyID == "" {
+			return ErrConflict
+		}
+		canonicalReceipt, marshalErr := json.Marshal(receipt)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO fleet_receipt_replays(node_id,receipt_digest,intent_id,signature_key_id,received_at) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING`, receipt.NodeID, digest(canonicalReceipt), receipt.IntentID, receipt.SignatureKeyID, receipt.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validReceiptTransition(previous,next federation.IntentStatus)bool{if previous==next{return true};switch previous{case federation.IntentAccepted:return next==federation.IntentRunning||next==federation.IntentAmbiguous||next==federation.IntentApplied||next==federation.IntentRejected||next==federation.IntentExpired;case federation.IntentRunning:return next==federation.IntentAmbiguous||next==federation.IntentApplied||next==federation.IntentRejected;case federation.IntentAmbiguous:return next==federation.IntentRunning||next==federation.IntentApplied||next==federation.IntentRejected};return false}
 func sameReceiptEvidence(left,right federation.Receipt)bool{left.SignatureKeyID="";left.Signature=nil;right.SignatureKeyID="";right.Signature=nil;leftRaw,leftErr:=json.Marshal(left);rightRaw,rightErr:=json.Marshal(right);return leftErr==nil&&rightErr==nil&&bytes.Equal(leftRaw,rightRaw)}
 func sameNodeEvent(left,right federation.NodeEvent)bool{left.SignatureKeyID="";left.Signature=nil;right.SignatureKeyID="";right.Signature=nil;leftRaw,leftErr:=json.Marshal(left);rightRaw,rightErr:=json.Marshal(right);return leftErr==nil&&rightErr==nil&&bytes.Equal(leftRaw,rightRaw)}

@@ -1,0 +1,53 @@
+[Unit]
+Description=CyberPanel optional central federation endpoint
+Documentation=https://github.com/aonsyed/cyberpanel
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cyberpanel-central
+Group=cyberpanel-central
+DynamicUser=yes
+ExecStart=/usr/lib/cyberpanel/bin/panel-central -config /etc/cyberpanel/panel-central.json
+LoadCredential=server.crt:/etc/cyberpanel/central/server.crt
+LoadCredential=server.key:/etc/cyberpanel/central/server.key
+LoadCredential=client-ca.pem:/etc/cyberpanel/central/client-ca.pem
+LoadCredential=intent-signing.key:/etc/cyberpanel/central/intent-signing.key
+LoadCredential=revocation-signing.key:/etc/cyberpanel/central/revocation-signing.key
+LoadCredential=enrollments.json:/etc/cyberpanel/central/enrollments.json
+StateDirectory=cyberpanel-central
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=30s
+TimeoutStopSec=45s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/cyberpanel
+ReadWritePaths=/var/lib/cyberpanel-central
+InaccessiblePaths=/run/docker.sock /var/run/docker.sock /var/lib/cyberpanel/control /var/lib/cyberpanel-auth /var/lib/cyberpanel-secrets /var/lib/cyberpanel/siteops /var/lib/cyberpanel/sites
+LimitNOFILE=4096
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target
