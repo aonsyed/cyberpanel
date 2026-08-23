@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 const SQLSchema = `
@@ -262,4 +263,194 @@ func sameEnrollmentGroup(left,right NodeGroup)bool{
 	if len(leftFences)!=len(rightFences){return false}
 	for index:=range leftFences{if leftFences[index]!=rightFences[index]{return false}}
 	return true
+}
+
+const (
+	writerAuthorityFailureFence      = "fence_required"
+	writerAuthorityFailureSplitBrain = "split_brain"
+	writerAuthorityFailureEvidence   = "caught_up_evidence_required"
+)
+
+func (r SQLRepository) DemoteWriter(ctx context.Context,operation WriterAuthorityOperation,now time.Time)(WriterAuthorityReceipt,error){operation.Kind=WriterAuthorityDemote;return r.applyWriterAuthorityOperation(ctx,operation,now)}
+func (r SQLRepository) ReconcileWriter(ctx context.Context,operation WriterAuthorityOperation,now time.Time)(WriterAuthorityReceipt,error){operation.Kind=WriterAuthorityReconcile;return r.applyWriterAuthorityOperation(ctx,operation,now)}
+func (r SQLRepository) FailbackWriter(ctx context.Context,operation WriterAuthorityOperation,now time.Time)(WriterAuthorityReceipt,error){operation.Kind=WriterAuthorityFailback;return r.applyWriterAuthorityOperation(ctx,operation,now)}
+
+func (r SQLRepository) applyWriterAuthorityOperation(ctx context.Context,operation WriterAuthorityOperation,now time.Time)(WriterAuthorityReceipt,error){
+	if r.DB==nil||ctx==nil||now.IsZero(){return WriterAuthorityReceipt{},ErrInvalid}
+	now=now.UTC()
+	if err:=operation.Validate();err!=nil{return WriterAuthorityReceipt{},err}
+	tx,err:=r.DB.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable})
+	if err!=nil{return WriterAuthorityReceipt{},err}
+	defer tx.Rollback()
+	if receipt,found,err:=loadWriterAuthorityReceipt(ctx,tx,operation);err!=nil{return WriterAuthorityReceipt{},err}else if found{
+		if err=tx.Commit();err!=nil{return WriterAuthorityReceipt{},err}
+		return receipt,writerAuthorityReceiptError(receipt)
+	}
+	authority,err:=loadLocalWriterAuthority(ctx,tx,operation)
+	if err!=nil{return WriterAuthorityReceipt{},err}
+	if authority.Generation!=operation.ExpectedGeneration{return WriterAuthorityReceipt{},ErrStaleGeneration}
+	if authority.WriterNodeID!=operation.PreviousWriterNodeID{
+		return finishUncertainWriterAuthority(ctx,tx,authority,operation,now,writerAuthorityFailureSplitBrain,ErrSplitBrainRisk)
+	}
+	if err=revokePreviousWriterLease(ctx,tx,operation,now);err!=nil{
+		return finishUncertainWriterAuthority(ctx,tx,authority,operation,now,writerAuthorityFailureSplitBrain,ErrSplitBrainRisk)
+	}
+	fence,err:=loadWriterFenceProof(ctx,tx,authority,operation,now)
+	if err!=nil{return finishUncertainWriterAuthority(ctx,tx,authority,operation,now,writerAuthorityFailureFence,ErrFenceRequired)}
+	if operation.Kind==WriterAuthorityFailback{
+		if err=loadFailbackEvidence(ctx,tx,authority,operation,fence,now);err!=nil{return finishUncertainWriterAuthority(ctx,tx,authority,operation,now,writerAuthorityFailureEvidence,ErrCheckpointStale)}
+	}
+	active,err:=activeWriterLeases(ctx,tx,operation.ResourceID,now)
+	if err!=nil{return WriterAuthorityReceipt{},err}
+	if len(active)!=1||active[0].ID!=operation.WriterLeaseID||active[0].HolderNodeID!=operation.WriterNodeID||active[0].GroupID!=operation.GroupID||active[0].FencingToken<=authority.FencingToken||active[0].FencingToken!=fence.FencingToken||active[0].AuthorityEpoch!=fence.AuthorityEpoch{
+		return finishUncertainWriterAuthority(ctx,tx,authority,operation,now,writerAuthorityFailureSplitBrain,ErrSplitBrainRisk)
+	}
+	authority.WriterNodeID=active[0].HolderNodeID
+	authority.State=LocalWriterActive
+	authority.FencingToken=active[0].FencingToken
+	authority.AuthorityEpoch=active[0].AuthorityEpoch
+	authority.Generation++
+	authority.FenceUncertain=false
+	authority.LastFenceID=fence.ID
+	if operation.Kind==WriterAuthorityFailback{authority.LastEvidenceID=operation.EvidenceID}
+	authority.UpdatedAt=now
+	if err=updateLocalWriterAuthority(ctx,tx,authority,operation.ExpectedGeneration);err!=nil{return WriterAuthorityReceipt{},err}
+	receipt:=WriterAuthorityReceipt{OperationID:operation.OperationID,OperationDigest:operation.OperationDigest,Kind:operation.Kind,TenantID:operation.TenantID,GroupID:operation.GroupID,ResourceID:operation.ResourceID,PreviousGeneration:operation.ExpectedGeneration,Generation:authority.Generation,WriterNodeID:authority.WriterNodeID,WriterLeaseID:active[0].ID,FenceID:fence.ID,EvidenceID:authority.LastEvidenceID,State:authority.State,CompletedAt:now}
+	if err=insertWriterAuthorityOperation(ctx,tx,operation,receipt);err!=nil{return WriterAuthorityReceipt{},err}
+	if err=tx.Commit();err!=nil{return WriterAuthorityReceipt{},err}
+	return receipt,nil
+}
+
+func loadWriterAuthorityReceipt(ctx context.Context,tx *sql.Tx,operation WriterAuthorityOperation)(WriterAuthorityReceipt,bool,error){
+	var digest string
+	var raw []byte
+	err:=tx.QueryRowContext(ctx,`SELECT operation_digest,receipt_json FROM ha_local_operations WHERE operation_id=?`,operation.OperationID).Scan(&digest,&raw)
+	if errors.Is(err,sql.ErrNoRows){return WriterAuthorityReceipt{},false,nil}
+	if err!=nil{return WriterAuthorityReceipt{},false,err}
+	if digest!=operation.OperationDigest{return WriterAuthorityReceipt{},false,ErrConflict}
+	var receipt WriterAuthorityReceipt
+	if err=decode(raw,&receipt);err!=nil{return WriterAuthorityReceipt{},false,err}
+	if receipt.OperationID!=operation.OperationID||receipt.OperationDigest!=operation.OperationDigest{return WriterAuthorityReceipt{},false,ErrConflict}
+	return receipt,true,nil
+}
+
+func loadLocalWriterAuthority(ctx context.Context,tx *sql.Tx,operation WriterAuthorityOperation)(LocalWriterAuthority,error){
+	var authority LocalWriterAuthority
+	var raw []byte
+	err:=tx.QueryRowContext(ctx,`SELECT authority_json FROM ha_local_workload_authority WHERE tenant_id=? AND group_id=? AND resource_id=?`,operation.TenantID,operation.GroupID,operation.ResourceID).Scan(&raw)
+	if errors.Is(err,sql.ErrNoRows){return LocalWriterAuthority{},ErrNotFound}
+	if err!=nil{return LocalWriterAuthority{},err}
+	if err=decode(raw,&authority);err!=nil{return LocalWriterAuthority{},err}
+	if err=authority.Validate();err!=nil{return LocalWriterAuthority{},err}
+	if authority.TenantID!=operation.TenantID||authority.GroupID!=operation.GroupID||authority.ResourceID!=operation.ResourceID{return LocalWriterAuthority{},ErrConflict}
+	return authority,nil
+}
+
+func revokePreviousWriterLease(ctx context.Context,tx *sql.Tx,operation WriterAuthorityOperation,now time.Time)error{
+	var raw []byte
+	err:=tx.QueryRowContext(ctx,`SELECT lease_json FROM ha_writer_leases WHERE id=?`,operation.PreviousWriterLeaseID).Scan(&raw)
+	if errors.Is(err,sql.ErrNoRows){return ErrLeaseLost}
+	if err!=nil{return err}
+	var lease WriterLease
+	if err=decode(raw,&lease);err!=nil{return err}
+	if lease.ID!=operation.PreviousWriterLeaseID||lease.GroupID!=operation.GroupID||lease.ResourceID!=operation.ResourceID||lease.HolderNodeID!=operation.PreviousWriterNodeID{return ErrConflict}
+	if lease.State!=LeaseActive{
+		if lease.State==LeaseRevoked||lease.State==LeaseExpired||lease.State==LeaseLost{return nil}
+		return ErrConflict
+	}
+	previousGeneration:=lease.Generation
+	if now.Before(lease.ExpiresAt){lease.State=LeaseRevoked}else{lease.State=LeaseExpired}
+	lease.Generation++
+	payload,err:=encode(lease)
+	if err!=nil{return err}
+	result,err:=tx.ExecContext(ctx,`UPDATE ha_writer_leases SET state=?,generation=?,lease_json=? WHERE id=? AND generation=? AND state='active'`,lease.State,lease.Generation,payload,lease.ID,previousGeneration)
+	if err!=nil{return err}
+	return cas(result)
+}
+
+func loadWriterFenceProof(ctx context.Context,tx *sql.Tx,authority LocalWriterAuthority,operation WriterAuthorityOperation,now time.Time)(Fence,error){
+	if authority.LastFenceID==operation.FenceID{return Fence{},ErrFenceRequired}
+	var raw []byte
+	err:=tx.QueryRowContext(ctx,`SELECT fence_json FROM ha_fences WHERE id=?`,operation.FenceID).Scan(&raw)
+	if errors.Is(err,sql.ErrNoRows){return Fence{},ErrFenceRequired}
+	if err!=nil{return Fence{},err}
+	var fence Fence
+	if err=decode(raw,&fence);err!=nil{return Fence{},err}
+	if err=fence.Validate(now);err!=nil{return Fence{},err}
+	if fence.State!=FenceProven||fence.GroupID!=operation.GroupID||fence.TargetNodeID!=operation.PreviousWriterNodeID||fence.ProviderReceipt==""||!now.Before(fence.ValidUntil){return Fence{},ErrFenceRequired}
+	return fence,nil
+}
+
+func loadFailbackEvidence(ctx context.Context,tx *sql.Tx,authority LocalWriterAuthority,operation WriterAuthorityOperation,fence Fence,now time.Time)error{
+	if authority.LastEvidenceID==operation.EvidenceID{return ErrCheckpointStale}
+	var raw []byte
+	err:=tx.QueryRowContext(ctx,`SELECT evidence_json FROM ha_local_replication_evidence WHERE evidence_id=?`,operation.EvidenceID).Scan(&raw)
+	if errors.Is(err,sql.ErrNoRows){return ErrCheckpointStale}
+	if err!=nil{return err}
+	var evidence LocalReplicationEvidence
+	if err=decode(raw,&evidence);err!=nil{return err}
+	if err=evidence.Validate();err!=nil{return err}
+	if !evidence.Usable(now)||evidence.TenantID!=operation.TenantID||evidence.GroupID!=operation.GroupID||evidence.ResourceID!=operation.ResourceID||evidence.SourceNodeID!=operation.PreviousWriterNodeID||evidence.TargetNodeID!=operation.WriterNodeID||evidence.EvidenceID!=operation.EvidenceID||fence.AppliedAt.Before(evidence.ObservedAt){return ErrCheckpointStale}
+	var bindingRaw []byte
+	err=tx.QueryRowContext(ctx,`SELECT binding_json FROM ha_local_channel_bindings WHERE channel_id=?`,evidence.ChannelID).Scan(&bindingRaw)
+	if errors.Is(err,sql.ErrNoRows){return ErrCheckpointStale}
+	if err!=nil{return err}
+	var binding LocalChannelBinding
+	if err=decode(bindingRaw,&binding);err!=nil{return err}
+	if err=binding.Validate();err!=nil{return err}
+	if binding.Generation!=evidence.BindingGeneration||binding.TenantID!=operation.TenantID||binding.GroupID!=operation.GroupID||binding.ResourceID!=operation.ResourceID||binding.SourceNodeID!=operation.PreviousWriterNodeID||binding.TargetNodeID!=operation.WriterNodeID{return ErrCheckpointStale}
+	return nil
+}
+
+func activeWriterLeases(ctx context.Context,tx *sql.Tx,resourceID string,now time.Time)([]WriterLease,error){
+	rows,err:=tx.QueryContext(ctx,`SELECT lease_json FROM ha_writer_leases WHERE resource_id=? AND state='active' ORDER BY authority_epoch,fencing_token,id`,resourceID)
+	if err!=nil{return nil,err}
+	var leases []WriterLease
+	for rows.Next(){var raw []byte;if err=rows.Scan(&raw);err!=nil{rows.Close();return nil,err};var lease WriterLease;if err=decode(raw,&lease);err!=nil{rows.Close();return nil,err};leases=append(leases,lease)}
+	if err=rows.Close();err!=nil{return nil,err}
+	if err=rows.Err();err!=nil{return nil,err}
+	active:=make([]WriterLease,0,len(leases))
+	for _,lease:=range leases{
+		if now.Before(lease.ExpiresAt){if err=lease.Validate(now);err!=nil{return nil,err};active=append(active,lease);continue}
+		previousGeneration:=lease.Generation
+		lease.State=LeaseExpired
+		lease.Generation++
+		payload,encodeErr:=encode(lease)
+		if encodeErr!=nil{return nil,encodeErr}
+		result,updateErr:=tx.ExecContext(ctx,`UPDATE ha_writer_leases SET state=?,generation=?,lease_json=? WHERE id=? AND generation=? AND state='active'`,lease.State,lease.Generation,payload,lease.ID,previousGeneration)
+		if updateErr!=nil{return nil,updateErr}
+		if updateErr=cas(result);updateErr!=nil{return nil,updateErr}
+	}
+	return active,nil
+}
+
+func finishUncertainWriterAuthority(ctx context.Context,tx *sql.Tx,authority LocalWriterAuthority,operation WriterAuthorityOperation,now time.Time,failure string,reason error)(WriterAuthorityReceipt,error){
+	authority.State=LocalWriterUncertain
+	authority.FenceUncertain=true
+	authority.Generation++
+	authority.UpdatedAt=now
+	if err:=updateLocalWriterAuthority(ctx,tx,authority,operation.ExpectedGeneration);err!=nil{return WriterAuthorityReceipt{},err}
+	receipt:=WriterAuthorityReceipt{OperationID:operation.OperationID,OperationDigest:operation.OperationDigest,Kind:operation.Kind,TenantID:operation.TenantID,GroupID:operation.GroupID,ResourceID:operation.ResourceID,PreviousGeneration:operation.ExpectedGeneration,Generation:authority.Generation,WriterNodeID:authority.WriterNodeID,WriterLeaseID:operation.PreviousWriterLeaseID,State:authority.State,Failure:failure,CompletedAt:now}
+	if err:=insertWriterAuthorityOperation(ctx,tx,operation,receipt);err!=nil{return WriterAuthorityReceipt{},err}
+	if err:=tx.Commit();err!=nil{return WriterAuthorityReceipt{},err}
+	return receipt,reason
+}
+
+func updateLocalWriterAuthority(ctx context.Context,tx *sql.Tx,authority LocalWriterAuthority,expectedGeneration uint64)error{
+	payload,err:=encode(authority)
+	if err!=nil{return err}
+	result,err:=tx.ExecContext(ctx,`UPDATE ha_local_workload_authority SET writer_node_id=?,state=?,fencing_token=?,authority_epoch=?,generation=?,fence_uncertain=?,authority_json=?,updated_at=? WHERE tenant_id=? AND group_id=? AND resource_id=? AND generation=?`,authority.WriterNodeID,authority.State,authority.FencingToken,authority.AuthorityEpoch,authority.Generation,authority.FenceUncertain,payload,authority.UpdatedAt,authority.TenantID,authority.GroupID,authority.ResourceID,expectedGeneration)
+	if err!=nil{return err}
+	return cas(result)
+}
+
+func insertWriterAuthorityOperation(ctx context.Context,tx *sql.Tx,operation WriterAuthorityOperation,receipt WriterAuthorityReceipt)error{
+	payload,err:=encode(receipt)
+	if err!=nil{return err}
+	_,err=tx.ExecContext(ctx,`INSERT INTO ha_local_operations (operation_id,kind,tenant_id,group_id,resource_id,expected_generation,operation_digest,state,receipt_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,operation.OperationID,operation.Kind,operation.TenantID,operation.GroupID,operation.ResourceID,operation.ExpectedGeneration,operation.OperationDigest,receipt.State,payload,operation.RequestedAt,receipt.CompletedAt)
+	return err
+}
+
+func writerAuthorityReceiptError(receipt WriterAuthorityReceipt)error{
+	switch receipt.Failure{case writerAuthorityFailureFence:return ErrFenceRequired;case writerAuthorityFailureEvidence:return ErrCheckpointStale;case writerAuthorityFailureSplitBrain:return ErrSplitBrainRisk;default:return nil}
 }

@@ -185,3 +185,107 @@ type BackupReplicationCoordinator struct { Store Store; Replication ReplicationC
 func (coordinator BackupReplicationCoordinator) ReplicateAndProve(ctx context.Context, channelID ChannelID, sourceGeneration,targetGeneration,fencingToken uint64,recoveryPointID string,target NodeID)(BackupReplicaCopy,error){checkpoint,err:=coordinator.Replication.Replicate(ctx,channelID,sourceGeneration,targetGeneration,fencingToken);if err!=nil{return BackupReplicaCopy{},err};copy,err:=coordinator.Backup.VerifyIndependentBackupCopy(ctx,recoveryPointID,target);if err!=nil{return BackupReplicaCopy{},err};if copy.ManifestDigest!=checkpoint.ManifestDigest||copy.CommitMarker==""||copy.VerifiedAt.IsZero(){return BackupReplicaCopy{},ErrInvalid};if err:=coordinator.Store.SaveBackupCopy(ctx,copy);err!=nil{return BackupReplicaCopy{},err};return copy,nil}
 
 func joinErrors(values ...error) error { var result error; for _,value:=range values { result=errors.Join(result,value) }; return result }
+
+type LocalWriterAuthorityState string
+
+const (
+	LocalWriterActive    LocalWriterAuthorityState = "writer"
+	LocalWriterUncertain LocalWriterAuthorityState = "uncertain"
+)
+
+type LocalWriterAuthority struct {
+	TenantID         string                    `json:"tenant_id"`
+	GroupID          NodeGroupID               `json:"group_id"`
+	ResourceID       string                    `json:"resource_id"`
+	WorkloadIdentity string                    `json:"workload_identity"`
+	WriterNodeID     NodeID                    `json:"writer_node_id"`
+	State            LocalWriterAuthorityState `json:"state"`
+	FencingToken     uint64                    `json:"fencing_token"`
+	AuthorityEpoch   uint64                    `json:"authority_epoch"`
+	Generation       uint64                    `json:"generation"`
+	FenceUncertain   bool                      `json:"fence_uncertain"`
+	LastFenceID      FenceID                   `json:"last_fence_id,omitempty"`
+	LastEvidenceID   string                    `json:"last_evidence_id,omitempty"`
+	UpdatedAt        time.Time                 `json:"updated_at"`
+}
+
+func (authority LocalWriterAuthority) Validate() error {
+	if authority.TenantID==""||!validID(string(authority.GroupID))||authority.ResourceID==""||authority.WorkloadIdentity==""||!validID(string(authority.WriterNodeID))||authority.FencingToken==0||authority.AuthorityEpoch==0||authority.Generation==0||authority.UpdatedAt.IsZero(){return ErrInvalid}
+	if authority.State!=LocalWriterActive&&authority.State!=LocalWriterUncertain{return ErrInvalid}
+	if (authority.State==LocalWriterUncertain)!=authority.FenceUncertain{return ErrInvalid}
+	return nil
+}
+
+type WriterAuthorityOperationKind string
+
+const (
+	WriterAuthorityDemote    WriterAuthorityOperationKind = "demote"
+	WriterAuthorityReconcile WriterAuthorityOperationKind = "reconcile"
+	WriterAuthorityFailback  WriterAuthorityOperationKind = "failback"
+)
+
+type WriterAuthorityOperation struct {
+	OperationID           OperationID                  `json:"operation_id"`
+	Kind                  WriterAuthorityOperationKind `json:"kind"`
+	TenantID              string                       `json:"tenant_id"`
+	GroupID               NodeGroupID                  `json:"group_id"`
+	ResourceID            string                       `json:"resource_id"`
+	ExpectedGeneration    uint64                       `json:"expected_generation"`
+	PreviousWriterNodeID  NodeID                       `json:"previous_writer_node_id"`
+	WriterNodeID          NodeID                       `json:"writer_node_id"`
+	PreviousWriterLeaseID WriterLeaseID                `json:"previous_writer_lease_id"`
+	WriterLeaseID         WriterLeaseID                `json:"writer_lease_id"`
+	FenceID               FenceID                      `json:"fence_id"`
+	EvidenceID            string                       `json:"evidence_id,omitempty"`
+	OperationDigest       string                       `json:"operation_digest"`
+	RequestedAt           time.Time                    `json:"requested_at"`
+}
+
+func (operation WriterAuthorityOperation) Digest() (string,error) {
+	copy:=operation
+	copy.OperationDigest=""
+	payload,err:=json.Marshal(copy)
+	if err!=nil{return "",err}
+	sum:=sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]),nil
+}
+
+func (operation WriterAuthorityOperation) Validate() error {
+	if !validID(string(operation.OperationID))||operation.TenantID==""||!validID(string(operation.GroupID))||operation.ResourceID==""||operation.ExpectedGeneration==0||!validID(string(operation.PreviousWriterNodeID))||!validID(string(operation.WriterNodeID))||operation.PreviousWriterNodeID==operation.WriterNodeID||!validID(string(operation.PreviousWriterLeaseID))||!validID(string(operation.WriterLeaseID))||!validID(string(operation.FenceID))||!validDigest(operation.OperationDigest)||operation.RequestedAt.IsZero(){return ErrInvalid}
+	if operation.Kind!=WriterAuthorityDemote&&operation.Kind!=WriterAuthorityReconcile&&operation.Kind!=WriterAuthorityFailback{return ErrInvalid}
+	if operation.Kind==WriterAuthorityFailback&&!validID(operation.EvidenceID){return ErrInvalid}
+	digest,err:=operation.Digest()
+	if err!=nil||digest!=operation.OperationDigest{return ErrInvalid}
+	return nil
+}
+
+type WriterAuthorityReceipt struct {
+	OperationID        OperationID                  `json:"operation_id"`
+	OperationDigest    string                       `json:"operation_digest"`
+	Kind               WriterAuthorityOperationKind `json:"kind"`
+	TenantID           string                       `json:"tenant_id"`
+	GroupID            NodeGroupID                  `json:"group_id"`
+	ResourceID         string                       `json:"resource_id"`
+	PreviousGeneration uint64                       `json:"previous_generation"`
+	Generation         uint64                       `json:"generation"`
+	WriterNodeID       NodeID                       `json:"writer_node_id"`
+	WriterLeaseID      WriterLeaseID                `json:"writer_lease_id,omitempty"`
+	FenceID            FenceID                      `json:"fence_id,omitempty"`
+	EvidenceID         string                       `json:"evidence_id,omitempty"`
+	State              LocalWriterAuthorityState    `json:"state"`
+	Failure            string                       `json:"failure,omitempty"`
+	CompletedAt        time.Time                    `json:"completed_at"`
+}
+
+type WriterAuthorityRepository interface {
+	DemoteWriter(context.Context,WriterAuthorityOperation,time.Time)(WriterAuthorityReceipt,error)
+	ReconcileWriter(context.Context,WriterAuthorityOperation,time.Time)(WriterAuthorityReceipt,error)
+	FailbackWriter(context.Context,WriterAuthorityOperation,time.Time)(WriterAuthorityReceipt,error)
+}
+
+type WriterAuthorityController struct { Repository WriterAuthorityRepository; Now func() time.Time }
+
+func (controller WriterAuthorityController) now() time.Time { if controller.Now!=nil{return controller.Now().UTC()};return time.Now().UTC() }
+func (controller WriterAuthorityController) Demote(ctx context.Context,operation WriterAuthorityOperation)(WriterAuthorityReceipt,error){if controller.Repository==nil{return WriterAuthorityReceipt{},ErrInvalid};operation.Kind=WriterAuthorityDemote;return controller.Repository.DemoteWriter(ctx,operation,controller.now())}
+func (controller WriterAuthorityController) Reconcile(ctx context.Context,operation WriterAuthorityOperation)(WriterAuthorityReceipt,error){if controller.Repository==nil{return WriterAuthorityReceipt{},ErrInvalid};operation.Kind=WriterAuthorityReconcile;return controller.Repository.ReconcileWriter(ctx,operation,controller.now())}
+func (controller WriterAuthorityController) Failback(ctx context.Context,operation WriterAuthorityOperation)(WriterAuthorityReceipt,error){if controller.Repository==nil{return WriterAuthorityReceipt{},ErrInvalid};operation.Kind=WriterAuthorityFailback;return controller.Repository.FailbackWriter(ctx,operation,controller.now())}
