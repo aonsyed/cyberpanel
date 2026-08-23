@@ -27,6 +27,8 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/audit"
 	"github.com/aonsyed/cyberpanel/platform/internal/certificates"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
+	"github.com/aonsyed/cyberpanel/platform/internal/maintenance"
+	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	"github.com/aonsyed/cyberpanel/platform/internal/productupdate"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 )
@@ -91,12 +93,18 @@ type signedProductUpdateAuthority struct {
 
 type productUpdateAuditSink struct{ service *audit.Service }
 
-// productUpdateCatalogEffects is deliberately fail-closed. The current
-// production process has no privileged product activation, migration,
-// maintenance-admission, or cross-service probe broker. Those coordinator
-// dependencies remain structurally present but the API capability gate never
-// advertises Apply until a separate typed executor implements them.
+// productUpdateCatalogEffects is the fail-closed fallback used until every
+// apply dependency, including the independently hosted self-updater, proves
+// readiness through the typed operations boundary.
 type productUpdateCatalogEffects struct{}
+
+type productUpdateApplyAdapters struct {
+	executor *operations.OperationsBrokerClient
+	authority *signedProductUpdateAuthority
+	maintenance *maintenance.Evaluator
+	occurrences *maintenance.Repository
+	nodeID string
+}
 
 func assembleProductUpdateEdge(ctx context.Context, db *sql.DB, auditService *audit.Service, clock runtimeClock) (apiserver.ProductUpdateEdgeService, error) {
 	if ctx == nil || db == nil || auditService == nil || auditService.Writer == nil {
@@ -141,8 +149,17 @@ func assembleProductUpdateEdge(ctx context.Context, db *sql.DB, auditService *au
 		return nil, fmt.Errorf("bootstrap product-update repository: %w", err)
 	}
 	effects := productUpdateCatalogEffects{}
-	coordinator, err := productupdate.NewCoordinator(repository, verifier, stager, releases, authority, effects,
-		productUpdateAuditSink{service:auditService}, effects, effects, effects, clock)
+	var maintenanceGate productupdate.MaintenanceGate = effects
+	var migrations productupdate.MigrationExecutor = effects
+	var platform productupdate.PlatformExecutor = effects
+	var health productupdate.HealthProber = effects
+	applyReady := false
+	if adapters, ready := newProductUpdateApplyAdapters(ctx, db, authority, inventory.NodeID); ready {
+		maintenanceGate, migrations, platform, health = adapters, adapters, adapters, adapters
+		applyReady = true
+	}
+	coordinator, err := productupdate.NewCoordinator(repository, verifier, stager, releases, authority, maintenanceGate,
+		productUpdateAuditSink{service:auditService}, migrations, platform, health, clock)
 	if err != nil {
 		return nil, fmt.Errorf("initialize product-update coordinator: %w", err)
 	}
@@ -155,7 +172,7 @@ func assembleProductUpdateEdge(ctx context.Context, db *sql.DB, auditService *au
 	if err != nil {
 		return nil, fmt.Errorf("initialize product-update catalog edge: %w", err)
 	}
-	edge.capabilities = apiserver.ProductUpdateEdgeCapabilities{List:true, Check:true, Plan:true}
+	edge.capabilities = apiserver.ProductUpdateEdgeCapabilities{List:true, Check:true, Plan:true, Apply:applyReady}
 	return edge, nil
 }
 
@@ -603,6 +620,168 @@ func (sink productUpdateAuditSink) RecordProductUpdate(ctx context.Context, reco
 	return nil
 }
 
+func newProductUpdateApplyAdapters(ctx context.Context, db *sql.DB, authority *signedProductUpdateAuthority, nodeID string) (*productUpdateApplyAdapters, bool) {
+	if ctx == nil || db == nil || authority == nil || !validProductUpdateRuntimeID(nodeID) { return nil, false }
+	repository, err := maintenance.NewRepository(db)
+	if err != nil || repository.Bootstrap(ctx) != nil { return nil, false }
+	evaluator, err := maintenance.NewEvaluator(repository, maintenance.EvaluatorConfig{})
+	if err != nil { return nil, false }
+	executor, err := operations.NewLocalOperationsClient()
+	if err != nil { return nil, false }
+	adapters := &productUpdateApplyAdapters{executor:executor, authority:authority, maintenance:evaluator, occurrences:repository, nodeID:nodeID}
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateReadiness}, nil)
+	if err != nil || result.Readiness == nil || !result.Readiness.Complete { return nil, false }
+	active, err := adapters.CurrentRelease(ctx, nodeID)
+	if err != nil || active.Validate() != nil { return nil, false }
+	baseline, err := adapters.CaptureBaseline(ctx, nodeID)
+	if err != nil || baseline.NodeID != nodeID || baseline.ActiveReleaseDigest != active.Digest || !validProductUpdateDigest(baseline.EvidenceDigest) ||
+		baseline.ObservedAt.IsZero() || !validProductUpdateDigest(baseline.Digest) { return nil, false }
+	claimed := baseline.Digest
+	baseline.Digest = ""
+	baseline.ObservedAt = baseline.ObservedAt.UTC()
+	if claimed != productUpdateRuntimeJSONDigest(baseline) { return nil, false }
+	return adapters, true
+}
+
+func (adapters *productUpdateApplyAdapters) execute(ctx context.Context, effect operations.ProductUpdateEffect, authorization *productupdate.UpdateAuthorization) (operations.ProductUpdateResult, error) {
+	if adapters == nil || adapters.executor == nil || adapters.authority == nil || ctx == nil { return operations.ProductUpdateResult{}, productupdate.ErrIntegrity }
+	effect.NodeID = adapters.nodeID
+	if authorization == nil {
+		switch effect.Action {
+		case operations.ProductUpdateReadiness, operations.ProductUpdateCurrent, operations.ProductUpdateCaptureBaseline:
+			effect.ObservedAt = adapters.authority.now().UTC()
+		}
+	}
+	if authorization != nil {
+		if authorization.NodeID != adapters.nodeID { return operations.ProductUpdateResult{}, productupdate.ErrUnauthorized }
+		envelope, err := adapters.authority.loadEnvelope(ctx, authorization.ManifestDigest, authorization.NodeID, authorization.Action, authorization.Subject)
+		if err != nil { return operations.ProductUpdateResult{}, err }
+		now := adapters.authority.now().UTC()
+		verified, err := adapters.authority.verifyEnvelope(envelope, now)
+		if err == nil {
+			verified, err = productupdate.CanonicalAuthorization(verified, productupdate.ReleaseManifest{Digest:authorization.ManifestDigest},
+				authorization.NodeID, authorization.Action, now)
+		}
+		if err != nil || verified != *authorization {
+			return operations.ProductUpdateResult{}, productupdate.ErrUnauthorized
+		}
+		effect.Authorization = &operations.ProductUpdateSignedAuthorization{Authorization:*authorization,
+			CertificateChainPEM:envelope.CertificateChainPEM, Signature:envelope.Signature}
+	}
+	request, err := operations.NewProductUpdateEffectRequest(effect)
+	if err != nil { return operations.ProductUpdateResult{}, productupdate.ErrIntegrity }
+	receipt, err := adapters.executor.ObserveOrApply(ctx, request)
+	if err != nil || receipt.Outcome != operations.EffectConfirmed || receipt.Result.ProductUpdate == nil {
+		return operations.ProductUpdateResult{}, productupdate.ErrIntegrity
+	}
+	return *receipt.Result.ProductUpdate, nil
+}
+
+func (adapters *productUpdateApplyAdapters) AdmitProductUpdate(ctx context.Context, request productupdate.MaintenanceRequest) (productupdate.MaintenanceAdmission, error) {
+	if adapters == nil || adapters.maintenance == nil || adapters.occurrences == nil || ctx == nil || request.NodeID != adapters.nodeID ||
+		(request.Action != productupdate.ActionPreflight && request.Action != productupdate.ActionSwitch) || !validProductUpdateDigest(request.ManifestDigest) ||
+		!validProductUpdateRuntimeID(request.ManifestID) || request.Fence == 0 || request.ExpectedDuration < time.Second || request.Digest == "" {
+		return productupdate.MaintenanceAdmission{}, productupdate.ErrInvalid
+	}
+	claimed := request.Digest
+	request.Digest = ""
+	if claimed != productUpdateRuntimeJSONDigest(request) { return productupdate.MaintenanceAdmission{}, productupdate.ErrIntegrity }
+	decision, err := adapters.maintenance.Admit(ctx, maintenance.AdmissionRequest{ID:"product-update-" + claimed[:32],
+		Target:maintenance.Target{TenantID:"installation", NodeID:request.NodeID, ResourceKind:"product_update", ResourceID:request.ManifestID},
+		OperationClass:maintenance.OperationUpgrade, ExpectedDuration:request.ExpectedDuration, At:request.RequestedAt.UTC()})
+	if err != nil || decision.Kind != maintenance.DecisionAllow || !validProductUpdateRuntimeID(decision.OccurrenceID) {
+		return productupdate.MaintenanceAdmission{}, productupdate.ErrConflict
+	}
+	occurrence, err := adapters.occurrences.LoadOccurrence(ctx, decision.OccurrenceID)
+	if err != nil || occurrence.ID != decision.OccurrenceID || occurrence.EndsAt.Before(request.RequestedAt.Add(request.ExpectedDuration)) {
+		return productupdate.MaintenanceAdmission{}, productupdate.ErrConflict
+	}
+	evidence := productUpdateRuntimeJSONDigest(struct {
+		RequestDigest string `json:"request_digest"`
+		DecisionEvidence string `json:"decision_evidence"`
+		OccurrenceDigest string `json:"occurrence_digest"`
+	}{claimed, decision.EvidenceDigest, occurrence.Digest})
+	admission := productupdate.MaintenanceAdmission{Allowed:true, OccurrenceID:occurrence.ID, OccurrenceDigest:occurrence.Digest,
+		EndsAt:occurrence.EndsAt.UTC(), EvidenceDigest:evidence}
+	admission.Digest = productUpdateRuntimeJSONDigest(admission)
+	return admission, nil
+}
+
+func (adapters *productUpdateApplyAdapters) PreflightMigration(ctx context.Context, operation productupdate.MigrationOperation) (productupdate.MigrationAssessment, error) {
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateMigrationPreflight, Migration:&operation}, &operation.Authorization)
+	if err != nil || result.MigrationAssessment == nil { return productupdate.MigrationAssessment{}, productupdate.ErrIntegrity }
+	return *result.MigrationAssessment, nil
+}
+
+func (adapters *productUpdateApplyAdapters) OnlineBackup(ctx context.Context, operation productupdate.BackupOperation) (productupdate.EffectReceipt, error) {
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateMigrationBackup, Backup:&operation}, &operation.Migration.Authorization)
+	if err != nil || result.Effect == nil { return productupdate.EffectReceipt{}, productupdate.ErrIntegrity }
+	return *result.Effect, nil
+}
+
+func (adapters *productUpdateApplyAdapters) ApplyMigration(ctx context.Context, operation productupdate.MigrationOperation) (productupdate.EffectReceipt, error) {
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateMigrationApply, Migration:&operation}, &operation.Authorization)
+	if err != nil || result.Effect == nil { return productupdate.EffectReceipt{}, productupdate.ErrIntegrity }
+	return *result.Effect, nil
+}
+
+func (adapters *productUpdateApplyAdapters) RollbackMigration(ctx context.Context, operation productupdate.MigrationRollbackOperation) (productupdate.EffectReceipt, error) {
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateMigrationRollback, MigrationRollback:&operation}, &operation.Migration.Authorization)
+	if err != nil || result.Effect == nil { return productupdate.EffectReceipt{}, productupdate.ErrIntegrity }
+	return *result.Effect, nil
+}
+
+func (adapters *productUpdateApplyAdapters) CurrentRelease(ctx context.Context, nodeID string) (productupdate.ActiveRelease, error) {
+	if adapters == nil || nodeID != adapters.nodeID { return productupdate.ActiveRelease{}, productupdate.ErrIntegrity }
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateCurrent}, nil)
+	if err != nil || result.ActiveRelease == nil { return productupdate.ActiveRelease{}, productupdate.ErrIntegrity }
+	return *result.ActiveRelease, nil
+}
+
+func (adapters *productUpdateApplyAdapters) InspectRollback(ctx context.Context, operation productupdate.RollbackInspection) (productupdate.RollbackProof, error) {
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateInspectRollback, RollbackInspection:&operation}, &operation.Authorization)
+	if err != nil || result.RollbackProof == nil { return productupdate.RollbackProof{}, productupdate.ErrIntegrity }
+	return *result.RollbackProof, nil
+}
+
+func (adapters *productUpdateApplyAdapters) AtomicSwitch(ctx context.Context, operation productupdate.SwitchOperation) (productupdate.EffectReceipt, error) {
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateSwitch, Switch:&operation}, &operation.Authorization)
+	if err != nil || result.Effect == nil { return productupdate.EffectReceipt{}, productupdate.ErrIntegrity }
+	return *result.Effect, nil
+}
+
+func (adapters *productUpdateApplyAdapters) CommitSwitch(ctx context.Context, operation productupdate.FinalizeOperation) (productupdate.EffectReceipt, error) {
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateCommit, Finalize:&operation}, &operation.Authorization)
+	if err != nil || result.Effect == nil { return productupdate.EffectReceipt{}, productupdate.ErrIntegrity }
+	return *result.Effect, nil
+}
+
+func (adapters *productUpdateApplyAdapters) AtomicRollback(ctx context.Context, operation productupdate.FinalizeOperation) (productupdate.EffectReceipt, error) {
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateRollback, Finalize:&operation}, &operation.Authorization)
+	if err != nil || result.Effect == nil { return productupdate.EffectReceipt{}, productupdate.ErrIntegrity }
+	return *result.Effect, nil
+}
+
+func (adapters *productUpdateApplyAdapters) CaptureBaseline(ctx context.Context, nodeID string) (productupdate.HealthSnapshot, error) {
+	if adapters == nil || nodeID != adapters.nodeID { return productupdate.HealthSnapshot{}, productupdate.ErrIntegrity }
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateCaptureBaseline}, nil)
+	if err != nil || result.Health == nil { return productupdate.HealthSnapshot{}, productupdate.ErrIntegrity }
+	return *result.Health, nil
+}
+
+func (adapters *productUpdateApplyAdapters) ProbeRelease(ctx context.Context, operation productupdate.ProbeOperation) (productupdate.HealthSnapshot, error) {
+	result, err := adapters.execute(ctx, operations.ProductUpdateEffect{Action:operations.ProductUpdateProbe, Probe:&operation}, &operation.Authorization)
+	if err != nil || result.Health == nil { return productupdate.HealthSnapshot{}, productupdate.ErrIntegrity }
+	return *result.Health, nil
+}
+
+func productUpdateRuntimeJSONDigest(value any) string {
+	raw, err := json.Marshal(value)
+	if err != nil { return "" }
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
 func (productUpdateCatalogEffects) AdmitProductUpdate(context.Context, productupdate.MaintenanceRequest) (productupdate.MaintenanceAdmission, error) {
 	return productupdate.MaintenanceAdmission{}, productupdate.ErrConflict
 }
@@ -770,3 +949,7 @@ var _ productupdate.AuditSink = productUpdateAuditSink{}
 var _ productupdate.MigrationExecutor = productUpdateCatalogEffects{}
 var _ productupdate.PlatformExecutor = productUpdateCatalogEffects{}
 var _ productupdate.HealthProber = productUpdateCatalogEffects{}
+var _ productupdate.MaintenanceGate = (*productUpdateApplyAdapters)(nil)
+var _ productupdate.MigrationExecutor = (*productUpdateApplyAdapters)(nil)
+var _ productupdate.PlatformExecutor = (*productUpdateApplyAdapters)(nil)
+var _ productupdate.HealthProber = (*productUpdateApplyAdapters)(nil)

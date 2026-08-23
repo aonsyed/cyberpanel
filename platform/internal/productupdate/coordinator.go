@@ -153,6 +153,7 @@ type MigrationOperation struct {
 	ManifestID     string        `json:"manifest_id"`
 	ManifestDigest string        `json:"manifest_digest"`
 	NodeID         string        `json:"node_id"`
+	Authorization  UpdateAuthorization `json:"-"`
 	Step           MigrationStep `json:"step"`
 	ReleaseRoot    ReleaseRoot   `json:"release_root"`
 	Fence          uint64        `json:"fence"`
@@ -192,6 +193,7 @@ type MigrationExecutor interface {
 type RollbackInspection struct {
 	ManifestID     string        `json:"manifest_id"`
 	NodeID         string        `json:"node_id"`
+	Authorization  UpdateAuthorization `json:"-"`
 	Current        ActiveRelease `json:"current"`
 	Target         ReleaseRoot   `json:"target"`
 	RollbackClass  RollbackClass `json:"rollback_class"`
@@ -212,6 +214,7 @@ type SwitchOperation struct {
 	ManifestID     string        `json:"manifest_id"`
 	ManifestDigest string        `json:"manifest_digest"`
 	NodeID         string        `json:"node_id"`
+	Authorization  UpdateAuthorization `json:"-"`
 	Previous       ActiveRelease `json:"previous"`
 	Target         ReleaseRoot   `json:"target"`
 	Fence          uint64        `json:"fence"`
@@ -224,6 +227,7 @@ type FinalizeOperation struct {
 	ManifestID       string `json:"manifest_id"`
 	ManifestDigest   string `json:"manifest_digest"`
 	NodeID           string `json:"node_id"`
+	Authorization    UpdateAuthorization `json:"-"`
 	ActiveReleaseID  string `json:"active_release_id"`
 	ActiveDigest     string `json:"active_digest"`
 	PreviousID       string `json:"previous_id"`
@@ -262,6 +266,7 @@ type HealthSnapshot struct {
 type ProbeOperation struct {
 	ManifestID           string `json:"manifest_id"`
 	NodeID                string `json:"node_id"`
+	Authorization         UpdateAuthorization `json:"-"`
 	ExpectedReleaseDigest string `json:"expected_release_digest"`
 	BaselineDigest       string `json:"baseline_digest"`
 	Fence                uint64 `json:"fence"`
@@ -425,7 +430,7 @@ func (coordinator *Coordinator) Preflight(ctx context.Context, command Command) 
 	if err != nil || active.Validate() != nil { return UpdateState{}, Receipt{}, ErrIntegrity }
 	baseline, err := coordinator.health.CaptureBaseline(ctx, command.NodeID)
 	if err != nil || validateHealth(baseline, command.NodeID, active.Digest, false) != nil { return UpdateState{}, Receipt{}, ErrIntegrity }
-	inspection := RollbackInspection{ManifestID: manifest.ID, NodeID: command.NodeID, Current: active,
+	inspection := RollbackInspection{ManifestID: manifest.ID, NodeID: command.NodeID, Authorization: authorization, Current: active,
 		Target: root, RollbackClass: manifest.Rollback, Fence: command.Fence}
 	inspection.Digest, _ = digestJSON(inspection)
 	proof := RollbackProof{}
@@ -445,7 +450,7 @@ func (coordinator *Coordinator) Preflight(ctx context.Context, command Command) 
 	backups := make(map[string]string, len(manifest.Migrations))
 	operations := make([]MigrationOperation, 0, len(manifest.Migrations))
 	for _, step := range manifest.Migrations {
-		operation := migrationOperation(manifest, command, root, step)
+		operation := migrationOperation(manifest, command, root, step, authorization)
 		assessment, assessErr := coordinator.migrations.PreflightMigration(ctx, operation)
 		if assessErr != nil || validateAssessment(assessment, operation, !step.ForwardOnly) != nil {
 			return coordinator.externalUncertain(ctx, command, state, authorization, ActionPreflight,
@@ -518,7 +523,7 @@ func (coordinator *Coordinator) Switch(ctx context.Context, command Command) (Up
 	if err != nil || active.Validate() != nil || active.ID != state.PreviousReleaseID || active.Digest != state.PreviousReleaseDigest {
 		return UpdateState{}, Receipt{}, ErrConflict
 	}
-	operation := SwitchOperation{ManifestID: manifest.ID, ManifestDigest: manifest.Digest, NodeID: command.NodeID,
+	operation := SwitchOperation{ManifestID: manifest.ID, ManifestDigest: manifest.Digest, NodeID: command.NodeID, Authorization: authorization,
 		Previous: active, Target: root, Fence: command.Fence, IdempotencyKey: command.IdempotencyKey}
 	operation.Digest, _ = digestJSON(operation)
 	if err := coordinator.recordAudit(ctx, state, authorization, ActionSwitch, admission.EvidenceDigest, operation.Digest, command.At); err != nil {
@@ -548,14 +553,14 @@ func (coordinator *Coordinator) CompleteProbe(ctx context.Context, command Comma
 	if state, receipt, found, err := coordinator.replay(ctx, command, PhaseProbing, PhaseCommitted, PhaseRolledBack, PhaseUncertain); found || err != nil { return state, receipt, err }
 	manifest, state, authorization, err := coordinator.loadAuthorized(ctx, command, PhaseProbing, ActionFinalize)
 	if err != nil { return UpdateState{}, Receipt{}, err }
-	probe := ProbeOperation{ManifestID: manifest.ID, NodeID: command.NodeID, ExpectedReleaseDigest: state.StagedRootDigest,
+	probe := ProbeOperation{ManifestID: manifest.ID, NodeID: command.NodeID, Authorization: authorization, ExpectedReleaseDigest: state.StagedRootDigest,
 		BaselineDigest: state.BaselineDigest, Fence: command.Fence}
 	probe.Digest, _ = digestJSON(probe)
 	snapshot, err := coordinator.health.ProbeRelease(ctx, probe)
 	if err != nil || validateHealth(snapshot, command.NodeID, state.StagedRootDigest, true) != nil {
 		return coordinator.rollback(ctx, command, manifest, state, authorization, snapshot)
 	}
-	operation := finalizeOperation(manifest, state, command, FinalizeCommit)
+	operation := finalizeOperation(manifest, state, command, authorization, FinalizeCommit)
 	if err := coordinator.recordAudit(ctx, state, authorization, ActionCommit, "", operation.Digest, command.At); err != nil { return UpdateState{}, Receipt{}, err }
 	effect, err := coordinator.platform.CommitSwitch(ctx, operation)
 	if err != nil {
@@ -575,7 +580,7 @@ func (coordinator *Coordinator) rollback(ctx context.Context, command Command, m
 		return coordinator.externalUncertain(ctx, command, state, authorization, ActionRollback, failureEvidence,
 			[]string{"preserve_recovery_evidence", "manual_recovery_required", "do_not_claim_rollback"})
 	}
-	operation := finalizeOperation(manifest, state, command, FinalizeRollback)
+	operation := finalizeOperation(manifest, state, command, authorization, FinalizeRollback)
 	if err := coordinator.recordAudit(ctx, state, authorization, ActionRollback, "", operation.Digest, command.At); err != nil { return UpdateState{}, Receipt{}, err }
 	effect, err := coordinator.platform.AtomicRollback(ctx, operation)
 	if err != nil {
@@ -590,7 +595,7 @@ func (coordinator *Coordinator) rollback(ctx context.Context, command Command, m
 		root, resolveErr := coordinator.stager.resolve(state.StagedRootID, state.StagedRootDigest)
 		if resolveErr != nil { return UpdateState{}, Receipt{}, resolveErr }
 		for index := len(manifest.Migrations) - 1; index >= 0; index-- {
-			migration := migrationOperation(manifest, command, root, manifest.Migrations[index])
+			migration := migrationOperation(manifest, command, root, manifest.Migrations[index], authorization)
 			migrationProof, found := findMigrationProof(state.MigrationProofs, migration.Step.ID)
 			if !found || migrationProof.OperationDigest != migration.Digest || !validDigest(migrationProof.BackupEvidence) {
 				return coordinator.externalUncertain(ctx, command, state, authorization, ActionRollback,
@@ -621,7 +626,7 @@ func (coordinator *Coordinator) rollback(ctx context.Context, command Command, m
 			migrationReceipts = append(migrationReceipts, inventory.Digest)
 		}
 	}
-	probe := ProbeOperation{ManifestID: manifest.ID, NodeID: command.NodeID, ExpectedReleaseDigest: state.PreviousReleaseDigest,
+	probe := ProbeOperation{ManifestID: manifest.ID, NodeID: command.NodeID, Authorization: authorization, ExpectedReleaseDigest: state.PreviousReleaseDigest,
 		BaselineDigest: state.BaselineDigest, Fence: command.Fence}
 	probe.Digest, _ = digestJSON(probe)
 	snapshot, probeErr := coordinator.health.ProbeRelease(ctx, probe)
@@ -708,8 +713,8 @@ func transitionFor(command Command, state UpdateState, to Phase, reason ReasonCo
 		From: state.Phase, To: to, Reason: reason, EvidenceDigest: evidence, At: command.At.UTC()}
 }
 
-func migrationOperation(manifest ReleaseManifest, command Command, root ReleaseRoot, step MigrationStep) MigrationOperation {
-	operation := MigrationOperation{ManifestID: manifest.ID, ManifestDigest: manifest.Digest, NodeID: command.NodeID,
+func migrationOperation(manifest ReleaseManifest, command Command, root ReleaseRoot, step MigrationStep, authorization UpdateAuthorization) MigrationOperation {
+	operation := MigrationOperation{ManifestID: manifest.ID, ManifestDigest: manifest.Digest, NodeID: command.NodeID, Authorization: authorization,
 		Step: step, ReleaseRoot: root, Fence: command.Fence,
 		IdempotencyKey: digestParts("migration", manifest.ID, command.NodeID, step.ID, fmtUint(command.Fence))}
 	operation.Digest, _ = digestJSON(operation)
@@ -747,8 +752,8 @@ func validateHealth(snapshot HealthSnapshot, nodeID, releaseDigest string, requi
 	return nil
 }
 
-func finalizeOperation(manifest ReleaseManifest, state UpdateState, command Command, disposition FinalizeDisposition) FinalizeOperation {
-	operation := FinalizeOperation{Disposition: disposition, ManifestID: manifest.ID, ManifestDigest: manifest.Digest, NodeID: command.NodeID,
+func finalizeOperation(manifest ReleaseManifest, state UpdateState, command Command, authorization UpdateAuthorization, disposition FinalizeDisposition) FinalizeOperation {
+	operation := FinalizeOperation{Disposition: disposition, ManifestID: manifest.ID, ManifestDigest: manifest.Digest, NodeID: command.NodeID, Authorization: authorization,
 		PreviousID: state.PreviousReleaseID, PreviousDigest: state.PreviousReleaseDigest, Fence: command.Fence,
 		IdempotencyKey: command.IdempotencyKey}
 	operation.ActiveReleaseID, operation.ActiveDigest = state.StagedRootID, state.StagedRootDigest

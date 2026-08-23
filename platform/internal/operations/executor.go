@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"strings"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/productupdate"
 )
 
 type EffectKind string
@@ -33,7 +35,10 @@ const (
 	EffectProcessTerminate EffectKind = "terminate_process"
 	EffectPackageTransaction EffectKind = "package_transaction"
 	EffectManagedService EffectKind = "reconcile_managed_service"
+	EffectProductUpdate EffectKind = "execute_product_update"
 )
+
+const KindProductUpdate ResourceKind = "product_update"
 
 type ActivationStrategy string
 
@@ -98,6 +103,75 @@ type ManagedServiceEffect struct {
 	RedisData *ManagedRedisDataEffect `json:"redis_data,omitempty"`
 }
 
+type ProductUpdateAction string
+
+const (
+	ProductUpdateReadiness ProductUpdateAction = "readiness"
+	ProductUpdateCurrent ProductUpdateAction = "current_release"
+	ProductUpdateInspectRollback ProductUpdateAction = "inspect_rollback"
+	ProductUpdateMigrationPreflight ProductUpdateAction = "migration_preflight"
+	ProductUpdateMigrationBackup ProductUpdateAction = "migration_backup"
+	ProductUpdateMigrationApply ProductUpdateAction = "migration_apply"
+	ProductUpdateMigrationRollback ProductUpdateAction = "migration_rollback"
+	ProductUpdateSwitch ProductUpdateAction = "switch_release"
+	ProductUpdateCommit ProductUpdateAction = "commit_release"
+	ProductUpdateRollback ProductUpdateAction = "rollback_release"
+	ProductUpdateCaptureBaseline ProductUpdateAction = "capture_health_baseline"
+	ProductUpdateProbe ProductUpdateAction = "probe_release"
+)
+
+type ProductUpdateSignedAuthorization struct {
+	Authorization productupdate.UpdateAuthorization `json:"authorization"`
+	CertificateChainPEM string `json:"certificate_chain_pem"`
+	Signature string `json:"signature"`
+}
+
+// ProductUpdateEffect is the closed request understood by an independently
+// deployed updater. Release paths, migration commands, unit names, and shell
+// text are intentionally absent; the updater resolves them from protected,
+// signed release metadata.
+type ProductUpdateEffect struct {
+	Action ProductUpdateAction `json:"action"`
+	NodeID string `json:"node_id"`
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+	Authorization *ProductUpdateSignedAuthorization `json:"authorization,omitempty"`
+	Migration *productupdate.MigrationOperation `json:"migration,omitempty"`
+	Backup *productupdate.BackupOperation `json:"backup,omitempty"`
+	MigrationRollback *productupdate.MigrationRollbackOperation `json:"migration_rollback,omitempty"`
+	RollbackInspection *productupdate.RollbackInspection `json:"rollback_inspection,omitempty"`
+	Switch *productupdate.SwitchOperation `json:"switch,omitempty"`
+	Finalize *productupdate.FinalizeOperation `json:"finalize,omitempty"`
+	Probe *productupdate.ProbeOperation `json:"probe,omitempty"`
+}
+
+type ProductUpdateRuntimeReadiness struct {
+	Complete bool `json:"complete"`
+	AdapterID string `json:"adapter_id"`
+	AdapterVersion string `json:"adapter_version"`
+	SignedAuthorization bool `json:"signed_authorization"`
+	DurableAcceptance bool `json:"durable_acceptance"`
+	DurableFrontierReceipts bool `json:"durable_frontier_receipts"`
+	AtomicActivation bool `json:"atomic_activation"`
+	MigrationGate bool `json:"migration_gate"`
+	HealthVerification bool `json:"health_verification"`
+	RollbackRecovery bool `json:"rollback_recovery"`
+	SelfUpdateIsolation bool `json:"self_update_isolation"`
+	EvidenceDigest string `json:"evidence_digest"`
+}
+
+type ProductUpdateResult struct {
+	Readiness *ProductUpdateRuntimeReadiness `json:"readiness,omitempty"`
+	ActiveRelease *productupdate.ActiveRelease `json:"active_release,omitempty"`
+	RollbackProof *productupdate.RollbackProof `json:"rollback_proof,omitempty"`
+	MigrationAssessment *productupdate.MigrationAssessment `json:"migration_assessment,omitempty"`
+	Effect *productupdate.EffectReceipt `json:"effect,omitempty"`
+	Health *productupdate.HealthSnapshot `json:"health,omitempty"`
+	MutationObserved bool `json:"mutation_observed"`
+	AuthorizationDigest string `json:"authorization_digest,omitempty"`
+	ExecutionReceiptDigest string `json:"execution_receipt_digest"`
+	FrontierReceiptDigest string `json:"frontier_receipt_digest,omitempty"`
+}
+
 type EffectRequest struct {
 	EffectID string `json:"effect_id"`
 	RequestDigest string `json:"request_digest"`
@@ -123,6 +197,7 @@ type EffectRequest struct {
 	ProcessTerminate *ProcessTerminateEffect `json:"process_terminate,omitempty"`
 	PackageTransaction *PackageTransactionEffect `json:"package_transaction,omitempty"`
 	ManagedService *ManagedServiceEffect `json:"managed_service,omitempty"`
+	ProductUpdate *ProductUpdateEffect `json:"product_update,omitempty"`
 }
 
 type EffectOutcome string
@@ -210,6 +285,7 @@ type EffectResult struct {
 	Diagnostics *ServiceDiagnostics `json:"diagnostics,omitempty"`
 	Packages *PackageTransactionResult `json:"packages,omitempty"`
 	ManagedRedisData *ManagedRedisDataResult `json:"managed_redis_data,omitempty"`
+	ProductUpdate *ProductUpdateResult `json:"product_update,omitempty"`
 }
 
 type ManagedRedisDataResult struct {
@@ -266,6 +342,26 @@ type HostExecutor interface {
 	Compensate(context.Context, CompensationRequest) (CompensationReceipt, error)
 }
 
+// ProductUpdateExecutor must be hosted out of process from panel-core and
+// panel-execd so it can update those processes without losing acknowledgement.
+// It independently re-verifies the signed authorization against root-owned
+// trust, journals acceptance before returning, persists an irreversible-frontier
+// receipt before mutation, and recovers or reports ambiguity by operation digest.
+type ProductUpdateExecutor interface {
+	ObserveOrApply(context.Context, ProductUpdateEffect) (ProductUpdateResult, error)
+	Recover(context.Context, ProductUpdateEffect) error
+}
+
+func NewProductUpdateEffectRequest(effect ProductUpdateEffect) (EffectRequest, error) {
+	nodeDigest := sha256.Sum256([]byte("cyberpanel:product-update-node:v1\x00" + effect.NodeID))
+	resourceDigest := sha256.Sum256([]byte("cyberpanel:product-update-resource:v1\x00" + string(effect.Action) + "\x00" + effect.NodeID))
+	nodeID, nodeErr := NewResourceID("product-node-" + hex.EncodeToString(nodeDigest[:16]))
+	resourceID, resourceErr := NewResourceID("product-update-" + hex.EncodeToString(resourceDigest[:16]))
+	if nodeErr != nil || resourceErr != nil { return EffectRequest{}, ErrInvalidCommand }
+	return finalizeEffect(EffectRequest{Scope:OperationScope{NodeID:nodeID, Kind:KindProductUpdate, ID:resourceID},
+		Kind:EffectProductUpdate, ProductUpdate:&effect})
+}
+
 func finalizeEffect(request EffectRequest) (EffectRequest, error) {
 	request.EffectID, request.RequestDigest = "", ""
 	if validateEffectShape(request) != nil { return EffectRequest{}, ErrInvalidCommand }
@@ -292,7 +388,7 @@ func validateEffectShape(request EffectRequest) error {
 		request.PutSSHKey != nil, request.DeleteSSHKey != nil, request.WAFPolicy != nil, request.ServicePolicy != nil,
 		request.ServiceControl != nil, request.ServiceDiagnose != nil, request.ServiceRepair != nil, request.MetricsQuery != nil,
 		request.LogQuery != nil, request.SSHLoginQuery != nil, request.SSHSessionQuery != nil, request.ProcessInvestigate != nil,
-		request.ProcessTerminate != nil, request.PackageTransaction != nil, request.ManagedService != nil,
+		request.ProcessTerminate != nil, request.PackageTransaction != nil, request.ManagedService != nil, request.ProductUpdate != nil,
 	} { if present { count++ } }
 	if count != 1 { return ErrInvalidCommand }
 	switch request.Kind {
@@ -336,10 +432,154 @@ func validateEffectShape(request EffectRequest) error {
 		if request.PackageTransaction == nil || request.PackageTransaction.Transaction.Validate() != nil { return ErrInvalidCommand }
 	case EffectManagedService:
 		if request.ManagedService == nil || request.ManagedService.Service.Validate() != nil || validateManagedRedisData(request.ManagedService.Service, request.ManagedService.RedisData) != nil { return ErrInvalidCommand }
+	case EffectProductUpdate:
+		if request.ProductUpdate == nil || request.Scope.Kind != KindProductUpdate || validateProductUpdateEffect(*request.ProductUpdate) != nil { return ErrInvalidCommand }
 	default:
 		return ErrInvalidCommand
 	}
 	return nil
+}
+
+func validateProductUpdateEffect(effect ProductUpdateEffect) error {
+	if !validProductUpdateIdentifier(effect.NodeID) { return ErrInvalidCommand }
+	count := 0
+	for _, present := range []bool{effect.Migration != nil, effect.Backup != nil, effect.MigrationRollback != nil,
+		effect.RollbackInspection != nil, effect.Switch != nil, effect.Finalize != nil, effect.Probe != nil} {
+		if present { count++ }
+	}
+	var action productupdate.UpdateAction
+	var nodeID, manifestDigest string
+	switch effect.Action {
+	case ProductUpdateReadiness, ProductUpdateCurrent, ProductUpdateCaptureBaseline:
+		if count != 0 || effect.Authorization != nil || effect.ObservedAt.IsZero() || effect.ObservedAt.Location() != time.UTC { return ErrInvalidCommand }
+		return nil
+	case ProductUpdateInspectRollback:
+		if count != 1 || effect.RollbackInspection == nil || !validProductUpdateRollbackInspection(*effect.RollbackInspection) { return ErrInvalidCommand }
+		action, nodeID = productupdate.ActionPreflight, effect.RollbackInspection.NodeID
+	case ProductUpdateMigrationPreflight, ProductUpdateMigrationApply:
+		if count != 1 || effect.Migration == nil || !validProductUpdateMigration(*effect.Migration) { return ErrInvalidCommand }
+		action, nodeID, manifestDigest = productupdate.ActionPreflight, effect.Migration.NodeID, effect.Migration.ManifestDigest
+	case ProductUpdateMigrationBackup:
+		if count != 1 || effect.Backup == nil || !validProductUpdateBackup(*effect.Backup) { return ErrInvalidCommand }
+		action, nodeID, manifestDigest = productupdate.ActionPreflight, effect.Backup.Migration.NodeID, effect.Backup.Migration.ManifestDigest
+	case ProductUpdateMigrationRollback:
+		if count != 1 || effect.MigrationRollback == nil || !validProductUpdateMigrationRollback(*effect.MigrationRollback) { return ErrInvalidCommand }
+		action, nodeID, manifestDigest = productupdate.ActionFinalize, effect.MigrationRollback.Migration.NodeID, effect.MigrationRollback.Migration.ManifestDigest
+	case ProductUpdateSwitch:
+		if count != 1 || effect.Switch == nil || !validProductUpdateSwitch(*effect.Switch) { return ErrInvalidCommand }
+		action, nodeID, manifestDigest = productupdate.ActionSwitch, effect.Switch.NodeID, effect.Switch.ManifestDigest
+	case ProductUpdateCommit, ProductUpdateRollback:
+		if count != 1 || effect.Finalize == nil || !validProductUpdateFinalize(*effect.Finalize, effect.Action) { return ErrInvalidCommand }
+		action, nodeID, manifestDigest = productupdate.ActionFinalize, effect.Finalize.NodeID, effect.Finalize.ManifestDigest
+	case ProductUpdateProbe:
+		if count != 1 || effect.Probe == nil || !validProductUpdateProbe(*effect.Probe) { return ErrInvalidCommand }
+		action, nodeID = productupdate.ActionFinalize, effect.Probe.NodeID
+	default:
+		return ErrInvalidCommand
+	}
+	if !effect.ObservedAt.IsZero() { return ErrInvalidCommand }
+	if effect.Authorization == nil { return ErrInvalidCommand }
+	authorization := effect.Authorization.Authorization
+	if nodeID != effect.NodeID || authorization.NodeID != effect.NodeID || manifestDigest != "" && authorization.ManifestDigest != manifestDigest ||
+		len(effect.Authorization.CertificateChainPEM) == 0 || len(effect.Authorization.CertificateChainPEM) > 1<<20 ||
+		len(effect.Authorization.Signature) == 0 || len(effect.Authorization.Signature) > 256 {
+		return ErrInvalidCommand
+	}
+	manifest := productupdate.ReleaseManifest{Digest:authorization.ManifestDigest}
+	if _, err := productupdate.CanonicalAuthorization(authorization, manifest, effect.NodeID, action, authorization.IssuedAt.UTC()); err != nil {
+		return ErrInvalidCommand
+	}
+	return nil
+}
+
+func validProductUpdateMigration(operation productupdate.MigrationOperation) bool {
+	if !validProductUpdateIdentifier(operation.NodeID) || !validProductUpdateIdentifier(operation.ManifestID) || !validSHA256(operation.ManifestDigest) || operation.Fence == 0 ||
+		!validProductUpdateIdentifier(operation.IdempotencyKey) || !validProductUpdateIdentifier(operation.Step.ID) || !validProductUpdateIdentifier(operation.Step.ArtifactID) ||
+		!validSHA256(operation.Step.ArtifactDigest) || operation.Step.ToSchema <= operation.Step.FromSchema ||
+		!validProductUpdateIdentifier(operation.ReleaseRoot.ID) || !validSHA256(operation.ReleaseRoot.Digest) {
+		return false
+	}
+	candidate := operation
+	claimed := candidate.Digest
+	candidate.Digest = ""
+	return claimed == productUpdateJSONDigest(candidate)
+}
+
+func validProductUpdateBackup(operation productupdate.BackupOperation) bool {
+	if !operation.Online || operation.IdempotencyKey == "" || !validProductUpdateMigration(operation.Migration) { return false }
+	candidate := operation
+	claimed := candidate.Digest
+	candidate.Digest = ""
+	return claimed == productUpdateJSONDigest(candidate)
+}
+
+func validProductUpdateMigrationRollback(operation productupdate.MigrationRollbackOperation) bool {
+	if operation.IdempotencyKey == "" || !validSHA256(operation.BackupEvidence) || !validSHA256(operation.RollbackProof) ||
+		!validProductUpdateMigration(operation.Migration) { return false }
+	candidate := operation
+	claimed := candidate.Digest
+	candidate.Digest = ""
+	return claimed == productUpdateJSONDigest(candidate)
+}
+
+func validProductUpdateRollbackInspection(operation productupdate.RollbackInspection) bool {
+	if !validProductUpdateIdentifier(operation.ManifestID) || !validProductUpdateIdentifier(operation.NodeID) || operation.Fence == 0 || operation.Current.Validate() != nil ||
+		!validProductUpdateIdentifier(operation.Target.ID) || !validSHA256(operation.Target.Digest) ||
+		(operation.RollbackClass != productupdate.RollbackFull && operation.RollbackClass != productupdate.RollbackBinaryOnly) {
+		return false
+	}
+	candidate := operation
+	claimed := candidate.Digest
+	candidate.Digest = ""
+	return claimed == productUpdateJSONDigest(candidate)
+}
+
+func validProductUpdateSwitch(operation productupdate.SwitchOperation) bool {
+	if !validProductUpdateIdentifier(operation.ManifestID) || !validSHA256(operation.ManifestDigest) || !validProductUpdateIdentifier(operation.NodeID) || operation.Fence == 0 ||
+		!validProductUpdateIdentifier(operation.IdempotencyKey) || operation.Previous.Validate() != nil || !validProductUpdateIdentifier(operation.Target.ID) || !validSHA256(operation.Target.Digest) {
+		return false
+	}
+	candidate := operation
+	claimed := candidate.Digest
+	candidate.Digest = ""
+	return claimed == productUpdateJSONDigest(candidate)
+}
+
+func validProductUpdateFinalize(operation productupdate.FinalizeOperation, action ProductUpdateAction) bool {
+	wanted := productupdate.FinalizeCommit
+	if action == ProductUpdateRollback { wanted = productupdate.FinalizeRollback }
+	if operation.Disposition != wanted || !validProductUpdateIdentifier(operation.ManifestID) || !validSHA256(operation.ManifestDigest) || !validProductUpdateIdentifier(operation.NodeID) ||
+		!validProductUpdateIdentifier(operation.ActiveReleaseID) || !validSHA256(operation.ActiveDigest) || !validProductUpdateIdentifier(operation.PreviousID) ||
+		!validSHA256(operation.PreviousDigest) || operation.Fence == 0 || !validProductUpdateIdentifier(operation.IdempotencyKey) { return false }
+	candidate := operation
+	claimed := candidate.Digest
+	candidate.Digest = ""
+	return claimed == productUpdateJSONDigest(candidate)
+}
+
+func validProductUpdateProbe(operation productupdate.ProbeOperation) bool {
+	if !validProductUpdateIdentifier(operation.ManifestID) || !validProductUpdateIdentifier(operation.NodeID) || !validSHA256(operation.ExpectedReleaseDigest) ||
+		!validSHA256(operation.BaselineDigest) || operation.Fence == 0 { return false }
+	candidate := operation
+	claimed := candidate.Digest
+	candidate.Digest = ""
+	return claimed == productUpdateJSONDigest(candidate)
+}
+
+func validProductUpdateIdentifier(value string) bool {
+	if value == "" || len(value) > 128 || !alphaNumeric(value[0]) || !alphaNumeric(value[len(value)-1]) { return false }
+	for index := range value {
+		character := value[index]
+		if !alphaNumeric(character) && character != '-' && character != '_' && character != '.' && character != ':' { return false }
+	}
+	return true
+}
+
+func productUpdateJSONDigest(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil { return "" }
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
 }
 
 func effectIsMutation(kind EffectKind) bool {
@@ -351,11 +591,24 @@ func effectIsMutation(kind EffectKind) bool {
 	}
 }
 
+func effectRequestIsMutation(request EffectRequest) bool {
+	if request.Kind == EffectProductUpdate && request.ProductUpdate != nil {
+		switch request.ProductUpdate.Action {
+		case ProductUpdateMigrationBackup, ProductUpdateMigrationApply, ProductUpdateMigrationRollback,
+			ProductUpdateSwitch, ProductUpdateCommit, ProductUpdateRollback:
+			return true
+		default:
+			return false
+		}
+	}
+	return effectIsMutation(request.Kind)
+}
+
 func effectReceiptMatches(request EffectRequest, receipt EffectReceipt) bool {
 	if receipt.EffectID != request.EffectID || receipt.RequestDigest != request.RequestDigest || receipt.CompletedAt.IsZero() { return false }
 	switch receipt.Outcome {
 	case EffectConfirmed:
-		return validateEffectResult(request, receipt.Result) == nil && validateActivationEvidence(request, receipt.Activation) && validSHA256(receipt.ProofDigest) && receipt.MutationObserved == effectIsMutation(request.Kind) && receipt.CompensationToken.IsZero() && receipt.FailureCode == ""
+		return validateEffectResult(request, receipt.Result) == nil && validateActivationEvidence(request, receipt.Activation) && validSHA256(receipt.ProofDigest) && receipt.MutationObserved == effectRequestIsMutation(request) && receipt.CompensationToken.IsZero() && receipt.FailureCode == ""
 	case EffectRejected:
 		return emptyEffectResult(receipt.Result) && receipt.FailureCode != "" && (!receipt.MutationObserved || !receipt.CompensationToken.IsZero())
 	case EffectAmbiguous:
@@ -397,7 +650,7 @@ func activationCandidateDigest(request EffectRequest) (string, bool) {
 }
 
 func emptyEffectResult(result EffectResult) bool {
-	return result.Metrics == nil && result.Logs == nil && result.SSHLogins == nil && result.SSHSessions == nil && result.Process == nil && result.Diagnostics == nil && result.Packages == nil && result.ManagedRedisData == nil
+	return result.Metrics == nil && result.Logs == nil && result.SSHLogins == nil && result.SSHSessions == nil && result.Process == nil && result.Diagnostics == nil && result.Packages == nil && result.ManagedRedisData == nil && result.ProductUpdate == nil
 }
 
 func compensationReceiptMatches(request CompensationRequest, receipt CompensationReceipt) bool {
@@ -415,6 +668,7 @@ func validateEffectResult(request EffectRequest, result EffectResult) error {
 	if result.Diagnostics != nil { count++ }
 	if result.Packages != nil { count++ }
 	if result.ManagedRedisData != nil { count++ }
+	if result.ProductUpdate != nil { count++ }
 	expected := false
 	switch request.Kind {
 	case EffectMetricsQuery: expected = result.Metrics != nil
@@ -426,6 +680,7 @@ func validateEffectResult(request EffectRequest, result EffectResult) error {
 	case EffectPackageTransaction: expected = result.Packages != nil || count == 0
 	case EffectManagedService:
 		expected = request.ManagedService != nil && request.ManagedService.RedisData != nil && result.ManagedRedisData != nil || request.ManagedService != nil && request.ManagedService.RedisData == nil && count == 0
+	case EffectProductUpdate: expected = result.ProductUpdate != nil && request.ProductUpdate != nil && validateProductUpdateResult(*request.ProductUpdate, *result.ProductUpdate) == nil
 	default: expected = count == 0
 	}
 	if !expected || count > 1 { return ErrInvalidEffect }
@@ -513,6 +768,69 @@ func validateManagedRedisData(service ManagedService, data *ManagedRedisDataEffe
 		return ErrInvalidCommand
 	}
 	return nil
+}
+
+func validateProductUpdateResult(effect ProductUpdateEffect, result ProductUpdateResult) error {
+	if !validSHA256(result.ExecutionReceiptDigest) || result.MutationObserved != productUpdateActionIsMutation(effect.Action) { return ErrInvalidEffect }
+	count := 0
+	for _, present := range []bool{result.Readiness != nil, result.ActiveRelease != nil, result.RollbackProof != nil,
+		result.MigrationAssessment != nil, result.Effect != nil, result.Health != nil} {
+		if present { count++ }
+	}
+	if count != 1 { return ErrInvalidEffect }
+	if productUpdateActionIsMutation(effect.Action) {
+		if effect.Authorization == nil || result.AuthorizationDigest != effect.Authorization.Authorization.Digest || !validSHA256(result.FrontierReceiptDigest) {
+			return ErrInvalidEffect
+		}
+	} else if effect.Authorization != nil {
+		if result.AuthorizationDigest != effect.Authorization.Authorization.Digest || result.FrontierReceiptDigest != "" { return ErrInvalidEffect }
+	} else if result.AuthorizationDigest != "" || result.FrontierReceiptDigest != "" {
+		return ErrInvalidEffect
+	}
+	switch effect.Action {
+	case ProductUpdateReadiness:
+		if result.Readiness == nil || !validProductUpdateReadiness(*result.Readiness) { return ErrInvalidEffect }
+	case ProductUpdateCurrent:
+		if result.ActiveRelease == nil || result.ActiveRelease.Validate() != nil { return ErrInvalidEffect }
+	case ProductUpdateInspectRollback:
+		if result.RollbackProof == nil || effect.RollbackInspection == nil ||
+			result.RollbackProof.InspectionDigest != effect.RollbackInspection.Digest || !validSHA256(result.RollbackProof.Digest) { return ErrInvalidEffect }
+	case ProductUpdateMigrationPreflight:
+		if result.MigrationAssessment == nil || effect.Migration == nil ||
+			result.MigrationAssessment.OperationDigest != effect.Migration.Digest || !validSHA256(result.MigrationAssessment.Digest) { return ErrInvalidEffect }
+	case ProductUpdateMigrationBackup:
+		if result.Effect == nil || effect.Backup == nil || result.Effect.OperationDigest != effect.Backup.Digest || !validSHA256(result.Effect.Digest) { return ErrInvalidEffect }
+	case ProductUpdateMigrationApply:
+		if result.Effect == nil || effect.Migration == nil || result.Effect.OperationDigest != effect.Migration.Digest || !validSHA256(result.Effect.Digest) { return ErrInvalidEffect }
+	case ProductUpdateMigrationRollback:
+		if result.Effect == nil || effect.MigrationRollback == nil || result.Effect.OperationDigest != effect.MigrationRollback.Digest || !validSHA256(result.Effect.Digest) { return ErrInvalidEffect }
+	case ProductUpdateSwitch:
+		if result.Effect == nil || effect.Switch == nil || result.Effect.OperationDigest != effect.Switch.Digest || !validSHA256(result.Effect.Digest) { return ErrInvalidEffect }
+	case ProductUpdateCommit, ProductUpdateRollback:
+		if result.Effect == nil || effect.Finalize == nil || result.Effect.OperationDigest != effect.Finalize.Digest || !validSHA256(result.Effect.Digest) { return ErrInvalidEffect }
+	case ProductUpdateCaptureBaseline, ProductUpdateProbe:
+		if result.Health == nil || result.Health.NodeID != effect.NodeID || !validSHA256(result.Health.Digest) { return ErrInvalidEffect }
+	default:
+		return ErrInvalidEffect
+	}
+	return nil
+}
+
+func validProductUpdateReadiness(readiness ProductUpdateRuntimeReadiness) bool {
+	if !validProductUpdateIdentifier(readiness.AdapterID) || !validProductUpdateIdentifier(readiness.AdapterVersion) || !validSHA256(readiness.EvidenceDigest) { return false }
+	complete := readiness.SignedAuthorization && readiness.DurableAcceptance && readiness.DurableFrontierReceipts &&
+		readiness.AtomicActivation && readiness.MigrationGate && readiness.HealthVerification && readiness.RollbackRecovery && readiness.SelfUpdateIsolation
+	return readiness.Complete == complete
+}
+
+func productUpdateActionIsMutation(action ProductUpdateAction) bool {
+	switch action {
+	case ProductUpdateMigrationBackup, ProductUpdateMigrationApply, ProductUpdateMigrationRollback,
+		ProductUpdateSwitch, ProductUpdateCommit, ProductUpdateRollback:
+		return true
+	default:
+		return false
+	}
 }
 
 func validMetricUnit(name MetricName, unit MetricUnit) bool {

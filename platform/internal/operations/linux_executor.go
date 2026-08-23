@@ -412,6 +412,7 @@ type LinuxOperationsConfig struct {
 	Runner FixedCommandRunner
 	Clock Clock
 	Sites LinuxOperationsSiteResolver
+	ProductUpdates ProductUpdateExecutor
 }
 
 type LinuxOperationsSiteBinding struct { TenantID string; SiteID string; SiteKey string; UID uint32; GID uint32; Generation uint64 }
@@ -454,6 +455,7 @@ type LinuxOperationsExecutor struct {
 	runner FixedCommandRunner
 	clock Clock
 	sites LinuxOperationsSiteResolver
+	productUpdates ProductUpdateExecutor
 	mu sync.Mutex
 }
 
@@ -490,7 +492,7 @@ func NewLinuxOperationsExecutor(config LinuxOperationsConfig) (*LinuxOperationsE
 	if config.Clock == nil { config.Clock = SystemClock{} }
 	if len(config.Volumes) == 0 || len(config.Packages) == 0 { return nil, ErrInvalidResource }
 	if err := ensureOperationsStateRoot(config.StateRoot); err != nil { return nil, err }
-	return &LinuxOperationsExecutor{stateRoot: config.StateRoot, volumes: cloneVolumes(config.Volumes), packages: clonePackages(config.Packages), wafPacks: cloneStrings(config.WAFPacks), secrets:config.Secrets, runner: config.Runner, clock: config.Clock, sites:config.Sites}, nil
+	return &LinuxOperationsExecutor{stateRoot: config.StateRoot, volumes: cloneVolumes(config.Volumes), packages: clonePackages(config.Packages), wafPacks: cloneStrings(config.WAFPacks), secrets:config.Secrets, runner: config.Runner, clock: config.Clock, sites:config.Sites, productUpdates:config.ProductUpdates}, nil
 }
 
 func ensureOperationsStateRoot(root string) error {
@@ -534,7 +536,7 @@ func (executor *LinuxOperationsExecutor) ObserveOrApply(ctx context.Context, req
 	var token SecretRef
 	var retainedSnapshots []operationsFileSnapshot
 	if effectErr == nil {
-		receipt.Outcome = EffectConfirmed; receipt.MutationObserved = effectIsMutation(request.Kind); receipt.ProofDigest = effectProof(request, result)
+		receipt.Outcome = EffectConfirmed; receipt.MutationObserved = effectRequestIsMutation(request); receipt.ProofDigest = effectProof(request, result)
 		if request.Kind == EffectProcessInvestigate && request.ProcessInvestigate != nil { if err := executor.storeProcessProof(receipt.ProofDigest, request.ProcessInvestigate.Process); err != nil { return EffectReceipt{}, err } }
 		if request.Kind == EffectServiceDiagnose && request.ServiceDiagnose != nil { if err := executor.storeDiagnosticProof(receipt.ProofDigest, request.ServiceDiagnose.Service); err != nil { return EffectReceipt{}, err } }
 	} else {
@@ -603,8 +605,28 @@ func (executor *LinuxOperationsExecutor) apply(ctx context.Context, request Effe
 	case EffectProcessTerminate: return executor.terminateProcess(ctx, *request.ProcessTerminate)
 	case EffectPackageTransaction: return executor.applyPackageTransaction(ctx, *request.PackageTransaction)
 	case EffectManagedService: return executor.applyManagedService(ctx, *request.ManagedService)
+	case EffectProductUpdate: return executor.applyProductUpdate(ctx, *request.ProductUpdate)
 	default: return linuxEffectResult{}, ErrInvalidEffect
 	}
+}
+
+func (executor *LinuxOperationsExecutor) applyProductUpdate(ctx context.Context, effect ProductUpdateEffect) (linuxEffectResult, error) {
+	if executor.productUpdates == nil {
+		if effect.Action != ProductUpdateReadiness { return linuxEffectResult{}, ErrInvalidEffect }
+		evidence := sha256.Sum256([]byte("cyberpanel:product-update-runtime-unavailable:v1\x00" + effect.NodeID + "\x00" + effect.ObservedAt.Format(time.RFC3339Nano)))
+		digest := hex.EncodeToString(evidence[:])
+		result := ProductUpdateResult{Readiness:&ProductUpdateRuntimeReadiness{AdapterID:"unavailable", AdapterVersion:"none", EvidenceDigest:digest},
+			ExecutionReceiptDigest:digest}
+		return linuxEffectResult{Result:EffectResult{ProductUpdate:&result}}, nil
+	}
+	result, err := executor.productUpdates.ObserveOrApply(ctx, effect)
+	if err != nil {
+		mutationObserved := result.MutationObserved
+		if mutationObserved && executor.productUpdates.Recover(ctx, effect) == nil { mutationObserved = false }
+		return linuxEffectResult{MutationObserved:mutationObserved}, err
+	}
+	if validateProductUpdateResult(effect, result) != nil { return linuxEffectResult{}, ErrInvalidReceipt }
+	return linuxEffectResult{Result:EffectResult{ProductUpdate:&result}, MutationObserved:result.MutationObserved}, nil
 }
 
 func (executor *LinuxOperationsExecutor) journalPath(effectID string) (string, error) {
