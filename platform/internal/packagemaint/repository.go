@@ -305,6 +305,21 @@ func (repository *SQLRepository) Operation(ctx context.Context, id string) (Main
 	return scanOperation(repository.db.QueryRowContext(ctx, `SELECT operation_json FROM package_maintenance_operations WHERE id=?`, id))
 }
 
+// LatestOperation returns the newest durable apply record for a package
+// manager. It is intentionally read-only: reconciliation and API retries use
+// the stored outcome rather than inferring success or replaying an effect.
+func (repository *SQLRepository) LatestOperation(ctx context.Context, nodeID string, manager Manager) (MaintenanceOperation, error) {
+	if repository == nil || repository.db == nil || !safeID.MatchString(nodeID) || !validManager(manager) {
+		return MaintenanceOperation{}, ErrInvalid
+	}
+	return scanOperation(repository.db.QueryRowContext(ctx, `SELECT o.operation_json
+FROM package_maintenance_operations o
+JOIN package_maintenance_plans p ON p.id=o.plan_id
+WHERE p.node_id=? AND p.manager=?
+ORDER BY p.generation DESC,o.updated_at DESC,o.id DESC
+LIMIT 1`, nodeID, string(manager)))
+}
+
 func (repository *SQLRepository) Transition(ctx context.Context, id string, expectedGeneration uint64, from, to OperationState, commit AuthorizationEvidence, receipt ExecutionReceipt, audit AuditRecord) (MaintenanceOperation, error) {
 	if repository == nil || repository.db == nil || !safeID.MatchString(id) || expectedGeneration == 0 || !transitionAllowed(from, to) || validateAudit(audit, id) != nil {
 		return MaintenanceOperation{}, ErrInvalid
