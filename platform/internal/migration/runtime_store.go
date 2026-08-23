@@ -166,7 +166,7 @@ func (store *RuntimeScopeStore) Bootstrap(ctx context.Context) error {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	_, err := store.db.ExecContext(ctx, runtimeScopeSchema)
+	_, err := store.db.ExecContext(ctx, runtimeScopeSchema+chunkMaintenanceSchema)
 	return err
 }
 
@@ -537,45 +537,60 @@ func (store *RuntimeScopeStore) releaseChunkReferencesLocked(ctx context.Context
 }
 
 func (store *RuntimeScopeStore) ReleaseExpiredChunkReferences(ctx context.Context, expiredBefore time.Time, quarantineDelay time.Duration, limit uint16) ([]ChunkReleaseReceipt, error) {
+	receipts, _, err := store.releaseExpiredChunkReferencesAfter(ctx, expiredBefore, quarantineDelay, "", limit)
+	return receipts, err
+}
+
+func (store *RuntimeScopeStore) releaseExpiredChunkReferencesAfter(ctx context.Context, expiredBefore time.Time, quarantineDelay time.Duration, cursor string, limit uint16) ([]ChunkReleaseReceipt, string, error) {
 	if store == nil || store.db == nil || ctx == nil || expiredBefore.IsZero() || expiredBefore.After(store.clock().UTC()) || quarantineDelay <= 0 || quarantineDelay > maximumChunkQuarantineDelay || limit == 0 || limit > 200 {
-		return nil, ErrInvalid
+		return nil, cursor, ErrInvalid
+	}
+	if cursor != "" {
+		if _, err := NewID(cursor); err != nil {
+			return nil, cursor, ErrInvalid
+		}
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	rows, err := store.db.QueryContext(ctx, `SELECT DISTINCT s.migration_id FROM panel_migration_scopes s JOIN panel_migration_chunk_refs r ON r.migration_id=s.migration_id AND r.state='active' LEFT JOIN panel_migration_chunk_release_receipts x ON x.migration_id=s.migration_id WHERE s.updated_at<=? AND x.migration_id IS NULL ORDER BY s.migration_id LIMIT ?`, encodeTime(expiredBefore.UTC()), int(limit))
+	rows, err := store.db.QueryContext(ctx, `SELECT DISTINCT s.migration_id FROM panel_migration_scopes s JOIN panel_migration_chunk_refs r ON r.migration_id=s.migration_id AND r.state='active' LEFT JOIN panel_migration_chunk_release_receipts x ON x.migration_id=s.migration_id WHERE s.updated_at<=? AND x.migration_id IS NULL AND s.migration_id>? ORDER BY s.migration_id LIMIT ?`, encodeTime(expiredBefore.UTC()), cursor, int(limit))
 	if err != nil {
-		return nil, err
+		return nil, cursor, err
 	}
 	var migrationIDs []ID
 	for rows.Next() {
 		var raw string
 		if err = rows.Scan(&raw); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, cursor, err
 		}
 		id, parseErr := NewID(raw)
 		if parseErr != nil {
 			rows.Close()
-			return nil, ErrAmbiguous
+			return nil, cursor, ErrAmbiguous
 		}
 		migrationIDs = append(migrationIDs, id)
 	}
 	if err = rows.Err(); err != nil {
 		rows.Close()
-		return nil, err
+		return nil, cursor, err
 	}
 	if err = rows.Close(); err != nil {
-		return nil, err
+		return nil, cursor, err
+	}
+	if len(migrationIDs) == 0 {
+		return []ChunkReleaseReceipt{}, "", nil
 	}
 	receipts := make([]ChunkReleaseReceipt, 0, len(migrationIDs))
+	next := cursor
 	for _, migrationID := range migrationIDs {
 		receipt, releaseErr := store.releaseChunkReferencesLocked(ctx, migrationID, ChunkReleaseExpired, quarantineDelay)
 		if releaseErr != nil {
-			return receipts, releaseErr
+			return receipts, next, releaseErr
 		}
 		receipts = append(receipts, receipt)
+		next = migrationID.String()
 	}
-	return receipts, nil
+	return receipts, next, nil
 }
 
 type chunkGCCandidate struct {
@@ -588,15 +603,20 @@ type chunkGCCandidate struct {
 }
 
 func (store *RuntimeScopeStore) CollectChunkGarbage(ctx context.Context, chunks *ChunkStore, limit uint16) ([]ChunkGCReceipt, error) {
-	if store == nil || store.db == nil || ctx == nil || chunks == nil || limit == 0 || limit > 200 {
-		return nil, ErrInvalid
+	receipts, _, err := store.collectChunkGarbageAfter(ctx, chunks, "", limit)
+	return receipts, err
+}
+
+func (store *RuntimeScopeStore) collectChunkGarbageAfter(ctx context.Context, chunks *ChunkStore, cursor string, limit uint16) ([]ChunkGCReceipt, string, error) {
+	if store == nil || store.db == nil || ctx == nil || chunks == nil || cursor != "" && !isDigest(cursor) || limit == 0 || limit > 200 {
+		return nil, cursor, ErrInvalid
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	now := store.clock().UTC()
-	rows, err := store.db.QueryContext(ctx, `SELECT digest,size_bytes,object_epoch,materialized,state,quarantine_after FROM panel_migration_chunk_objects WHERE (state='quarantined' AND quarantine_after<>'' AND quarantine_after<=?) OR state='deleting' ORDER BY quarantine_after,digest LIMIT ?`, encodeTime(now), int(limit))
+	rows, err := store.db.QueryContext(ctx, `SELECT digest,size_bytes,object_epoch,materialized,state,quarantine_after FROM panel_migration_chunk_objects WHERE ((state='quarantined' AND quarantine_after<>'' AND quarantine_after<=?) OR state='deleting') AND digest>? ORDER BY digest LIMIT ?`, encodeTime(now), cursor, int(limit))
 	if err != nil {
-		return nil, err
+		return nil, cursor, err
 	}
 	var candidates []chunkGCCandidate
 	for rows.Next() {
@@ -604,61 +624,87 @@ func (store *RuntimeScopeStore) CollectChunkGarbage(ctx context.Context, chunks 
 		var quarantineAfter string
 		if err = rows.Scan(&candidate.digest, &candidate.size, &candidate.epoch, &candidate.materialized, &candidate.state, &quarantineAfter); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, cursor, err
 		}
 		candidate.quarantineAfter, err = decodeTime(quarantineAfter)
 		if err != nil || !validStoredChunkObject(candidate.digest, candidate.size, candidate.epoch, candidate.materialized, candidate.state) || candidate.quarantineAfter.IsZero() || candidate.quarantineAfter.After(now) && candidate.state == "quarantined" {
 			rows.Close()
-			return nil, ErrAmbiguous
+			return nil, cursor, ErrAmbiguous
 		}
 		candidates = append(candidates, candidate)
 	}
 	if err = rows.Err(); err != nil {
 		rows.Close()
-		return nil, err
+		return nil, cursor, err
 	}
 	if err = rows.Close(); err != nil {
-		return nil, err
+		return nil, cursor, err
+	}
+	if len(candidates) == 0 {
+		return []ChunkGCReceipt{}, "", nil
 	}
 	receipts := make([]ChunkGCReceipt, 0, len(candidates))
+	next := cursor
 	for _, candidate := range candidates {
 		var receipt ChunkGCReceipt
 		if candidate.state == "quarantined" {
 			if inspectErr := chunks.inspectForGarbageCollection(ctx, candidate.digest, uint64(candidate.size), candidate.materialized == 0); inspectErr != nil {
 				if ctx.Err() != nil {
-					return receipts, ctx.Err()
+					return receipts, next, ctx.Err()
 				}
 				ambiguous, markErr := store.markChunkGCAmbiguousLocked(ctx, candidate)
 				if markErr == nil {
 					receipts = append(receipts, ambiguous)
+					next = candidate.digest
 				}
-				return receipts, errors.Join(ErrAmbiguous, inspectErr, markErr)
+				return receipts, next, errors.Join(ErrAmbiguous, inspectErr, markErr)
 			}
 			receipt, err = store.prepareChunkGCLocked(ctx, candidate, now)
 		} else {
 			receipt, err = store.loadPreparedChunkGCLocked(ctx, candidate)
 		}
 		if err != nil {
-			return receipts, err
+			if ctx.Err() != nil {
+				return receipts, next, ctx.Err()
+			}
+			if errors.Is(err, ErrAmbiguous) {
+				ambiguous, markErr := store.markChunkGCAmbiguousLocked(ctx, candidate)
+				if markErr == nil {
+					receipts = append(receipts, ambiguous)
+					next = candidate.digest
+				}
+				return receipts, next, errors.Join(ErrAmbiguous, err, markErr)
+			}
+			return receipts, next, err
 		}
 		allowMissing := candidate.state == "deleting" || candidate.materialized == 0
 		if err = chunks.deleteQuarantined(ctx, candidate.digest, uint64(candidate.size), allowMissing); err != nil {
 			if ctx.Err() != nil {
-				return receipts, ctx.Err()
+				return receipts, next, ctx.Err()
 			}
 			ambiguous, markErr := store.markChunkGCAmbiguousLocked(ctx, candidate)
 			if markErr == nil {
 				receipts = append(receipts, ambiguous)
+				next = candidate.digest
 			}
-			return receipts, errors.Join(ErrAmbiguous, err, markErr)
+			return receipts, next, errors.Join(ErrAmbiguous, err, markErr)
 		}
 		receipt, err = store.completeChunkGCLocked(ctx, candidate, receipt)
 		if err != nil {
-			return receipts, err
+			if ctx.Err() != nil {
+				return receipts, next, ctx.Err()
+			}
+			ambiguous, markErr := store.markChunkGCAmbiguousLocked(ctx, candidate)
+			if markErr == nil {
+				receipts = append(receipts, ambiguous)
+				next = candidate.digest
+			}
+			return receipts, next, errors.Join(ErrAmbiguous, err, markErr)
 		}
 		receipts = append(receipts, receipt)
+		next = candidate.digest
 	}
-	return receipts, nil
+	return receipts, next, nil
 }
 
 func (store *RuntimeScopeStore) prepareChunkGCLocked(ctx context.Context, candidate chunkGCCandidate, now time.Time) (ChunkGCReceipt, error) {

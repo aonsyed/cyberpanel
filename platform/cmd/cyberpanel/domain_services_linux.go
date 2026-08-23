@@ -44,6 +44,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
 	"github.com/aonsyed/cyberpanel/platform/internal/maildelivery"
+	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 	localmigration "github.com/aonsyed/cyberpanel/platform/internal/migration/localruntime"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	"github.com/aonsyed/cyberpanel/platform/internal/redisservice"
@@ -63,6 +64,40 @@ import (
 type localEmailMarketingDeliveryProvider struct {
 	client             *mail.MailDaemonClient
 	unsubscribeBaseURL string
+}
+
+type migrationChunkMaintenanceAudit struct{ service *audit.Service }
+
+func (sink migrationChunkMaintenanceAudit) RecordMigrationChunkMaintenance(ctx context.Context, evidence migration.ChunkMaintenanceEvidence) error {
+	if sink.service == nil || sink.service.Writer == nil || len(evidence.EvidenceDigest) != sha256.Size*2 {
+		return audit.ErrInvalid
+	}
+	outcome := audit.OutcomeApplied
+	if evidence.State == migration.ChunkMaintenanceNeedsReconciliation {
+		outcome = audit.OutcomeAmbiguous
+	} else if evidence.State != migration.ChunkMaintenanceHealthy {
+		outcome = audit.OutcomeFailed
+	}
+	_, err := sink.service.Writer.Append(ctx, audit.Event{
+		ID:            "migration-chunk-maintenance-" + evidence.EvidenceDigest[:32],
+		Class:         audit.ClassSystem,
+		Action:        "migration.chunk_maintenance.cycle",
+		Actor:         audit.Actor{ServiceID: "panel-core", Origin: "local_scheduler"},
+		Target:        audit.Target{Kind: "migration_chunk_store", ID: "local"},
+		Outcome:       outcome,
+		RequestDigest: evidence.EvidenceDigest,
+		Attributes: map[string]string{
+			"evidence_digest":     evidence.EvidenceDigest,
+			"failure_code":        evidence.FailureCode,
+			"lease_fence":         strconv.FormatUint(evidence.LeaseFence, 10),
+			"release_cursor":      evidence.ReleaseCursor,
+			"gc_cursor":           evidence.GarbageCursor,
+			"released_migrations": strconv.FormatUint(uint64(evidence.ReleasedMigrations), 10),
+			"gc_receipts":         strconv.FormatUint(uint64(evidence.GarbageReceipts), 10),
+		},
+		OccurredAt: evidence.CompletedAt.UTC(),
+	})
+	return err
 }
 
 func (provider *localEmailMarketingDeliveryProvider) Availability(context.Context, marketing.TenantID, string) (marketing.ProviderAvailability, error) {
@@ -343,6 +378,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	federationConsoleEdge,err:=newFederationEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize federation console edge: %w",err)}
 	productUpdateEdge,err:=assembleProductUpdateEdge(ctx,repositories.ControlDB,auditService,runtimeClock{});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize product-update catalog: %w",err)}
 	packageMaintenanceEdge,err:=assemblePackageMaintenanceEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize package-maintenance runtime: %w",err)}
+	if err=migrationRuntime.StartChunkMaintenance(ctx,migrationChunkMaintenanceAudit{service:auditService});err!=nil{_=migrationRuntime.Close();return apiserver.DomainServices{},fmt.Errorf("start migration chunk maintenance: %w",err)}
 	repositories.WebCatalog = catalog
 	go certificateRenewal.RunQueue(ctx,15*time.Minute,4)
 	if mailTelemetryReady{go mailConsoleEdge.RunMailTelemetry(ctx,15*time.Second)}

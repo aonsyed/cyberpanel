@@ -46,6 +46,10 @@ type Runtime struct {
 	Target       *migration.CanonicalTargetImporter
 	Chunks       *migration.ChunkStore
 	cpanel       *cPanelIntake
+	maintenanceMu     sync.Mutex
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
+	closed            bool
 }
 
 type Config struct {
@@ -133,6 +137,33 @@ func (runtime *Runtime) CPanelAvailable() bool {
 	return runtime != nil && runtime.cpanel != nil && runtime.cpanel.Ready()
 }
 
+func (runtime *Runtime) StartChunkMaintenance(ctx context.Context, auditor migration.ChunkMaintenanceAuditor) error {
+	if runtime == nil || runtime.Scopes == nil || runtime.Chunks == nil || ctx == nil || auditor == nil {
+		return migration.ErrInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	scheduler, err := migration.NewChunkMaintenanceScheduler(runtime.Scopes, runtime.Chunks, auditor, migration.DefaultChunkMaintenanceConfig())
+	if err != nil {
+		return err
+	}
+	runtime.maintenanceMu.Lock()
+	defer runtime.maintenanceMu.Unlock()
+	if runtime.closed || runtime.maintenanceDone != nil {
+		return migration.ErrConflict
+	}
+	runContext, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	runtime.maintenanceCancel = cancel
+	runtime.maintenanceDone = done
+	go func() {
+		defer close(done)
+		scheduler.Run(runContext)
+	}()
+	return nil
+}
+
 func (runtime *Runtime) AdmitCPanel(ctx context.Context, tenantID, endpoint string) (CPanelAdmission, error) {
 	if !runtime.CPanelAvailable() {
 		return CPanelAdmission{}, migration.ErrBlocked
@@ -141,10 +172,27 @@ func (runtime *Runtime) AdmitCPanel(ctx context.Context, tenantID, endpoint stri
 }
 
 func (runtime *Runtime) Close() error {
-	if runtime == nil || runtime.Chunks == nil {
+	if runtime == nil {
 		return nil
 	}
-	return runtime.Chunks.Close()
+	runtime.maintenanceMu.Lock()
+	if runtime.closed {
+		runtime.maintenanceMu.Unlock()
+		return nil
+	}
+	runtime.closed = true
+	cancel, done, chunks := runtime.maintenanceCancel, runtime.maintenanceDone, runtime.Chunks
+	runtime.maintenanceMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+	if chunks == nil {
+		return nil
+	}
+	return chunks.Close()
 }
 
 type trustDocument struct {

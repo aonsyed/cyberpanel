@@ -99,6 +99,7 @@ func runCore(configuration coreConfiguration) error {
 	if err != nil { return fmt.Errorf("initialize identity authority: %w", err) }
 	domainServices, err := assembleDomainServices(ctx,repositories,identityService,identityStore,auditService,configuration.MailHostname,configuration.PanelRegistrableDomain,configuration.PreviewRegistrableDomain)
 	if err != nil { return fmt.Errorf("assemble domain services: %w", err) }
+	if migrationService, ok := domainServices.MigrationEdge.(*migrationEdge); ok { defer migrationService.runtime.Close() }
 	core, err := apiserver.AssembleCore(apiserver.CoreAssemblyConfig{StateRoot:configuration.StateRoot,TrustPath:configuration.TrustPath},identityService,domainServices)
 	if err != nil { return fmt.Errorf("assemble panel core: %w", err) }
 	gatewayUID, controlGID, err := resolveRuntimeIdentities(configuration.GatewayAccount)
