@@ -12,6 +12,137 @@ import (
 )
 
 type TransferGrantIssuer interface { IssueReplicationGrant(context.Context, ReplicationChannel, StableView, time.Time) (string, error) }
+
+type LocalChannelBinding struct {
+	ChannelID    ChannelID   `json:"channel_id"`
+	TenantID     string      `json:"tenant_id"`
+	GroupID      NodeGroupID `json:"group_id"`
+	ResourceID   string      `json:"resource_id"`
+	SourceNodeID NodeID      `json:"source_node_id"`
+	TargetNodeID NodeID      `json:"target_node_id"`
+	Generation   uint64      `json:"generation"`
+	UpdatedAt    time.Time   `json:"updated_at"`
+}
+
+func (binding LocalChannelBinding) Validate() error {
+	if !validID(string(binding.ChannelID)) || !validID(binding.TenantID) || !validID(string(binding.GroupID)) || binding.ResourceID == "" || !validID(string(binding.SourceNodeID)) || !validID(string(binding.TargetNodeID)) || binding.SourceNodeID == binding.TargetNodeID || binding.Generation == 0 || binding.Generation > uint64(1<<63-1) || binding.UpdatedAt.IsZero() {
+		return ErrInvalid
+	}
+	return nil
+}
+
+type LocalReplicationEvidence struct {
+	EvidenceID        ID           `json:"evidence_id"`
+	OperationID       OperationID  `json:"operation_id"`
+	TenantID          string       `json:"tenant_id"`
+	GroupID           NodeGroupID  `json:"group_id"`
+	ResourceID        string       `json:"resource_id"`
+	ChannelID         ChannelID    `json:"channel_id"`
+	SourceNodeID      NodeID       `json:"source_node_id"`
+	TargetNodeID      NodeID       `json:"target_node_id"`
+	BindingGeneration uint64       `json:"binding_generation"`
+	SourceGeneration  uint64       `json:"source_generation"`
+	TargetGeneration  uint64       `json:"target_generation"`
+	CheckpointID      CheckpointID `json:"checkpoint_id"`
+	WriteFrontier     uint64       `json:"write_frontier"`
+	ManifestDigest    string       `json:"manifest_digest"`
+	Sequence          uint64       `json:"sequence"`
+	CaughtUp          bool         `json:"caught_up"`
+	Healthy           bool         `json:"healthy"`
+	EvidenceDigest    string       `json:"evidence_digest"`
+	ObservedAt        time.Time    `json:"observed_at"`
+	ValidUntil        time.Time    `json:"valid_until"`
+}
+
+func (evidence LocalReplicationEvidence) Validate() error {
+	if !validID(string(evidence.EvidenceID)) || !validID(string(evidence.OperationID)) || !validID(evidence.TenantID) || !validID(string(evidence.GroupID)) || evidence.ResourceID == "" || !validID(string(evidence.ChannelID)) || !validID(string(evidence.SourceNodeID)) || !validID(string(evidence.TargetNodeID)) || evidence.SourceNodeID == evidence.TargetNodeID || evidence.BindingGeneration == 0 || evidence.SourceGeneration == 0 || evidence.TargetGeneration == 0 || evidence.Sequence == 0 || evidence.BindingGeneration > uint64(1<<63-1) || evidence.SourceGeneration > uint64(1<<63-1) || evidence.TargetGeneration > uint64(1<<63-1) || evidence.Sequence > uint64(1<<63-1) || evidence.ObservedAt.IsZero() || !evidence.ValidUntil.After(evidence.ObservedAt) || !validDigest(evidence.EvidenceDigest) {
+		return ErrInvalid
+	}
+	if evidence.CaughtUp && (!evidence.Healthy || !validID(string(evidence.CheckpointID)) || evidence.WriteFrontier == 0 || !validDigest(evidence.ManifestDigest)) {
+		return ErrInvalid
+	}
+	digest, err := evidence.Digest()
+	if err != nil {
+		return err
+	}
+	if digest != evidence.EvidenceDigest {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (evidence LocalReplicationEvidence) Digest() (string, error) {
+	evidence.EvidenceDigest = ""
+	payload, err := json.Marshal(struct {
+		Domain   string                   `json:"domain"`
+		Evidence LocalReplicationEvidence `json:"evidence"`
+	}{Domain:"cyberpanel-ha-local-replication-evidence-v1", Evidence:evidence})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (evidence LocalReplicationEvidence) Usable(now time.Time) bool {
+	return evidence.Validate() == nil && evidence.Healthy && evidence.CaughtUp && now.Before(evidence.ValidUntil)
+}
+
+type ReplicationChannelHealth struct {
+	ChannelID         ChannelID    `json:"channel_id"`
+	ChannelGeneration uint64       `json:"channel_generation"`
+	SourceGeneration  uint64       `json:"source_generation"`
+	TargetGeneration  uint64       `json:"target_generation"`
+	CheckpointID      CheckpointID `json:"checkpoint_id,omitempty"`
+	WriteFrontier     uint64       `json:"write_frontier,omitempty"`
+	State             ChannelState `json:"state"`
+	Healthy           bool         `json:"healthy"`
+	CaughtUp          bool         `json:"caught_up"`
+	FailureDigest     string       `json:"failure_digest,omitempty"`
+	EvidenceDigest    string       `json:"evidence_digest"`
+	ObservedAt        time.Time    `json:"observed_at"`
+	ValidUntil        time.Time    `json:"valid_until"`
+}
+
+func (health ReplicationChannelHealth) Validate() error {
+	if !validID(string(health.ChannelID)) || health.ChannelGeneration == 0 || health.SourceGeneration == 0 || health.TargetGeneration == 0 || health.ChannelGeneration > uint64(1<<63-1) || health.SourceGeneration > uint64(1<<63-1) || health.TargetGeneration > uint64(1<<63-1) || health.ObservedAt.IsZero() || !health.ValidUntil.After(health.ObservedAt) || !validDigest(health.EvidenceDigest) {
+		return ErrInvalid
+	}
+	switch health.State {
+	case ChannelCaughtUp:
+		if !health.Healthy || !health.CaughtUp || !validID(string(health.CheckpointID)) || health.WriteFrontier == 0 || health.FailureDigest != "" {
+			return ErrInvalid
+		}
+	case ChannelFailed:
+		if health.Healthy || health.CaughtUp || health.CheckpointID != "" || health.WriteFrontier != 0 || !validDigest(health.FailureDigest) {
+			return ErrInvalid
+		}
+	default:
+		return ErrInvalid
+	}
+	digest, err := health.Digest()
+	if err != nil {
+		return err
+	}
+	if digest != health.EvidenceDigest {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (health ReplicationChannelHealth) Digest() (string, error) {
+	health.EvidenceDigest = ""
+	payload, err := json.Marshal(struct {
+		Domain string                   `json:"domain"`
+		Health ReplicationChannelHealth `json:"health"`
+	}{Domain:"cyberpanel-ha-replication-health-v1", Health:health})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 type ReplicationCoordinator struct { Store Store; Executor ReplicationExecutor; Database DatabaseReplicationExecutor; Grants TransferGrantIssuer; Now func() time.Time }
 func (coordinator ReplicationCoordinator) now() time.Time { if coordinator.Now != nil { return coordinator.Now().UTC() }; return time.Now().UTC() }
 
