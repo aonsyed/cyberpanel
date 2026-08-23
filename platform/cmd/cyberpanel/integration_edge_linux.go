@@ -21,6 +21,7 @@ type integrationEdgeProfile struct {
 
 type integrationEdge struct {
 	store    integrations.Store
+	inbox    *integrations.InboxService
 	bindings *integrations.BindingService
 	profiles map[string]integrationEdgeProfile
 }
@@ -37,7 +38,31 @@ func newIntegrationEdge(store integrations.Store, bindings *integrations.Binding
 		}
 		copyProfiles[name] = profile
 	}
-	return &integrationEdge{store:store, bindings:bindings, profiles:copyProfiles}, nil
+	var inbox *integrations.InboxService
+	if inboxStore,ok:=store.(integrations.InboxStore);ok{inbox=&integrations.InboxService{Store:inboxStore}}
+	return &integrationEdge{store:store, inbox:inbox, bindings:bindings, profiles:copyProfiles}, nil
+}
+
+func(edge *integrationEdge)NotificationInboxAvailable()bool{return edge!=nil&&edge.inbox!=nil}
+
+func(edge *integrationEdge)ProjectInbox(ctx context.Context,call apiserver.EdgeCall,payload apiserver.NotificationInboxProjectPayload)(apiserver.EdgeMutation[integrations.InboxItem],error){
+	if !edge.NotificationInboxAvailable()||ctx==nil||call.CommandID==""||call.TenantID==""||payload.PrincipalID==""||payload.NotificationID==""{return apiserver.EdgeMutation[integrations.InboxItem]{},integrations.ErrInvalid}
+	item,created,err:=edge.inbox.Project(ctx,integrations.TenantID(call.TenantID),payload.PrincipalID,payload.NotificationID);if err!=nil{return apiserver.EdgeMutation[integrations.InboxItem]{},err};state:=item.State();if !created{state="existing"};return apiserver.EdgeMutation[integrations.InboxItem]{OperationID:call.CommandID,State:state,Generation:item.Generation,Resource:item},nil
+}
+
+func(edge *integrationEdge)ListInbox(ctx context.Context,call apiserver.EdgeCall,page apiserver.EdgePagePayload)(apiserver.EdgePage[integrations.InboxItem],error){
+	if !edge.NotificationInboxAvailable()||ctx==nil||call.TenantID==""||call.PrincipalID==""{return apiserver.EdgePage[integrations.InboxItem]{},integrations.ErrInvalid};items,next,err:=edge.inbox.List(ctx,integrations.TenantID(call.TenantID),call.PrincipalID,page.Limit,page.Cursor);if err!=nil{return apiserver.EdgePage[integrations.InboxItem]{},err};return apiserver.EdgePage[integrations.InboxItem]{Items:items,NextCursor:next},nil
+}
+
+func(edge *integrationEdge)GetInboxItem(ctx context.Context,call apiserver.EdgeCall)(integrations.InboxItem,error){if !edge.NotificationInboxAvailable()||ctx==nil||call.TenantID==""||call.PrincipalID==""||call.ResourceID==""{return integrations.InboxItem{},integrations.ErrInvalid};return edge.inbox.Get(ctx,integrations.TenantID(call.TenantID),call.PrincipalID,integrations.ID(call.ResourceID))}
+func(edge *integrationEdge)MarkInboxRead(ctx context.Context,call apiserver.EdgeCall)(apiserver.EdgeMutation[integrations.InboxItem],error){return edge.mutateInbox(ctx,call,"read")}
+func(edge *integrationEdge)AcknowledgeInbox(ctx context.Context,call apiserver.EdgeCall)(apiserver.EdgeMutation[integrations.InboxItem],error){return edge.mutateInbox(ctx,call,"acknowledge")}
+func(edge *integrationEdge)DismissInbox(ctx context.Context,call apiserver.EdgeCall)(apiserver.EdgeMutation[integrations.InboxItem],error){return edge.mutateInbox(ctx,call,"dismiss")}
+func(edge *integrationEdge)mutateInbox(ctx context.Context,call apiserver.EdgeCall,action string)(apiserver.EdgeMutation[integrations.InboxItem],error){
+	if !edge.NotificationInboxAvailable()||ctx==nil||call.CommandID==""||call.TenantID==""||call.PrincipalID==""||call.ResourceID==""||call.ExpectedGeneration==0{return apiserver.EdgeMutation[integrations.InboxItem]{},integrations.ErrInvalid}
+	var item integrations.InboxItem;var err error;tenant:=integrations.TenantID(call.TenantID);id:=integrations.ID(call.ResourceID)
+	switch action{case "read":item,err=edge.inbox.MarkRead(ctx,tenant,call.PrincipalID,id,call.ExpectedGeneration);case "acknowledge":item,err=edge.inbox.Acknowledge(ctx,tenant,call.PrincipalID,id,call.ExpectedGeneration);case "dismiss":item,err=edge.inbox.Dismiss(ctx,tenant,call.PrincipalID,id,call.ExpectedGeneration);default:err=integrations.ErrInvalid}
+	if err!=nil{return apiserver.EdgeMutation[integrations.InboxItem]{},err};return apiserver.EdgeMutation[integrations.InboxItem]{OperationID:call.CommandID,State:item.State(),Generation:item.Generation,Resource:item},nil
 }
 
 func (edge *integrationEdge) ListBindings(ctx context.Context, call apiserver.EdgeCall, page apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.IntegrationProjection], error) {
@@ -175,3 +200,4 @@ func wipeIntegrationEdgeSecret(value []byte) {
 }
 
 var _ apiserver.IntegrationEdgeService = (*integrationEdge)(nil)
+var _ apiserver.NotificationInboxEdgeService = (*integrationEdge)(nil)

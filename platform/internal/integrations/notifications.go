@@ -2,11 +2,91 @@ package integrations
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 )
+
+type InboxItem struct {
+	ID               ID                   `json:"id"`
+	TenantID         TenantID             `json:"tenant_id"`
+	PrincipalID      string               `json:"principal_id"`
+	NotificationID   ID                   `json:"notification_id"`
+	Severity         NotificationSeverity `json:"severity"`
+	Kind             string               `json:"kind"`
+	Subject          string               `json:"subject"`
+	TemplateID       string               `json:"template_id"`
+	TemplateVersion  uint32               `json:"template_version"`
+	DataRef          string               `json:"data_ref"`
+	DataDigest       string               `json:"data_digest"`
+	Unread           bool                 `json:"unread"`
+	ReadAt           time.Time            `json:"read_at,omitempty"`
+	AcknowledgedAt   time.Time            `json:"acknowledged_at,omitempty"`
+	DismissedAt      time.Time            `json:"dismissed_at,omitempty"`
+	Generation       uint64               `json:"generation"`
+	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
+}
+
+func (item InboxItem) Validate() error {
+	if !validID(string(item.ID)) || !validID(string(item.TenantID)) || !validID(item.PrincipalID) || !validID(string(item.NotificationID)) || item.Kind=="" || item.Subject=="" || !validID(item.TemplateID) || item.TemplateVersion==0 || !validDigest(item.DataDigest) || item.Generation==0 || item.CreatedAt.IsZero() || item.UpdatedAt.Before(item.CreatedAt) { return ErrInvalid }
+	switch item.Severity { case NotifyInfo,NotifyWarning,NotifyError,NotifyCritical: default: return ErrInvalid }
+	if item.Unread&&!item.ReadAt.IsZero() || !item.Unread&&item.ReadAt.IsZero() || !item.AcknowledgedAt.IsZero()&&item.ReadAt.IsZero() || !item.DismissedAt.IsZero()&&item.ReadAt.IsZero() { return ErrInvalid }
+	for _,value:=range []time.Time{item.ReadAt,item.AcknowledgedAt,item.DismissedAt}{if !value.IsZero()&&(value.Before(item.CreatedAt)||value.After(item.UpdatedAt)){return ErrInvalid}}
+	return nil
+}
+
+func (item InboxItem) State() string {
+	if !item.DismissedAt.IsZero() { return "dismissed" }
+	if !item.AcknowledgedAt.IsZero() { return "acknowledged" }
+	if item.Unread { return "unread" }
+	return "read"
+}
+
+type InboxStore interface {
+	LoadNotification(context.Context,TenantID,ID)(Notification,error)
+	CreateInboxItem(context.Context,InboxItem)(InboxItem,bool,error)
+	LoadInboxItem(context.Context,TenantID,string,ID)(InboxItem,error)
+	ListInboxItems(context.Context,TenantID,string,uint16,string)([]InboxItem,string,error)
+	UpdateInboxItem(context.Context,InboxItem,uint64)error
+}
+
+type InboxService struct { Store InboxStore; Now func()time.Time }
+
+func (service InboxService) Project(ctx context.Context,tenant TenantID,principal string,notificationID ID)(InboxItem,bool,error){
+	if service.Store==nil||ctx==nil||!validID(string(tenant))||!validID(principal)||!validID(string(notificationID)){return InboxItem{},false,ErrInvalid}
+	notification,err:=service.Store.LoadNotification(ctx,tenant,notificationID);if err!=nil{return InboxItem{},false,err}
+	if notification.TenantID!=""&&notification.TenantID!=tenant{return InboxItem{},false,ErrNotFound}
+	now:=service.now();sum:=sha256.Sum256([]byte("integration-inbox-v1\x00"+string(tenant)+"\x00"+principal+"\x00"+string(notification.ID)))
+	item:=InboxItem{ID:ID(fmt.Sprintf("inbox_%020d_%s",notification.OccurredAt.UTC().UnixNano(),hex.EncodeToString(sum[:])[:32])),TenantID:tenant,PrincipalID:principal,NotificationID:notification.ID,Severity:notification.Severity,Kind:notification.Kind,Subject:notification.Subject,TemplateID:notification.TemplateID,TemplateVersion:notification.TemplateVersion,DataRef:notification.DataRef,DataDigest:notification.DataDigest,Unread:true,Generation:1,CreatedAt:now,UpdatedAt:now}
+	return service.Store.CreateInboxItem(ctx,item)
+}
+
+func (service InboxService) List(ctx context.Context,tenant TenantID,principal string,limit uint16,cursor string)([]InboxItem,string,error){if service.Store==nil||ctx==nil||!validID(string(tenant))||!validID(principal){return nil,"",ErrInvalid};return service.Store.ListInboxItems(ctx,tenant,principal,limit,cursor)}
+func (service InboxService) Get(ctx context.Context,tenant TenantID,principal string,id ID)(InboxItem,error){if service.Store==nil||ctx==nil||!validID(string(tenant))||!validID(principal)||!validID(string(id)){return InboxItem{},ErrInvalid};return service.Store.LoadInboxItem(ctx,tenant,principal,id)}
+func (service InboxService) MarkRead(ctx context.Context,tenant TenantID,principal string,id ID,expected uint64)(InboxItem,error){return service.transition(ctx,tenant,principal,id,expected,"read")}
+func (service InboxService) Acknowledge(ctx context.Context,tenant TenantID,principal string,id ID,expected uint64)(InboxItem,error){return service.transition(ctx,tenant,principal,id,expected,"acknowledge")}
+func (service InboxService) Dismiss(ctx context.Context,tenant TenantID,principal string,id ID,expected uint64)(InboxItem,error){return service.transition(ctx,tenant,principal,id,expected,"dismiss")}
+
+func (service InboxService) transition(ctx context.Context,tenant TenantID,principal string,id ID,expected uint64,action string)(InboxItem,error){
+	if expected==0{return InboxItem{},ErrStaleGeneration};item,err:=service.Get(ctx,tenant,principal,id);if err!=nil{return InboxItem{},err};if item.Generation!=expected{return InboxItem{},ErrStaleGeneration}
+	if !item.DismissedAt.IsZero()&&action!="dismiss"{return InboxItem{},ErrConflict}
+	now:=service.now();changed:=false
+	switch action{
+	case "read":if item.Unread{item.Unread=false;item.ReadAt=now;changed=true}
+	case "acknowledge":if item.AcknowledgedAt.IsZero(){if item.Unread{item.Unread=false;item.ReadAt=now};item.AcknowledgedAt=now;changed=true}
+	case "dismiss":if item.DismissedAt.IsZero(){if item.Unread{item.Unread=false;item.ReadAt=now};item.DismissedAt=now;changed=true}
+	default:return InboxItem{},ErrInvalid
+	}
+	if !changed{return item,nil};item.Generation++;item.UpdatedAt=now;if err=service.Store.UpdateInboxItem(ctx,item,expected);err!=nil{return InboxItem{},err};return item,nil
+}
+
+func (service InboxService) now()time.Time{if service.Now!=nil{return service.Now().UTC()};return time.Now().UTC()}
+
+func sameInboxSource(left,right InboxItem)bool{return left.ID==right.ID&&left.TenantID==right.TenantID&&left.PrincipalID==right.PrincipalID&&left.NotificationID==right.NotificationID&&left.Severity==right.Severity&&left.Kind==right.Kind&&left.Subject==right.Subject&&left.TemplateID==right.TemplateID&&left.TemplateVersion==right.TemplateVersion&&left.DataRef==right.DataRef&&left.DataDigest==right.DataDigest}
 
 type NotificationCoordinator struct { Store Store; Provider NotificationProvider; Signer NotificationSigner; Now func() time.Time; MaximumAttempts uint32; BaseRetry time.Duration }
 func (coordinator NotificationCoordinator) now() time.Time { if coordinator.Now != nil { return coordinator.Now().UTC() }; return time.Now().UTC() }

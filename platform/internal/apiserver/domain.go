@@ -109,13 +109,13 @@ type DomainServices struct {
 
 func NewDomainRegistry() (*Registry,error) {
 	registry:=NewRegistry()
-	for _,register:=range []func(*Registry)error{registerIdentityContracts,registerHostingContracts,registerDatabaseContracts,registerFoundationContracts,registerCertificateContracts,registerBackupContracts,registerDNSContracts,registerMailContracts,registerMarketingContracts,registerAccessContracts,registerAccessFileContracts,registerAccessDeveloperContracts,registerApplicationContracts,registerContainerContracts,registerOperationsContracts,registerWebEngineContracts,registerAuditContracts,registerConsoleEdgeContracts,registerSecretEnrollmentContracts}{if err:=register(registry);err!=nil{return nil,err}}
+	for _,register:=range []func(*Registry)error{registerIdentityContracts,registerHostingContracts,registerDatabaseContracts,registerFoundationContracts,registerCertificateContracts,registerBackupContracts,registerDNSContracts,registerMailContracts,registerMarketingContracts,registerAccessContracts,registerAccessFileContracts,registerAccessDeveloperContracts,registerApplicationContracts,registerContainerContracts,registerOperationsContracts,registerWebEngineContracts,registerAuditContracts,registerConsoleEdgeContracts,registerNotificationContracts,registerSecretEnrollmentContracts}{if err:=register(registry);err!=nil{return nil,err}}
 	return registry,nil
 }
 
 func (services DomainServices) Bind(registry *Registry) error {
 	if registry==nil{return invalid("domain registry")}
-	for _,bind:=range []func(*Registry,DomainServices)error{bindIdentity,bindHosting,bindDatabase,bindFoundation,bindCertificates,bindBackup,bindDNS,bindMail,bindMarketing,bindAccess,bindAccessFileDomains,bindAccessDeveloper,bindApplications,bindContainers,bindOperations,bindWebEngine,bindAudit,bindConsoleEdgeContracts,bindSecretEnrollmentContracts}{if err:=bind(registry,services);err!=nil{return err}}
+	for _,bind:=range []func(*Registry,DomainServices)error{bindIdentity,bindHosting,bindDatabase,bindFoundation,bindCertificates,bindBackup,bindDNS,bindMail,bindMarketing,bindAccess,bindAccessFileDomains,bindAccessDeveloper,bindApplications,bindContainers,bindOperations,bindWebEngine,bindAudit,bindConsoleEdgeContracts,bindNotificationContracts,bindSecretEnrollmentContracts}{if err:=bind(registry,services);err!=nil{return err}}
 	return nil
 }
 
