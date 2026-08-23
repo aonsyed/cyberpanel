@@ -178,7 +178,7 @@ func (service ApplicationService) Update(ctx context.Context, request UpdateRequ
 	}
 	definition, err := service.Catalog.Resolve(ctx, request.TargetRecipe, request.CatalogTarget)
 	if err != nil { return Deployment{}, service.fail(ctx, operation, "catalog", err) }
-	if definition.Kind != installation.Kind { return Deployment{}, service.fail(ctx, operation, "catalog", ErrConflict) }
+	if definition.Kind != installation.Kind || definition.Artifact.Digest != request.TargetContentDigest { return Deployment{}, service.fail(ctx, operation, "catalog", ErrConflict) }
 	recoveryPoint, frontier, err := service.Recovery.CreateRecoveryPoint(ctx, RecoveryRequest{TenantID: installation.TenantID, SiteID: installation.SiteID, InstallationID: installation.ID, Purpose: "application_update", Consistency: "application_consistent", Required: true})
 	if err != nil { return Deployment{}, service.fail(ctx, operation, "recovery_point", err) }
 	if err := service.Recovery.VerifyRecoveryPoint(ctx, recoveryPoint); err != nil { return Deployment{}, service.fail(ctx, operation, "verify_recovery_point", err) }
@@ -221,13 +221,22 @@ func (service ApplicationService) Update(ctx context.Context, request UpdateRequ
 		if err == nil { err = ErrIntegrity }
 		return Deployment{}, service.rollbackUpdate(ctx, operation, installation, deployment, execution, shadow, err)
 	}
+	inventory, promotedHealth, inspectReceipt, err := service.Executor.Inspect(ctx, InspectExecution{Scope: scope, Installation: installation.ID, Kind: definition.Kind, RecipeDigest: definition.Recipe.RecipeDigest, Deep: true})
+	if err != nil || promotedHealth.State != HealthHealthy {
+		if err == nil { err = ErrIntegrity }
+		return Deployment{}, service.rollbackUpdate(ctx, operation, installation, deployment, execution, shadow, err)
+	}
+	if err := inspectReceipt.Validate("inspect", scope, installation.ID); err != nil { return Deployment{}, service.rollbackUpdate(ctx, operation, installation, deployment, execution, shadow, err) }
+	if err := service.Store.SaveInventory(ctx, inventory); err != nil { return Deployment{}, service.rollbackUpdate(ctx, operation, installation, deployment, execution, shadow, err) }
+	health = promotedHealth
+	targetRelease.PromotedAt = service.now()
 	if err := service.Store.SaveRelease(ctx, targetRelease); err != nil { return Deployment{}, service.failRecovery(ctx, operation, "persist_release", err) }
 	previousGeneration = installation.Generation
 	installation.PreviousReleaseID, installation.ActiveReleaseID, installation.Health = deployment.FromReleaseID, targetRelease.ID, health
+	installation.DefinitionID, installation.Recipe, installation.StorageMode = definition.ID, definition.Recipe, definition.StorageMode
 	if err := installation.Transition(InstallationActive, service.now()); err != nil { return Deployment{}, service.failRecovery(ctx, operation, "activate", err) }
 	if err := service.Store.UpdateInstallation(ctx, installation, previousGeneration); err != nil { return Deployment{}, service.failRecovery(ctx, operation, "activate", err) }
 	deployment.State, deployment.UpdatedAt = DeploymentCommitted, service.now()
-	targetRelease.PromotedAt = service.now()
 	if err := service.Store.UpdateDeployment(ctx, deployment); err != nil { return Deployment{}, service.failRecovery(ctx, operation, "persist_commit", err) }
 	_ = service.Routes.RemoveShadowRoute(ctx, installation.SiteID, installation.ID, targetRelease.ID)
 	operation.State, operation.Stage, operation.ResultDigest, operation.UpdatedAt = OperationCommitted, "committed", promoteReceipt.OutputDigest, service.now()

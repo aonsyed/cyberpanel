@@ -1019,14 +1019,14 @@ func validateAccessFileWrite(value any) error {
 
 func validateApplicationInstall(value any) error {
 	payload := value.(*ApplicationInstallEdgePayload)
-	if !validEdgeID(payload.SiteID) || !validEdgeID(payload.Version) || !validEdgeID(payload.RecipeID) || !safeEdgeText(payload.AdministratorUsername,128) || !strings.Contains(payload.AdministratorEmail,"@") || !safeEdgeText(payload.AdministratorEmail,320) || !safeEdgeText(payload.AdministratorDisplayName,256) || len(payload.AdministratorPassword)<12 || len(payload.AdministratorPassword)>4096 || payload.Locale!=""&&!safeEdgeText(payload.Locale,64) || payload.Timezone!=""&&!safeEdgeText(payload.Timezone,128) || len(payload.Title)>256 { return invalid("application install") }
+	if !validEdgeID(payload.SiteID) || !validEdgeID(payload.Version) || payload.RecipeID!=""&&!validEdgeID(payload.RecipeID) || !safeEdgeText(payload.AdministratorUsername,128) || !strings.Contains(payload.AdministratorEmail,"@") || !safeEdgeText(payload.AdministratorEmail,320) || !safeEdgeText(payload.AdministratorDisplayName,256) || len(payload.AdministratorPassword)<12 || len(payload.AdministratorPassword)>4096 || payload.Locale!=""&&!safeEdgeText(payload.Locale,64) || payload.Timezone!=""&&!safeEdgeText(payload.Timezone,128) || payload.Title!=""&&!safeEdgeText(payload.Title,256) { return invalid("application install") }
 	switch payload.Application { case "wordpress", "joomla", "prestashop", "magento", "mautic": default: return invalid("application kind") }
 	return nil
 }
 
 func validateApplicationUpdate(value any) error {
 	payload := value.(*ApplicationUpdateEdgePayload)
-	if !validEdgeID(payload.RecipeID) || payload.Version != "" && !validEdgeID(payload.Version) { return invalid("application update") }
+	if payload.RecipeID==""&&payload.Version=="" || payload.RecipeID!=""&&!validEdgeID(payload.RecipeID) || payload.Version!=""&&!validEdgeID(payload.Version) { return invalid("application update") }
 	return nil
 }
 

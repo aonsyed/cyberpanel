@@ -11,6 +11,7 @@ function format(raw:unknown,column:ColumnDefinition):string{if(raw===undefined||
 function bytes(value:number):string{if(!Number.isFinite(value))return"—";const units=["B","KiB","MiB","GiB","TiB","PiB"];let index=0;while(Math.abs(value)>=1024&&index<units.length-1){value/=1024;index++}return`${value>=10||index===0?value.toFixed(0):value.toFixed(1)} ${units[index]}`}
 function duration(value:number):string{if(!Number.isFinite(value))return"—";if(value<60)return`${Math.round(value)}s`;if(value<3600)return`${Math.round(value/60)}m`;if(value<86400)return`${Math.round(value/3600)}h`;return`${Math.round(value/86400)}d`}
 function statusClass(raw:unknown):string{return`status-${String(raw||"neutral").toLowerCase().replace(/[^a-z0-9_-]/g,"")}`}
+function actionsFor(row:Record<string,unknown>):ActionDefinition[]{return(props.actions||[]).filter((action)=>!action.resourceTypes?.length||action.resourceTypes.includes(String(row.type||"")))}
 const hasActions=computed(()=>Boolean(props.actions?.length));
 </script>
 
@@ -19,7 +20,7 @@ const hasActions=computed(()=>Boolean(props.actions?.length));
     <table><thead><tr><th v-for="column in columns" :key="column.key" :style="{width:column.width}"><button type="button" @click="emit('sort',column.key)">{{column.label}}<SortAscending :size="12"/></button></th><th v-if="hasActions" class="actions-column"><span class="sr-only">Actions</span></th></tr></thead>
       <tbody><tr v-for="(row,index) in rows" :key="String(row.id||row.resource_id||index)" :class="{selected:selected===String(row.id||row.resource_id||'')}" @dblclick="emit('select',row)">
         <td v-for="column in columns" :key="column.key"><span v-if="column.format==='status'" class="status" :class="statusClass(value(row,column.key))">{{format(value(row,column.key),column)}}</span><span v-else :class="{mono:column.format==='bytes'||column.format==='number'}">{{format(value(row,column.key),column)}}</span></td>
-        <td v-if="hasActions" class="row-actions"><details><summary aria-label="Resource actions"><DotsThree :size="19" weight="bold"/></summary><div><button v-for="action in actions" :key="action.id" type="button" :class="{critical:action.tone==='critical'}" @click="emit('action',action,row)">{{action.label}}</button></div></details></td>
+        <td v-if="hasActions" class="row-actions"><details><summary aria-label="Resource actions"><DotsThree :size="19" weight="bold"/></summary><div><button v-for="action in actionsFor(row)" :key="action.id" type="button" :class="{critical:action.tone==='critical'}" @click="emit('action',action,row)">{{action.label}}</button></div></details></td>
       </tr></tbody>
     </table>
   </div>
