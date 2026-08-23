@@ -5,9 +5,13 @@ package database
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +20,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/ha"
 )
 
 type mariaDBConnection struct {
@@ -38,6 +45,9 @@ const (
 	sqlObserveGrants
 	sqlApplyExternalTuning
 	sqlObserveTuning
+	sqlObserveHA
+	sqlFreezeHA
+	sqlPromoteHA
 )
 
 type principalMutation struct {
@@ -275,6 +285,15 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 			return "", ErrInvalidCommand
 		}
 		return tuningObservation(), nil
+	case sqlObserveHA:
+		if len(values) != 0 { return "", ErrInvalidCommand }
+		return mariaDBHAObservation(), nil
+	case sqlFreezeHA:
+		if len(values) != 0 { return "", ErrInvalidCommand }
+		return "SET GLOBAL read_only=ON;\n" + mariaDBHAObservation(), nil
+	case sqlPromoteHA:
+		if len(values) != 0 { return "", ErrInvalidCommand }
+		return "SET GLOBAL read_only=OFF;\n" + mariaDBHAObservation(), nil
 	default:
 		return "", ErrInvalidCommand
 	}
@@ -299,6 +318,10 @@ func principalObservation(principal DatabasePrincipal) string {
 
 func tuningObservation() string {
 	return "SELECT @@innodb_buffer_pool_size,@@max_connections,@@tmp_table_size,@@max_heap_table_size,@@long_query_time,@@innodb_flush_method;\n"
+}
+
+func mariaDBHAObservation() string {
+	return "SELECT @@server_id,@@hostname,@@read_only,@@gtid_binlog_pos;\n"
 }
 
 func quotedIdentifier(identifier SQLIdentifier) string {
@@ -421,6 +444,198 @@ func slowQuerySeconds(milliseconds uint32) string {
 	remainder := milliseconds % 1000
 	return strconv.FormatUint(uint64(seconds), 10) + "." + fmt.Sprintf("%03d", remainder)
 }
+
+type localMariaDBHAReceipt struct {
+	EffectID     string          `json:"effect_id"`
+	Action       MariaDBHAAction `json:"action"`
+	ClusterID    ha.ID           `json:"cluster_id"`
+	NodeID       ha.NodeID       `json:"node_id"`
+	FencingToken uint64          `json:"fencing_token"`
+	LeaseID      ha.WriterLeaseID `json:"lease_id,omitempty"`
+	ReadOnly     bool            `json:"read_only"`
+	GTID         string          `json:"gtid"`
+	Frontier     uint64          `json:"frontier"`
+	ProofDigest  string          `json:"proof_digest"`
+	AppliedAt    time.Time       `json:"applied_at"`
+}
+
+type localMariaDBPermitKey struct { Key string `json:"key"` }
+
+func (executor *LinuxMariaDBExecutor) ObserveCluster(ctx context.Context, cluster ha.DatabaseCluster) (ha.DatabaseCluster, error) {
+	if executor == nil || ctx == nil || !validLocalHACluster(cluster) { return ha.DatabaseCluster{}, ErrInvalidCommand }
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	member, _, err := executor.observeLocalHAMember(ctx)
+	if err != nil { return ha.DatabaseCluster{}, err }
+	found := false
+	for index := range cluster.Members {
+		if cluster.Members[index].NodeID == ha.NodeID("local") {
+			member.PeerCIDRs = append([]string(nil), cluster.Members[index].PeerCIDRs...)
+			cluster.Members[index] = member
+			found = true
+			break
+		}
+	}
+	if !found { return ha.DatabaseCluster{}, ErrInvalidResource }
+	if member.ReadOnly {
+		if cluster.WriterNodeID == member.NodeID { cluster.WriterNodeID, cluster.WriterLeaseID = "", "" }
+	} else {
+		cluster.WriterNodeID = member.NodeID
+	}
+	cluster.UpdatedAt = member.ObservedAt
+	if cluster.Validate() != nil { return ha.DatabaseCluster{}, ErrInvalidResource }
+	return cluster, nil
+}
+
+func (executor *LinuxMariaDBExecutor) FreezeDatabaseWrites(ctx context.Context, cluster ha.DatabaseCluster, node ha.NodeID, fencingToken uint64) (string, error) {
+	return executor.applyLocalHA(ctx, MariaDBHAFreeze, cluster, node, fencingToken, "", sqlFreezeHA, true)
+}
+
+func (executor *LinuxMariaDBExecutor) PromoteDatabaseWriter(ctx context.Context, cluster ha.DatabaseCluster, node ha.NodeID, lease ha.WriterLease) (string, uint64, error) {
+	if lease.Validate(executor.now().UTC()) != nil || lease.State != ha.LeaseActive || lease.GroupID != cluster.GroupID || lease.ResourceID != string(cluster.ID) || lease.HolderNodeID != node {
+		return "", 0, ErrInvalidCommand
+	}
+	receipt, err := executor.applyLocalHA(ctx, MariaDBHAPromote, cluster, node, lease.FencingToken, lease.ID, sqlPromoteHA, false)
+	if err != nil { return receipt, 0, err }
+	var parsed localMariaDBHAReceipt
+	if json.Unmarshal([]byte(receipt), &parsed) != nil || parsed.Frontier == 0 { return receipt, 0, ErrAmbiguous }
+	return receipt, parsed.Frontier, nil
+}
+
+func (executor *LinuxMariaDBExecutor) DemoteDatabaseWriter(ctx context.Context, cluster ha.DatabaseCluster, node ha.NodeID, fencingToken uint64) (string, error) {
+	return executor.applyLocalHA(ctx, MariaDBHADemote, cluster, node, fencingToken, "", sqlFreezeHA, true)
+}
+
+func (*LinuxMariaDBExecutor) CreateDatabaseCheckpoint(context.Context, ha.ReplicationChannel, uint64) (ha.ReplicationCheckpoint, error) {
+	return ha.ReplicationCheckpoint{}, ha.ErrUnsupported
+}
+
+func (*LinuxMariaDBExecutor) CatchUpReplica(context.Context, ha.ReplicationChannel, ha.ReplicationCheckpoint) (ha.ReplicationReceipt, error) {
+	return ha.ReplicationReceipt{}, ha.ErrUnsupported
+}
+
+func (*LinuxMariaDBExecutor) RejoinDatabaseMember(context.Context, ha.DatabaseCluster, ha.NodeID, ha.ReplicationCheckpoint) (string, error) {
+	return "", ha.ErrUnsupported
+}
+
+func (executor *LinuxMariaDBExecutor) SignWritePermit(ctx context.Context, permit ha.WritePermit) (ha.WritePermit, error) {
+	if executor == nil || ctx == nil || permit.ResourceID != "mariadb-local" || permit.NodeID != ha.NodeID("local") || permit.LeaseID == "" || permit.FencingToken == 0 || permit.AuthorityEpoch == 0 || len(permit.WritePaths) == 0 || permit.Signature != "" || permit.IssuedAt.IsZero() || !permit.ExpiresAt.After(permit.IssuedAt) || !executor.now().UTC().Before(permit.ExpiresAt) {
+		return ha.WritePermit{}, ErrInvalidCommand
+	}
+	select { case <-ctx.Done(): return ha.WritePermit{}, ctx.Err(); default: }
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	key, err := executor.localHAPermitKey()
+	if err != nil { return ha.WritePermit{}, err }
+	unsigned, err := json.Marshal(struct {
+		Domain string         `json:"domain"`
+		Permit ha.WritePermit `json:"permit"`
+	}{Domain:"cyberpanel-local-mariadb-write-permit-v1", Permit:permit})
+	if err != nil { wipeBytes(key); return ha.WritePermit{}, err }
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(unsigned)
+	permit.Signature = "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
+	wipeBytes(key, unsigned)
+	return permit, nil
+}
+
+func validLocalHACluster(cluster ha.DatabaseCluster) bool {
+	return cluster.Validate() == nil && cluster.ID == ha.ID("mariadb-local") && cluster.Topology == ha.DatabasePrimaryReplica
+}
+
+func (executor *LinuxMariaDBExecutor) applyLocalHA(ctx context.Context, action MariaDBHAAction, cluster ha.DatabaseCluster, node ha.NodeID, fencingToken uint64, leaseID ha.WriterLeaseID, statement mariaDBStatement, wantReadOnly bool) (string, error) {
+	if executor == nil || ctx == nil || !validLocalHACluster(cluster) || node != ha.NodeID("local") || fencingToken == 0 { return "", ErrInvalidCommand }
+	effectID := localMariaDBHAEffectID(action, cluster.ID, node, fencingToken, leaseID)
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	var existing localMariaDBHAReceipt
+	if err := executor.readNamed("effects", effectID+".json", &existing); err == nil {
+		if existing.EffectID != effectID || existing.Action != action || existing.ClusterID != cluster.ID || existing.NodeID != node || existing.FencingToken != fencingToken || existing.LeaseID != leaseID || existing.ReadOnly != wantReadOnly || existing.ProofDigest == "" || existing.AppliedAt.IsZero() {
+			return "", ErrIdempotency
+		}
+		encoded, encodeErr := json.Marshal(existing)
+		return string(encoded), encodeErr
+	} else if !errors.Is(err, ErrNotFound) { return "", err }
+	instanceID, err := NewResourceID(string(cluster.ID))
+	if err != nil { return "", err }
+	instance, err := executor.instance(instanceID)
+	if err != nil || instance.Placement != PlacementLocal { return "", errors.Join(err, ErrInvalidResource) }
+	connection, cleanup, err := executor.connection(ctx, instance)
+	if err != nil { return "", err }
+	defer cleanup()
+	output, err := connection.query(ctx, statement)
+	if err != nil { return "", errors.Join(ErrAmbiguous, err) }
+	member, proof, err := parseLocalHAMember(output, executor.now().UTC())
+	if err != nil || member.ReadOnly != wantReadOnly { return "", errors.Join(ErrAmbiguous, err) }
+	receipt := localMariaDBHAReceipt{EffectID:effectID, Action:action, ClusterID:cluster.ID, NodeID:node, FencingToken:fencingToken, LeaseID:leaseID, ReadOnly:member.ReadOnly, GTID:member.GTID, Frontier:member.Sequence, ProofDigest:proof, AppliedAt:member.ObservedAt}
+	if err = executor.writeNamed("effects", effectID+".json", receipt); err != nil { return "", errors.Join(ErrAmbiguous, err) }
+	encoded, err := json.Marshal(receipt)
+	if err != nil { return "", err }
+	return string(encoded), nil
+}
+
+func (executor *LinuxMariaDBExecutor) observeLocalHAMember(ctx context.Context) (ha.DatabaseMember, string, error) {
+	instanceID, err := NewResourceID("mariadb-local")
+	if err != nil { return ha.DatabaseMember{}, "", err }
+	instance, err := executor.instance(instanceID)
+	if err != nil || instance.Placement != PlacementLocal { return ha.DatabaseMember{}, "", errors.Join(err, ErrInvalidResource) }
+	connection, cleanup, err := executor.connection(ctx, instance)
+	if err != nil { return ha.DatabaseMember{}, "", err }
+	defer cleanup()
+	output, err := connection.query(ctx, sqlObserveHA)
+	if err != nil { return ha.DatabaseMember{}, "", err }
+	return parseLocalHAMember(output, executor.now().UTC())
+}
+
+func parseLocalHAMember(output []byte, observedAt time.Time) (ha.DatabaseMember, string, error) {
+	line := strings.TrimSuffix(strings.TrimSuffix(string(output), "\n"), "\r")
+	fields := strings.Split(line, "\t")
+	if len(fields) != 4 || observedAt.IsZero() || strings.TrimSpace(fields[0]) == "" || strings.TrimSpace(fields[1]) == "" || fields[2] != "0" && fields[2] != "1" {
+		return ha.DatabaseMember{}, "", ErrInvalidResource
+	}
+	frontier, err := mariaDBGTIDFrontier(strings.TrimSpace(fields[3]))
+	if err != nil { return ha.DatabaseMember{}, "", err }
+	identity := sha256.Sum256([]byte(fields[0] + "\x00" + fields[1]))
+	proof := sha256.Sum256(output)
+	member := ha.DatabaseMember{NodeID:ha.NodeID("local"), ServerUUID:"mariadb-"+hex.EncodeToString(identity[:16]), State:ha.DBSynced, ClusterStatus:"Primary", GTID:strings.TrimSpace(fields[3]), Sequence:frontier, ReadOnly:fields[2]=="1", PublicListener:false, ObservedAt:observedAt.UTC()}
+	return member, hex.EncodeToString(proof[:]), nil
+}
+
+func mariaDBGTIDFrontier(value string) (uint64, error) {
+	if value == "" { return 0, nil }
+	var frontier uint64
+	for _, item := range strings.Split(value, ",") {
+		parts := strings.Split(strings.TrimSpace(item), "-")
+		if len(parts) != 3 { return 0, ErrInvalidResource }
+		sequence, err := strconv.ParseUint(parts[2], 10, 64)
+		if err != nil { return 0, ErrInvalidResource }
+		if sequence > frontier { frontier = sequence }
+	}
+	return frontier, nil
+}
+
+func localMariaDBHAEffectID(action MariaDBHAAction, cluster ha.ID, node ha.NodeID, token uint64, lease ha.WriterLeaseID) string {
+	sum := sha256.Sum256([]byte("cyberpanel-local-mariadb-ha-v1\x00"+string(action)+"\x00"+string(cluster)+"\x00"+string(node)+"\x00"+strconv.FormatUint(token,10)+"\x00"+string(lease)))
+	return "ha-" + string(action) + "-" + hex.EncodeToString(sum[:24])
+}
+
+func (executor *LinuxMariaDBExecutor) localHAPermitKey() ([]byte, error) {
+	const name = "ha-permit-key.json"
+	var stored localMariaDBPermitKey
+	if err := executor.readNamed("effects", name, &stored); err == nil {
+		key, decodeErr := hex.DecodeString(stored.Key)
+		if decodeErr != nil || len(key) != 32 { wipeBytes(key); return nil, ErrInvalidResource }
+		return key, nil
+	} else if !errors.Is(err, ErrNotFound) { return nil, err }
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil { return nil, err }
+	stored.Key = hex.EncodeToString(key)
+	if err := executor.writeNamed("effects", name, stored); err != nil { wipeBytes(key); return nil, err }
+	return key, nil
+}
+
+var _ ha.DatabaseReplicationExecutor = (*LinuxMariaDBExecutor)(nil)
+var _ ha.WritePermitSigner = (*LinuxMariaDBExecutor)(nil)
 
 type limitedBuffer struct {
 	buffer    bytes.Buffer

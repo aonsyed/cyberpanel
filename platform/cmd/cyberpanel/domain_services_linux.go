@@ -338,7 +338,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	backupConsoleEdge,err:=newBackupEdge(backupRuntime.Catalog,&restoreWorkflow,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize backup console edge: %w",err)}
 	migrationRuntime,err:=localmigration.New(ctx,repositories.ControlDB,repositories.Migrations);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration runtime: %w",err)}
 	migrationConsoleEdge,err:=newMigrationEdge(migrationRuntime,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration console edge: %w",err)}
-	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}
+	localHAProviders,err:=newLocalMariaDBHAProviders(ctx,&repositories.HA,databaseExecutor,databaseExecutor,catalog,activationClient,configuration.Engine.Listeners,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize local MariaDB HA providers: %w",err)}
+	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,localHAProviders,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}
 	federationConsoleEdge,err:=newFederationEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize federation console edge: %w",err)}
 	productUpdateEdge,err:=assembleProductUpdateEdge(ctx,repositories.ControlDB,auditService,runtimeClock{});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize product-update catalog: %w",err)}
 	packageMaintenanceEdge,err:=assemblePackageMaintenanceEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize package-maintenance runtime: %w",err)}

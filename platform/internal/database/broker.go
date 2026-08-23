@@ -12,6 +12,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/ha"
 )
 
 const (
@@ -27,7 +29,37 @@ const (
 	BrokerCompensate     BrokerOperation = "compensate"
 	BrokerWorkspaceMetadata BrokerOperation = "workspace_metadata"
 	BrokerWorkspaceQuery    BrokerOperation = "workspace_query"
+	BrokerMariaDBHA         BrokerOperation = "mariadb_ha"
 )
+
+type MariaDBHAAction string
+
+const (
+	MariaDBHAObserve    MariaDBHAAction = "observe"
+	MariaDBHAFreeze     MariaDBHAAction = "freeze"
+	MariaDBHAPromote    MariaDBHAAction = "promote"
+	MariaDBHADemote     MariaDBHAAction = "demote"
+	MariaDBHASignPermit MariaDBHAAction = "sign_permit"
+)
+
+// MariaDBHARequest is the closed privileged surface used by the local HA
+// adapters. It carries topology state, fencing coordinates, and write permits;
+// it never accepts SQL, an executable, a service name, or a filesystem path.
+type MariaDBHARequest struct {
+	Action       MariaDBHAAction   `json:"action"`
+	Cluster      ha.DatabaseCluster `json:"cluster,omitempty"`
+	NodeID       ha.NodeID          `json:"node_id,omitempty"`
+	FencingToken uint64             `json:"fencing_token,omitempty"`
+	Lease        *ha.WriterLease    `json:"lease,omitempty"`
+	Permit       *ha.WritePermit    `json:"permit,omitempty"`
+}
+
+type MariaDBHAResult struct {
+	Cluster  *ha.DatabaseCluster `json:"cluster,omitempty"`
+	Receipt  string              `json:"receipt,omitempty"`
+	Frontier uint64              `json:"frontier,omitempty"`
+	Permit   *ha.WritePermit     `json:"permit,omitempty"`
+}
 
 type WorkspaceBrokerRequest struct {
 	Access    WorkspaceAccess `json:"access"`
@@ -42,6 +74,7 @@ type BrokerRequest struct {
 	Effect       *EffectRequest       `json:"effect,omitempty"`
 	Compensation *CompensationRequest `json:"compensation,omitempty"`
 	Workspace    *WorkspaceBrokerRequest `json:"workspace,omitempty"`
+	MariaDBHA    *MariaDBHARequest    `json:"mariadb_ha,omitempty"`
 }
 
 type BrokerResponse struct {
@@ -52,6 +85,7 @@ type BrokerResponse struct {
 	Compensation *CompensationReceipt  `json:"compensation,omitempty"`
 	Metadata     *WorkspaceMetadataResult `json:"metadata,omitempty"`
 	Query        *WorkspaceQueryResult `json:"query,omitempty"`
+	MariaDBHA    *MariaDBHAResult      `json:"mariadb_ha,omitempty"`
 	FailureCode  string                `json:"failure_code,omitempty"`
 }
 
@@ -61,22 +95,26 @@ func (request BrokerRequest) validate(now time.Time) error {
 	}
 	switch request.Operation {
 	case BrokerObserveOrApply:
-		if request.Effect == nil || request.Compensation != nil || request.Workspace != nil || validateEffectRequest(*request.Effect) != nil {
+		if request.Effect == nil || request.Compensation != nil || request.Workspace != nil || request.MariaDBHA != nil || validateEffectRequest(*request.Effect) != nil {
 			return ErrInvalidCommand
 		}
 	case BrokerCompensate:
-		if request.Effect != nil || request.Compensation == nil || request.Workspace != nil || !validCompensationRequest(*request.Compensation) {
+		if request.Effect != nil || request.Compensation == nil || request.Workspace != nil || request.MariaDBHA != nil || !validCompensationRequest(*request.Compensation) {
 			return ErrInvalidCommand
 		}
 	case BrokerWorkspaceMetadata:
-		if request.Effect != nil || request.Compensation != nil || request.Workspace == nil || request.Workspace.Statement != "" || request.Workspace.Access.validate(now) != nil {
+		if request.Effect != nil || request.Compensation != nil || request.Workspace == nil || request.MariaDBHA != nil || request.Workspace.Statement != "" || request.Workspace.Access.validate(now) != nil {
 			return ErrInvalidCommand
 		}
 	case BrokerWorkspaceQuery:
-		if request.Effect != nil || request.Compensation != nil || request.Workspace == nil || request.Workspace.Access.validate(now) != nil {
+		if request.Effect != nil || request.Compensation != nil || request.Workspace == nil || request.MariaDBHA != nil || request.Workspace.Access.validate(now) != nil {
 			return ErrInvalidCommand
 		}
 		if normalized, _, err := ParseWorkspaceStatement(request.Workspace.Statement); err != nil || normalized != request.Workspace.Statement {
+			return ErrInvalidCommand
+		}
+	case BrokerMariaDBHA:
+		if request.Effect != nil || request.Compensation != nil || request.Workspace != nil || request.MariaDBHA == nil || validateMariaDBHARequest(*request.MariaDBHA, now) != nil {
 			return ErrInvalidCommand
 		}
 	default:
@@ -90,33 +128,101 @@ func (response BrokerResponse) validate(request BrokerRequest) error {
 		return ErrInvalidReceipt
 	}
 	if response.FailureCode != "" {
-		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query != nil || !validBrokerFailure(response.FailureCode) {
+		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query != nil || response.MariaDBHA != nil || !validBrokerFailure(response.FailureCode) {
 			return ErrInvalidReceipt
 		}
 		return nil
 	}
 	switch request.Operation {
 	case BrokerObserveOrApply:
-		if response.Metadata != nil || response.Query != nil { return ErrInvalidReceipt }
+		if response.Metadata != nil || response.Query != nil || response.MariaDBHA != nil { return ErrInvalidReceipt }
 		return validateBrokerEffectResponse(request, response)
 	case BrokerCompensate:
-		if response.Metadata != nil || response.Query != nil { return ErrInvalidReceipt }
+		if response.Metadata != nil || response.Query != nil || response.MariaDBHA != nil { return ErrInvalidReceipt }
 		return validateBrokerCompensationResponse(request, response)
 	case BrokerWorkspaceMetadata:
-		if response.Effect != nil || response.Compensation != nil || response.Metadata == nil || response.Query != nil || request.Workspace == nil {
+		if response.Effect != nil || response.Compensation != nil || response.Metadata == nil || response.Query != nil || response.MariaDBHA != nil || request.Workspace == nil {
 			return ErrInvalidReceipt
 		}
 		return validateWorkspaceMetadata(*response.Metadata, request.Workspace.Access)
 	case BrokerWorkspaceQuery:
-		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query == nil || request.Workspace == nil {
+		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query == nil || response.MariaDBHA != nil || request.Workspace == nil {
 			return ErrInvalidReceipt
 		}
 		_, kind, err := ParseWorkspaceStatement(request.Workspace.Statement)
 		if err != nil || response.Query.Kind != kind { return ErrInvalidReceipt }
 		return validateWorkspaceResult(*response.Query, request.Workspace.Access)
+	case BrokerMariaDBHA:
+		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query != nil || response.MariaDBHA == nil || request.MariaDBHA == nil {
+			return ErrInvalidReceipt
+		}
+		return validateMariaDBHAResult(*request.MariaDBHA, *response.MariaDBHA)
 	default:
 		return ErrInvalidReceipt
 	}
+}
+
+func validateMariaDBHARequest(request MariaDBHARequest, now time.Time) error {
+	const localResource = ha.ID("mariadb-local")
+	const localNode = ha.NodeID("local")
+	if request.Action == MariaDBHASignPermit {
+		if request.Cluster.ID != "" || request.Cluster.GroupID != "" || request.Cluster.Topology != "" || len(request.Cluster.Members) != 0 || request.Cluster.Generation != 0 || request.NodeID != "" || request.FencingToken != 0 || request.Lease != nil || request.Permit == nil {
+			return ErrInvalidCommand
+		}
+		permit := *request.Permit
+		if permit.ResourceID != string(localResource) || permit.NodeID != localNode || permit.LeaseID == "" || permit.FencingToken == 0 || permit.AuthorityEpoch == 0 || len(permit.WritePaths) == 0 || permit.Signature != "" || permit.IssuedAt.IsZero() || !permit.ExpiresAt.After(permit.IssuedAt) || !now.Before(permit.ExpiresAt) {
+			return ErrInvalidCommand
+		}
+		return nil
+	}
+	if request.Cluster.Validate() != nil || request.Cluster.ID != localResource || request.Cluster.Topology != ha.DatabasePrimaryReplica || request.Permit != nil {
+		return ErrInvalidCommand
+	}
+	switch request.Action {
+	case MariaDBHAObserve:
+		if request.NodeID != "" || request.FencingToken != 0 || request.Lease != nil { return ErrInvalidCommand }
+	case MariaDBHAFreeze, MariaDBHADemote:
+		if request.NodeID != localNode || request.FencingToken == 0 || request.Lease != nil { return ErrInvalidCommand }
+	case MariaDBHAPromote:
+		if request.NodeID != localNode || request.FencingToken == 0 || request.Lease == nil { return ErrInvalidCommand }
+		lease := *request.Lease
+		if lease.Validate(now) != nil || lease.State != ha.LeaseActive || lease.ResourceID != string(localResource) || lease.HolderNodeID != localNode || lease.FencingToken != request.FencingToken || lease.GroupID != request.Cluster.GroupID {
+			return ErrInvalidCommand
+		}
+	default:
+		return ErrInvalidCommand
+	}
+	return nil
+}
+
+func validateMariaDBHAResult(request MariaDBHARequest, result MariaDBHAResult) error {
+	switch request.Action {
+	case MariaDBHAObserve:
+		if result.Cluster == nil || result.Receipt != "" || result.Frontier != 0 || result.Permit != nil || result.Cluster.Validate() != nil || result.Cluster.ID != request.Cluster.ID || result.Cluster.GroupID != request.Cluster.GroupID {
+			return ErrInvalidReceipt
+		}
+	case MariaDBHAFreeze, MariaDBHADemote:
+		if result.Cluster != nil || result.Receipt == "" || result.Frontier != 0 || result.Permit != nil { return ErrInvalidReceipt }
+	case MariaDBHAPromote:
+		if result.Cluster != nil || result.Receipt == "" || result.Frontier == 0 || result.Permit != nil { return ErrInvalidReceipt }
+	case MariaDBHASignPermit:
+		if result.Cluster != nil || result.Receipt != "" || result.Frontier != 0 || result.Permit == nil { return ErrInvalidReceipt }
+		actual, expected := *result.Permit, *request.Permit
+		signature := actual.Signature
+		actual.Signature = ""
+		if !sameWritePermit(actual, expected) || signature == "" { return ErrInvalidReceipt }
+	default:
+		return ErrInvalidReceipt
+	}
+	return nil
+}
+
+func sameWritePermit(left, right ha.WritePermit) bool {
+	if left.ResourceID != right.ResourceID || left.NodeID != right.NodeID || left.LeaseID != right.LeaseID || left.FencingToken != right.FencingToken || left.AuthorityEpoch != right.AuthorityEpoch || !left.IssuedAt.Equal(right.IssuedAt) || !left.ExpiresAt.Equal(right.ExpiresAt) || left.Signature != right.Signature || len(left.WritePaths) != len(right.WritePaths) {
+		return false
+	}
+	for index := range left.WritePaths { if left.WritePaths[index] != right.WritePaths[index] { return false } }
+	return true
 }
 
 func validateBrokerEffectResponse(request BrokerRequest, response BrokerResponse) error {
@@ -162,6 +268,8 @@ type BrokerClient struct {
 }
 
 var _ MariaDBExecutor = (*BrokerClient)(nil)
+var _ ha.DatabaseReplicationExecutor = (*BrokerClient)(nil)
+var _ ha.WritePermitSigner = (*BrokerClient)(nil)
 
 func NewBrokerClient(transport DatabaseBrokerTransport) (*BrokerClient, error) {
 	if transport == nil { return nil, ErrInvalidCommand }
@@ -226,6 +334,60 @@ func (client *BrokerClient) ExecuteWorkspaceStatement(ctx context.Context, acces
 	if err = response.validate(request); err != nil { return WorkspaceQueryResult{}, err }
 	if response.FailureCode != "" { return WorkspaceQueryResult{}, brokerFailure(response.FailureCode) }
 	return *response.Query, nil
+}
+
+func (client *BrokerClient) ObserveCluster(ctx context.Context, cluster ha.DatabaseCluster) (ha.DatabaseCluster, error) {
+	result, err := client.mariaDBHA(ctx, MariaDBHARequest{Action:MariaDBHAObserve, Cluster:cluster})
+	if err != nil { return ha.DatabaseCluster{}, err }
+	return *result.Cluster, nil
+}
+
+func (client *BrokerClient) FreezeDatabaseWrites(ctx context.Context, cluster ha.DatabaseCluster, node ha.NodeID, fencingToken uint64) (string, error) {
+	result, err := client.mariaDBHA(ctx, MariaDBHARequest{Action:MariaDBHAFreeze, Cluster:cluster, NodeID:node, FencingToken:fencingToken})
+	if err != nil { return "", err }
+	return result.Receipt, nil
+}
+
+func (client *BrokerClient) PromoteDatabaseWriter(ctx context.Context, cluster ha.DatabaseCluster, node ha.NodeID, lease ha.WriterLease) (string, uint64, error) {
+	result, err := client.mariaDBHA(ctx, MariaDBHARequest{Action:MariaDBHAPromote, Cluster:cluster, NodeID:node, FencingToken:lease.FencingToken, Lease:&lease})
+	if err != nil { return "", 0, err }
+	return result.Receipt, result.Frontier, nil
+}
+
+func (client *BrokerClient) DemoteDatabaseWriter(ctx context.Context, cluster ha.DatabaseCluster, node ha.NodeID, fencingToken uint64) (string, error) {
+	result, err := client.mariaDBHA(ctx, MariaDBHARequest{Action:MariaDBHADemote, Cluster:cluster, NodeID:node, FencingToken:fencingToken})
+	if err != nil { return "", err }
+	return result.Receipt, nil
+}
+
+func (client *BrokerClient) SignWritePermit(ctx context.Context, permit ha.WritePermit) (ha.WritePermit, error) {
+	result, err := client.mariaDBHA(ctx, MariaDBHARequest{Action:MariaDBHASignPermit, Permit:&permit})
+	if err != nil { return ha.WritePermit{}, err }
+	return *result.Permit, nil
+}
+
+func (*BrokerClient) CreateDatabaseCheckpoint(context.Context, ha.ReplicationChannel, uint64) (ha.ReplicationCheckpoint, error) {
+	return ha.ReplicationCheckpoint{}, ha.ErrUnsupported
+}
+
+func (*BrokerClient) CatchUpReplica(context.Context, ha.ReplicationChannel, ha.ReplicationCheckpoint) (ha.ReplicationReceipt, error) {
+	return ha.ReplicationReceipt{}, ha.ErrUnsupported
+}
+
+func (*BrokerClient) RejoinDatabaseMember(context.Context, ha.DatabaseCluster, ha.NodeID, ha.ReplicationCheckpoint) (string, error) {
+	return "", ha.ErrUnsupported
+}
+
+func (client *BrokerClient) mariaDBHA(ctx context.Context, value MariaDBHARequest) (MariaDBHAResult, error) {
+	request, err := client.request(ctx, BrokerMariaDBHA)
+	if err != nil { return MariaDBHAResult{}, err }
+	request.MariaDBHA = &value
+	if err = request.validate(client.now().UTC()); err != nil { return MariaDBHAResult{}, err }
+	response, err := client.transport.RoundTrip(ctx, request)
+	if err != nil { return MariaDBHAResult{}, err }
+	if err = response.validate(request); err != nil { return MariaDBHAResult{}, err }
+	if response.FailureCode != "" { return MariaDBHAResult{}, brokerFailure(response.FailureCode) }
+	return *response.MariaDBHA, nil
 }
 
 func (client *BrokerClient) request(ctx context.Context, operation BrokerOperation) (BrokerRequest, error) {
@@ -336,8 +498,33 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		var result WorkspaceQueryResult
 		result, err = workspace.ExecuteWorkspaceStatement(ctx, request.Workspace.Access, request.Workspace.Statement)
 		if err == nil && validateWorkspaceResult(result, request.Workspace.Access) == nil { response.Query = &result }
+	case BrokerMariaDBHA:
+		result := MariaDBHAResult{}
+		executor, ok := server.Executor.(ha.DatabaseReplicationExecutor)
+		if !ok { err = ErrInvalidCommand; break }
+		switch request.MariaDBHA.Action {
+		case MariaDBHAObserve:
+			var cluster ha.DatabaseCluster
+			cluster, err = executor.ObserveCluster(ctx, request.MariaDBHA.Cluster)
+			if err == nil { result.Cluster = &cluster }
+		case MariaDBHAFreeze:
+			result.Receipt, err = executor.FreezeDatabaseWrites(ctx, request.MariaDBHA.Cluster, request.MariaDBHA.NodeID, request.MariaDBHA.FencingToken)
+		case MariaDBHAPromote:
+			result.Receipt, result.Frontier, err = executor.PromoteDatabaseWriter(ctx, request.MariaDBHA.Cluster, request.MariaDBHA.NodeID, *request.MariaDBHA.Lease)
+		case MariaDBHADemote:
+			result.Receipt, err = executor.DemoteDatabaseWriter(ctx, request.MariaDBHA.Cluster, request.MariaDBHA.NodeID, request.MariaDBHA.FencingToken)
+		case MariaDBHASignPermit:
+			signer, signerOK := server.Executor.(ha.WritePermitSigner)
+			if !signerOK { err = ErrInvalidCommand; break }
+			var permit ha.WritePermit
+			permit, err = signer.SignWritePermit(ctx, *request.MariaDBHA.Permit)
+			if err == nil { result.Permit = &permit }
+		default:
+			err = ErrInvalidCommand
+		}
+		if err == nil && validateMariaDBHAResult(*request.MariaDBHA, result) == nil { response.MariaDBHA = &result }
 	}
-	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil {
+	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil && response.MariaDBHA == nil {
 		response.FailureCode = classifyBrokerFailure(err)
 	}
 	_ = writeDatabaseBrokerFrameLimit(connection, response, databaseBrokerMaximumResponseFrame)
