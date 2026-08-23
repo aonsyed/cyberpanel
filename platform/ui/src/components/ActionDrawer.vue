@@ -20,8 +20,50 @@ const resultText=computed(()=>result.value===null?"":JSON.stringify(redact(resul
 
 watch([()=>props.action,()=>props.resource],()=>{initialize();if(!props.action.mutating)queueMicrotask(()=>void submit())},{immediate:true});
 function initialize():void{Object.keys(values).forEach((key)=>delete values[key]);props.action.fields?.forEach((field)=>values[field.key]=field.defaultValue??(field.type==="boolean"?false:""));confirmation.value=!props.action.confirmation;failure.value="";result.value=null;completed.value=false}
-function validate():boolean{Object.keys(errors).forEach((key)=>delete errors[key]);for(const field of props.action.fields||[]){const value=values[field.key];if(field.required&&(value===undefined||value===null||String(value).trim()==="")){errors[field.key]="This value is required.";continue}if(value&&field.type==="email"&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value))){errors[field.key]="Enter a valid email address."}if(value&&field.type==="hostname"&&!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(String(value))){errors[field.key]="Enter a valid DNS hostname."}if(value&&field.type==="cidr"&&!/^([0-9a-f:.]+)\/(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$/i.test(String(value))){errors[field.key]="Enter a canonical IPv4 or IPv6 prefix."}}return Object.keys(errors).length===0}
-async function submit():Promise<void>{if(!validate()||(props.action.mutating&&!confirmation.value))return;submitting.value=true;failure.value="";try{const resourceID=props.resource?String(props.resource.id||props.resource.resource_id||props.resource.site_id||""):undefined;const generation=props.action.mutating?(props.expectedGeneration??(Number(props.resource?.generation)||undefined)):undefined;if(props.action.operation==="container.exec.issue"){const token=oneTimeToken();const argumentsValue=String(values.arguments||"").split("\n").map((value)=>value.trim()).filter(Boolean);const issued=await api.invoke<Record<string,unknown>>(props.action.operation,{tenantId:props.tenantId,resourceId:resourceID,expectedGeneration:generation,payload:{command_id:values.command_id,arguments:argumentsValue,ttl_seconds:Number(values.ttl_seconds)||60,token}});const grantID=String(issued.result.id||"");if(!grantID)throw new Error("The node did not return a valid one-time exec grant.");const exchanged=await api.exchangeContainerExec<unknown>(grantID,token);result.value=exchanged.result}else{const response=await api.invoke<unknown>(props.action.operation,{tenantId:props.tenantId,resourceId:resourceID,expectedGeneration:generation,payload:{...values}});result.value=response.result}completed.value=true;if(props.action.mutating){sessionStore.notify({tone:"healthy",title:`${props.action.label} accepted`,body:"The durable operation was admitted and will continue if this browser disconnects."});emit("complete",result.value)}}catch(error){failure.value=error instanceof Error?error.message:"The operation could not be admitted."}finally{submitting.value=false}}
+function validate():boolean{
+  Object.keys(errors).forEach((key)=>delete errors[key]);
+  for(const field of props.action.fields||[]){
+    const value=values[field.key];
+    if(field.required&&(value===undefined||value===null||String(value).trim()==="")){errors[field.key]="This value is required.";continue}
+    if(value&&field.type==="email"&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value)))errors[field.key]="Enter a valid email address.";
+    if(value&&field.type==="hostname"&&!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(String(value)))errors[field.key]="Enter a valid DNS hostname.";
+    if(value&&field.type==="cidr"&&!/^([0-9a-f:.]+)\/(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$/i.test(String(value)))errors[field.key]="Enter a canonical IPv4 or IPv6 prefix.";
+    if(String(value??"").trim()&&field.type==="json")try{JSON.parse(String(value))}catch{errors[field.key]="Enter valid JSON."}
+  }
+  return Object.keys(errors).length===0;
+}
+function actionPayload():Record<string,unknown>{
+  const payload:Record<string,unknown>={};
+  for(const field of props.action.fields||[]){
+    const value=values[field.key];
+    if(field.type==="json"){
+      if(String(value??"").trim()!=="")payload[field.key]=JSON.parse(String(value));
+    }else payload[field.key]=value;
+  }
+  return payload;
+}
+async function submit():Promise<void>{
+  if(!validate()||(props.action.mutating&&!confirmation.value))return;
+  submitting.value=true;failure.value="";
+  try{
+    const resourceID=props.resource?String(props.resource.id||props.resource.resource_id||props.resource.site_id||""):undefined;
+    const explicitGeneration=Number(props.expectedGeneration||0);
+    const resourceGeneration=Number(props.action.generationField==="revision"?(props.resource?.revision||0):(props.resource?.generation||0));
+    const generation=props.action.mutating?(explicitGeneration||resourceGeneration||undefined):undefined;
+    if(props.action.operation==="container.exec.issue"){
+      const token=oneTimeToken();
+      const argumentsValue=String(values.arguments||"").split("\n").map((value)=>value.trim()).filter(Boolean);
+      const issued=await api.invoke<Record<string,unknown>>(props.action.operation,{tenantId:props.tenantId,resourceId:resourceID,expectedGeneration:generation,payload:{command_id:values.command_id,arguments:argumentsValue,ttl_seconds:Number(values.ttl_seconds)||60,token}});
+      const grantID=String(issued.result.id||"");
+      if(!grantID)throw new Error("The node did not return a valid one-time exec grant.");
+      const exchanged=await api.exchangeContainerExec<unknown>(grantID,token);result.value=exchanged.result;
+    }else{
+      const response=await api.invoke<unknown>(props.action.operation,{tenantId:props.tenantId,resourceId:resourceID,expectedGeneration:generation,payload:actionPayload()});result.value=response.result;
+    }
+    completed.value=true;
+    if(props.action.mutating){sessionStore.notify({tone:"healthy",title:`${props.action.label} accepted`,body:"The durable operation was admitted and will continue if this browser disconnects."});emit("complete",result.value)}
+  }catch(error){failure.value=error instanceof Error?error.message:"The operation could not be admitted."}finally{submitting.value=false}
+}
 function redact(value:unknown,key=""):unknown{if(/password|secret|token|credential|private[_-]?key|authorization/i.test(key))return"[REDACTED]";if(Array.isArray(value))return value.map((item)=>redact(item));if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value as Record<string,unknown>).map(([entryKey,entryValue])=>[entryKey,redact(entryValue,entryKey)]));return value}
 function keydown(event:KeyboardEvent):void{if(event.key==="Escape")emit("close")}
 onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>window.removeEventListener("keydown",keydown));
@@ -36,7 +78,7 @@ onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>wi
           <div v-for="field in action.fields||[]" :key="field.key" class="field">
             <label :for="`field-${field.key}`">{{field.label}}</label>
             <select v-if="field.type==='select'" :id="`field-${field.key}`" v-model="values[field.key]" class="select" :required="field.required"><option value="" disabled>Select…</option><option v-for="option in field.options" :key="option.value" :value="option.value">{{option.label}}</option></select>
-            <textarea v-else-if="field.type==='textarea'" :id="`field-${field.key}`" v-model="values[field.key]" class="textarea" :required="field.required"></textarea>
+            <textarea v-else-if="field.type==='textarea'||field.type==='json'" :id="`field-${field.key}`" v-model="values[field.key]" class="textarea" :class="{mono:field.type==='json'}" :required="field.required"></textarea>
             <label v-else-if="field.type==='boolean'" class="checkbox"><input :id="`field-${field.key}`" v-model="values[field.key]" type="checkbox"/><span>Enabled</span></label>
             <input v-else :id="`field-${field.key}`" v-model="values[field.key]" class="input" :class="{mono:field.type==='cidr'||field.type==='cron'}" :type="field.type==='password'?'password':field.type==='number'?'number':field.type==='email'?'email':'text'" :required="field.required"/>
             <p v-if="field.helper" class="field-help">{{field.helper}}</p><p v-if="errors[field.key]" class="field-error">{{errors[field.key]}}</p>

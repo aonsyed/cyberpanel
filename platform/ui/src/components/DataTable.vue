@@ -11,7 +11,7 @@ function format(raw:unknown,column:ColumnDefinition):string{if(raw===undefined||
 function bytes(value:number):string{if(!Number.isFinite(value))return"—";const units=["B","KiB","MiB","GiB","TiB","PiB"];let index=0;while(Math.abs(value)>=1024&&index<units.length-1){value/=1024;index++}return`${value>=10||index===0?value.toFixed(0):value.toFixed(1)} ${units[index]}`}
 function duration(value:number):string{if(!Number.isFinite(value))return"—";if(value<60)return`${Math.round(value)}s`;if(value<3600)return`${Math.round(value/60)}m`;if(value<86400)return`${Math.round(value/3600)}h`;return`${Math.round(value/86400)}d`}
 function statusClass(raw:unknown):string{return`status-${String(raw||"neutral").toLowerCase().replace(/[^a-z0-9_-]/g,"")}`}
-function actionsFor(row:Record<string,unknown>):ActionDefinition[]{return(props.actions||[]).filter((action)=>!action.resourceTypes?.length||action.resourceTypes.includes(String(row.type||"")))}
+function actionsFor(row:Record<string,unknown>):ActionDefinition[]{return(props.actions||[]).filter((action)=>(!action.resourceTypes?.length||action.resourceTypes.includes(String(row.type||"")))&&(!action.resourceStates?.length||action.resourceStates.includes(String(row.state||""))))}
 const hasActions=computed(()=>Boolean(props.actions?.length));
 </script>
 
