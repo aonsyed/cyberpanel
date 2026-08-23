@@ -1,0 +1,310 @@
+package management
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/catalog"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/composer"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/native"
+)
+
+// VerifiedActivator is the privileged desired-state boundary used by the
+// production web-engine runtime. The privileged side independently renders
+// the request and refuses a digest mismatch before staging native files.
+type VerifiedActivator interface {
+	ApplyVerified(context.Context, native.RenderRequest, string) (activation.Receipt, error)
+}
+
+// Runtime adapts management commands to the canonical catalog and immutable
+// activation pipeline. Package acquisition and licensing are deliberately not
+// implemented here: those require their own signed-catalog and secret brokers.
+type Runtime struct {
+	catalog    *catalog.SQLCatalog
+	activator  VerifiedActivator
+	renderers  map[webengine.Edition]native.Renderer
+	activation sync.Mutex
+	now        func() time.Time
+}
+
+func NewRuntime(catalogValue *catalog.SQLCatalog, activator VerifiedActivator, renderers ...native.Renderer) (*Runtime, error) {
+	if catalogValue == nil || nilRuntimeInterface(activator) {
+		return nil, ErrInvalid
+	}
+	byEdition := make(map[webengine.Edition]native.Renderer, len(renderers))
+	for _, renderer := range renderers {
+		if nilRuntimeInterface(renderer) || renderer.Edition() != webengine.EditionOpenLiteSpeed && renderer.Edition() != webengine.EditionLiteSpeedEnterprise || byEdition[renderer.Edition()] != nil {
+			return nil, ErrInvalid
+		}
+		byEdition[renderer.Edition()] = renderer
+	}
+	if len(byEdition) != 2 {
+		return nil, ErrInvalid
+	}
+	return &Runtime{catalog: catalogValue, activator: activator, renderers: byEdition, now: time.Now}, nil
+}
+
+func (*Runtime) ManagementCapabilities() Capabilities {
+	return Capabilities{Inspect: true, Tune: true}
+}
+
+func DefaultGlobalTuning() GlobalTuning {
+	return GlobalTuning{
+		WorkerProcesses: 1, MaxConnections: 10_000, MaxTLSConnections: 10_000,
+		ConnectionTimeout: 300 * time.Second, KeepAliveTimeout: 5 * time.Second, KeepAliveRequests: 1_000,
+		MemoryCacheBytes: 64 << 20, Compression: true, CompressionLevel: 6, Brotli: false, Generation: 1,
+	}
+}
+
+func DesiredTuning(value GlobalTuning) (webengine.WebEngineTuning, error) {
+	return canonicalTuning(value)
+}
+
+func ManagementTuning(value webengine.WebEngineTuning) GlobalTuning {
+	return GlobalTuning{
+		WorkerProcesses: value.WorkerProcesses, MaxConnections: value.MaxConnections, MaxTLSConnections: value.MaxTLSConnections,
+		ConnectionTimeout: time.Duration(value.ConnectionTimeoutSeconds) * time.Second,
+		KeepAliveTimeout: time.Duration(value.KeepAliveTimeoutSeconds) * time.Second,
+		KeepAliveRequests: value.KeepAliveRequests, MemoryCacheBytes: value.MemoryCacheBytes,
+		Compression: value.Compression, CompressionLevel: value.CompressionLevel, Brotli: value.Brotli, Generation: value.Generation,
+	}
+}
+
+func canonicalTuning(value GlobalTuning) (webengine.WebEngineTuning, error) {
+	if value.Brotli {
+		return webengine.WebEngineTuning{}, ErrUnsupported
+	}
+	if value.Generation == 0 || value.WorkerProcesses == 0 || value.WorkerProcesses > 1024 ||
+		value.MaxConnections == 0 || value.MaxConnections > 10_000_000 || value.MaxTLSConnections == 0 || value.MaxTLSConnections > value.MaxConnections ||
+		value.ConnectionTimeout < time.Second || value.ConnectionTimeout > time.Hour || value.ConnectionTimeout%time.Second != 0 ||
+		value.KeepAliveTimeout < time.Second || value.KeepAliveTimeout > time.Hour || value.KeepAliveTimeout%time.Second != 0 ||
+		value.KeepAliveRequests == 0 || value.KeepAliveRequests > 100_000 ||
+		value.MemoryCacheBytes < 1<<20 || value.MemoryCacheBytes > 1<<40 || value.MemoryCacheBytes%(1<<20) != 0 ||
+		value.Compression && (value.CompressionLevel == 0 || value.CompressionLevel > 9) ||
+		!value.Compression && value.CompressionLevel != 0 {
+		return webengine.WebEngineTuning{}, ErrInvalid
+	}
+	return webengine.WebEngineTuning{
+		WorkerProcesses: value.WorkerProcesses, MaxConnections: value.MaxConnections, MaxTLSConnections: value.MaxTLSConnections,
+		ConnectionTimeoutSeconds: uint32(value.ConnectionTimeout / time.Second),
+		KeepAliveTimeoutSeconds: uint32(value.KeepAliveTimeout / time.Second), KeepAliveRequests: value.KeepAliveRequests,
+		MemoryCacheBytes: value.MemoryCacheBytes, Compression: value.Compression, CompressionLevel: value.CompressionLevel,
+		Brotli: value.Brotli, Generation: value.Generation,
+	}, nil
+}
+
+func (runtime *Runtime) Resolve(context.Context, ArtifactRequest) (ArtifactPlan, error) {
+	return ArtifactPlan{}, ErrUnsupported
+}
+
+func (runtime *Runtime) BuildTarget(ctx context.Context, edition webengine.Edition, snapshotGeneration uint64) (native.ConfigGeneration, error) {
+	if runtime == nil || runtime.catalog == nil || nilRuntimeInterface(runtime.activator) {
+		return native.ConfigGeneration{}, ErrInvalid
+	}
+	plan, err := runtime.catalog.PlanForEdition(ctx, edition, snapshotGeneration)
+	if err != nil {
+		return native.ConfigGeneration{}, err
+	}
+	composed, err := composer.Compose(plan)
+	if err != nil {
+		return native.ConfigGeneration{}, err
+	}
+	renderer := runtime.renderers[edition]
+	if renderer == nil {
+		return native.ConfigGeneration{}, ErrUnsupported
+	}
+	return renderer.Render(ctx, native.RenderRequest{Desired: composed.Desired, Snapshot: composed.Snapshot})
+}
+
+func (runtime *Runtime) Inspect(ctx context.Context, edition webengine.Edition) (Installation, error) {
+	if runtime == nil || runtime.catalog == nil {
+		return Installation{}, ErrInvalid
+	}
+	state, err := runtime.catalog.NodeState(ctx)
+	if err != nil {
+		return Installation{}, err
+	}
+	if edition != state.Configuration.Engine.Edition {
+		return Installation{}, ErrNotFound
+	}
+	return Installation{
+		ID: "node-webengine", Edition: edition, Channel: ChannelPinned, State: StateActive,
+		Generation: state.Configuration.Engine.Tuning.Generation, ActiveConfigDigest: state.AppliedDigest,
+		InstalledAt: state.UpdatedAt, UpdatedAt: state.UpdatedAt,
+	}, nil
+}
+
+func (runtime *Runtime) ApplyGlobalTuning(ctx context.Context, request EffectRequest, tuning GlobalTuning) (EffectReceipt, error) {
+	receipt := EffectReceipt{EffectID: request.EffectID, PlanDigest: request.PlanDigest, Generation: tuning.Generation, Fence: request.Fence}
+	if runtime == nil || runtime.catalog == nil || nilRuntimeInterface(runtime.activator) || ctx == nil ||
+		!validEffectToken(request.EffectID) || request.ExpectedGeneration == 0 || request.Fence != request.ExpectedGeneration+1 ||
+		!validSHA256(request.PlanDigest) || request.PlanDigest != digestJSON(tuning) || !validSHA256(request.CommitAuthorizationDigest) ||
+		tuning.Generation != request.ExpectedGeneration+1 {
+		return receipt, ErrInvalid
+	}
+	target, err := canonicalTuning(tuning)
+	if err != nil {
+		return receipt, err
+	}
+	runtime.activation.Lock()
+	defer runtime.activation.Unlock()
+	prepared, lookupErr := runtime.catalog.NodeConfigurationChange(ctx, request.EffectID)
+	if lookupErr == nil {
+		if prepared.Configuration.Engine.Tuning != target || prepared.Configuration.Engine.Edition != prepared.Plan.Engine.Edition {
+			return receipt, ErrConflict
+		}
+	} else if !errors.Is(lookupErr, catalog.ErrChangeMissing) {
+		return receipt, mapCatalogError(lookupErr)
+	} else {
+		state, stateErr := runtime.catalog.NodeState(ctx)
+		if stateErr != nil {
+			return receipt, stateErr
+		}
+		if state.Configuration.Engine.Tuning.Generation != request.ExpectedGeneration {
+			return receipt, ErrConflict
+		}
+		if state.Configuration.Engine.Edition == webengine.EditionLiteSpeedEnterprise &&
+			target.WorkerProcesses != state.Configuration.Engine.Tuning.WorkerProcesses {
+			return receipt, ErrLicense
+		}
+		next := state.Configuration
+		next.Revision++
+		next.Engine.Tuning = target
+		prepared, err = runtime.catalog.PrepareNodeConfiguration(ctx, request.EffectID, next, state.Configuration.Revision)
+		if err != nil {
+			return receipt, mapCatalogError(err)
+		}
+	}
+	if prepared.Finalized {
+		if !validSHA256(prepared.ActivationDigest) {
+			return receipt, ErrAmbiguous
+		}
+		evidence := prepared.ActivationDigest
+		if current, currentErr := runtime.catalog.NodeState(ctx); currentErr == nil && current.Configuration.Engine.Tuning == target && validSHA256(current.AppliedDigest) {
+			evidence = current.AppliedDigest
+		}
+		receipt.Outcome, receipt.EvidenceDigest, receipt.ObservedAt = "confirmed", evidence, runtime.now().UTC()
+		return receipt, nil
+	}
+	composed, err := composer.Compose(prepared.Plan)
+	if err != nil {
+		_ = runtime.catalog.RejectNodeConfiguration(ctx, prepared)
+		return receipt, err
+	}
+	renderer := runtime.renderers[composed.Desired.Engine.Edition]
+	if renderer == nil {
+		_ = runtime.catalog.RejectNodeConfiguration(ctx, prepared)
+		return receipt, ErrUnsupported
+	}
+	renderRequest := native.RenderRequest{Desired: composed.Desired, Snapshot: composed.Snapshot}
+	generation, err := renderer.Render(ctx, renderRequest)
+	if err != nil {
+		_ = runtime.catalog.RejectNodeConfiguration(ctx, prepared)
+		return receipt, err
+	}
+	activated, activationErr := runtime.activator.ApplyVerified(ctx, renderRequest, generation.ContentDigest)
+	if activated.Status == activation.RolledBack {
+		_ = runtime.catalog.RejectNodeConfiguration(ctx, prepared)
+		return receipt, errors.Join(ErrAmbiguous, activationErr)
+	}
+	if activationErr != nil || activated.Status != activation.Applied || !activated.Confirmed || activated.Digest != generation.ContentDigest {
+		return receipt, errors.Join(ErrAmbiguous, activationErr)
+	}
+	if err = runtime.catalog.FinalizeNodeConfiguration(ctx, prepared, activated.Digest); err != nil {
+		return receipt, errors.Join(ErrAmbiguous, err)
+	}
+	receipt.Outcome, receipt.EvidenceDigest, receipt.ObservedAt = "confirmed", activated.Digest, runtime.now().UTC()
+	return receipt, nil
+}
+
+func (*Runtime) Install(context.Context, EffectRequest, ArtifactPlan) (EffectReceipt, error) {
+	return EffectReceipt{}, ErrUnsupported
+}
+func (*Runtime) ApplyLicense(context.Context, EffectRequest, LicenseRequest) (LicenseStatus, error) {
+	return LicenseStatus{}, ErrUnsupported
+}
+func (*Runtime) RefreshLicense(context.Context, EffectRequest) (LicenseStatus, error) {
+	return LicenseStatus{}, ErrUnsupported
+}
+func (*Runtime) StageGeneration(context.Context, EffectRequest, native.ConfigGeneration) (EffectReceipt, error) {
+	return EffectReceipt{}, ErrUnsupported
+}
+func (*Runtime) ValidateGeneration(context.Context, EffectRequest, native.ConfigGeneration) (ValidationReceipt, error) {
+	return ValidationReceipt{}, ErrUnsupported
+}
+func (*Runtime) ShadowProbe(context.Context, EffectRequest, native.ConfigGeneration) (ProbeReceipt, error) {
+	return ProbeReceipt{}, ErrUnsupported
+}
+func (*Runtime) SwitchService(context.Context, SwitchRequest) (SwitchReceipt, error) {
+	return SwitchReceipt{}, ErrUnsupported
+}
+func (*Runtime) ConfirmService(context.Context, SwitchReceipt) (ProbeReceipt, error) {
+	return ProbeReceipt{}, ErrUnsupported
+}
+func (*Runtime) RestoreService(context.Context, SwitchReceipt) (ProbeReceipt, error) {
+	return ProbeReceipt{}, ErrUnsupported
+}
+func (*Runtime) Remove(context.Context, EffectRequest, webengine.Edition) (EffectReceipt, error) {
+	return EffectReceipt{}, ErrUnsupported
+}
+func (*Runtime) InstallPHP(context.Context, EffectRequest, PHPArtifactPlan) (EffectReceipt, error) {
+	return EffectReceipt{}, ErrUnsupported
+}
+func (*Runtime) ApplyPHPProfile(context.Context, EffectRequest, PHPProfile) (EffectReceipt, error) {
+	return EffectReceipt{}, ErrUnsupported
+}
+func (*Runtime) RestartPHPPool(context.Context, EffectRequest, string) (EffectReceipt, error) {
+	return EffectReceipt{}, ErrUnsupported
+}
+
+func validEffectToken(value string) bool {
+	if value == "" || len(value) > 160 {
+		return false
+	}
+	for _, character := range value {
+		if character != '-' && character != '_' && character != '.' &&
+			(character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validSHA256(value string) bool {
+	return len(value) == 64 && strings.Trim(value, "0123456789abcdef") == ""
+}
+
+func nilRuntimeInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
+}
+
+func mapCatalogError(err error) error {
+	switch {
+	case errors.Is(err, catalog.ErrChangeBusy), errors.Is(err, catalog.ErrChangeClosed):
+		return errors.Join(ErrConflict, err)
+	case errors.Is(err, catalog.ErrChangeMissing):
+		return errors.Join(ErrNotFound, err)
+	default:
+		return err
+	}
+}
+
+var _ ArtifactCatalog = (*Runtime)(nil)
+var _ TargetRenderer = (*Runtime)(nil)
+var _ Executor = (*Runtime)(nil)
+var _ CapabilityProvider = (*Runtime)(nil)

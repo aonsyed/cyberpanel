@@ -593,7 +593,10 @@ type WebEngineProjection struct {
 	Edition      string    `json:"edition"`
 	Version      string    `json:"version"`
 	Channel      string    `json:"channel"`
+	License      string    `json:"license"`
 	LicenseState string    `json:"license_state"`
+	Workers      uint32    `json:"workers"`
+	Connections  uint32    `json:"connections"`
 	Health       string    `json:"health"`
 	Generation   uint64    `json:"generation"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -805,6 +808,9 @@ type WebEngineEdgeService interface {
 	Upgrade(context.Context, EdgeCall, WebEngineUpgradePayload) (EdgeMutation[WebEngineProjection], error)
 	CreatePHPProfile(context.Context, EdgeCall, WebEnginePHPProfilePayload) (EdgeMutation[WebEnginePHPProfileProjection], error)
 }
+
+type WebEngineEdgeCapabilities struct{List,License,Tuning,Upgrade,PHPProfile bool}
+type WebEngineEdgeCapabilityProvider interface{WebEngineCapabilities() WebEngineEdgeCapabilities}
 
 type IntegrationEdgeService interface {
 	ListBindings(context.Context, EdgeCall, EdgePagePayload) (EdgePage[IntegrationProjection], error)
@@ -1235,13 +1241,13 @@ func validateWebEngineLicense(value any) error {
 
 func validateWebEngineTuning(value any) error {
 	payload := value.(*WebEngineTuningPayload)
-	if payload.WorkerProcesses > 1024 || payload.MaxConnections > 10_000_000 || payload.KeepAliveSeconds > 3600 { return invalid("web engine tuning") }
+	if payload.WorkerProcesses == 0 && payload.MaxConnections == 0 && payload.KeepAliveSeconds == 0 || payload.WorkerProcesses > 1024 || payload.MaxConnections > 10_000_000 || payload.KeepAliveSeconds > 3600 { return invalid("web engine tuning") }
 	return nil
 }
 
 func validateWebEngineUpgrade(value any) error {
 	payload := value.(*WebEngineUpgradePayload)
-	if !validVersion(payload.Version) || payload.Channel != "" && payload.Channel != "stable" && payload.Channel != "candidate" { return invalid("web engine upgrade") }
+	if !validVersion(payload.Version) || payload.Channel != "" && payload.Channel != "stable" && payload.Channel != "pinned" { return invalid("web engine upgrade") }
 	return nil
 }
 
@@ -1862,27 +1868,28 @@ func bindConsoleEdgeContractsFour(registry *Registry, services DomainServices) e
 		}); err != nil { return err }
 	}
 	if services.WebEngineEdge != nil {
-		if err := registry.Bind("webengine.installation.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+		capabilities:=WebEngineEdgeCapabilities{List:true,License:true,Tuning:true,Upgrade:true,PHPProfile:true};if provider,ok:=services.WebEngineEdge.(WebEngineEdgeCapabilityProvider);ok{capabilities=provider.WebEngineCapabilities()}
+		if capabilities.List { if err := registry.Bind("webengine.installation.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.WebEngineEdge.ListInstallations(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result}, nil
-		}); err != nil { return err }
-		if err := registry.Bind("webengine.license.configure", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+		}); err != nil { return err } }
+		if capabilities.License { if err := registry.Bind("webengine.license.configure", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			payload := value.(*WebEngineLicensePayload); secret := []byte(payload.LicenseSecret); payload.LicenseSecret = ""; defer clearSecret(secret)
 			result, err := services.WebEngineEdge.ConfigureLicense(ctx, edgeCall(inv), *payload, secret); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return edgeOperationResult(http.StatusAccepted, result), nil
-		}); err != nil { return err }
-		if err := registry.Bind("webengine.tuning.configure", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+		}); err != nil { return err } }
+		if capabilities.Tuning { if err := registry.Bind("webengine.tuning.configure", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.WebEngineEdge.ConfigureTuning(ctx, edgeCall(inv), *value.(*WebEngineTuningPayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return edgeOperationResult(http.StatusAccepted, result), nil
-		}); err != nil { return err }
-		if err := registry.Bind("webengine.upgrade", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+		}); err != nil { return err } }
+		if capabilities.Upgrade { if err := registry.Bind("webengine.upgrade", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.WebEngineEdge.Upgrade(ctx, edgeCall(inv), *value.(*WebEngineUpgradePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return edgeOperationResult(http.StatusAccepted, result), nil
-		}); err != nil { return err }
-		if err := registry.Bind("webengine.php_profile.create", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+		}); err != nil { return err } }
+		if capabilities.PHPProfile { if err := registry.Bind("webengine.php_profile.create", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.WebEngineEdge.CreatePHPProfile(ctx, edgeCall(inv), *value.(*WebEnginePHPProfilePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return edgeOperationResult(http.StatusCreated, result), nil
-		}); err != nil { return err }
+		}); err != nil { return err } }
 	}
 	if services.IntegrationEdge != nil {
 		if err := registry.Bind("integration.binding.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {

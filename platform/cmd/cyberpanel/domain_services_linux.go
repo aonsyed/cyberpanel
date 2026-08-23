@@ -33,6 +33,7 @@ import (
 	webcontroller "github.com/aonsyed/cyberpanel/platform/internal/webengine/controller"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/containerproxy"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/enterprise"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/management"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/ols"
 )
 
@@ -115,11 +116,14 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("load installed web-engine edition: %w", err)
 	}
+	defaultWebTuning:=management.DefaultGlobalTuning()
+	desiredWebTuning,err:=management.DesiredTuning(defaultWebTuning);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("construct default web-engine tuning: %w",err)}
 	configuration := webcatalog.NodeConfiguration{
-		Revision: 2,
+		Revision: 3,
 		Engine: composer.NodeEngine{
 			Edition: webengine.Edition(installedEdition),
 			PreviewProxyPort: 8090,
+			Tuning: desiredWebTuning,
 			Listeners: []composer.ListenerInput{{
 				Ref:       webengine.ResourceRef("listener/http"),
 				Addresses: []string{"0.0.0.0", "::"},
@@ -149,6 +153,14 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("connect web-engine activation broker: %w", err)
 	}
+	webManagementRuntime,err:=management.NewRuntime(catalog,activationClient,ols.New(),enterprise.New());if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize web-engine management runtime: %w",err)}
+	webManagement,err:=management.New(repositories.WebEngine,webManagementRuntime,webManagementRuntime,webManagementRuntime);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize web-engine management service: %w",err)}
+	nodeState,err:=catalog.NodeState(ctx);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("inspect web-engine node state: %w",err)}
+	observedTuning:=management.ManagementTuning(nodeState.Configuration.Engine.Tuning)
+	if _,err=repositories.WebEngine.EnsureGlobalTuning(ctx,observedTuning);err!=nil{return apiserver.DomainServices{},fmt.Errorf("reconcile web-engine tuning projection: %w",err)}
+	observedInstallation,err:=webManagementRuntime.Inspect(ctx,webengine.Edition(installedEdition));if err!=nil{return apiserver.DomainServices{},fmt.Errorf("inspect web-engine installation: %w",err)}
+	if _,err=repositories.WebEngine.EnsureInstallation(ctx,observedInstallation);err!=nil{return apiserver.DomainServices{},fmt.Errorf("reconcile web-engine installation projection: %w",err)}
+	webEngineConsoleEdge,err:=newWebEngineEdge(webManagement,webengine.Edition(installedEdition));if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize web-engine console edge: %w",err)}
 	webAccessCredentials,err:=accesspolicy.NewLocalCredentialSource();if err!=nil{return apiserver.DomainServices{},fmt.Errorf("connect web access credential broker: %w",err)}
 	webAccessPolicies,err:=accesspolicy.New(catalog,activationClient,webAccessCredentials,ols.New(),enterprise.New());if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize web access policy authority: %w",err)}
 	controller, err := webcontroller.New(catalog, activationClient, provisioner, ols.New(), enterprise.New())
@@ -270,6 +282,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		HAEdge:            fleetHAConsoleEdge,
 		MigrationEdge:     migrationConsoleEdge,
 		IdentityEdge:      identityConsoleEdge,
+		WebEngine:        webManagement,
+		WebEngineEdge:    webEngineConsoleEdge,
 		IntegrationEdge:   integrationConsoleEdge,
 		Marketing:         &repositories.Marketing,
 		Campaigns:         campaignCoordinator,

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/composer"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/controller"
 )
@@ -33,6 +34,19 @@ CREATE TABLE IF NOT EXISTS webengine_node_config (
  applied_digest TEXT NOT NULL,
  updated_at TIMESTAMP NOT NULL
 );
+CREATE TABLE IF NOT EXISTS webengine_node_changes (
+ change_token TEXT PRIMARY KEY,
+ effect_id TEXT NOT NULL UNIQUE,
+ status TEXT NOT NULL,
+ expected_revision BIGINT NOT NULL,
+ plan_json TEXT NOT NULL,
+ proposed_config_json TEXT NOT NULL,
+ activation_digest TEXT NOT NULL,
+ created_at TIMESTAMP NOT NULL,
+ completed_at TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS webengine_one_pending_node_change
+ ON webengine_node_changes(status) WHERE status = 'pending';
 CREATE TABLE IF NOT EXISTS webengine_site_inputs (
  tenant_id TEXT NOT NULL,
  site_id TEXT NOT NULL,
@@ -177,25 +191,103 @@ func (catalog *SQLCatalog) Configure(ctx context.Context, configuration NodeConf
 // closed, code-defined configuration migrations. It never merges caller text
 // or rewrites operator-owned listeners heuristically.
 func (catalog *SQLCatalog) EnsureConfigured(ctx context.Context, configuration NodeConfiguration) error {
-	if catalog==nil||catalog.db==nil||configuration.Revision==0||len(configuration.Engine.Listeners)==0{return errors.New("invalid initial node configuration")};encoded,err:=json.Marshal(configuration);if err!=nil{return err};tx,err:=catalog.db.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return err};defer tx.Rollback();var revision uint64;var stored []byte;err=tx.QueryRowContext(ctx,`SELECT revision,config_json FROM webengine_node_config WHERE singleton_id=1`).Scan(&revision,&stored);if err==nil{var current NodeConfiguration;if json.Unmarshal(stored,&current)!=nil||current.Revision!=revision{return errors.New("invalid stored node configuration")};currentEncoded,_:=json.Marshal(current);if revision==configuration.Revision&&string(currentEncoded)==string(encoded){return tx.Commit()};if !closedNodeConfigurationUpgrade(current,configuration){return errors.New("initial node configuration conflicts with stored state")};result,updateErr:=tx.ExecContext(ctx,`UPDATE webengine_node_config SET revision=?,config_json=?,updated_at=? WHERE singleton_id=1 AND revision=?`,configuration.Revision,encoded,catalog.clock().UTC(),revision);if updateErr!=nil{return updateErr};changed,rowsErr:=result.RowsAffected();if rowsErr!=nil||changed!=1{if rowsErr!=nil{return rowsErr};return errors.New("stale node configuration revision")};return tx.Commit()};if !errors.Is(err,sql.ErrNoRows){return err};_,err=tx.ExecContext(ctx,`INSERT INTO webengine_node_config(singleton_id,revision,snapshot_generation,config_json,applied_digest,updated_at) VALUES(1,?,0,?,'',?)`,configuration.Revision,encoded,catalog.clock().UTC());if err!=nil{return err};return tx.Commit()
+	if catalog == nil || catalog.db == nil || configuration.Revision == 0 || len(configuration.Engine.Listeners) == 0 {
+		return errors.New("invalid initial node configuration")
+	}
+	encoded, err := json.Marshal(configuration)
+	if err != nil {
+		return err
+	}
+	tx, err := catalog.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var revision uint64
+	var stored []byte
+	err = tx.QueryRowContext(ctx, `SELECT revision,config_json FROM webengine_node_config WHERE singleton_id=1`).Scan(&revision, &stored)
+	if err == nil {
+		var current NodeConfiguration
+		if json.Unmarshal(stored, &current) != nil || current.Revision != revision {
+			return errors.New("invalid stored node configuration")
+		}
+		currentEncoded, _ := json.Marshal(current)
+		if revision == configuration.Revision && string(currentEncoded) == string(encoded) || compatibleRuntimeNodeConfiguration(current, configuration) {
+			return tx.Commit()
+		}
+		if !closedNodeConfigurationUpgrade(current, configuration) {
+			return errors.New("initial node configuration conflicts with stored state")
+		}
+		result, updateErr := tx.ExecContext(ctx, `UPDATE webengine_node_config SET revision=?,config_json=?,updated_at=? WHERE singleton_id=1 AND revision=?`,
+			configuration.Revision, encoded, catalog.clock().UTC(), revision)
+		if updateErr != nil {
+			return updateErr
+		}
+		changed, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if changed != 1 {
+			return errors.New("stale node configuration revision")
+		}
+		return tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO webengine_node_config(singleton_id,revision,snapshot_generation,config_json,applied_digest,updated_at) VALUES(1,?,0,?,'',?)`,
+		configuration.Revision, encoded, catalog.clock().UTC())
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func closedNodeConfigurationUpgrade(current, target NodeConfiguration) bool {
-	if current.Revision != 1 || target.Revision != 2 || current.Engine.Edition != target.Engine.Edition { return false }
-	upgraded := current
-	upgraded.Revision = 2
-	upgraded.Engine.PreviewProxyPort = target.Engine.PreviewProxyPort
-	if upgraded.DefaultTLS == nil {
-		if target.DefaultTLS == nil || target.DefaultTLS.PolicyRef != "tls/preview-default" || target.DefaultTLS.MaterialKey != "preview-default" || target.DefaultTLS.Generation != 1 || target.DefaultTLS.OwnerScope != (service.CommandScope{}) { return false }
-		upgraded.DefaultTLS = target.DefaultTLS
+	if current.Engine.Edition != target.Engine.Edition || current.Revision == 0 || current.Revision >= target.Revision {
+		return false
 	}
-	for _, desired := range target.Engine.Listeners {
-		found := false
-		for _, existing := range upgraded.Engine.Listeners { if existing.Ref == desired.Ref { found = true; break } }
-		if !found { upgraded.Engine.Listeners = append(upgraded.Engine.Listeners, desired) }
+	upgraded := current
+	if upgraded.Revision == 1 {
+		upgraded.Revision = 2
+		upgraded.Engine.PreviewProxyPort = target.Engine.PreviewProxyPort
+		if upgraded.DefaultTLS == nil {
+			if target.DefaultTLS == nil || target.DefaultTLS.PolicyRef != "tls/preview-default" || target.DefaultTLS.MaterialKey != "preview-default" || target.DefaultTLS.Generation != 1 || target.DefaultTLS.OwnerScope != (service.CommandScope{}) {
+				return false
+			}
+			upgraded.DefaultTLS = target.DefaultTLS
+		}
+		for _, desired := range target.Engine.Listeners {
+			found := false
+			for _, existing := range upgraded.Engine.Listeners {
+				if existing.Ref == desired.Ref {
+					found = true
+					break
+				}
+			}
+			if !found {
+				upgraded.Engine.Listeners = append(upgraded.Engine.Listeners, desired)
+			}
+		}
+	}
+	if upgraded.Revision == 2 && target.Revision == 3 && upgraded.Engine.Tuning == (webengine.WebEngineTuning{}) {
+		upgraded.Engine.Tuning = target.Engine.Tuning
+		upgraded.Revision = 3
 	}
 	left, leftErr := json.Marshal(upgraded)
 	right, rightErr := json.Marshal(target)
+	return leftErr == nil && rightErr == nil && string(left) == string(right)
+}
+
+func compatibleRuntimeNodeConfiguration(current, baseline NodeConfiguration) bool {
+	if current.Revision < baseline.Revision || current.Engine.Tuning.Generation == 0 || current.Engine.Edition != baseline.Engine.Edition {
+		return false
+	}
+	normalized := current
+	normalized.Revision = baseline.Revision
+	normalized.Engine.Tuning = baseline.Engine.Tuning
+	left, leftErr := json.Marshal(normalized)
+	right, rightErr := json.Marshal(baseline)
 	return leftErr == nil && rightErr == nil && string(left) == string(right)
 }
 
@@ -227,7 +319,7 @@ func (catalog *SQLCatalog) Prepare(ctx context.Context, request service.SiteEffe
 		return controller.PreparedPlan{Token: existing.token, Plan: existing.plan}, tx.Commit()
 	}
 	var pendingEffect string
-	err = tx.QueryRowContext(ctx, `SELECT effect_id FROM webengine_changes WHERE status = 'pending' UNION ALL SELECT effect_id FROM webengine_proxy_changes WHERE status = 'pending' UNION ALL SELECT effect_id FROM webengine_access_changes WHERE status = 'pending' LIMIT 1`).Scan(&pendingEffect)
+	err = tx.QueryRowContext(ctx, `SELECT effect_id FROM webengine_changes WHERE status = 'pending' UNION ALL SELECT effect_id FROM webengine_proxy_changes WHERE status = 'pending' UNION ALL SELECT effect_id FROM webengine_access_changes WHERE status = 'pending' UNION ALL SELECT effect_id FROM webengine_node_changes WHERE status = 'pending' LIMIT 1`).Scan(&pendingEffect)
 	if err == nil {
 		return controller.PreparedPlan{}, fmt.Errorf("%w: %s", ErrChangeBusy, pendingEffect)
 	}

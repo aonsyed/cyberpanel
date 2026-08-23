@@ -111,14 +111,42 @@ func newRenderIndex(request native.RenderRequest) renderIndex {
 	return index
 }
 
+func nativeBool(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+func nativeMemorySize(bytes uint64) string {
+	return strconv.FormatUint(bytes/(1<<20), 10) + "M"
+}
+
 func renderServer(request native.RenderRequest, index renderIndex, bindings []webengine.WebBindingSpec) []byte {
 	var output strings.Builder
+	tuning := request.Desired.Engine.Tuning
 	output.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
 	output.WriteString("<httpServerConfig>\n")
 	writeElement(&output, 1, "serverName", "cyberpanel-managed")
 	writeElement(&output, 1, "loadApacheConf", "0")
 	writeElement(&output, 1, "autoReloadApacheConf", "0")
 	writeElement(&output, 1, "showVersionNumber", "0")
+	if tuning.Generation != 0 {
+		writeElement(&output, 1, "httpdWorkers", strconv.FormatUint(uint64(tuning.WorkerProcesses), 10))
+		output.WriteString("  <tuning>\n")
+		writeElement(&output, 2, "maxConnections", strconv.FormatUint(uint64(tuning.MaxConnections), 10))
+		writeElement(&output, 2, "maxSSLConnections", strconv.FormatUint(uint64(tuning.MaxTLSConnections), 10))
+		writeElement(&output, 2, "connTimeout", strconv.FormatUint(uint64(tuning.ConnectionTimeoutSeconds), 10))
+		writeElement(&output, 2, "maxKeepAliveReq", strconv.FormatUint(uint64(tuning.KeepAliveRequests), 10))
+		writeElement(&output, 2, "keepAliveTimeout", strconv.FormatUint(uint64(tuning.KeepAliveTimeoutSeconds), 10))
+		writeElement(&output, 2, "totalInMemCacheSize", nativeMemorySize(tuning.MemoryCacheBytes))
+		writeElement(&output, 2, "enableGzipCompress", nativeBool(tuning.Compression))
+		writeElement(&output, 2, "enableDynGzipCompress", nativeBool(tuning.Compression))
+		if tuning.Compression {
+			writeElement(&output, 2, "gzipCompressLevel", strconv.FormatUint(uint64(tuning.CompressionLevel), 10))
+		}
+		output.WriteString("  </tuning>\n")
+	}
 	output.WriteString("  <moduleList>\n    <module>\n")
 	writeElement(&output, 3, "name", "mod_security")
 	writeElement(&output, 3, "internal", "1")
@@ -211,7 +239,11 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 	if len(hostnames) > 1 {
 		writeElement(&output, 1, "vhAliases", strings.Join(hostnames[1:], ", "))
 	}
-	writeElement(&output, 1, "enableGzip", "1")
+	compression := true
+	if request.Desired.Engine.Tuning.Generation != 0 {
+		compression = request.Desired.Engine.Tuning.Compression
+	}
+	writeElement(&output, 1, "enableGzip", nativeBool(compression))
 	if binding.Relationship == webengine.BindingPreview {
 		output.WriteString("  <rewrite>\n")
 		writeElement(&output,2,"enable","1")

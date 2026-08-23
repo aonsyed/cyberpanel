@@ -87,7 +87,7 @@ func (catalog *SQLCatalog) PrepareAccessPolicy(ctx context.Context, effectID str
 		return PreparedAccessPolicy{}, err
 	}
 	var pending string
-	if scanErr := tx.QueryRowContext(ctx, `SELECT effect_id FROM webengine_changes WHERE status='pending' UNION ALL SELECT effect_id FROM webengine_proxy_changes WHERE status='pending' UNION ALL SELECT effect_id FROM webengine_access_changes WHERE status='pending' LIMIT 1`).Scan(&pending); scanErr == nil {
+	if scanErr := tx.QueryRowContext(ctx, `SELECT effect_id FROM webengine_changes WHERE status='pending' UNION ALL SELECT effect_id FROM webengine_proxy_changes WHERE status='pending' UNION ALL SELECT effect_id FROM webengine_access_changes WHERE status='pending' UNION ALL SELECT effect_id FROM webengine_node_changes WHERE status='pending' LIMIT 1`).Scan(&pending); scanErr == nil {
 		return PreparedAccessPolicy{}, fmt.Errorf("%w: %s", ErrChangeBusy, pending)
 	} else if !errors.Is(scanErr, sql.ErrNoRows) {
 		return PreparedAccessPolicy{}, scanErr

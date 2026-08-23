@@ -112,12 +112,50 @@ func newRenderIndex(request native.RenderRequest) renderIndex {
 	return index
 }
 
+func nativeBool(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+func nativeMemorySize(bytes uint64) string {
+	return strconv.FormatUint(bytes/(1<<20), 10) + "M"
+}
+
 func renderServer(request native.RenderRequest, index renderIndex, bindings []webengine.WebBindingSpec) []byte {
 	var output strings.Builder
+	tuning := request.Desired.Engine.Tuning
 	output.WriteString("# CyberPanel managed complete OpenLiteSpeed generation\n")
 	output.WriteString("serverName cyberpanel-managed\n")
 	output.WriteString("showVersionNumber 0\n")
-	output.WriteString("autoLoadHtaccess 0\n\n")
+	output.WriteString("autoLoadHtaccess 0\n")
+	if tuning.Generation != 0 {
+		output.WriteString("httpdWorkers ")
+		output.WriteString(strconv.FormatUint(uint64(tuning.WorkerProcesses), 10))
+		output.WriteString("\n\ntuning {\n  maxConnections ")
+		output.WriteString(strconv.FormatUint(uint64(tuning.MaxConnections), 10))
+		output.WriteString("\n  maxSSLConnections ")
+		output.WriteString(strconv.FormatUint(uint64(tuning.MaxTLSConnections), 10))
+		output.WriteString("\n  connTimeout ")
+		output.WriteString(strconv.FormatUint(uint64(tuning.ConnectionTimeoutSeconds), 10))
+		output.WriteString("\n  maxKeepAliveReq ")
+		output.WriteString(strconv.FormatUint(uint64(tuning.KeepAliveRequests), 10))
+		output.WriteString("\n  keepAliveTimeout ")
+		output.WriteString(strconv.FormatUint(uint64(tuning.KeepAliveTimeoutSeconds), 10))
+		output.WriteString("\n  totalInMemCacheSize ")
+		output.WriteString(nativeMemorySize(tuning.MemoryCacheBytes))
+		output.WriteString("\n  enableGzipCompress ")
+		output.WriteString(nativeBool(tuning.Compression))
+		output.WriteString("\n  enableDynGzipCompress ")
+		output.WriteString(nativeBool(tuning.Compression))
+		if tuning.Compression {
+			output.WriteString("\n  gzipCompressLevel ")
+			output.WriteString(strconv.FormatUint(uint64(tuning.CompressionLevel), 10))
+		}
+		output.WriteString("\n}\n")
+	}
+	output.WriteByte('\n')
 	output.WriteString("module mod_security {\n")
 	output.WriteString("  ls_enabled 1\n")
 	output.WriteString("  modsecurity on\n")
@@ -223,7 +261,13 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 		output.WriteString(strings.Join(hostnames[1:], ", "))
 		output.WriteByte('\n')
 	}
-	output.WriteString("enableGzip 1\n\n")
+	compression := true
+	if request.Desired.Engine.Tuning.Generation != 0 {
+		compression = request.Desired.Engine.Tuning.Compression
+	}
+	output.WriteString("enableGzip ")
+	output.WriteString(nativeBool(compression))
+	output.WriteString("\n\n")
 	if binding.Relationship == webengine.BindingPreview {
 		output.WriteString("rewrite {\n  enable 1\n  rules <<<END_preview_rules\nRewriteCond %{HTTPS} !=on\nRewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=308,L,NE]\nEND_preview_rules\n}\n\n")
 	}

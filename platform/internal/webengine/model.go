@@ -138,9 +138,27 @@ type Listener struct {
 	DefaultBindingRef ResourceRef
 }
 
+// WebEngineTuning is the closed, engine-neutral node tuning grammar. Durations
+// are represented as bounded whole seconds so native adapters never receive a
+// free-form duration or directive.
+type WebEngineTuning struct {
+	WorkerProcesses          uint32
+	MaxConnections           uint32
+	MaxTLSConnections        uint32
+	ConnectionTimeoutSeconds uint32
+	KeepAliveTimeoutSeconds  uint32
+	KeepAliveRequests        uint32
+	MemoryCacheBytes         uint64
+	Compression              bool
+	CompressionLevel         uint8
+	Brotli                   bool
+	Generation               uint64
+}
+
 type WebEngineSpec struct {
 	Edition           Edition
 	Listeners         []Listener
+	Tuning            WebEngineTuning
 	EnterpriseLicense *EnterpriseLicenseExpectation
 }
 
@@ -227,6 +245,17 @@ func Validate(state DesiredState) []Finding {
 			}
 			validateRef(license.SecretRef, "engine.enterpriseLicense.secretRef")
 		}
+	}
+	tuning := state.Engine.Tuning
+	if tuning != (WebEngineTuning{}) && (tuning.Generation == 0 || tuning.WorkerProcesses == 0 || tuning.WorkerProcesses > 1024 ||
+		tuning.MaxConnections == 0 || tuning.MaxConnections > 10_000_000 ||
+		tuning.MaxTLSConnections > tuning.MaxConnections || tuning.ConnectionTimeoutSeconds == 0 || tuning.ConnectionTimeoutSeconds > 3600 ||
+		tuning.KeepAliveTimeoutSeconds == 0 || tuning.KeepAliveTimeoutSeconds > 3600 ||
+		tuning.KeepAliveRequests == 0 || tuning.KeepAliveRequests > 100_000 ||
+		tuning.MemoryCacheBytes < 1<<20 || tuning.MemoryCacheBytes > 1<<40 || tuning.MemoryCacheBytes%(1<<20) != 0 ||
+		(tuning.Compression && (tuning.CompressionLevel == 0 || tuning.CompressionLevel > 9)) ||
+		(!tuning.Compression && tuning.CompressionLevel != 0) || tuning.Brotli) {
+		add("WEBENGINE_GLOBAL_TUNING_INVALID", "engine.tuning")
 	}
 
 	listeners := make(map[ResourceRef]Listener, len(state.Engine.Listeners))

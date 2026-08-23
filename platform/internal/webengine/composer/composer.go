@@ -30,6 +30,7 @@ type NodeEngine struct {
 	Edition          webengine.Edition
 	Listeners        []ListenerInput
 	PreviewProxyPort uint16
+	Tuning           webengine.WebEngineTuning
 }
 
 type TLSInput struct {
@@ -139,7 +140,7 @@ func Compose(plan Plan) (Result, error) {
 	if plan.DefaultTLS != nil && plan.DefaultTLS.PolicyRef != "" {
 		defaultPolicy = plan.DefaultTLS.PolicyRef
 	}
-	desired := webengine.DesiredState{Engine: webengine.WebEngineSpec{Edition: plan.Engine.Edition}}
+	desired := webengine.DesiredState{Engine: webengine.WebEngineSpec{Edition: plan.Engine.Edition, Tuning: plan.Engine.Tuning}}
 	if plan.Engine.Edition == webengine.EditionLiteSpeedEnterprise {
 		desired.Engine.EnterpriseLicense = &webengine.EnterpriseLicenseExpectation{ExpectedState: webengine.LicenseTrial}
 	}
