@@ -25,7 +25,7 @@ type Origin string
 const(OriginLocalUI Origin="local_ui";OriginLocalAPI Origin="local_api";OriginLocalCLI Origin="local_cli";OriginScheduler Origin="scheduler";OriginFederation Origin="federation")
 type Capability struct{CommandType,SchemaHash string;Version uint32;RemoteEligible bool;MinimumRisk Risk;Resources []string}
 type CapabilitySet struct{NodeID ID;ProtocolVersion uint32;ProductVersion,BuildDigest,OS,Architecture,WebEngineEdition,WebEngineVersion string;AuthorityEpoch uint64;Capabilities []Capability;GeneratedAt time.Time;Digest string}
-func(c CapabilitySet)CanonicalDigest()string{copy:=c;copy.Digest="";sort.Slice(copy.Capabilities,func(i,j int)bool{return copy.Capabilities[i].CommandType<copy.Capabilities[j].CommandType});raw,_:=json.Marshal(copy);sum:=sha256.Sum256(raw);return hex.EncodeToString(sum[:])}
+func(c CapabilitySet)CanonicalDigest()string{copy:=c;copy.Digest="";copy.Capabilities=append([]Capability(nil),c.Capabilities...);sort.Slice(copy.Capabilities,func(i,j int)bool{return copy.Capabilities[i].CommandType<copy.Capabilities[j].CommandType});raw,_:=json.Marshal(copy);sum:=sha256.Sum256(raw);return hex.EncodeToString(sum[:])}
 type ResourceSelector struct{Kind,TenantID,ResourceID,LabelSelector string;Operations []string}
 type MutationGrant struct{ID,PeerID,NodeID ID;AuthorityEpoch uint64;Selectors []ResourceSelector;MaximumRisk Risk;IssuedAt,ExpiresAt time.Time;RevokedAt *time.Time;Digest,SignatureKeyID string;Signature []byte}
 func(g MutationGrant)Validate(now time.Time)error{if !g.ID.Valid()||!g.PeerID.Valid()||!g.NodeID.Valid()||g.AuthorityEpoch==0||len(g.Selectors)==0||g.IssuedAt.IsZero()||!g.ExpiresAt.After(g.IssuedAt)||!now.Before(g.ExpiresAt)||len(g.Digest)!=64||len(g.Signature)==0{return ErrInvalid};if g.RevokedAt!=nil{return ErrForbidden};return nil}
@@ -40,7 +40,8 @@ type Receipt struct{IntentID ID;NodeID ID;EffectID,IdempotencyKey string;Status 
 func(r Receipt)SigStructure()[]byte{copy:=r;copy.Signature=nil;raw,_:=json.Marshal(struct{Domain string `json:"domain"`;Value Receipt `json:"value"`}{"cyberpanel-federation-receipt-v1",copy});return raw}
 type EventPriority uint8
 const(PriorityTelemetry EventPriority=1;PriorityState EventPriority=2;PrioritySecurity EventPriority=3;PriorityReceipt EventPriority=4;PriorityRevocation EventPriority=5)
-type NodeEvent struct{ID,NodeID ID;Sequence uint64;Priority EventPriority;Kind,TenantID,ResourceID,ResourceKind string;Generation uint64;Payload json.RawMessage;PayloadDigest string;OccurredAt time.Time}
+type NodeEvent struct{ID,NodeID ID;Sequence uint64;Priority EventPriority;Kind,TenantID,ResourceID,ResourceKind string;Generation uint64;Payload json.RawMessage;PayloadDigest string;OccurredAt time.Time;SignatureKeyID string;Signature []byte}
+func(e NodeEvent)SigStructure()[]byte{copy:=e;copy.Signature=nil;raw,_:=json.Marshal(struct{Domain string `json:"domain"`;Value NodeEvent `json:"value"`}{"cyberpanel-federation-event-v1",copy});return raw}
 type ProjectionCursor struct{PeerID,NodeID ID;EventSequence,SnapshotGeneration uint64;LastReceiptAt,UpdatedAt time.Time}
 type Revocation struct{PeerID,NodeID ID;NewAuthorityEpoch uint64;GrantIDs []ID;Reason string;IssuedAt time.Time;SigningKeyID string;Signature []byte}
 func canonicalJSON(raw []byte)([]byte,error){var value any;decoder:=json.NewDecoder(strings.NewReader(string(raw)));decoder.UseNumber();if err:=decoder.Decode(&value);err!=nil{return nil,err};var extra any;if err:=decoder.Decode(&extra);!errors.Is(err,io.EOF){return nil,ErrInvalid};return json.Marshal(value)}
