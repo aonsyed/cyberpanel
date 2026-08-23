@@ -59,6 +59,26 @@ CREATE TABLE IF NOT EXISTS identity_profile_preferences (
  reduced_motion TEXT NOT NULL, revision BIGINT NOT NULL, created_at TIMESTAMP NOT NULL,
  updated_at TIMESTAMP NOT NULL, updated_by_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS identity_service_principals (
+ id TEXT PRIMARY KEY, principal_id TEXT NOT NULL UNIQUE, tenant_id TEXT NOT NULL,
+ role_id TEXT NOT NULL, display_name TEXT NOT NULL, description TEXT NOT NULL,
+ state TEXT NOT NULL, permissions_json TEXT NOT NULL, scope_kind TEXT NOT NULL,
+ scope_resource_id TEXT NOT NULL, selectors_json TEXT NOT NULL,
+ authz_epoch BIGINT NOT NULL, generation BIGINT NOT NULL,
+ created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL, deleted_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS identity_service_principals_tenant ON identity_service_principals(tenant_id,id);
+CREATE TABLE IF NOT EXISTS identity_service_api_credentials (
+ id TEXT PRIMARY KEY, service_principal_id TEXT NOT NULL, tenant_id TEXT NOT NULL,
+ prefix TEXT NOT NULL, verifier_ref TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
+ state TEXT NOT NULL, verifier_version INTEGER NOT NULL, authz_epoch BIGINT NOT NULL,
+ not_before TIMESTAMP NOT NULL, expires_at TIMESTAMP NOT NULL, last_used_at TIMESTAMP,
+ audience TEXT NOT NULL, network_mode TEXT NOT NULL, network_prefix TEXT NOT NULL,
+ rotated_from_id TEXT NOT NULL, rotated_to_id TEXT NOT NULL, overlap_until TIMESTAMP,
+ generation BIGINT NOT NULL, created_at TIMESTAMP NOT NULL, revoked_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS identity_service_api_credentials_principal ON identity_service_api_credentials(service_principal_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS identity_service_api_credentials_prefix ON identity_service_api_credentials(prefix);
 CREATE TABLE IF NOT EXISTS identity_roles (
  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL,
  permissions_json TEXT NOT NULL, builtin INTEGER NOT NULL, generation BIGINT NOT NULL,

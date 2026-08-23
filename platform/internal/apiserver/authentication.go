@@ -34,7 +34,15 @@ func (authenticator IdentityAuthenticator) Authenticate(ctx context.Context, mat
 		return Actor{PrincipalID: principal.ID, CredentialID: session.CredentialID, SessionID: session.ID, AuthzEpoch: principal.AuthzEpoch, Assurance: session.Assurance, CredentialKind: CredentialSession}, nil
 	case CredentialAPIKey:
 		raw := []byte(material.APIKey)
-		actor, principal, err := authenticator.Service.AuthenticateAPIKey(ctx, raw)
+		var actor identity.ActorContext
+		var principal identity.Principal
+		var err error
+		if strings.HasPrefix(material.APIKey, "spk.") {
+			if !meta.TLS { clearSecret(raw); return Actor{}, ErrUnauthenticated }
+			actor, principal, err = authenticator.Service.AuthenticateServiceAPIKey(ctx, raw, meta.ClientIP, meta.Host)
+		} else {
+			actor, principal, err = authenticator.Service.AuthenticateAPIKey(ctx, raw)
+		}
 		if err != nil { return Actor{}, mapIdentityError(err) }
 		return Actor{PrincipalID: principal.ID, CredentialID: actor.CredentialID, AuthzEpoch: actor.AuthzEpoch, Assurance: actor.Assurance, CredentialKind: CredentialAPIKey}, nil
 	default:
