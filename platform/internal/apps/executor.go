@@ -90,6 +90,7 @@ func (execution InstallExecution) Validate(now time.Time) error {
 type DiscoveryExecution struct {
 	Scope       SiteExecutionScope `json:"scope"`
 	Kinds       []ApplicationKind `json:"kinds"`
+	RuntimeID   string `json:"runtime_id"`
 	MaximumDepth uint8 `json:"maximum_depth"`
 	MaximumCandidates uint16 `json:"maximum_candidates"`
 }
@@ -97,8 +98,10 @@ type DiscoveryExecution struct {
 type AdoptExecution struct {
 	Scope         SiteExecutionScope `json:"scope"`
 	Installation InstallationID `json:"installation_id"`
+	ReleaseID     ReleaseID `json:"release_id"`
 	Definition   ApplicationDefinition `json:"definition"`
 	Candidate    DiscoveryCandidate `json:"candidate"`
+	CanonicalURL string `json:"canonical_url"`
 	Database     DatabaseBinding `json:"database"`
 }
 

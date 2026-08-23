@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type DiscoveryRequest struct {
 	IsolationProfile string `json:"isolation_profile"`
 	Root             RelativePath `json:"root"`
 	Kinds            []ApplicationKind `json:"kinds"`
+	RuntimeID        string `json:"runtime_id"`
 	MaximumDepth     uint8 `json:"maximum_depth"`
 	MaximumCandidates uint16 `json:"maximum_candidates"`
 }
@@ -29,10 +31,12 @@ type AdoptionRequest struct {
 	SiteGeneration   uint64 `json:"site_generation"`
 	IsolationProfile string `json:"isolation_profile"`
 	InstallationID   InstallationID `json:"installation_id"`
+	ReleaseID        ReleaseID `json:"release_id"`
 	Recipe           RecipeReference `json:"recipe"`
 	CatalogTarget    CatalogTarget `json:"catalog_target"`
 	Candidate        DiscoveryCandidate `json:"candidate"`
 	RuntimeID        string `json:"runtime_id"`
+	CanonicalURL     string `json:"canonical_url"`
 	Database         DatabaseBinding `json:"database"`
 }
 
@@ -71,8 +75,8 @@ func (coordinator LifecycleCoordinator) now() time.Time {
 }
 
 func (coordinator LifecycleCoordinator) Discover(ctx context.Context, request DiscoveryRequest) ([]DiscoveryCandidate, error) {
-	if coordinator.Store == nil || coordinator.Executor == nil || len(request.Kinds) == 0 || request.MaximumDepth == 0 || request.MaximumDepth > 16 || request.MaximumCandidates == 0 || request.MaximumCandidates > 1000 { return nil, ErrInvalid }
-	for _, kind := range request.Kinds { if !kind.Valid() { return nil, ErrInvalid } }
+	if coordinator.Store == nil || coordinator.Executor == nil || len(request.Kinds) == 0 || strings.TrimSpace(request.RuntimeID) == "" || request.MaximumDepth == 0 || request.MaximumDepth > 16 || request.MaximumCandidates == 0 || request.MaximumCandidates > 1000 { return nil, ErrInvalid }
+	for _, kind := range request.Kinds { if kind != ApplicationJoomla && kind != ApplicationPrestaShop && kind != ApplicationMautic && kind != ApplicationMagento { return nil, ErrUnsupported } }
 	digest, err := requestDigest(request)
 	if err != nil { return nil, err }
 	operation := Operation{CommandID: request.CommandID, Kind: "discover", TenantID: request.TenantID, SiteID: request.SiteID, RequestDigest: digest, State: OperationAdmitted, Stage: "admitted", CreatedAt: coordinator.now(), UpdatedAt: coordinator.now()}
@@ -81,12 +85,12 @@ func (coordinator LifecycleCoordinator) Discover(ctx context.Context, request Di
 	if !created { return nil, ErrConflict }
 	scope := SiteExecutionScope{TenantID: request.TenantID, SiteID: request.SiteID, SiteUID: request.SiteUID, Root: request.Root, IsolationProfile: request.IsolationProfile, ResourceGeneration: request.SiteGeneration}
 	if err := scope.Validate(); err != nil { return nil, coordinator.fail(ctx, operation, "scope", err) }
-	candidates, receipt, err := coordinator.Executor.Discover(ctx, DiscoveryExecution{Scope: scope, Kinds: request.Kinds, MaximumDepth: request.MaximumDepth, MaximumCandidates: request.MaximumCandidates})
+	candidates, receipt, err := coordinator.Executor.Discover(ctx, DiscoveryExecution{Scope: scope, Kinds: request.Kinds, RuntimeID: request.RuntimeID, MaximumDepth: request.MaximumDepth, MaximumCandidates: request.MaximumCandidates})
 	if err != nil { return nil, coordinator.fail(ctx, operation, "execute", err) }
 	if err := receipt.Validate("discover", scope, ""); err != nil { return nil, coordinator.fail(ctx, operation, "receipt", err) }
 	seen := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
-		if !candidate.Kind.Valid() || !candidate.DatabaseReachable || !candidate.OwnershipValid || !validDigest(candidate.EvidenceDigest) || !versionPattern.MatchString(candidate.Version) {
+		if candidate.RuntimeID != request.RuntimeID || candidate.Validate() != nil {
 			return nil, coordinator.fail(ctx, operation, "candidate", ErrIntegrity)
 		}
 		key := candidate.Root.String()
@@ -100,7 +104,11 @@ func (coordinator LifecycleCoordinator) Discover(ctx context.Context, request Di
 
 func (coordinator LifecycleCoordinator) Adopt(ctx context.Context, request AdoptionRequest) (ApplicationInstallation, error) {
 	if coordinator.Store == nil || coordinator.Catalog == nil || coordinator.Executor == nil { return ApplicationInstallation{}, ErrInvalid }
-	if !request.Candidate.DatabaseReachable || !request.Candidate.OwnershipValid || !validDigest(request.Candidate.EvidenceDigest) { return ApplicationInstallation{}, ErrPolicyDenied }
+	if request.Candidate.Validate() != nil || request.RuntimeID != request.Candidate.RuntimeID || request.ReleaseID != DerivedAdoptionReleaseID(request.InstallationID, request.Candidate) || request.InstallationID != DerivedAdoptionInstallationID(request.TenantID, request.SiteID, request.Candidate) || strings.TrimSpace(request.CanonicalURL) == "" || request.Database != (DatabaseBinding{}) { return ApplicationInstallation{}, ErrPolicyDenied }
+	if existing, loadErr := coordinator.Store.LoadInstallation(ctx, request.InstallationID); loadErr == nil {
+		if existing.TenantID == request.TenantID && existing.SiteID == request.SiteID && existing.Root == request.Candidate.Root && existing.Kind == request.Candidate.Kind && existing.ActiveReleaseID == request.ReleaseID && (existing.State == InstallationActive || existing.State == InstallationDegraded) && existing.Health.State != HealthUnknown { return existing, nil }
+		return ApplicationInstallation{}, ErrConflict
+	} else if !errors.Is(loadErr, ErrNotFound) { return ApplicationInstallation{}, loadErr }
 	digest, err := requestDigest(request)
 	if err != nil { return ApplicationInstallation{}, err }
 	operation := Operation{CommandID: request.CommandID, Kind: "adopt", TenantID: request.TenantID, SiteID: request.SiteID, InstallationID: request.InstallationID, RequestDigest: digest, State: OperationAdmitted, Stage: "admitted", CreatedAt: coordinator.now(), UpdatedAt: coordinator.now()}
@@ -112,13 +120,16 @@ func (coordinator LifecycleCoordinator) Adopt(ctx context.Context, request Adopt
 	}
 	definition, err := coordinator.Catalog.Resolve(ctx, request.Recipe, request.CatalogTarget)
 	if err != nil { return ApplicationInstallation{}, coordinator.fail(ctx, operation, "catalog", err) }
-	if definition.Kind != request.Candidate.Kind || !definition.Lifecycle.Adopt { return ApplicationInstallation{}, coordinator.fail(ctx, operation, "catalog", ErrUnsupported) }
+	if definition.Kind != request.Candidate.Kind || definition.Recipe.ProductVersion != request.Candidate.Version || !definition.Lifecycle.Adopt { return ApplicationInstallation{}, coordinator.fail(ctx, operation, "catalog", ErrUnsupported) }
 	scope := SiteExecutionScope{TenantID: request.TenantID, SiteID: request.SiteID, SiteUID: request.SiteUID, Root: request.Candidate.Root, IsolationProfile: request.IsolationProfile, ResourceGeneration: request.SiteGeneration}
-	receipt, err := coordinator.Executor.Adopt(ctx, AdoptExecution{Scope: scope, Installation: request.InstallationID, Definition: definition, Candidate: request.Candidate, Database: request.Database})
+	receipt, err := coordinator.Executor.Adopt(ctx, AdoptExecution{Scope: scope, Installation: request.InstallationID, ReleaseID: request.ReleaseID, Definition: definition, Candidate: request.Candidate, CanonicalURL: request.CanonicalURL})
 	if err != nil { return ApplicationInstallation{}, coordinator.fail(ctx, operation, "execute", err) }
 	if err := receipt.Validate("adopt", scope, request.InstallationID); err != nil { return ApplicationInstallation{}, coordinator.fail(ctx, operation, "receipt", err) }
-	installation := ApplicationInstallation{ID: request.InstallationID, TenantID: request.TenantID, ProjectID: request.ProjectID, SiteID: request.SiteID, SiteUID: request.SiteUID, DefinitionID: definition.ID, Recipe: definition.Recipe, Kind: definition.Kind, Root: request.Candidate.Root, RuntimeID: request.RuntimeID, DatabaseBindingID: request.Database.ID, StorageMode: definition.StorageMode, State: InstallationActive, Health: HealthObservation{State: HealthUnknown}, Generation: 1, CreatedAt: coordinator.now(), UpdatedAt: coordinator.now()}
+	now := coordinator.now()
+	installation := ApplicationInstallation{ID: request.InstallationID, TenantID: request.TenantID, ProjectID: request.ProjectID, SiteID: request.SiteID, SiteUID: request.SiteUID, DefinitionID: definition.ID, Recipe: definition.Recipe, Kind: definition.Kind, Root: request.Candidate.Root, RuntimeID: request.RuntimeID, StorageMode: definition.StorageMode, State: InstallationActive, ActiveReleaseID: request.ReleaseID, Health: HealthObservation{State: HealthUnknown}, Generation: 1, CreatedAt: now, UpdatedAt: now}
 	if err := coordinator.Store.CreateInstallation(ctx, installation); err != nil { return ApplicationInstallation{}, coordinator.recovery(ctx, operation, "persist", err) }
+	release := Release{ID: request.ReleaseID, InstallationID: request.InstallationID, ProductVersion: request.Candidate.Version, ContentDigest: request.Candidate.EvidenceDigest, RecipeDigest: definition.Recipe.RecipeDigest, CreatedAt: receipt.CompletedAt, PromotedAt: receipt.CompletedAt}
+	if err := coordinator.Store.SaveRelease(ctx, release); err != nil { return ApplicationInstallation{}, coordinator.recovery(ctx, operation, "release", err) }
 	inventory, health, inspectReceipt, err := coordinator.Executor.Inspect(ctx, InspectExecution{Scope: scope, Installation: installation.ID, Kind: installation.Kind, RecipeDigest: definition.Recipe.RecipeDigest, Deep: true})
 	if err != nil { return ApplicationInstallation{}, coordinator.recovery(ctx, operation, "inspect", err) }
 	if err := inspectReceipt.Validate("inspect", scope, installation.ID); err != nil { return ApplicationInstallation{}, coordinator.recovery(ctx, operation, "inspect_receipt", err) }

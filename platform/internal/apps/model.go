@@ -728,9 +728,71 @@ type DiscoveryCandidate struct {
 	Root            RelativePath `json:"root"`
 	Version         string `json:"version"`
 	RuntimeID       string `json:"runtime_id"`
+	ConfigurationPath RelativePath `json:"configuration_path"`
+	ConfigurationDigest string `json:"configuration_digest"`
+	StructureDigest string `json:"structure_digest"`
 	DatabaseReachable bool `json:"database_reachable"`
 	OwnershipValid  bool `json:"ownership_valid"`
+	SearchStatus    DiscoverySearchStatus `json:"search_status"`
+	SearchEvidenceDigest string `json:"search_evidence_digest"`
 	EvidenceDigest  string `json:"evidence_digest"`
+}
+
+type DiscoverySearchStatus string
+
+const (
+	DiscoverySearchNotApplicable DiscoverySearchStatus = "not_applicable"
+	DiscoverySearchNotConfigured DiscoverySearchStatus = "not_configured"
+	DiscoverySearchNonLocal      DiscoverySearchStatus = "non_local"
+	DiscoverySearchLocalReachable DiscoverySearchStatus = "local_reachable"
+	DiscoverySearchLocalUnreachable DiscoverySearchStatus = "local_unreachable"
+)
+
+func (candidate DiscoveryCandidate) evidenceDigest() (string, error) {
+	payload, err := json.Marshal(struct {
+		Kind ApplicationKind `json:"kind"`
+		Root RelativePath `json:"root"`
+		Version string `json:"version"`
+		RuntimeID string `json:"runtime_id"`
+		ConfigurationPath RelativePath `json:"configuration_path"`
+		ConfigurationDigest string `json:"configuration_digest"`
+		StructureDigest string `json:"structure_digest"`
+		DatabaseReachable bool `json:"database_reachable"`
+		OwnershipValid bool `json:"ownership_valid"`
+		SearchStatus DiscoverySearchStatus `json:"search_status"`
+		SearchEvidenceDigest string `json:"search_evidence_digest"`
+	}{candidate.Kind, candidate.Root, candidate.Version, candidate.RuntimeID, candidate.ConfigurationPath, candidate.ConfigurationDigest, candidate.StructureDigest, candidate.DatabaseReachable, candidate.OwnershipValid, candidate.SearchStatus, candidate.SearchEvidenceDigest})
+	if err != nil { return "", err }
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func (candidate DiscoveryCandidate) Validate() error {
+	if !candidate.Kind.Valid() || candidate.Kind == ApplicationWordPress || !versionPattern.MatchString(candidate.Version) || !validID(candidate.RuntimeID) || candidate.ConfigurationPath.IsRoot() || !candidate.DatabaseReachable || !candidate.OwnershipValid || !validDigest(candidate.ConfigurationDigest) || !validDigest(candidate.StructureDigest) || !validDigest(candidate.SearchEvidenceDigest) || !validDigest(candidate.EvidenceDigest) {
+		return fmt.Errorf("%w: discovery candidate", ErrInvalid)
+	}
+	switch candidate.Kind {
+	case ApplicationMagento:
+		switch candidate.SearchStatus {
+		case DiscoverySearchNotConfigured, DiscoverySearchNonLocal, DiscoverySearchLocalReachable, DiscoverySearchLocalUnreachable:
+		default: return fmt.Errorf("%w: Magento search observation", ErrInvalid)
+		}
+	default:
+		if candidate.SearchStatus != DiscoverySearchNotApplicable { return fmt.Errorf("%w: application search observation", ErrInvalid) }
+	}
+	digest, err := candidate.evidenceDigest()
+	if err != nil || digest != candidate.EvidenceDigest { return fmt.Errorf("%w: discovery evidence", ErrIntegrity) }
+	return nil
+}
+
+func DerivedAdoptionInstallationID(tenantID TenantID, siteID SiteID, candidate DiscoveryCandidate) InstallationID {
+	digest := sha256.Sum256([]byte(string(tenantID)+"\x00"+string(siteID)+"\x00"+string(candidate.Kind)+"\x00"+candidate.Root.String()))
+	return InstallationID("app-adopted-" + hex.EncodeToString(digest[:])[:48])
+}
+
+func DerivedAdoptionReleaseID(installationID InstallationID, candidate DiscoveryCandidate) ReleaseID {
+	digest := sha256.Sum256([]byte(string(installationID)+"\x00"+candidate.Version+"\x00"+candidate.ConfigurationDigest))
+	return ReleaseID("release-adopted-" + hex.EncodeToString(digest[:])[:48])
 }
 
 type CloneRelationship struct {

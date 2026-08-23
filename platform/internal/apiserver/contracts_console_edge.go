@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/aonsyed/cyberpanel/platform/internal/apps"
 	"github.com/aonsyed/cyberpanel/platform/internal/database"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
@@ -221,6 +222,23 @@ type ApplicationInstallEdgePayload struct {
 	Locale string `json:"locale,omitempty"`
 	Timezone string `json:"timezone,omitempty"`
 	Title string `json:"title,omitempty"`
+}
+
+type ApplicationDiscoveryEdgePayload struct {
+	Root string `json:"root,omitempty"`
+	Applications EdgeStringList `json:"applications,omitempty"`
+	MaximumDepth uint8 `json:"maximum_depth,omitempty"`
+	MaximumCandidates uint16 `json:"maximum_candidates,omitempty"`
+}
+
+type ApplicationAdoptEdgePayload struct {
+	Candidate apps.DiscoveryCandidate `json:"candidate"`
+	RecipeID string `json:"recipe_id,omitempty"`
+}
+
+type ApplicationDiscoveryEdgeResult struct {
+	Candidates []apps.DiscoveryCandidate `json:"candidates"`
+	Generation uint64 `json:"generation"`
 }
 
 type ApplicationUpdateEdgePayload struct {
@@ -699,6 +717,8 @@ type AccessEdgeService interface {
 
 type ApplicationEdgeService interface {
 	ListApplications(context.Context, EdgeCall, EdgePagePayload) (EdgePage[ApplicationProjection], error)
+	DiscoverApplications(context.Context, EdgeCall, ApplicationDiscoveryEdgePayload) (ApplicationDiscoveryEdgeResult, error)
+	AdoptApplication(context.Context, EdgeCall, ApplicationAdoptEdgePayload) (EdgeMutation[ApplicationProjection], error)
 	InstallApplication(context.Context, EdgeCall, ApplicationInstallEdgePayload, []byte) (EdgeMutation[ApplicationProjection], error)
 	UpdateApplication(context.Context, EdgeCall, ApplicationUpdateEdgePayload) (EdgeMutation[ApplicationProjection], error)
 	RemoveApplication(context.Context, EdgeCall) (EdgeMutation[ApplicationProjection], error)
@@ -707,7 +727,7 @@ type ApplicationEdgeService interface {
 	PurgeWordPressCache(context.Context, EdgeCall, ApplicationCachePurgePayload) (EdgeMutation[ApplicationProjection], error)
 }
 
-type ApplicationEdgeCapabilities struct{List,Install,Update,Remove,Scan,Autologin,CachePurge bool}
+type ApplicationEdgeCapabilities struct{List,Discover,Adopt,Install,Update,Remove,Scan,Autologin,CachePurge bool}
 type ApplicationEdgeCapabilityProvider interface{ApplicationCapabilities() ApplicationEdgeCapabilities}
 
 type BackupEdgeService interface {
@@ -851,6 +871,8 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("access.file.write", "file:write", password, true, func() any { return &AccessFileWritePayload{} }, validateAccessFileWrite, edgeTenantExistingMutationScope),
 
 		consoleOperation("apps.instance.list", "application:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
+		consoleOperation("apps.discovery.scan", "application:manage", password, true, func() any { return &ApplicationDiscoveryEdgePayload{} }, validateApplicationDiscoveryEdge, edgeTenantExistingMutationScope),
+		consoleOperation("apps.discovery.adopt", "application:install", mfa, true, func() any { return &ApplicationAdoptEdgePayload{} }, validateApplicationAdoptEdge, edgeTenantExistingMutationScope),
 		consoleOperation("apps.instance.install", "application:install", mfa, true, func() any { return &ApplicationInstallEdgePayload{} }, validateApplicationInstall, edgeTenantCreateScope),
 		consoleOperation("apps.instance.update", "application:update", mfa, true, func() any { return &ApplicationUpdateEdgePayload{} }, validateApplicationUpdate, edgeTenantExistingMutationScope),
 		consoleOperation("apps.instance.remove", "application:manage", mfa, true, func() any { return &EmptyPayload{} }, nil, edgeTenantExistingMutationScope),
@@ -1021,6 +1043,29 @@ func validateApplicationInstall(value any) error {
 	payload := value.(*ApplicationInstallEdgePayload)
 	if !validEdgeID(payload.SiteID) || !validEdgeID(payload.Version) || payload.RecipeID!=""&&!validEdgeID(payload.RecipeID) || !safeEdgeText(payload.AdministratorUsername,128) || !strings.Contains(payload.AdministratorEmail,"@") || !safeEdgeText(payload.AdministratorEmail,320) || !safeEdgeText(payload.AdministratorDisplayName,256) || len(payload.AdministratorPassword)<12 || len(payload.AdministratorPassword)>4096 || payload.Locale!=""&&!safeEdgeText(payload.Locale,64) || payload.Timezone!=""&&!safeEdgeText(payload.Timezone,128) || payload.Title!=""&&!safeEdgeText(payload.Title,256) { return invalid("application install") }
 	switch payload.Application { case "wordpress", "joomla", "prestashop", "magento", "mautic": default: return invalid("application kind") }
+	return nil
+}
+
+func validateApplicationDiscoveryEdge(value any) error {
+	payload := value.(*ApplicationDiscoveryEdgePayload)
+	if payload.MaximumDepth == 0 { payload.MaximumDepth = 4 }
+	if payload.MaximumCandidates == 0 { payload.MaximumCandidates = 32 }
+	if payload.MaximumDepth > 16 || payload.MaximumCandidates > 1000 { return invalid("application discovery budget") }
+	if _, err := apps.ParseRelativePath(payload.Root); err != nil { return invalid("application discovery root") }
+	if len(payload.Applications) == 0 { payload.Applications = EdgeStringList{"joomla", "prestashop", "mautic", "magento"} }
+	if len(payload.Applications) > 4 { return invalid("application discovery kind") }
+	seen := map[string]bool{}
+	for _, application := range payload.Applications {
+		switch application { case "joomla", "prestashop", "mautic", "magento", "magento_open_source": default: return invalid("application discovery kind") }
+		canonical:=application;if canonical=="magento_open_source"{canonical="magento"};if seen[canonical] { return invalid("application discovery kind") }
+		seen[canonical] = true
+	}
+	return nil
+}
+
+func validateApplicationAdoptEdge(value any) error {
+	payload := value.(*ApplicationAdoptEdgePayload)
+	if payload.Candidate.Validate() != nil || payload.RecipeID != "" && !validEdgeID(payload.RecipeID) { return invalid("application adoption") }
 	return nil
 }
 
@@ -1609,10 +1654,18 @@ func bindConsoleEdgeContracts(registry *Registry, services DomainServices) error
 		}); err != nil { return err }
 	}
 	if services.ApplicationEdge != nil {
-		capabilities:=ApplicationEdgeCapabilities{List:true,Install:true,Update:true,Remove:true,Scan:true,Autologin:true,CachePurge:true};if provider,ok:=services.ApplicationEdge.(ApplicationEdgeCapabilityProvider);ok{capabilities=provider.ApplicationCapabilities()}
+		capabilities:=ApplicationEdgeCapabilities{List:true,Discover:true,Adopt:true,Install:true,Update:true,Remove:true,Scan:true,Autologin:true,CachePurge:true};if provider,ok:=services.ApplicationEdge.(ApplicationEdgeCapabilityProvider);ok{capabilities=provider.ApplicationCapabilities()}
 		if capabilities.List { if err := registry.Bind("apps.instance.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.ApplicationEdge.ListApplications(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err } }
+		if capabilities.Discover { if err := registry.Bind("apps.discovery.scan", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.ApplicationEdge.DiscoverApplications(ctx, edgeCall(inv), *value.(*ApplicationDiscoveryEdgePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result, Generation:result.Generation}, nil
+		}); err != nil { return err } }
+		if capabilities.Adopt { if err := registry.Bind("apps.discovery.adopt", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.ApplicationEdge.AdoptApplication(ctx, edgeCall(inv), *value.(*ApplicationAdoptEdgePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusCreated, result), nil
 		}); err != nil { return err } }
 		if capabilities.Install { if err := registry.Bind("apps.instance.install", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			payload:=value.(*ApplicationInstallEdgePayload);password:=[]byte(payload.AdministratorPassword);payload.AdministratorPassword="";defer clearSecret(password)
