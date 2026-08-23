@@ -1,0 +1,48 @@
+[Unit]
+Description=CyberPanel unprivileged signed update feed fetcher
+Documentation=https://github.com/aonsyed/cyberpanel
+After=local-fs.target network-online.target panel-updated.service
+Wants=network-online.target
+Requires=panel-updated.service
+RequiresMountsFor=/opt/cyberpanel /var/lib/cyberpanel/product-update-spool
+
+[Service]
+Type=simple
+User=cyberpanel
+Group=cyberpanel
+ExecStart=/usr/local/libexec/cyberpanel/panel-update-fetchd
+RuntimeDirectory=panel-update-fetchd
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/cyberpanel/product-update /run/cyberpanel-product-updater
+ReadWritePaths=/var/lib/cyberpanel/product-update-spool /run/panel-update-fetchd
+InaccessiblePaths=/var/lib/cyberpanel/control /var/lib/cyberpanel/product-updater /var/lib/cyberpanel/product-updates /var/lib/cyberpanel-auth /var/lib/cyberpanel-secrets /var/lib/cyberpanel/siteops /var/lib/cyberpanel/sites /var/lib/cyberpanel/quarantine /var/lib/cyberpanel/tombstones /etc/cyberpanel/secrets /run/docker.sock /var/run/docker.sock
+LimitNOFILE=128
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

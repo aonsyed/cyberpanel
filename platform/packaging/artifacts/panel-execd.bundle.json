@@ -18,6 +18,13 @@
       "mode": "0755"
     },
     {
+      "path_id": "panel_update_fetchd",
+      "command": "./cmd/panel-update-fetchd",
+      "archive_path": "panel-update-fetchd",
+      "install_path": "/usr/local/libexec/cyberpanel/panel-update-fetchd",
+      "mode": "0755"
+    },
+    {
       "path_id": "panel_cron_exec",
       "command": "./cmd/panel-cron-exec",
       "archive_path": "panel-cron-exec",

@@ -38,7 +38,10 @@ const (
 	productUpdaterJournalRoot      = ProductUpdaterStateRoot + "/journal"
 	productUpdaterBaselineRoot     = ProductUpdaterStateRoot + "/baselines"
 	productUpdaterActivationPath   = ProductUpdaterStateRoot + "/activation.json"
+	productUpdaterFeedFrontierPath = ProductUpdaterStateRoot + "/feed-frontier.json"
 	productUpdaterStagingRoot      = "/var/lib/cyberpanel/control/product-update-staging"
+	productUpdaterFeedSpoolRoot    = "/var/lib/cyberpanel/product-update-spool"
+	productUpdaterReleaseRoot      = "/var/lib/cyberpanel/product-updates"
 	productUpdaterTrustPath        = "/etc/cyberpanel/product-update/trust.json"
 	productUpdaterSlotRoot         = "/opt/cyberpanel/slots"
 	productUpdaterExecutablePath   = "/usr/local/libexec/cyberpanel/panel-updated"
@@ -59,31 +62,124 @@ type ProductUpdaterMethod string
 const (
 	ProductUpdaterObserve ProductUpdaterMethod = "observe_or_apply"
 	ProductUpdaterRecover ProductUpdaterMethod = "recover"
+	ProductUpdaterImportFeed ProductUpdaterMethod = "import_feed"
 )
+
+type ProductUpdateFeedArtifactReference struct {
+	ID string `json:"id"`
+	Digest string `json:"digest"`
+	Size int64 `json:"size"`
+}
+
+type ProductUpdateFeedManifestReference struct {
+	ID string `json:"id"`
+	Sequence uint64 `json:"sequence"`
+	Digest string `json:"digest"`
+	SHA256 string `json:"sha256"`
+	Size int64 `json:"size"`
+	Artifacts []ProductUpdateFeedArtifactReference `json:"artifacts"`
+}
+
+type ProductUpdateFeedIndex struct {
+	Version uint16 `json:"version"`
+	Platform productupdate.PlatformTuple `json:"platform"`
+	Manifest ProductUpdateFeedManifestReference `json:"manifest"`
+	IssuedAt time.Time `json:"issued_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Digest string `json:"digest"`
+}
+
+func CanonicalProductUpdateFeedIndex(index ProductUpdateFeedIndex, now time.Time) (ProductUpdateFeedIndex, error) {
+	if index.Version != 1 || index.Platform.Validate() != nil || !validProductUpdateIdentifier(index.Manifest.ID) ||
+		index.Manifest.Sequence == 0 || !validSHA256(index.Manifest.Digest) || !validSHA256(index.Manifest.SHA256) ||
+		index.Manifest.Size <= 0 || index.Manifest.Size > 16<<20 || len(index.Manifest.Artifacts) == 0 ||
+		len(index.Manifest.Artifacts) > 256 || index.IssuedAt.IsZero() || index.ExpiresAt.IsZero() || now.IsZero() {
+		return ProductUpdateFeedIndex{}, productupdate.ErrInvalid
+	}
+	index.IssuedAt, index.ExpiresAt, now = index.IssuedAt.UTC(), index.ExpiresAt.UTC(), now.UTC()
+	if !index.ExpiresAt.After(index.IssuedAt) || index.ExpiresAt.Sub(index.IssuedAt) > 7*24*time.Hour ||
+		now.Add(10*time.Minute).Before(index.IssuedAt) || !now.Add(-10*time.Minute).Before(index.ExpiresAt) {
+		return ProductUpdateFeedIndex{}, productupdate.ErrExpired
+	}
+	index.Manifest.Artifacts = append([]ProductUpdateFeedArtifactReference(nil), index.Manifest.Artifacts...)
+	sort.Slice(index.Manifest.Artifacts, func(i, j int) bool { return index.Manifest.Artifacts[i].ID < index.Manifest.Artifacts[j].ID })
+	var total int64
+	for position, artifact := range index.Manifest.Artifacts {
+		if !validProductUpdateIdentifier(artifact.ID) || !validSHA256(artifact.Digest) || artifact.Size <= 0 || artifact.Size > 4<<30 ||
+			position > 0 && index.Manifest.Artifacts[position-1].ID == artifact.ID || total > 16<<30-artifact.Size {
+			return ProductUpdateFeedIndex{}, productupdate.ErrInvalid
+		}
+		total += artifact.Size
+	}
+	claimed := index.Digest
+	index.Digest = ""
+	index.Digest = productUpdateJSONDigest(index)
+	if !validSHA256(claimed) || claimed != index.Digest { return ProductUpdateFeedIndex{}, productupdate.ErrIntegrity }
+	return index, nil
+}
+
+type ProductUpdateFeedImport struct {
+	Version uint16 `json:"version"`
+	SpoolID string `json:"spool_id"`
+	IndexDigest string `json:"index_digest"`
+}
+
+func (claim ProductUpdateFeedImport) validate() error {
+	if claim.Version != 1 || !validSHA256(claim.IndexDigest) || claim.SpoolID != "feed-"+claim.IndexDigest { return productupdate.ErrInvalid }
+	return nil
+}
+
+type ProductUpdateFeedImportReceipt struct {
+	Version uint16 `json:"version"`
+	SpoolID string `json:"spool_id"`
+	IndexDigest string `json:"index_digest"`
+	ManifestID string `json:"manifest_id"`
+	ManifestDigest string `json:"manifest_digest"`
+	Sequence uint64 `json:"sequence"`
+	ArtifactCount int `json:"artifact_count"`
+	ArtifactBytes int64 `json:"artifact_bytes"`
+	ImportedAt time.Time `json:"imported_at"`
+	EvidenceDigest string `json:"evidence_digest"`
+}
+
+func (receipt ProductUpdateFeedImportReceipt) validate(claim ProductUpdateFeedImport) error {
+	evidence := receipt.EvidenceDigest;receipt.EvidenceDigest=""
+	if claim.validate()!=nil || receipt.Version!=1 || receipt.SpoolID!=claim.SpoolID || receipt.IndexDigest!=claim.IndexDigest ||
+		!validProductUpdateIdentifier(receipt.ManifestID) || !validSHA256(receipt.ManifestDigest) || receipt.Sequence==0 ||
+		receipt.ArtifactCount<1 || receipt.ArtifactCount>256 || receipt.ArtifactBytes<=0 || receipt.ArtifactBytes>16<<30 ||
+		receipt.ImportedAt.IsZero() || receipt.ImportedAt.Location()!=time.UTC || !validSHA256(evidence) || evidence!=productUpdateJSONDigest(receipt) {
+		return productupdate.ErrIntegrity
+	}
+	return nil
+}
 
 type ProductUpdaterRequest struct {
 	Version         uint16              `json:"version"`
 	Method          ProductUpdaterMethod `json:"method"`
 	OperationDigest string              `json:"operation_digest"`
 	Effect          ProductUpdateEffect `json:"effect"`
+	Import          *ProductUpdateFeedImport `json:"import,omitempty"`
 	Deadline        time.Time           `json:"deadline"`
 }
 
 func (request ProductUpdaterRequest) validate(now time.Time) error {
-	if request.Version != ProductUpdaterProtocolVersion ||
-		(request.Method != ProductUpdaterObserve && request.Method != ProductUpdaterRecover) ||
-		!validSHA256(request.OperationDigest) || request.OperationDigest != productUpdaterEffectDigest(request.Effect) ||
-		request.Deadline.IsZero() || !request.Deadline.After(now) || request.Deadline.After(now.Add(10*time.Minute)) {
-		return errProductUpdaterProtocol
-	}
+	if request.Version != ProductUpdaterProtocolVersion || !validSHA256(request.OperationDigest) || request.Deadline.IsZero() || !request.Deadline.After(now) { return errProductUpdaterProtocol }
+	if request.Method == ProductUpdaterImportFeed {
+		if request.Import == nil || request.Import.validate()!=nil || !productUpdaterEffectEmpty(request.Effect) ||
+			request.OperationDigest!=productUpdateJSONDigest(*request.Import) || request.Deadline.After(now.Add(30*time.Minute)) { return errProductUpdaterProtocol }
+	} else if (request.Method!=ProductUpdaterObserve && request.Method!=ProductUpdaterRecover) || request.Import!=nil ||
+		request.OperationDigest!=productUpdaterEffectDigest(request.Effect) || request.Deadline.After(now.Add(10*time.Minute)) { return errProductUpdaterProtocol }
 	return nil
 }
+
+func productUpdaterEffectEmpty(effect ProductUpdateEffect) bool { return effect.Action=="" && effect.NodeID=="" && effect.ObservedAt.IsZero() && effect.Authorization==nil && effect.Migration==nil && effect.Backup==nil && effect.MigrationRollback==nil && effect.RollbackInspection==nil && effect.Switch==nil && effect.Finalize==nil && effect.Probe==nil }
 
 type ProductUpdaterResponse struct {
 	Version         uint16               `json:"version"`
 	Method          ProductUpdaterMethod `json:"method"`
 	OperationDigest string               `json:"operation_digest"`
 	Result          *ProductUpdateResult `json:"result,omitempty"`
+	Import          *ProductUpdateFeedImportReceipt `json:"import,omitempty"`
 	ErrorCode       string               `json:"error_code,omitempty"`
 	CompletedAt     time.Time            `json:"completed_at"`
 }
@@ -96,10 +192,12 @@ func (response ProductUpdaterResponse) validate(request ProductUpdaterRequest, n
 	}
 	if response.ErrorCode == "" {
 		if request.Method == ProductUpdaterObserve {
-			if response.Result == nil || validateProductUpdateResult(request.Effect, *response.Result) != nil {
+			if response.Result == nil || response.Import!=nil || validateProductUpdateResult(request.Effect, *response.Result) != nil {
 				return errProductUpdaterProtocol
 			}
-		} else if response.Result != nil {
+		} else if request.Method==ProductUpdaterImportFeed {
+			if response.Result!=nil || response.Import==nil || request.Import==nil || response.Import.validate(*request.Import)!=nil { return errProductUpdaterProtocol }
+		} else if response.Result != nil || response.Import!=nil {
 			return errProductUpdaterProtocol
 		}
 	}
@@ -122,8 +220,9 @@ func NewLocalProductUpdateClient() (*ProductUpdaterClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	_, controlGID, identityErr := LookupOperationsControlIdentity()
 	metadata, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || metadata.Uid != 0 || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 {
+	if identityErr!=nil || !ok || metadata.Uid != 0 || metadata.Gid!=controlGID || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0660 {
 		return nil, ErrUnauthorized
 	}
 	return &ProductUpdaterClient{}, nil
@@ -148,6 +247,14 @@ func (client *ProductUpdaterClient) Recover(ctx context.Context, effect ProductU
 	return productUpdaterClientError(response.ErrorCode)
 }
 
+func (client *ProductUpdaterClient) ImportFeed(ctx context.Context, claim ProductUpdateFeedImport) (ProductUpdateFeedImportReceipt, error) {
+	if client==nil || ctx==nil || claim.validate()!=nil { return ProductUpdateFeedImportReceipt{}, errProductUpdaterProtocol }
+	now:=time.Now().UTC();deadline:=now.Add(30*time.Minute);if candidate,ok:=ctx.Deadline();ok&&candidate.Before(deadline){deadline=candidate.UTC()}
+	request:=ProductUpdaterRequest{Version:ProductUpdaterProtocolVersion,Method:ProductUpdaterImportFeed,OperationDigest:productUpdateJSONDigest(claim),Import:&claim,Deadline:deadline}
+	response,err:=client.exchange(ctx,request);if err!=nil{return ProductUpdateFeedImportReceipt{},err};if response.Import==nil{return ProductUpdateFeedImportReceipt{},errProductUpdaterProtocol}
+	return *response.Import,productUpdaterClientError(response.ErrorCode)
+}
+
 func (client *ProductUpdaterClient) roundTrip(ctx context.Context, method ProductUpdaterMethod, effect ProductUpdateEffect) (ProductUpdaterResponse, error) {
 	if client == nil || ctx == nil {
 		return ProductUpdaterResponse{}, errProductUpdaterProtocol
@@ -162,9 +269,11 @@ func (client *ProductUpdaterClient) roundTrip(ctx context.Context, method Produc
 		deadline = candidate.UTC()
 	}
 	request := ProductUpdaterRequest{Version: ProductUpdaterProtocolVersion, Method: method, OperationDigest: digest, Effect: effect, Deadline: deadline}
-	if err := request.validate(now); err != nil {
-		return ProductUpdaterResponse{}, err
-	}
+	return client.exchange(ctx,request)
+}
+
+func (client *ProductUpdaterClient) exchange(ctx context.Context,request ProductUpdaterRequest)(ProductUpdaterResponse,error){
+	if client==nil||ctx==nil||request.validate(time.Now().UTC())!=nil{return ProductUpdaterResponse{},errProductUpdaterProtocol}
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", ProductUpdaterSocketPath)
 	if err != nil {
 		return ProductUpdaterResponse{}, err
@@ -175,7 +284,7 @@ func (client *ProductUpdaterClient) roundTrip(ctx context.Context, method Produc
 	}
 	stop := context.AfterFunc(ctx, func() { _ = connection.SetDeadline(time.Now()) })
 	defer stop()
-	if err = connection.SetDeadline(deadline); err != nil {
+	if err = connection.SetDeadline(request.Deadline); err != nil {
 		return ProductUpdaterResponse{}, err
 	}
 	if err = writeProductUpdaterFrame(connection, request); err != nil {
@@ -216,25 +325,26 @@ func (server *ProductUpdaterServer) Serve(listener net.Listener) error {
 	if server == nil || server.Updater == nil || listener == nil {
 		return errProductUpdaterProtocol
 	}
+	slots:=make(chan struct{},16)
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
 			return err
 		}
-		go server.serve(connection)
+		select{case slots<-struct{}{}:go func(peer net.Conn){defer func(){<-slots}();server.serve(peer)}(connection);default:_=connection.Close()}
 	}
 }
 
 func (server *ProductUpdaterServer) serve(connection net.Conn) {
 	defer connection.Close()
-	if authorizeProductUpdaterConnection(connection, 0) != nil {
-		return
-	}
-	_ = connection.SetDeadline(time.Now().Add(10 * time.Minute))
+	peerUID,peerErr:=productUpdaterPeerUID(connection);if peerErr!=nil{return}
+	_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
 	var request ProductUpdaterRequest
 	if readProductUpdaterFrame(connection, &request) != nil || request.validate(time.Now().UTC()) != nil {
 		return
 	}
+	if request.Method==ProductUpdaterImportFeed { if peerUID!=server.Updater.controlUID{return} } else if peerUID!=0{return}
+	if connection.SetDeadline(request.Deadline)!=nil{return}
 	ctx, cancel := context.WithDeadline(context.Background(), request.Deadline)
 	defer cancel()
 	response := ProductUpdaterResponse{Version: ProductUpdaterProtocolVersion, Method: request.Method,
@@ -243,13 +353,15 @@ func (server *ProductUpdaterServer) serve(connection net.Conn) {
 	if request.Method == ProductUpdaterObserve {
 		result, err := server.Updater.ObserveOrApply(ctx, request.Effect)
 		response.Result, executionErr = &result, err
-	} else {
+	} else if request.Method==ProductUpdaterRecover {
 		executionErr = server.Updater.Recover(ctx, request.Effect)
+	} else {
+		receipt,err:=server.Updater.ImportFeed(ctx,*request.Import);response.Import,executionErr=&receipt,err
 	}
 	response.ErrorCode = productUpdaterServerError(executionErr)
 	response.CompletedAt = time.Now().UTC()
 	if response.ErrorCode != "" || response.validate(request, time.Now().UTC()) == nil {
-		if writeProductUpdaterFrame(connection, response) == nil && executionErr == nil && request.Effect.Action == ProductUpdateCommit {
+		if writeProductUpdaterFrame(connection, response) == nil && executionErr == nil && request.Method!=ProductUpdaterImportFeed && request.Effect.Action == ProductUpdateCommit {
 			go server.Updater.restartSelfAfterAcknowledgement()
 		}
 	}
@@ -277,7 +389,7 @@ func ListenProductUpdater() (*net.UnixListener, error) {
 	if os.Geteuid() != 0 {
 		return nil, ErrUnauthorized
 	}
-	if err := ensureProductUpdaterDirectory(productUpdaterRuntimeRoot, 0700); err != nil {
+	if err := ensureProductUpdaterDirectory(productUpdaterRuntimeRoot, 0711); err != nil {
 		return nil, err
 	}
 	if info, err := os.Lstat(ProductUpdaterSocketPath); err == nil {
@@ -295,8 +407,9 @@ func ListenProductUpdater() (*net.UnixListener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = os.Chown(ProductUpdaterSocketPath, 0, 0); err == nil {
-		err = os.Chmod(ProductUpdaterSocketPath, 0600)
+	_,controlGID,identityErr:=LookupOperationsControlIdentity();if identityErr!=nil{_ = listener.Close();return nil,identityErr}
+	if err = os.Chown(ProductUpdaterSocketPath, 0, int(controlGID)); err == nil {
+		err = os.Chmod(ProductUpdaterSocketPath, 0660)
 	}
 	if err != nil {
 		_ = listener.Close()
@@ -306,22 +419,26 @@ func ListenProductUpdater() (*net.UnixListener, error) {
 }
 
 func authorizeProductUpdaterConnection(connection net.Conn, allowedUID uint32) error {
+	uid,err:=productUpdaterPeerUID(connection);if err!=nil||uid!=allowedUID{return ErrUnauthorized};return nil
+}
+
+func productUpdaterPeerUID(connection net.Conn)(uint32,error){
 	unixConnection, ok := connection.(*net.UnixConn)
 	if !ok {
-		return ErrUnauthorized
+		return 0,ErrUnauthorized
 	}
 	raw, err := unixConnection.SyscallConn()
 	if err != nil {
-		return ErrUnauthorized
+		return 0,ErrUnauthorized
 	}
 	var credential *syscall.Ucred
 	var credentialErr error
 	if err = raw.Control(func(fd uintptr) {
 		credential, credentialErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	}); err != nil || credentialErr != nil || credential == nil || credential.Pid <= 1 || credential.Uid != allowedUID {
-		return ErrUnauthorized
+	}); err != nil || credentialErr != nil || credential == nil || credential.Pid <= 1 {
+		return 0,ErrUnauthorized
 	}
-	return nil
+	return credential.Uid,nil
 }
 
 func writeProductUpdaterFrame(writer io.Writer, value any) error {
@@ -429,6 +546,20 @@ type productUpdaterReleaseMarker struct {
 	RecordDigest  string    `json:"record_digest"`
 }
 
+type productUpdaterFeedFrontier struct {
+	Version uint16 `json:"version"`
+	State string `json:"state"`
+	SpoolID string `json:"spool_id"`
+	IndexDigest string `json:"index_digest"`
+	Platform productupdate.PlatformTuple `json:"platform"`
+	ManifestID string `json:"manifest_id"`
+	ManifestDigest string `json:"manifest_digest"`
+	Sequence uint64 `json:"sequence"`
+	Receipt *ProductUpdateFeedImportReceipt `json:"receipt,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+	RecordDigest string `json:"record_digest"`
+}
+
 type productUpdaterStagedFile struct {
 	Path   string `json:"path"`
 	Mode   uint32 `json:"mode"`
@@ -466,6 +597,7 @@ type productUpdaterHealthEvidence struct {
 type LinuxProductUpdater struct {
 	host       *install.LinuxHost
 	controlUID uint32
+	controlGID uint32
 	now        func() time.Time
 	mu         sync.Mutex
 }
@@ -474,7 +606,7 @@ func NewLinuxProductUpdater() (*LinuxProductUpdater, error) {
 	if os.Geteuid() != 0 {
 		return nil, ErrUnauthorized
 	}
-	controlUID, _, err := LookupOperationsControlIdentity()
+	controlUID, controlGID, err := LookupOperationsControlIdentity()
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +615,7 @@ func NewLinuxProductUpdater() (*LinuxProductUpdater, error) {
 			return nil, err
 		}
 	}
-	return &LinuxProductUpdater{host: install.NewLinuxHost(), controlUID: controlUID, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &LinuxProductUpdater{host: install.NewLinuxHost(), controlUID: controlUID,controlGID:controlGID, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 func (updater *LinuxProductUpdater) ObserveOrApply(ctx context.Context, effect ProductUpdateEffect) (ProductUpdateResult, error) {
@@ -521,6 +653,92 @@ func (updater *LinuxProductUpdater) RecoverPending(ctx context.Context) error {
 	}
 	return nil
 }
+
+func (updater *LinuxProductUpdater) ImportFeed(ctx context.Context,claim ProductUpdateFeedImport)(ProductUpdateFeedImportReceipt,error){
+	if updater==nil||ctx==nil||claim.validate()!=nil{return ProductUpdateFeedImportReceipt{},productupdate.ErrInvalid}
+	updater.mu.Lock();defer updater.mu.Unlock()
+	frontier,found,err:=loadProductUpdaterFeedFrontier();if err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	if found&&frontier.State=="complete"&&frontier.SpoolID==claim.SpoolID&&frontier.Receipt!=nil{return *frontier.Receipt,nil}
+	if found&&frontier.State=="accepted"&&(frontier.SpoolID!=claim.SpoolID||frontier.IndexDigest!=claim.IndexDigest){return ProductUpdateFeedImportReceipt{},productupdate.ErrConflict}
+	readyRoot:=filepath.Join(productUpdaterFeedSpoolRoot,"ready");bundleRoot:=filepath.Join(readyRoot,claim.SpoolID);artifactRoot:=filepath.Join(bundleRoot,"artifacts")
+	for _,directory:=range []string{productUpdaterFeedSpoolRoot,readyRoot,bundleRoot,artifactRoot}{if verifyProductUpdaterDirectory(directory,0700,updater.controlUID)!=nil{return ProductUpdateFeedImportReceipt{},productupdate.ErrIntegrity}}
+	indexRaw,err:=readProductUpdaterFile(filepath.Join(bundleRoot,"index.json"),1<<20,updater.controlUID);if err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	var index ProductUpdateFeedIndex;if decodeProductUpdaterJSON(indexRaw,&index)!=nil{return ProductUpdateFeedImportReceipt{},productupdate.ErrIntegrity}
+	index,err=CanonicalProductUpdateFeedIndex(index,updater.now());if err!=nil||index.Digest!=claim.IndexDigest||claim.SpoolID!="feed-"+index.Digest{return ProductUpdateFeedImportReceipt{},errors.Join(err,productupdate.ErrIntegrity)}
+	verifier,limits,maximumManifest,err:=loadProductUpdaterManifestVerifier(updater.now());if err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	if index.Manifest.Size>maximumManifest{return ProductUpdateFeedImportReceipt{},productupdate.ErrCapacity}
+	manifestRaw,err:=readProductUpdaterFile(filepath.Join(bundleRoot,"manifest.json"),int(index.Manifest.Size),updater.controlUID);if err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	if int64(len(manifestRaw))!=index.Manifest.Size||digestProductUpdaterBytes(manifestRaw)!=index.Manifest.SHA256{return ProductUpdateFeedImportReceipt{},productupdate.ErrIntegrity}
+	var manifest productupdate.ReleaseManifest;if decodeProductUpdaterJSON(manifestRaw,&manifest)!=nil{return ProductUpdateFeedImportReceipt{},productupdate.ErrIntegrity}
+	manifest,err=productupdate.CanonicalManifest(manifest);if err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	if err=validateProductUpdaterFeedManifest(index,manifest,limits);err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	inventoryRaw,err:=readProductUpdaterFile(filepath.Join(productUpdaterReleaseRoot,"inventory.json"),1<<20,0);if err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	var inventory productupdate.InstalledInventory;if decodeProductUpdaterJSON(inventoryRaw,&inventory)!=nil{return ProductUpdateFeedImportReceipt{},productupdate.ErrIntegrity}
+	acceptedSequence:=uint64(0);acceptedDigest:=""
+	if found{acceptedSequence,acceptedDigest=frontier.Sequence,frontier.ManifestDigest}
+	manifest,_,err=verifier.Verify(manifest,inventory,updater.now(),acceptedSequence,acceptedDigest);if err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	frontier=productUpdaterFeedFrontier{Version:1,State:"accepted",SpoolID:claim.SpoolID,IndexDigest:index.Digest,Platform:index.Platform,ManifestID:manifest.ID,ManifestDigest:manifest.Digest,Sequence:manifest.Sequence,UpdatedAt:updater.now()}
+	if err=storeProductUpdaterFeedFrontier(&frontier);err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	if err=updater.verifyProductUpdaterReleaseDirectories();err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	var artifactBytes int64
+	for _,artifact:=range manifest.Artifacts{source:=filepath.Join(artifactRoot,artifact.Digest+".tar");destination:=filepath.Join(productUpdaterReleaseRoot,"artifacts",artifact.Digest+".tar");if err=updater.promoteProductUpdaterFeedFile(ctx,source,destination,artifact.Size,artifact.Digest);err!=nil{return ProductUpdateFeedImportReceipt{},err};artifactBytes+=artifact.Size}
+	if err=updater.promoteProductUpdaterBytes(ctx,manifestRaw,filepath.Join(productUpdaterReleaseRoot,"manifests",manifest.ID+".json"),index.Manifest.SHA256);err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	indexCanonical,err:=json.Marshal(index);if err!=nil{return ProductUpdateFeedImportReceipt{},err};indexSHA:=digestProductUpdaterBytes(indexCanonical)
+	if err=updater.promoteProductUpdaterBytes(ctx,indexCanonical,filepath.Join(productUpdaterReleaseRoot,"channels",index.Digest+".json"),indexSHA);err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	receipt:=ProductUpdateFeedImportReceipt{Version:1,SpoolID:claim.SpoolID,IndexDigest:index.Digest,ManifestID:manifest.ID,ManifestDigest:manifest.Digest,Sequence:manifest.Sequence,ArtifactCount:len(manifest.Artifacts),ArtifactBytes:artifactBytes,ImportedAt:updater.now()};receipt.EvidenceDigest=productUpdateJSONDigest(receipt)
+	frontier.State,frontier.Receipt,frontier.UpdatedAt="complete",&receipt,updater.now();if err=storeProductUpdaterFeedFrontier(&frontier);err!=nil{return ProductUpdateFeedImportReceipt{},err}
+	return receipt,nil
+}
+
+func validateProductUpdaterFeedManifest(index ProductUpdateFeedIndex,manifest productupdate.ReleaseManifest,limits productupdate.StagingLimits)error{
+	if manifest.ID!=index.Manifest.ID||manifest.Sequence!=index.Manifest.Sequence||manifest.Digest!=index.Manifest.Digest||manifest.Platform!=index.Platform||len(manifest.Artifacts)!=len(index.Manifest.Artifacts){return productupdate.ErrIntegrity}
+	var total int64
+	for position,artifact:=range manifest.Artifacts{reference:=index.Manifest.Artifacts[position];if artifact.ID!=reference.ID||artifact.Digest!=reference.Digest||artifact.Size!=reference.Size||artifact.Size>limits.MaximumArtifactBytes||total>limits.MaximumTotalBytes-artifact.Size{return productupdate.ErrIntegrity};total+=artifact.Size}
+	return nil
+}
+
+func loadProductUpdaterFeedFrontier()(productUpdaterFeedFrontier,bool,error){
+	raw,err:=readProductUpdaterFile(productUpdaterFeedFrontierPath,1<<20,0);if errors.Is(err,os.ErrNotExist){return productUpdaterFeedFrontier{},false,nil};if err!=nil{return productUpdaterFeedFrontier{},false,err}
+	var frontier productUpdaterFeedFrontier;if strictProductUpdaterJSON(raw,&frontier)!=nil||frontier.Version!=1||(frontier.State!="accepted"&&frontier.State!="complete")||frontier.SpoolID!="feed-"+frontier.IndexDigest||!validSHA256(frontier.IndexDigest)||frontier.Platform.Validate()!=nil||!validProductUpdateIdentifier(frontier.ManifestID)||!validSHA256(frontier.ManifestDigest)||frontier.Sequence==0||frontier.UpdatedAt.IsZero(){return productUpdaterFeedFrontier{},false,productupdate.ErrIntegrity}
+	claimed:=frontier.RecordDigest;frontier.RecordDigest="";if claimed!=productUpdateJSONDigest(frontier){return productUpdaterFeedFrontier{},false,productupdate.ErrIntegrity};frontier.RecordDigest=claimed
+	claim:=ProductUpdateFeedImport{Version:1,SpoolID:frontier.SpoolID,IndexDigest:frontier.IndexDigest};if frontier.State=="complete"{if frontier.Receipt==nil||frontier.Receipt.validate(claim)!=nil{return productUpdaterFeedFrontier{},false,productupdate.ErrIntegrity}}else if frontier.Receipt!=nil{return productUpdaterFeedFrontier{},false,productupdate.ErrIntegrity}
+	return frontier,true,nil
+}
+
+func storeProductUpdaterFeedFrontier(frontier *productUpdaterFeedFrontier)error{frontier.RecordDigest="";frontier.RecordDigest=productUpdateJSONDigest(*frontier);raw,err:=json.Marshal(frontier);if err!=nil{return err};return writeProductUpdaterFile(productUpdaterFeedFrontierPath,raw,0600)}
+
+func (updater *LinuxProductUpdater)verifyProductUpdaterReleaseDirectories()error{
+	for _,path:=range []string{productUpdaterReleaseRoot,filepath.Join(productUpdaterReleaseRoot,"manifests"),filepath.Join(productUpdaterReleaseRoot,"artifacts"),filepath.Join(productUpdaterReleaseRoot,"channels")}{info,err:=os.Lstat(path);if err!=nil{return err};metadata,ok:=info.Sys().(*syscall.Stat_t);if !ok||metadata.Uid!=0||metadata.Gid!=updater.controlGID||!info.IsDir()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()!=0750{return productupdate.ErrIntegrity};resolved,err:=filepath.EvalSymlinks(path);if err!=nil||resolved!=path{return productupdate.ErrIntegrity}}
+	return nil
+}
+
+func (updater *LinuxProductUpdater)promoteProductUpdaterFeedFile(ctx context.Context,source,destination string,size int64,digest string)error{
+	before,err:=os.Lstat(source);if err!=nil{return err};metadata,ok:=before.Sys().(*syscall.Stat_t);if !ok||metadata.Uid!=updater.controlUID||metadata.Nlink!=1||!before.Mode().IsRegular()||before.Mode()&os.ModeSymlink!=0||before.Mode().Perm()&0022!=0||before.Size()!=size{return productupdate.ErrIntegrity}
+	file,err:=os.OpenFile(source,os.O_RDONLY|syscall.O_NOFOLLOW,0);if err!=nil{return err};opened,err:=file.Stat();if err!=nil||!os.SameFile(before,opened){_ = file.Close();return productupdate.ErrIntegrity};defer file.Close()
+	return updater.promoteProductUpdaterReader(ctx,file,destination,size,digest)
+}
+
+func (updater *LinuxProductUpdater)promoteProductUpdaterBytes(ctx context.Context,content []byte,destination,digest string)error{return updater.promoteProductUpdaterReader(ctx,bytes.NewReader(content),destination,int64(len(content)),digest)}
+
+func (updater *LinuxProductUpdater)promoteProductUpdaterReader(ctx context.Context,source io.Reader,destination string,size int64,digest string)error{
+	if ctx==nil||!withinProductUpdaterRoot(productUpdaterReleaseRoot,destination)||size<=0||!validSHA256(digest){return productupdate.ErrInvalid}
+	if _,err:=os.Lstat(destination);err==nil{return verifyPromotedProductUpdaterFile(destination,size,digest)}else if !errors.Is(err,os.ErrNotExist){return err}
+	temporary:=destination+".import-"+digest[:16];_ = os.Remove(temporary)
+	file,err:=os.OpenFile(temporary,os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW,0440);if err!=nil{return err}
+	hasher:=sha256.New();written,copyErr:=io.Copy(io.MultiWriter(file,hasher),io.LimitReader(&productUpdaterContextReader{ctx:ctx,reader:source},size+1))
+	joined:=errors.Join(copyErr,file.Chown(0,int(updater.controlGID)),file.Chmod(0440),file.Sync(),file.Close());if joined!=nil||written!=size||hex.EncodeToString(hasher.Sum(nil))!=digest{_ = os.Remove(temporary);return errors.Join(joined,productupdate.ErrIntegrity)}
+	if err=os.Link(temporary,destination);err!=nil{_ = os.Remove(temporary);if errors.Is(err,os.ErrExist){return verifyPromotedProductUpdaterFile(destination,size,digest)};return err};if err=os.Remove(temporary);err!=nil{return err};return syncProductUpdaterDirectory(filepath.Dir(destination))
+}
+
+type productUpdaterContextReader struct{ctx context.Context;reader io.Reader}
+func (reader *productUpdaterContextReader)Read(content []byte)(int,error){select{case <-reader.ctx.Done():return 0,reader.ctx.Err();default:return reader.reader.Read(content)}}
+
+func verifyPromotedProductUpdaterFile(path string,size int64,digest string)error{
+	before,err:=os.Lstat(path);if err!=nil{return err};metadata,ok:=before.Sys().(*syscall.Stat_t);if !ok||metadata.Uid!=0||metadata.Nlink!=1||!before.Mode().IsRegular()||before.Mode()&os.ModeSymlink!=0||before.Mode().Perm()&0022!=0||before.Size()!=size{return productupdate.ErrIntegrity}
+	file,err:=os.OpenFile(path,os.O_RDONLY|syscall.O_NOFOLLOW,0);if err!=nil{return err};hasher:=sha256.New();written,copyErr:=io.Copy(hasher,file);closeErr:=file.Close();if copyErr!=nil||closeErr!=nil||written!=size||hex.EncodeToString(hasher.Sum(nil))!=digest{return errors.Join(copyErr,closeErr,productupdate.ErrIntegrity)};return nil
+}
+
+func digestProductUpdaterBytes(content []byte)string{sum:=sha256.Sum256(content);return hex.EncodeToString(sum[:])}
 
 func (updater *LinuxProductUpdater) apply(ctx context.Context, effect ProductUpdateEffect) (ProductUpdateResult, error) {
 	if updater == nil || updater.host == nil || ctx == nil {
@@ -968,7 +1186,7 @@ func (updater *LinuxProductUpdater) probeRelease(ctx context.Context, operation 
 }
 
 var productUpdaterControlUnits = []string{
-	"panel-authd.service", "panel-secretd.service", "panel-execd.service", "panel-providerd.service", "panel-core.service", "panel-gateway.service",
+	"panel-authd.service", "panel-secretd.service", "panel-execd.service", "panel-providerd.service", "panel-core.service", "panel-gateway.service", "panel-update-fetchd.service",
 }
 
 var productUpdaterWorkloadUnits = []string{
@@ -1305,10 +1523,27 @@ type productUpdaterTrustDocument struct {
 	MaximumClockSkewSeconds int64             `json:"maximum_clock_skew_seconds"`
 	MaximumLifetimeSeconds  int64             `json:"maximum_lifetime_seconds"`
 	MaximumManifestBytes    int64             `json:"maximum_manifest_bytes"`
-	ManifestRoots           []json.RawMessage `json:"manifest_roots"`
+	ManifestRoots           []productUpdaterManifestRootDocument `json:"manifest_roots"`
 	AuthorizationRootsPEM   string            `json:"authorization_roots_pem"`
-	Staging                 json.RawMessage   `json:"staging"`
+	Staging                 productUpdaterStagingLimitsDocument `json:"staging"`
 }
+
+type productUpdaterManifestRootDocument struct{KeyID string `json:"key_id"`;Epoch uint64 `json:"epoch"`;PublicKey string `json:"public_key"`;NotBefore time.Time `json:"not_before"`;NotAfter time.Time `json:"not_after"`;Revoked bool `json:"revoked"`}
+type productUpdaterStagingLimitsDocument struct{MaximumArtifactBytes int64 `json:"maximum_artifact_bytes"`;MaximumTotalBytes int64 `json:"maximum_total_bytes"`;MaximumExtractedBytes int64 `json:"maximum_extracted_bytes"`;MaximumFileBytes int64 `json:"maximum_file_bytes"`;MaximumFiles int `json:"maximum_files"`;MaximumPathBytes int `json:"maximum_path_bytes"`}
+
+func loadProductUpdaterManifestVerifier(now time.Time)(*productupdate.Verifier,productupdate.StagingLimits,int64,error){
+	raw,err:=readProductUpdaterFile(productUpdaterTrustPath,1<<20,0);if err!=nil{return nil,productupdate.StagingLimits{},0,err};var document productUpdaterTrustDocument
+	if decodeProductUpdaterJSON(raw,&document)!=nil||document.Threshold<2||document.MaximumClockSkewSeconds<0||document.MaximumClockSkewSeconds>600||document.MaximumLifetimeSeconds<=0||document.MaximumLifetimeSeconds>int64((366*24*time.Hour)/time.Second)||document.MaximumManifestBytes<=0||document.MaximumManifestBytes>16<<20||len(document.ManifestRoots)<int(document.Threshold){return nil,productupdate.StagingLimits{},0,productupdate.ErrInvalid}
+	limits:=productupdate.StagingLimits{MaximumArtifactBytes:document.Staging.MaximumArtifactBytes,MaximumTotalBytes:document.Staging.MaximumTotalBytes,MaximumExtractedBytes:document.Staging.MaximumExtractedBytes,MaximumFileBytes:document.Staging.MaximumFileBytes,MaximumFiles:document.Staging.MaximumFiles,MaximumPathBytes:document.Staging.MaximumPathBytes}
+	if limits.MaximumArtifactBytes<=0||limits.MaximumArtifactBytes>4<<30||limits.MaximumTotalBytes<limits.MaximumArtifactBytes||limits.MaximumTotalBytes>16<<30||limits.MaximumExtractedBytes<=0||limits.MaximumExtractedBytes>32<<30||limits.MaximumFileBytes<=0||limits.MaximumFileBytes>limits.MaximumExtractedBytes||limits.MaximumFiles<=0||limits.MaximumFiles>1000000||limits.MaximumPathBytes<16||limits.MaximumPathBytes>4096{return nil,productupdate.StagingLimits{},0,productupdate.ErrInvalid}
+	roots:=make([]productupdate.TrustRoot,0,len(document.ManifestRoots));active:=0
+	for _,entry:=range document.ManifestRoots{key,decodeErr:=decodeProductUpdaterPublicKey(entry.PublicKey);if decodeErr!=nil{return nil,productupdate.StagingLimits{},0,decodeErr};root:=productupdate.TrustRoot{KeyID:entry.KeyID,Epoch:entry.Epoch,PublicKey:key,NotBefore:entry.NotBefore.UTC(),NotAfter:entry.NotAfter.UTC(),Revoked:entry.Revoked};if !root.Revoked&&root.Epoch==document.CurrentEpoch&&!now.Before(root.NotBefore)&&now.Before(root.NotAfter){active++};roots=append(roots,root)}
+	if active<int(document.Threshold){return nil,productupdate.StagingLimits{},0,productupdate.ErrUnauthorized}
+	verifier,err:=productupdate.NewVerifier(productupdate.TrustPolicy{Roots:roots,Threshold:document.Threshold,CurrentEpoch:document.CurrentEpoch,MaximumClockSkew:time.Duration(document.MaximumClockSkewSeconds)*time.Second,MaximumLifetime:time.Duration(document.MaximumLifetimeSeconds)*time.Second,MaximumBytes:document.MaximumManifestBytes});if err!=nil{return nil,productupdate.StagingLimits{},0,err}
+	return verifier,limits,document.MaximumManifestBytes,nil
+}
+
+func decodeProductUpdaterPublicKey(value string)(ed25519.PublicKey,error){value=strings.TrimSpace(value);var decoded []byte;var err error;for _,encoding:=range []*base64.Encoding{base64.RawURLEncoding,base64.URLEncoding,base64.RawStdEncoding,base64.StdEncoding}{decoded,err=encoding.DecodeString(value);if err==nil{break}};if err!=nil{decoded,err=hex.DecodeString(value)};if err!=nil||len(decoded)!=ed25519.PublicKeySize{return nil,productupdate.ErrInvalid};return ed25519.PublicKey(decoded),nil}
 
 func (updater *LinuxProductUpdater) verifyTrustDocument(now time.Time) error {
 	_, err := loadProductUpdaterAuthorizationRoots(now)
