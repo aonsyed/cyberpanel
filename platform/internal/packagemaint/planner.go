@@ -26,9 +26,10 @@ type SolverAttestation struct {
 }
 
 type PlanRequest struct {
-	Generation  uint64
-	ValidFor    time.Duration
-	Attestation SolverAttestation
+	Generation              uint64
+	ValidFor                time.Duration
+	MaintenanceOccurrenceID string
+	Attestation             SolverAttestation
 }
 
 // Planner accepts only a complete solver attestation whose exact package
@@ -38,7 +39,7 @@ type Planner struct {
 }
 
 func (planner Planner) Build(snapshot InventorySnapshot, request PlanRequest) (MaintenancePlan, error) {
-	if err := snapshot.Validate(); err != nil || request.Generation == 0 || request.ValidFor <= 0 || request.ValidFor > 24*time.Hour {
+	if err := snapshot.Validate(); err != nil || request.Generation == 0 || request.ValidFor <= 0 || request.ValidFor > 24*time.Hour || !safeID.MatchString(request.MaintenanceOccurrenceID) {
 		return MaintenancePlan{}, ErrInvalid
 	}
 	for _, lock := range snapshot.Locks {
@@ -96,6 +97,7 @@ func (planner Planner) Build(snapshot InventorySnapshot, request PlanRequest) (M
 	plan := MaintenancePlan{
 		NodeID:              snapshot.NodeID,
 		Manager:             snapshot.Manager,
+		MaintenanceOccurrenceID: request.MaintenanceOccurrenceID,
 		InventoryID:         snapshot.ID,
 		InventoryGeneration: snapshot.Generation,
 		InventoryDigest:     snapshot.ContentDigest,

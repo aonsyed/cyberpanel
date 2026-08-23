@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
+	"github.com/aonsyed/cyberpanel/platform/internal/maintenance"
 	"github.com/aonsyed/cyberpanel/platform/internal/packagemaint"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 )
@@ -33,13 +34,20 @@ type packageMaintenanceLinuxEdge struct {
 	now        func() time.Time
 }
 
+type packageMaintenanceWindowAdmission struct {
+	evaluator   *maintenance.Evaluator
+	occurrences *maintenance.Repository
+	nodeID      string
+	manager     packagemaint.Manager
+}
+
 const packageMaintenanceMaximumGeneration = uint64(1<<63 - 1)
 
 func newPackageMaintenanceLinuxEdge(repository *packagemaint.SQLRepository, inventory packagemaint.InventoryProvider,
 	resolver packageMaintenancePlanResolver, authorizer packagemaint.Authorizer, executor packagemaint.MaintenanceExecutor,
-	nodeID string, manager packagemaint.Manager, now func() time.Time) (*packageMaintenanceLinuxEdge, error) {
+	maintenanceGate packagemaint.MaintenanceGate, nodeID string, manager packagemaint.Manager, now func() time.Time) (*packageMaintenanceLinuxEdge, error) {
 	if repository == nil || inventory == nil || resolver == nil || authorizer == nil || executor == nil ||
-		!validPackageMaintenanceRuntimeID(nodeID) || manager != packagemaint.ManagerAPT && manager != packagemaint.ManagerDNF {
+		maintenanceGate == nil || !validPackageMaintenanceRuntimeID(nodeID) || manager != packagemaint.ManagerAPT && manager != packagemaint.ManagerDNF {
 		return nil, packagemaint.ErrInvalid
 	}
 	if now == nil {
@@ -47,7 +55,7 @@ func newPackageMaintenanceLinuxEdge(repository *packagemaint.SQLRepository, inve
 	}
 	edge := &packageMaintenanceLinuxEdge{repository: repository, inventory: inventory, resolver: resolver,
 		nodeID: nodeID, manager: manager, now: now}
-	edge.service = packagemaint.Service{Store: repository, Authorizer: authorizer, Executor: executor, Now: now}
+	edge.service = packagemaint.Service{Store: repository, Authorizer: authorizer, Executor: executor, Maintenance: maintenanceGate, Now: now}
 	return edge, nil
 }
 
@@ -80,6 +88,17 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 	if err = repository.Bootstrap(ctx); err != nil {
 		return nil, err
 	}
+	maintenanceRepository, err := maintenance.NewRepository(database)
+	if err != nil {
+		return nil, err
+	}
+	if err = maintenanceRepository.Bootstrap(ctx); err != nil {
+		return nil, err
+	}
+	maintenanceEvaluator, err := maintenance.NewEvaluator(maintenanceRepository, maintenance.EvaluatorConfig{})
+	if err != nil {
+		return nil, err
+	}
 	client, err := packagemaint.NewLocalLinuxClient()
 	if err != nil {
 		return nil, fmt.Errorf("connect package-maintenance executor: %w", err)
@@ -92,7 +111,9 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 	if err != nil {
 		return nil, err
 	}
-	edge, err := newPackageMaintenanceLinuxEdge(repository, client, client, authorizer, client,
+	maintenanceGate := &packageMaintenanceWindowAdmission{evaluator: maintenanceEvaluator, occurrences: maintenanceRepository,
+		nodeID: catalog.NodeID, manager: catalog.Manager}
+	edge, err := newPackageMaintenanceLinuxEdge(repository, client, client, authorizer, client, maintenanceGate,
 		catalog.NodeID, catalog.Manager, now)
 	if err != nil {
 		return nil, err
@@ -231,12 +252,19 @@ func (edge *packageMaintenanceLinuxEdge) PlanPackageMaintenance(ctx context.Cont
 	}
 	planner := packagemaint.Planner{Now: edge.now}
 	plan, err := planner.Build(snapshot, packagemaint.PlanRequest{Generation: planGeneration,
-		ValidFor: time.Duration(payload.ValidForSeconds) * time.Second, Attestation: attestation})
+		ValidFor: time.Duration(payload.ValidForSeconds) * time.Second,
+		MaintenanceOccurrenceID: payload.MaintenanceOccurrenceID, Attestation: attestation})
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
 	}
 	if !packageMaintenanceSecurityOnly(snapshot, plan) {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrUnsupported
+	}
+	if err = edge.service.AdmitMaintenance(ctx, packagemaint.MaintenanceAdmissionRequest{
+		RequestID: "pkgmw_" + packageMaintenanceDigest("plan", call.CommandID, plan.ID)[:32],
+		OccurrenceID: plan.MaintenanceOccurrenceID, NodeID: plan.NodeID, Manager: plan.Manager,
+		ExpectedDuration: packagemaint.MaintenanceExecutionDuration, At: edge.now().UTC()}); err != nil {
+		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
 	}
 	if err = edge.repository.PutPlan(ctx, plan); err != nil {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
@@ -250,7 +278,7 @@ func (edge *packageMaintenanceLinuxEdge) PlanPackageMaintenance(ctx context.Cont
 }
 
 func (edge *packageMaintenanceLinuxEdge) ApplyPackageMaintenance(ctx context.Context,
-	call apiserver.EdgeCall) (apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection], error) {
+	call apiserver.EdgeCall, payload apiserver.PackageMaintenanceApplyPayload) (apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection], error) {
 	if err := edge.validateMutation(ctx, call, true); err != nil {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
 	}
@@ -259,7 +287,7 @@ func (edge *packageMaintenanceLinuxEdge) ApplyPackageMaintenance(ctx context.Con
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
 	}
 	if plan.NodeID != edge.nodeID || plan.Manager != edge.manager || plan.Generation != call.ExpectedGeneration ||
-		!edge.now().UTC().Before(plan.ExpiresAt) {
+		payload.MaintenanceOccurrenceID != plan.MaintenanceOccurrenceID || !edge.now().UTC().Before(plan.ExpiresAt) {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrStalePlan
 	}
 	latestPlan, err := edge.repository.LatestPlan(ctx, edge.nodeID, edge.manager)
@@ -290,7 +318,7 @@ func (edge *packageMaintenanceLinuxEdge) ApplyPackageMaintenance(ctx context.Con
 			return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrConflict
 		}
 		operation, err = edge.service.Admit(ctx, packagemaint.AdmissionRequest{OperationID: operationID, PlanID: plan.ID,
-			ActorID: call.PrincipalID, Fence: plan.Generation})
+			MaintenanceOccurrenceID: payload.MaintenanceOccurrenceID, ActorID: call.PrincipalID, Fence: plan.Generation})
 	}
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
@@ -492,6 +520,7 @@ func projectPackageMaintenance(snapshot packagemaint.InventorySnapshot, plan pac
 	if plan.ID != "" {
 		projection.PlanID = plan.ID
 		projection.PlanDigest = plan.Digest
+		projection.MaintenanceOccurrenceID = plan.MaintenanceOccurrenceID
 		projection.PlannedReboot = string(plan.Reboot)
 		projection.RecoveryKind = string(plan.Recovery.Kind)
 		projection.RecoveryRequired = plan.Recovery.Required
@@ -632,6 +661,37 @@ func packageMaintenanceOperationID(call apiserver.EdgeCall, plan packagemaint.Ma
 	sum := sha256.Sum256([]byte("cyberpanel-package-maintenance-operation-v1\x00" + call.CommandID + "\x00" +
 		call.IdempotencyKey + "\x00" + plan.Digest))
 	return "pkgop_" + hex.EncodeToString(sum[:24])
+}
+
+func packageMaintenanceDigest(values ...string) string {
+	hash := sha256.New()
+	for _, value := range values {
+		hash.Write([]byte(value))
+		hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func (admission *packageMaintenanceWindowAdmission) AdmitPackageMaintenance(ctx context.Context,
+	request packagemaint.MaintenanceAdmissionRequest) error {
+	if admission == nil || admission.evaluator == nil || admission.occurrences == nil || ctx == nil ||
+		request.NodeID != admission.nodeID || request.Manager != admission.manager {
+		return packagemaint.ErrInvalid
+	}
+	decision, err := admission.evaluator.Admit(ctx, maintenance.AdmissionRequest{
+		ID: "pkgmw_" + packageMaintenanceDigest(request.RequestID, request.OccurrenceID)[:32],
+		Target: maintenance.Target{TenantID: maintenance.InstallationTenantID, NodeID: request.NodeID,
+			ResourceKind: "package_maintenance", ResourceID: string(request.Manager)},
+		OperationClass: maintenance.OperationSecurity, ExpectedDuration: request.ExpectedDuration, At: request.At.UTC()})
+	if err != nil || decision.Kind != maintenance.DecisionAllow || decision.OccurrenceID != request.OccurrenceID {
+		return packagemaint.ErrUnauthorized
+	}
+	occurrence, err := admission.occurrences.LoadOccurrence(ctx, decision.OccurrenceID)
+	if err != nil || occurrence.ID != request.OccurrenceID || occurrence.StartsAt.After(request.At) ||
+		occurrence.EndsAt.Before(request.At.Add(request.ExpectedDuration)) {
+		return packagemaint.ErrUnauthorized
+	}
+	return nil
 }
 
 func validPackageMaintenanceRuntimeID(value string) bool {

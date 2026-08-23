@@ -30,6 +30,7 @@ type PackageMaintenanceProjection struct {
 	InventoryDigest          string    `json:"inventory_digest"`
 	PlanID                   string    `json:"plan_id,omitempty"`
 	PlanDigest               string    `json:"plan_digest,omitempty"`
+	MaintenanceOccurrenceID  string    `json:"maintenance_occurrence_id,omitempty"`
 	PlanStatus               string    `json:"plan_status"`
 	ApplyStatus              string    `json:"apply_status"`
 	OperationID              string    `json:"operation_id,omitempty"`
@@ -48,14 +49,19 @@ type PackageMaintenanceProjection struct {
 }
 
 type PackageMaintenancePlanPayload struct {
-	ValidForSeconds uint32 `json:"valid_for_seconds,omitempty"`
+	ValidForSeconds         uint32 `json:"valid_for_seconds,omitempty"`
+	MaintenanceOccurrenceID string `json:"maintenance_occurrence_id"`
+}
+
+type PackageMaintenanceApplyPayload struct {
+	MaintenanceOccurrenceID string `json:"maintenance_occurrence_id"`
 }
 
 type PackageMaintenanceEdgeService interface {
 	ListPackageMaintenance(context.Context, EdgeCall, EdgePagePayload) (EdgePage[PackageMaintenanceProjection], error)
 	RefreshPackageMaintenance(context.Context, EdgeCall) (EdgeMutation[PackageMaintenanceProjection], error)
 	PlanPackageMaintenance(context.Context, EdgeCall, PackageMaintenancePlanPayload) (EdgeMutation[PackageMaintenanceProjection], error)
-	ApplyPackageMaintenance(context.Context, EdgeCall) (EdgeMutation[PackageMaintenanceProjection], error)
+	ApplyPackageMaintenance(context.Context, EdgeCall, PackageMaintenanceApplyPayload) (EdgeMutation[PackageMaintenanceProjection], error)
 }
 
 // PackageMaintenanceEdgeCapabilities prevents a status-only deployment from
@@ -77,7 +83,7 @@ func registerPackageMaintenanceContracts(registry *Registry) error {
 		consoleOperation("package_maintenance.status.list", "operations:observe", identity.AssurancePassword, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
 		consoleOperation("package_maintenance.refresh", "package:manage", identity.AssuranceMFA, true, func() any { return &EmptyPayload{} }, nil, edgeInstallationCreateScope),
 		consoleOperation("package_maintenance.plan", "package:manage", identity.AssuranceMFA, true, func() any { return &PackageMaintenancePlanPayload{} }, validatePackageMaintenancePlan, edgeInstallationExistingMutationScope),
-		consoleOperation("package_maintenance.apply", "package:manage", identity.AssurancePhishingResistant, true, func() any { return &EmptyPayload{} }, nil, edgeInstallationExistingMutationScope),
+		consoleOperation("package_maintenance.apply", "package:manage", identity.AssurancePhishingResistant, true, func() any { return &PackageMaintenanceApplyPayload{} }, validatePackageMaintenanceApply, edgeInstallationExistingMutationScope),
 	}
 	for _, definition := range definitions {
 		if err := register(registry, definition); err != nil {
@@ -92,8 +98,15 @@ func validatePackageMaintenancePlan(value any) error {
 	if payload.ValidForSeconds == 0 {
 		payload.ValidForSeconds = 1800
 	}
-	if payload.ValidForSeconds < 60 || payload.ValidForSeconds > 86400 {
+	if payload.ValidForSeconds < 60 || payload.ValidForSeconds > 86400 || !validEdgeID(payload.MaintenanceOccurrenceID) {
 		return invalid("package maintenance plan lifetime")
+	}
+	return nil
+}
+
+func validatePackageMaintenanceApply(value any) error {
+	if !validEdgeID(value.(*PackageMaintenanceApplyPayload).MaintenanceOccurrenceID) {
+		return invalid("package maintenance occurrence")
 	}
 	return nil
 }
@@ -140,8 +153,8 @@ func bindPackageMaintenanceContracts(registry *Registry, services DomainServices
 		}
 	}
 	if capabilities.Apply {
-		if err := registry.Bind("package_maintenance.apply", func(ctx context.Context, invocation Invocation, _ any) (OperationResult, error) {
-			result, err := services.PackageMaintenance.ApplyPackageMaintenance(ctx, edgeCall(invocation))
+		if err := registry.Bind("package_maintenance.apply", func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
+			result, err := services.PackageMaintenance.ApplyPackageMaintenance(ctx, edgeCall(invocation), *value.(*PackageMaintenanceApplyPayload))
 			if err != nil {
 				return OperationResult{}, mapDomainError(err)
 			}

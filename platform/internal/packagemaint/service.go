@@ -11,6 +11,7 @@ type AuthorizationBoundary string
 const (
 	BoundaryAcceptance AuthorizationBoundary = "package_maintenance_acceptance"
 	BoundaryCommit     AuthorizationBoundary = "package_maintenance_commit"
+	MaintenanceExecutionDuration              = 30 * time.Minute
 )
 
 type AuthorizationRequest struct {
@@ -54,27 +55,62 @@ type MaintenanceExecutor interface {
 	Apply(context.Context, ExecutionRequest) (ExecutionReceipt, error)
 }
 
+type MaintenanceAdmissionRequest struct {
+	RequestID        string
+	OccurrenceID     string
+	NodeID           string
+	Manager          Manager
+	ExpectedDuration time.Duration
+	At               time.Time
+}
+
+type MaintenanceGate interface {
+	AdmitPackageMaintenance(context.Context, MaintenanceAdmissionRequest) error
+}
+
 type AdmissionRequest struct {
-	OperationID string
-	PlanID      string
-	ActorID     string
-	Fence       uint64
+	OperationID            string
+	PlanID                 string
+	MaintenanceOccurrenceID string
+	ActorID                string
+	Fence                  uint64
 }
 
 type Service struct {
 	Store      MaintenanceStore
 	Authorizer Authorizer
 	Executor   MaintenanceExecutor
+	Maintenance MaintenanceGate
 	Now        func() time.Time
 }
 
+func (service Service) AdmitMaintenance(ctx context.Context, request MaintenanceAdmissionRequest) error {
+	if ctx == nil || service.Maintenance == nil || !safeID.MatchString(request.RequestID) || !safeID.MatchString(request.OccurrenceID) ||
+		!safeID.MatchString(request.NodeID) || !validManager(request.Manager) || request.ExpectedDuration != MaintenanceExecutionDuration ||
+		request.At.IsZero() || request.At.Location() != time.UTC {
+		return ErrInvalid
+	}
+	if err := service.Maintenance.AdmitPackageMaintenance(ctx, request); err != nil {
+		return ErrUnauthorized
+	}
+	return nil
+}
+
 func (service Service) Admit(ctx context.Context, request AdmissionRequest) (MaintenanceOperation, error) {
-	if service.Store == nil || service.Authorizer == nil || !safeID.MatchString(request.OperationID) || !safeID.MatchString(request.PlanID) || !safeID.MatchString(request.ActorID) || request.Fence == 0 {
+	if service.Store == nil || service.Authorizer == nil || service.Maintenance == nil || !safeID.MatchString(request.OperationID) || !safeID.MatchString(request.PlanID) || !safeID.MatchString(request.MaintenanceOccurrenceID) || !safeID.MatchString(request.ActorID) || request.Fence == 0 {
 		return MaintenanceOperation{}, ErrInvalid
 	}
 	now := service.now()
 	plan, inventory, err := service.currentInputs(ctx, request.PlanID, now)
 	if err != nil {
+		return MaintenanceOperation{}, err
+	}
+	if request.MaintenanceOccurrenceID != plan.MaintenanceOccurrenceID {
+		return MaintenanceOperation{}, ErrUnauthorized
+	}
+	if err = service.AdmitMaintenance(ctx, MaintenanceAdmissionRequest{RequestID: "pkgmw_" + digestStrings("admit", request.OperationID, plan.MaintenanceOccurrenceID)[:32],
+		OccurrenceID: plan.MaintenanceOccurrenceID, NodeID: plan.NodeID, Manager: plan.Manager,
+		ExpectedDuration: MaintenanceExecutionDuration, At: now}); err != nil {
 		return MaintenanceOperation{}, err
 	}
 	scope := "package-maintenance:accept:" + plan.ID
@@ -119,7 +155,7 @@ func (service Service) Admit(ctx context.Context, request AdmissionRequest) (Mai
 }
 
 func (service Service) Apply(ctx context.Context, operationID, actorID string) (MaintenanceOperation, error) {
-	if service.Store == nil || service.Authorizer == nil || service.Executor == nil || !safeID.MatchString(operationID) || !safeID.MatchString(actorID) {
+	if service.Store == nil || service.Authorizer == nil || service.Executor == nil || service.Maintenance == nil || !safeID.MatchString(operationID) || !safeID.MatchString(actorID) {
 		return MaintenanceOperation{}, ErrInvalid
 	}
 	now := service.now()
@@ -139,6 +175,19 @@ func (service Service) Apply(ctx context.Context, operationID, actorID string) (
 	}
 	if inventory.Generation != operation.InventoryGeneration || inventory.ContentDigest != operation.InventoryDigest {
 		return MaintenanceOperation{}, ErrStaleInventory
+	}
+	maintenanceErr := service.AdmitMaintenance(ctx, MaintenanceAdmissionRequest{RequestID: "pkgmw_" + digestStrings("apply", operation.ID, plan.MaintenanceOccurrenceID)[:32],
+		OccurrenceID: plan.MaintenanceOccurrenceID, NodeID: plan.NodeID, Manager: plan.Manager,
+		ExpectedDuration: MaintenanceExecutionDuration, At: now})
+	if maintenanceErr != nil {
+		evidence := digestStrings(operation.ID, plan.MaintenanceOccurrenceID, "maintenance-denied")
+		failed, transitionErr := service.Store.Transition(ctx, operation.ID, operation.Generation, OperationAdmitted, OperationFailed,
+			AuthorizationEvidence{}, ExecutionReceipt{}, makeAudit(operation.ID, operation.Generation+1, actorID,
+				"maintenance-admission", "denied", plan.Digest, evidence, now))
+		if transitionErr != nil {
+			return MaintenanceOperation{}, transitionErr
+		}
+		return failed, maintenanceErr
 	}
 	scope := "package-maintenance:commit:" + plan.ID
 	authorizationRequest := AuthorizationRequest{

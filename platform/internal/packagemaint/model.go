@@ -236,6 +236,7 @@ type MaintenancePlan struct {
 	ID                  string                `json:"id"`
 	NodeID              string                `json:"node_id"`
 	Manager             Manager               `json:"manager"`
+	MaintenanceOccurrenceID string            `json:"maintenance_occurrence_id"`
 	InventoryID         string                `json:"inventory_id"`
 	InventoryGeneration uint64                `json:"inventory_generation"`
 	InventoryDigest     string                `json:"inventory_digest"`
@@ -495,7 +496,7 @@ func hasCandidateProvenance(values []Provenance, candidate Package) bool {
 }
 
 func (plan MaintenancePlan) Validate() error {
-	if !safeID.MatchString(plan.ID) || !safeID.MatchString(plan.NodeID) || !validManager(plan.Manager) || !safeID.MatchString(plan.InventoryID) || plan.InventoryGeneration == 0 || !validDigest(plan.InventoryDigest) || !validDigest(plan.SolverDigest) || plan.Generation == 0 || len(plan.Changes) == 0 || len(plan.Changes) > MaximumChanges || len(plan.Dependencies) > MaximumDependencies || len(plan.Holds) > MaximumHolds || len(plan.Services) > MaximumServiceImpacts || !validSecurity(plan.Security) || !validDigest(plan.Digest) || plan.CreatedAt.IsZero() || !plan.ExpiresAt.After(plan.CreatedAt) || plan.ExpiresAt.Sub(plan.CreatedAt) > 24*time.Hour {
+	if !safeID.MatchString(plan.ID) || !safeID.MatchString(plan.NodeID) || !validManager(plan.Manager) || !safeID.MatchString(plan.MaintenanceOccurrenceID) || !safeID.MatchString(plan.InventoryID) || plan.InventoryGeneration == 0 || !validDigest(plan.InventoryDigest) || !validDigest(plan.SolverDigest) || plan.Generation == 0 || len(plan.Changes) == 0 || len(plan.Changes) > MaximumChanges || len(plan.Dependencies) > MaximumDependencies || len(plan.Holds) > MaximumHolds || len(plan.Services) > MaximumServiceImpacts || !validSecurity(plan.Security) || !validDigest(plan.Digest) || plan.CreatedAt.IsZero() || !plan.ExpiresAt.After(plan.CreatedAt) || plan.ExpiresAt.Sub(plan.CreatedAt) > 24*time.Hour {
 		return ErrInvalid
 	}
 	changes := make(map[string]struct{}, len(plan.Changes))
