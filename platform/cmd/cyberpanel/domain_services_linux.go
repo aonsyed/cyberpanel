@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	stdmail "net/mail"
 	"net/textproto"
 	"os"
 	"regexp"
@@ -33,6 +34,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/containers"
 	"github.com/aonsyed/cyberpanel/platform/internal/database"
 	"github.com/aonsyed/cyberpanel/platform/internal/dns"
+	marketing "github.com/aonsyed/cyberpanel/platform/internal/emailmarketing"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/siteops"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/webactivation"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/preview"
@@ -57,6 +59,52 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/management"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/ols"
 )
+
+type localEmailMarketingDeliveryProvider struct {
+	client             *mail.MailDaemonClient
+	unsubscribeBaseURL string
+}
+
+func (provider *localEmailMarketingDeliveryProvider) Availability(context.Context, marketing.TenantID, string) (marketing.ProviderAvailability, error) {
+	if provider == nil || provider.client == nil {
+		return marketing.ProviderAvailability{}, marketing.ErrInvalid
+	}
+	evidence := sha256.Sum256([]byte("local_mail_daemon_configured"))
+	return marketing.ProviderAvailability{Online: true, EvidenceDigest: hex.EncodeToString(evidence[:])}, nil
+}
+
+func (provider *localEmailMarketingDeliveryProvider) Send(ctx context.Context, envelope marketing.DeliveryEnvelope) (marketing.ProviderResult, error) {
+	if provider == nil || provider.client == nil || !envelope.Test || envelope.TextBody == "" || len(envelope.Subject)+len("[TEST] ") > 998 {
+		return marketing.ProviderResult{}, marketing.ErrInvalid
+	}
+	sender, err := stdmail.ParseAddress(envelope.From)
+	if err != nil || mail.ValidateAddress(mail.Address(strings.ToLower(sender.Address))) != nil {
+		return marketing.ProviderResult{}, marketing.ErrInvalid
+	}
+	parts := strings.SplitN(strings.ToLower(sender.Address), "@", 2)
+	if len(parts) != 2 {
+		return marketing.ProviderResult{}, marketing.ErrInvalid
+	}
+	replyTo := mail.Address("")
+	if envelope.ReplyTo != "" {
+		parsed, parseErr := stdmail.ParseAddress(envelope.ReplyTo)
+		if parseErr != nil || mail.ValidateAddress(mail.Address(strings.ToLower(parsed.Address))) != nil {
+			return marketing.ProviderResult{}, marketing.ErrInvalid
+		}
+		replyTo = mail.Address(strings.ToLower(parsed.Address))
+	}
+	sum := sha256.Sum256([]byte(envelope.IdempotencyKey))
+	binding := mail.WebmailBinding{TenantID: string(envelope.TenantID), MailboxID: mail.MailboxID("test_" + hex.EncodeToString(sum[:16])), Address: mail.Address(strings.ToLower(sender.Address)), ServerName: parts[1]}
+	submission := mail.CampaignSubmission{CampaignID: mail.CampaignID("test_" + hex.EncodeToString(sum[16:])), Sender: binding, Recipient: mail.Address(envelope.Recipient), ReplyTo: replyTo, Subject: "[TEST] " + envelope.Subject, Text: envelope.TextBody, SanitizedHTML: envelope.HTMLBody, UnsubscribeURL: provider.unsubscribeBaseURL, IdempotencyKey: envelope.IdempotencyKey}
+	queueID, err := provider.client.SubmitCampaign(ctx, submission)
+	if errors.Is(err, mail.ErrRateLimited) {
+		return marketing.ProviderResult{Disposition: marketing.ProviderDeferred, Reason: "local_rate_limited", RetryAfter: time.Minute, Definitive: true}, nil
+	}
+	if err != nil {
+		return marketing.ProviderResult{Disposition: marketing.ProviderUnknown, Reason: "local_submission_unavailable", Definitive: false}, err
+	}
+	return marketing.ProviderResult{Disposition: marketing.ProviderAccepted, ProviderMessageID: string(queueID), Definitive: true}, nil
+}
 
 // assembleDomainServices exposes only services whose complete runtime
 // dependencies are present. Repository-backed catalogs are immediately
@@ -140,6 +188,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	certificateConsoleEdge,err:=newCertificateEdge(certificateRuntime,certificateIssuance,certificateDeployment);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize certificate console edge: %w",err)}
 	accessClient,err:=access.NewLocalAccessClient();if err!=nil{return apiserver.DomainServices{},fmt.Errorf("connect access executor: %w",err)}
 	fileService:=&access.FileService{Executor:accessClient,Store:repositories.Access,Now:runtimeClock{}.Now}
+	localMarketingDelivery:=&localEmailMarketingDeliveryProvider{client:campaignSender.Client,unsubscribeBaseURL:campaignSender.Signer.BaseURL}
+	if err=emailMarketingOperations.ConfigureContentRuntime(fileService,localMarketingDelivery,unsubscribeKey);err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize email marketing content runtime: %w",err)}
 	credentialService:=&access.CredentialService{Executor:accessClient,Terminal:accessClient,Store:repositories.Access,Now:runtimeClock{}.Now}
 	cronService:=&access.CronService{Executor:accessClient,Store:repositories.Access,Now:runtimeClock{}.Now}
 	gitService:=&access.GitService{Executor:accessClient,Store:repositories.Access,Now:runtimeClock{}.Now}

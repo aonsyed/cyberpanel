@@ -124,6 +124,12 @@ type EmailMarketingOperations struct {
 	Policy     marketing.CampaignPolicyService
 	Backup     marketing.CampaignBackupService
 	Restore    *emailMarketingRestoreActivation
+	Artifacts  emailMarketingArtifactStore
+	LocalDelivery marketing.DeliveryProvider
+	DeliveryProviders map[string]marketing.DeliveryProvider
+	VerificationProviders map[string]EmailMarketingVerificationProvider
+	verificationMu sync.Mutex
+	verificationRates map[marketing.TenantID]emailMarketingVerificationRate
 	ArchiveRoot string
 	Now        func() time.Time
 }
