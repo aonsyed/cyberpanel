@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -781,6 +782,14 @@ type MigrationProjection struct {
 	RollbackDeadline   *time.Time `json:"rollback_deadline,omitempty"`
 }
 
+type MigrationProviderProjection struct {
+	Source             string `json:"source"`
+	Transport          string `json:"transport"`
+	EndpointScheme     string `json:"endpoint_scheme"`
+	NetworkRequired    bool   `json:"network_required"`
+	CreationOperation  string `json:"creation_operation"`
+}
+
 type MigrationCreatePayload struct {
 	Source         string `json:"source"`
 	SourceEndpoint string `json:"source_endpoint"`
@@ -1090,6 +1099,10 @@ type MigrationEdgeService interface {
 	Cutover(context.Context, EdgeCall, MigrationCutoverPayload) (EdgeMutation[MigrationProjection], error)
 }
 
+type MigrationProviderDiscoveryEdgeService interface {
+	ListMigrationProviders(context.Context, EdgeCall) ([]MigrationProviderProjection, error)
+}
+
 // MigrationEdgeCapabilities lets a concrete runtime keep destructive stages
 // unbound until every authority required by that stage is present. Implementors
 // that do not expose this optional interface retain the complete legacy surface.
@@ -1237,6 +1250,7 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("ha.promotion.plan", "ha:manage", phishingResistant, true, func() any { return &HAPromotionPlanPayload{} }, validateHAPromotionPlan, edgeInstallationExistingMutationScope),
 		consoleOperation("ha.promotion.execute", "ha:manage", phishingResistant, true, func() any { return &HAPromotionExecutePayload{} }, validateHAPromotionExecute, edgeInstallationExistingMutationScope),
 
+		consoleOperation("migration.provider.list", "migration:manage", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantListScope),
 		consoleOperation("migration.list", "migration:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
 		consoleOperation("migration.inspect", "migration:manage", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantResourceReadScope),
 		consoleOperation("migration.create", "migration:manage", mfa, true, func() any { return &MigrationCreatePayload{} }, validateMigrationCreate, edgeTenantCreateScope),
@@ -1714,9 +1728,23 @@ func mapHAEdgeError(err error) error {
 
 func validateMigrationCreate(value any) error {
 	payload := value.(*MigrationCreatePayload)
-	if payload.Source != "cyberpanel" { return invalid("migration source") }
-	if !validApprovedEndpoint(payload.SourceEndpoint) { return invalid("migration source endpoint") }
+	switch payload.Source {
+	case "cyberpanel":
+		if !validApprovedEndpoint(payload.SourceEndpoint) { return invalid("migration source endpoint") }
+	case "cpanel":
+		if !validCPanelIntakeEndpoint(payload.SourceEndpoint) { return invalid("migration source endpoint") }
+	default:
+		return invalid("migration source")
+	}
 	return nil
+}
+
+func validCPanelIntakeEndpoint(value string) bool {
+	if len(value) == 0 || len(value) > 2048 { return false }
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "file" || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" { return false }
+	path := parsed.Path
+	return filepath.IsAbs(path) && filepath.Clean(path) == path && (&url.URL{Scheme:"file", Path:path}).String() == value
 }
 
 func validateMigrationPlan(value any) error {
@@ -2447,6 +2475,10 @@ func bindConsoleEdgeContractsThree(registry *Registry, services DomainServices) 
 		}); err != nil { return err }
 	}
 	if services.MigrationEdge != nil {
+		if discovery, ok := services.MigrationEdge.(MigrationProviderDiscoveryEdgeService); ok { if err := registry.Bind("migration.provider.list", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := discovery.ListMigrationProviders(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err } }
 		capabilities := MigrationEdgeCapabilities{List:true,Inspect:true,Create:true,Cancel:true,Inventory:true,Plan:true,Sync:true,Cutover:true}
 		if provider, ok := services.MigrationEdge.(MigrationEdgeCapabilityProvider); ok { capabilities=provider.MigrationCapabilities() }
 		if capabilities.List { if err := registry.Bind("migration.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {

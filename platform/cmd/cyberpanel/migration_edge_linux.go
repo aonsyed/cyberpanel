@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,6 +35,17 @@ func newMigrationEdge(runtime *localmigration.Runtime, now func() time.Time) (*m
 
 func (*migrationEdge) MigrationCapabilities() apiserver.MigrationEdgeCapabilities {
 	return apiserver.MigrationEdgeCapabilities{List:true,Inspect:true,Create:true,Cancel:true,Inventory:true,Plan:true,Sync:true,Cutover:true}
+}
+
+func (edge *migrationEdge) ListMigrationProviders(ctx context.Context, call apiserver.EdgeCall) ([]apiserver.MigrationProviderProjection, error) {
+	if edge == nil || edge.runtime == nil || ctx == nil || strings.TrimSpace(call.TenantID) == "" {
+		return nil, migration.ErrInvalid
+	}
+	providers := []apiserver.MigrationProviderProjection{{Source:"cyberpanel", Transport:"mutual_tls_extractor", EndpointScheme:"https", NetworkRequired:true, CreationOperation:"migration.create"}}
+	if edge.runtime.CPanelAvailable() {
+		providers = append(providers, apiserver.MigrationProviderProjection{Source:"cpanel", Transport:"local_quarantine", EndpointScheme:"file", NetworkRequired:false, CreationOperation:"migration.create"})
+	}
+	return providers, nil
 }
 
 func (edge *migrationEdge) ListMigrations(ctx context.Context, call apiserver.EdgeCall, payload apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.MigrationProjection], error) {
@@ -78,16 +90,30 @@ func (edge *migrationEdge) CreateMigration(ctx context.Context, call apiserver.E
 	if edge == nil || edge.runtime == nil || ctx == nil || strings.TrimSpace(call.TenantID) == "" || strings.TrimSpace(call.CommandID) == "" {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrInvalid
 	}
-	if err := validateMigrationEndpoint(payload.SourceEndpoint); err != nil {
+	source := migration.SourceKind(payload.Source)
+	if err := validateMigrationEndpoint(source, payload.SourceEndpoint); err != nil {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
 	}
-	if payload.Source != string(migration.SourceCyberPanel) {
+	var id migration.ID
+	sourceEndpoint := payload.SourceEndpoint
+	switch source {
+	case migration.SourceCyberPanel:
+		id = migrationID(call.CommandID, call.TenantID)
+	case migration.SourceCPanel:
+		admission, err := edge.runtime.AdmitCPanel(ctx, call.TenantID, payload.SourceEndpoint)
+		if err != nil {
+			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+		}
+		if admission.Manifest.Source != migration.SourceCPanel || !admission.Manifest.MigrationID.Valid() {
+			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrInvalid
+		}
+		id = admission.Manifest.MigrationID
+		sourceEndpoint = admission.SourceEndpoint
+	default:
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrInvalid
 	}
-	source := migration.SourceCyberPanel
-	id := migrationID(call.CommandID, call.TenantID)
 	now := edge.now().UTC()
-	scope := migration.RuntimeScope{MigrationID: id, TenantID: call.TenantID, SourceEndpoint: payload.SourceEndpoint, Generation: 1, LastCommandID: call.CommandID, UpdatedAt: now}
+	scope := migration.RuntimeScope{MigrationID: id, TenantID: call.TenantID, SourceEndpoint: sourceEndpoint, Generation: 1, LastCommandID: call.CommandID, UpdatedAt: now}
 	createdScope, err := edge.runtime.Scopes.Create(ctx, scope)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
@@ -489,9 +515,22 @@ func migrationPlanID(id migration.ID, commandID string) migration.ID {
 	return planID
 }
 
-func validateMigrationEndpoint(endpoint string) error {
+func validateMigrationEndpoint(source migration.SourceKind, endpoint string) error {
 	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" || parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" || len(endpoint) > 2048 {
+	if err != nil || len(endpoint) > 2048 {
+		return migration.ErrInvalid
+	}
+	switch source {
+	case migration.SourceCyberPanel:
+		if parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" || parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return migration.ErrInvalid
+		}
+	case migration.SourceCPanel:
+		path := parsed.Path
+		if parsed.Scheme != "file" || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || (&url.URL{Scheme:"file", Path:path}).String() != endpoint {
+			return migration.ErrInvalid
+		}
+	default:
 		return migration.ErrInvalid
 	}
 	return nil
@@ -546,3 +585,4 @@ func migrationProgress(value migration.Migration) uint8 {
 }
 
 var _ apiserver.MigrationEdgeService = (*migrationEdge)(nil)
+var _ apiserver.MigrationProviderDiscoveryEdgeService = (*migrationEdge)(nil)

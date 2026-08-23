@@ -45,15 +45,24 @@ type Runtime struct {
 	Orchestrator *migration.Orchestrator
 	Target       *migration.CanonicalTargetImporter
 	Chunks       *migration.ChunkStore
+	cpanel       *cPanelIntake
 }
 
 type Config struct {
-	ChunkPath         string
-	MaximumChunkBytes uint64
+	ChunkPath                string
+	MaximumChunkBytes        uint64
+	TrustPath                string
+	CPanelIntakePath         string
+	CPanelQuarantinePath     string
+	MaximumCPanelBundleBytes uint64
 }
 
 func New(ctx context.Context, db *sql.DB, repository *migration.SQLRepository) (*Runtime, error) {
-	return NewWithConfig(ctx, db, repository, Config{})
+	return NewWithConfig(ctx, db, repository, Config{
+		TrustPath:            DefaultTrustPath,
+		CPanelIntakePath:     DefaultCPanelIntakePath,
+		CPanelQuarantinePath: DefaultCPanelQuarantinePath,
+	})
 }
 
 func NewWithConfig(ctx context.Context, db *sql.DB, repository *migration.SQLRepository, config Config) (*Runtime, error) {
@@ -63,7 +72,13 @@ func NewWithConfig(ctx context.Context, db *sql.DB, repository *migration.SQLRep
 	if config.ChunkPath == "" {
 		config.ChunkPath = DefaultChunkPath
 	}
+	if config.TrustPath == "" {
+		config.TrustPath = DefaultTrustPath
+	}
 	if !filepath.IsAbs(config.ChunkPath) || filepath.Clean(config.ChunkPath) != config.ChunkPath {
+		return nil, migration.ErrInvalid
+	}
+	if !filepath.IsAbs(config.TrustPath) || filepath.Clean(config.TrustPath) != config.TrustPath || (config.CPanelIntakePath == "") != (config.CPanelQuarantinePath == "") {
 		return nil, migration.ErrInvalid
 	}
 	if err := ensurePrivateDirectory(config.ChunkPath); err != nil {
@@ -95,14 +110,33 @@ func NewWithConfig(ctx context.Context, db *sql.DB, repository *migration.SQLRep
 	if err != nil {
 		return nil, err
 	}
-	source := &scopedExtractorSource{scopes:scopes, clients:map[migration.ID]scopedClient{}, chunks:map[string][]migration.ID{}}
-	orchestrator, err := migration.NewOrchestrator(repository, configuredManifestVerifier{path: DefaultTrustPath}, source, source, target)
+	verifier := configuredManifestVerifier{path: config.TrustPath}
+	var cpanelIntake *cPanelIntake
+	if config.CPanelIntakePath != "" {
+		cpanelIntake, err = newCPanelIntake(config.CPanelIntakePath, config.CPanelQuarantinePath, config.MaximumCPanelBundleBytes, verifier)
+		if err != nil {
+			return nil, err
+		}
+	}
+	source := &scopedExtractorSource{scopes:scopes, cpanel:cpanelIntake, clients:map[migration.ID]scopedClient{}, chunks:map[string][]migration.ID{}}
+	orchestrator, err := migration.NewOrchestrator(repository, verifier, source, source, target)
 	if err != nil {
 		return nil, err
 	}
 	orchestrator.WithChunkStager(stager)
 	closeChunks = false
-	return &Runtime{Repository: repository, Scopes: scopes, Orchestrator: orchestrator, Target: target, Chunks: chunks}, nil
+	return &Runtime{Repository: repository, Scopes: scopes, Orchestrator: orchestrator, Target: target, Chunks: chunks, cpanel: cpanelIntake}, nil
+}
+
+func (runtime *Runtime) CPanelAvailable() bool {
+	return runtime != nil && runtime.cpanel != nil && runtime.cpanel.Ready()
+}
+
+func (runtime *Runtime) AdmitCPanel(ctx context.Context, tenantID, endpoint string) (CPanelAdmission, error) {
+	if !runtime.CPanelAvailable() {
+		return CPanelAdmission{}, migration.ErrBlocked
+	}
+	return runtime.cpanel.Admit(ctx, tenantID, endpoint)
 }
 
 func (runtime *Runtime) Close() error {
@@ -133,12 +167,28 @@ func (verifier configuredManifestVerifier) Verify(ctx context.Context, manifest 
 }
 
 func loadTrustPolicy(path string) (migration.ManifestTrustPolicy, error) {
-	if path != DefaultTrustPath {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return migration.ManifestTrustPolicy{}, migration.ErrInvalid
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return migration.ManifestTrustPolicy{}, err
+	}
+	metadata, ownerKnown := before.Sys().(*syscall.Stat_t)
+	if !ownerKnown || int(metadata.Uid) != 0 && int(metadata.Uid) != os.Geteuid() {
+		return migration.ManifestTrustPolicy{}, migration.ErrBlocked
 	}
 	raw, err := readStableFile(path, 1<<20, false)
 	if err != nil {
 		return migration.ManifestTrustPolicy{}, err
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		return migration.ManifestTrustPolicy{}, err
+	}
+	afterMetadata, afterOwnerKnown := after.Sys().(*syscall.Stat_t)
+	if !afterOwnerKnown || !os.SameFile(before, after) || int(afterMetadata.Uid) != int(metadata.Uid) {
+		return migration.ManifestTrustPolicy{}, migration.ErrBlocked
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
@@ -171,28 +221,41 @@ func loadTrustPolicy(path string) (migration.ManifestTrustPolicy, error) {
 }
 
 type scopedClient struct{ endpoint string; client *cyberpanelextractor.Client }
-type scopedExtractorSource struct{ scopes *migration.RuntimeScopeStore; mu sync.RWMutex; clients map[migration.ID]scopedClient; chunks map[string][]migration.ID }
+type scopedExtractorSource struct{ scopes *migration.RuntimeScopeStore; cpanel *cPanelIntake; mu sync.RWMutex; clients map[migration.ID]scopedClient; chunks map[string][]migration.ID }
 
 func (source *scopedExtractorSource) Discover(ctx context.Context, id migration.ID) (migration.Manifest, error) {
-	client, err := source.client(ctx, id)
+	scope, local, err := source.localScope(ctx, id)
 	if err != nil {
 		return migration.Manifest{}, err
 	}
-	manifest, err := client.Discover(ctx, id)
+	var manifest migration.Manifest
+	if local {
+		manifest, err = source.cpanel.Discover(ctx, scope)
+	} else {
+		var client *cyberpanelextractor.Client
+		client, err = source.client(ctx, id)
+		if err == nil {
+			manifest, err = client.Discover(ctx, id)
+		}
+	}
 	if err != nil {
 		return migration.Manifest{}, err
 	}
+	source.rememberManifest(manifest)
+	return manifest, nil
+}
+
+func (source *scopedExtractorSource) rememberManifest(manifest migration.Manifest) {
 	source.mu.Lock()
 	for _, chunk := range manifest.Chunks {
 		values := source.chunks[chunk.Digest]
 		found := false
-		for _, existing := range values { if existing == id { found = true; break } }
-		if !found { values = append(values, id) }
+		for _, existing := range values { if existing == manifest.MigrationID { found = true; break } }
+		if !found { values = append(values, manifest.MigrationID) }
 		if len(values) > 64 { values = values[len(values)-64:] }
 		source.chunks[chunk.Digest] = values
 	}
 	source.mu.Unlock()
-	return manifest, nil
 }
 
 func (source *scopedExtractorSource) OpenChunk(ctx context.Context, digest string, offset, length uint64) ([]byte, error) {
@@ -207,11 +270,23 @@ func (source *scopedExtractorSource) OpenChunk(ctx context.Context, digest strin
 	}
 	var result error
 	for _, id := range ids {
-		client, err := source.client(ctx, id)
-		if err == nil {
+		scope, local, err := source.localScope(ctx, id)
+		if err == nil && local {
 			var value []byte
-			value, err = client.OpenChunk(ctx, digest, offset, length)
-			if err == nil { return value, nil }
+			value, err = source.cpanel.OpenChunk(ctx, scope, digest, offset, length)
+			if err == nil {
+				return value, nil
+			}
+		} else if err == nil {
+			var client *cyberpanelextractor.Client
+			client, err = source.client(ctx, id)
+			if err == nil {
+				var value []byte
+				value, err = client.OpenChunk(ctx, digest, offset, length)
+				if err == nil {
+					return value, nil
+				}
+			}
 		}
 		result = errors.Join(result, err)
 	}
@@ -219,6 +294,13 @@ func (source *scopedExtractorSource) OpenChunk(ctx context.Context, digest strin
 }
 
 func (source *scopedExtractorSource) Generation(ctx context.Context, id migration.ID) (uint64, error) {
+	scope, local, err := source.localScope(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	if local {
+		return source.cpanel.Generation(ctx, scope)
+	}
 	client, err := source.client(ctx, id)
 	if err != nil {
 		return 0, err
@@ -227,6 +309,13 @@ func (source *scopedExtractorSource) Generation(ctx context.Context, id migratio
 }
 
 func (source *scopedExtractorSource) Quiesce(ctx context.Context, id migration.ID, plan migration.Plan, expectedFence uint64) (migration.SourceFence, error) {
+	_, local, err := source.localScope(ctx, id)
+	if err != nil {
+		return migration.SourceFence{}, err
+	}
+	if local {
+		return migration.SourceFence{}, migration.ErrBlocked
+	}
 	client, err := source.client(ctx, id)
 	if err != nil {
 		return migration.SourceFence{}, err
@@ -235,6 +324,13 @@ func (source *scopedExtractorSource) Quiesce(ctx context.Context, id migration.I
 }
 
 func (source *scopedExtractorSource) Unquiesce(ctx context.Context, fence migration.SourceFence) error {
+	_, local, err := source.localScope(ctx, fence.MigrationID)
+	if err != nil {
+		return err
+	}
+	if local {
+		return migration.ErrBlocked
+	}
 	client, err := source.client(ctx, fence.MigrationID)
 	if err != nil {
 		return err
@@ -243,6 +339,13 @@ func (source *scopedExtractorSource) Unquiesce(ctx context.Context, fence migrat
 }
 
 func (source *scopedExtractorSource) FinalDelta(ctx context.Context, fence migration.SourceFence, base migration.Manifest) (migration.Manifest, error) {
+	_, local, err := source.localScope(ctx, fence.MigrationID)
+	if err != nil {
+		return migration.Manifest{}, err
+	}
+	if local {
+		return migration.Manifest{}, migration.ErrBlocked
+	}
 	client, err := source.client(ctx, fence.MigrationID)
 	if err != nil {
 		return migration.Manifest{}, err
@@ -251,6 +354,13 @@ func (source *scopedExtractorSource) FinalDelta(ctx context.Context, fence migra
 }
 
 func (source *scopedExtractorSource) CommitSource(ctx context.Context, fence migration.SourceFence) error {
+	_, local, err := source.localScope(ctx, fence.MigrationID)
+	if err != nil {
+		return err
+	}
+	if local {
+		return migration.ErrBlocked
+	}
 	client, err := source.client(ctx, fence.MigrationID)
 	if err != nil {
 		return err
@@ -259,11 +369,35 @@ func (source *scopedExtractorSource) CommitSource(ctx context.Context, fence mig
 }
 
 func (source *scopedExtractorSource) RollbackSource(ctx context.Context, fence migration.SourceFence) error {
+	_, local, err := source.localScope(ctx, fence.MigrationID)
+	if err != nil {
+		return err
+	}
+	if local {
+		return migration.ErrBlocked
+	}
 	client, err := source.client(ctx, fence.MigrationID)
 	if err != nil {
 		return err
 	}
 	return client.RollbackSource(ctx, fence)
+}
+
+func (source *scopedExtractorSource) localScope(ctx context.Context, id migration.ID) (migration.RuntimeScope, bool, error) {
+	if source == nil || source.scopes == nil || ctx == nil || !id.Valid() {
+		return migration.RuntimeScope{}, false, migration.ErrInvalid
+	}
+	scope, err := source.scopes.LoadByMigration(ctx, id)
+	if err != nil {
+		return migration.RuntimeScope{}, false, err
+	}
+	if source.cpanel != nil && source.cpanel.OwnsEndpoint(scope.SourceEndpoint) {
+		return scope, true, nil
+	}
+	if strings.HasPrefix(scope.SourceEndpoint, "file:") {
+		return migration.RuntimeScope{}, false, migration.ErrBlocked
+	}
+	return scope, false, nil
 }
 
 func (source *scopedExtractorSource) client(ctx context.Context, id migration.ID) (*cyberpanelextractor.Client, error) {
@@ -273,6 +407,9 @@ func (source *scopedExtractorSource) client(ctx context.Context, id migration.ID
 	scope, err := source.scopes.LoadByMigration(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if source.cpanel != nil && source.cpanel.OwnsEndpoint(scope.SourceEndpoint) {
+		return nil, migration.ErrConflict
 	}
 	source.mu.RLock()
 	cached, found := source.clients[id]
