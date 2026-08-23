@@ -38,7 +38,9 @@ const (
 	ActionIssuePreview      Action = "preview.issue"
 	ActionConsumePreview    Action = "preview.consume"
 	ActionRevokePreview     Action = "preview.revoke"
+	ActionListPreviews      Action = "preview.list"
 	ActionQueueScreenshot   Action = "screenshot.queue"
+	ActionInspectScreenshot Action = "screenshot.inspect"
 	ActionRenderScreenshot  Action = "screenshot.render"
 )
 
@@ -198,6 +200,19 @@ type RevokeRequest struct {
 	SiteID             SiteID
 	SessionID          SessionID
 	ExpectedGeneration uint64
+}
+
+type ListSessionsRequest struct {
+	Actor    Actor
+	TenantID TenantID
+	SiteID   SiteID
+	After    SessionID
+	Limit    uint32
+}
+
+type ScreenshotInspection struct {
+	Job      ScreenshotJob       `json:"job"`
+	Artifact *ScreenshotArtifact `json:"artifact,omitempty"`
 }
 
 type Service struct {
@@ -391,6 +406,36 @@ func (service *Service) Revoke(ctx context.Context, request RevokeRequest) error
 		SiteGeneration: session.SiteGeneration, AuthzEpoch: decision.CurrentActorAuthzEpoch, RequestDigest: requestDigest, Outcome: "revoked", OccurredAt: now})
 }
 
+func (service *Service) ListSessions(ctx context.Context, request ListSessionsRequest) ([]PreviewSession, SessionID, error) {
+	if service == nil || request.Actor.Validate() != nil || !validID(string(request.TenantID)) || !validID(string(request.SiteID)) || request.After != "" && !validID(string(request.After)) || request.Limit == 0 || request.Limit > 500 {
+		return nil, "", ErrInvalid
+	}
+	decision, err := service.authorize(ctx, AuthorizationRequest{Actor: request.Actor, TenantID: request.TenantID, SiteID: request.SiteID, Action: ActionListPreviews, MinimumAssurance: AssuranceSession})
+	if err != nil || !validDecision(decision, request.Actor, request.TenantID, request.SiteID) {
+		return nil, "", concealAuthorization(err)
+	}
+	site, err := service.sites.ResolveExactSite(ctx, request.TenantID, request.SiteID)
+	if err != nil || site.Validate() != nil || site.TenantID != request.TenantID || site.SiteID != request.SiteID {
+		return nil, "", ErrNotFound
+	}
+	return service.repository.ListSessions(ctx, request.TenantID, request.SiteID, request.After, request.Limit)
+}
+
+func (service *ScreenshotService) Inspect(ctx context.Context, actor Actor, tenantID TenantID, siteID SiteID, jobID ScreenshotJobID) (ScreenshotInspection, error) {
+	if service == nil || actor.Validate() != nil || !validID(string(tenantID)) || !validID(string(siteID)) || !validID(string(jobID)) {
+		return ScreenshotInspection{}, ErrInvalid
+	}
+	decision, err := service.authorizer.AuthorizeSitePreview(ctx, AuthorizationRequest{Actor: actor, TenantID: tenantID, SiteID: siteID, Action: ActionInspectScreenshot, MinimumAssurance: AssuranceSession})
+	if err != nil || !validDecision(decision, actor, tenantID, siteID) {
+		return ScreenshotInspection{}, concealAuthorization(err)
+	}
+	job, artifact, err := service.repository.LoadScreenshotJob(ctx, tenantID, siteID, jobID)
+	if err != nil {
+		return ScreenshotInspection{}, concealSite(err)
+	}
+	return ScreenshotInspection{Job: job, Artifact: artifact}, nil
+}
+
 func (service *Service) ReconcileExpired(ctx context.Context, limit uint32) (uint32, error) {
 	if service == nil || limit == 0 || limit > 500 {
 		return 0, ErrInvalid
@@ -526,17 +571,17 @@ func validDecision(decision AuthorizationDecision, actor Actor, tenantID TenantI
 }
 
 func concealAuthorization(err error) error {
-	if err == nil {
-		return ErrUnauthorized
-	}
-	return errors.Join(ErrUnauthorized, err)
+	return ErrUnauthorized
 }
 
 func concealSite(err error) error {
 	if errors.Is(err, ErrStaleGeneration) {
 		return err
 	}
-	return ErrNotFound
+	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnauthorized) {
+		return ErrNotFound
+	}
+	return err
 }
 
 func digestToken(token []byte) string {

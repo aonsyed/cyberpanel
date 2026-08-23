@@ -223,6 +223,39 @@ func (repository *Repository) LoadSession(ctx context.Context, tenantID TenantID
 	return repository.decodeSession(encoded, tenantID, sessionID)
 }
 
+func (repository *Repository) ListSessions(ctx context.Context, tenantID TenantID, siteID SiteID, after SessionID, limit uint32) ([]PreviewSession, SessionID, error) {
+	if repository == nil || !validID(string(tenantID)) || !validID(string(siteID)) || after != "" && !validID(string(after)) || limit == 0 || limit > 500 {
+		return nil, "", ErrInvalid
+	}
+	rows, err := repository.db.QueryContext(ctx, `SELECT session_id,session_json FROM site_preview_sessions_v1 WHERE tenant_id=? AND site_id=? AND session_id>? ORDER BY session_id LIMIT ?`, tenantID, siteID, after, limit+1)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	values := make([]PreviewSession, 0, limit)
+	for rows.Next() {
+		var sessionID SessionID
+		var encoded []byte
+		if err = rows.Scan(&sessionID, &encoded); err != nil {
+			return nil, "", err
+		}
+		session, decodeErr := repository.decodeSession(encoded, tenantID, sessionID)
+		if decodeErr != nil || session.SiteID != siteID {
+			return nil, "", ErrIntegrity
+		}
+		values = append(values, session)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, "", err
+	}
+	var next SessionID
+	if len(values) > int(limit) {
+		values = values[:limit]
+		next = values[len(values)-1].ID
+	}
+	return values, next, nil
+}
+
 func (repository *Repository) decodeSession(encoded []byte, tenantID TenantID, sessionID SessionID) (PreviewSession, error) {
 	var session PreviewSession
 	if decodeStored(encoded, &session) != nil || session.Validate(repository.previewDomain) != nil || session.TenantID != tenantID || session.ID != sessionID {
@@ -575,6 +608,37 @@ func (repository *Repository) CreateScreenshotJob(ctx context.Context, job Scree
 		return err
 	}
 	return tx.Commit()
+}
+
+func (repository *Repository) LoadScreenshotJob(ctx context.Context, tenantID TenantID, siteID SiteID, jobID ScreenshotJobID) (ScreenshotJob, *ScreenshotArtifact, error) {
+	if repository == nil || !validID(string(tenantID)) || !validID(string(siteID)) || !validID(string(jobID)) {
+		return ScreenshotJob{}, nil, ErrInvalid
+	}
+	var encoded []byte
+	err := repository.db.QueryRowContext(ctx, `SELECT job_json FROM site_preview_screenshot_jobs_v1 WHERE tenant_id=? AND site_id=? AND job_id=?`, tenantID, siteID, jobID).Scan(&encoded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ScreenshotJob{}, nil, ErrNotFound
+	}
+	if err != nil {
+		return ScreenshotJob{}, nil, err
+	}
+	var job ScreenshotJob
+	if decodeStored(encoded, &job) != nil || job.Validate() != nil || job.TenantID != tenantID || job.SiteID != siteID || job.ID != jobID {
+		return ScreenshotJob{}, nil, ErrIntegrity
+	}
+	var artifactJSON []byte
+	err = repository.db.QueryRowContext(ctx, `SELECT artifact_json FROM site_preview_screenshot_artifacts_v1 WHERE tenant_id=? AND job_id=?`, tenantID, jobID).Scan(&artifactJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return job, nil, nil
+	}
+	if err != nil {
+		return ScreenshotJob{}, nil, err
+	}
+	var artifact ScreenshotArtifact
+	if decodeStored(artifactJSON, &artifact) != nil || artifact.Validate() != nil || artifact.TenantID != tenantID || artifact.SiteID != siteID || artifact.JobID != jobID || artifact.SiteGeneration != job.SiteGeneration {
+		return ScreenshotJob{}, nil, ErrIntegrity
+	}
+	return job, &artifact, nil
 }
 
 func (repository *Repository) ClaimScreenshotJob(ctx context.Context, workerID string, now time.Time, leaseDuration time.Duration) (ScreenshotJob, error) {
