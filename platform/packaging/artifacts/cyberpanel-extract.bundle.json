@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "component_id": "cyberpanel_extract",
+  "format": "tar_gzip",
+  "members": [
+    {
+      "path_id": "cyberpanel_extract",
+      "command": "./cmd/cyberpanel-extract",
+      "archive_path": "cyberpanel-extract",
+      "install_path": "/usr/local/libexec/cyberpanel/cyberpanel-extract",
+      "mode": "0755"
+    }
+  ]
+}
