@@ -42,6 +42,7 @@ const (
 	serverPrivateKeyPath        = credentialRoot + "/server.key"
 	clientCAPath                = credentialRoot + "/client-ca.pem"
 	operatorCAPath              = credentialRoot + "/operator-ca.pem"
+	enrollmentCAKeyPath         = credentialRoot + "/enrollment-ca.key"
 	intentSigningKeyPath        = credentialRoot + "/intent-signing.key"
 	revocationSigningKeyPath    = credentialRoot + "/revocation-signing.key"
 	enrollmentBundlePath        = credentialRoot + "/enrollments.json"
@@ -61,6 +62,9 @@ type configuration struct {
 	OperatorEnabled            bool   `json:"operator_enabled"`
 	OperatorListen             string `json:"operator_listen"`
 	OperatorCAFingerprintSHA256 string `json:"operator_ca_fingerprint_sha256"`
+	EnrollmentEnabled          bool   `json:"enrollment_enabled"`
+	EnrollmentListen           string `json:"enrollment_listen"`
+	EnrollmentCertificateTTLSeconds uint32 `json:"enrollment_certificate_ttl_seconds"`
 	MaximumSessions            uint32 `json:"maximum_sessions"`
 	ShutdownTimeoutSeconds     uint32 `json:"shutdown_timeout_seconds"`
 }
@@ -69,6 +73,7 @@ type enrollmentBundle struct {
 	Version     uint32                                   `json:"version"`
 	Enrollments []controlplane.ProvisionedEnrollment    `json:"enrollments"`
 	OperatorGrants []controlplane.OperatorGrant          `json:"operator_grants"`
+	EnrollmentTokens []controlplane.ProvisionedEnrollmentToken `json:"enrollment_tokens"`
 }
 
 func main() {
@@ -113,12 +118,33 @@ func run(config configuration) error {
 	if err != nil {
 		return fmt.Errorf("load enrollment trust: %w", err)
 	}
+	provisionedNodes := make(map[federation.ID]struct{}, len(bundle.Enrollments))
 	for _, enrollment := range bundle.Enrollments {
 		if enrollment.Grant.PeerID != peerID {
 			return fmt.Errorf("enrollment for %s names a different central peer", enrollment.Node.ID)
 		}
+		if _, duplicate := provisionedNodes[enrollment.Node.ID]; duplicate {
+			return fmt.Errorf("duplicate enrollment for %s", enrollment.Node.ID)
+		}
+		provisionedNodes[enrollment.Node.ID] = struct{}{}
 		if err = store.ProvisionEnrollment(ctx, enrollment); err != nil {
 			return fmt.Errorf("persist enrollment for %s: %w", enrollment.Node.ID, err)
+		}
+	}
+	if config.EnrollmentEnabled {
+		if err = store.BootstrapEnrollment(ctx); err != nil {
+			return fmt.Errorf("migrate enrollment authority: %w", err)
+		}
+		if len(bundle.EnrollmentTokens) == 0 {
+			return errors.New("enrollment listener requires at least one provisioned token digest")
+		}
+		for _, token := range bundle.EnrollmentTokens {
+			if _, static := provisionedNodes[token.NodeID]; static {
+				return fmt.Errorf("node %s cannot be both statically enrolled and token-enrollable", token.NodeID)
+			}
+		}
+		if err = store.ProvisionEnrollmentTokens(ctx, bundle.EnrollmentTokens, peerID, config.ClientCAFingerprintSHA256); err != nil {
+			return fmt.Errorf("persist enrollment token bindings: %w", err)
 		}
 	}
 	var serviceAuthorizer controlplane.Authorizer = denyAuthorizer{}
@@ -189,6 +215,7 @@ func run(config configuration) error {
 		return fmt.Errorf("listen for federation nodes: %w", err)
 	}
 	defer listener.Close()
+	listeners := []centralListener{{listener: listener, serve: server.Serve}}
 	if config.OperatorEnabled {
 		operatorTLS, loadErr := loadTLSConfiguration(operatorCAPath, config.OperatorCAFingerprintSHA256, time.Now().UTC())
 		if loadErr != nil {
@@ -207,12 +234,41 @@ func run(config configuration) error {
 			return fmt.Errorf("listen for central operators: %w", listenErr)
 		}
 		defer operatorListener.Close()
-		return serveCentralListeners(ctx, cancel, server, listener, operatorServer, operatorListener)
+		listeners = append(listeners, centralListener{listener: operatorListener, serve: operatorServer.Serve})
 	}
-	if err = server.Serve(ctx, listener); err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("serve federation nodes: %w", err)
+	if config.EnrollmentEnabled {
+		caPEM, readErr := readProtectedFile(clientCAPath, maximumCertificateBytes, false)
+		if readErr != nil {
+			return fmt.Errorf("load enrollment CA certificate: %w", readErr)
+		}
+		caKey, readErr := readProtectedFile(enrollmentCAKeyPath, ed25519.PrivateKeySize, true)
+		if readErr != nil {
+			return fmt.Errorf("load enrollment CA key: %w", readErr)
+		}
+		defer clear(caKey)
+		intentPublic := intentKey.Public().(ed25519.PublicKey)
+		revocationPublic := revocationKey.Public().(ed25519.PublicKey)
+		issuer, issuerErr := controlplane.NewEnrollmentIssuer(caPEM, caKey, config.ClientCAFingerprintSHA256, peerID, map[string][]byte{config.IntentSigningKeyID: intentPublic, config.RevocationSigningKeyID: revocationPublic}, time.Duration(config.EnrollmentCertificateTTLSeconds)*time.Second)
+		if issuerErr != nil {
+			return fmt.Errorf("assemble enrollment certificate issuer: %w", issuerErr)
+		}
+		defer issuer.Close()
+		enrollmentAPI, apiErr := controlplane.NewEnrollmentAPI(store, issuer)
+		if apiErr != nil {
+			return fmt.Errorf("assemble enrollment API: %w", apiErr)
+		}
+		enrollmentServer, serverErr := controlplane.NewEnrollmentServer(enrollmentAPI, tlsConfig, config.MaximumSessions, time.Duration(config.ShutdownTimeoutSeconds)*time.Second)
+		if serverErr != nil {
+			return fmt.Errorf("assemble enrollment listener: %w", serverErr)
+		}
+		enrollmentListener, listenErr := net.Listen("tcp", config.EnrollmentListen)
+		if listenErr != nil {
+			return fmt.Errorf("listen for node enrollment: %w", listenErr)
+		}
+		defer enrollmentListener.Close()
+		listeners = append(listeners, centralListener{listener: enrollmentListener, serve: enrollmentServer.Serve})
 	}
-	return nil
+	return serveCentralListeners(ctx, cancel, listeners)
 }
 
 func loadConfiguration(path string) (configuration, error) {
@@ -241,8 +297,8 @@ func loadConfiguration(path string) (configuration, error) {
 		return configuration{}, errors.New("invalid central listener port")
 	}
 	if !config.Enabled {
-		if config.OperatorEnabled {
-			return configuration{}, errors.New("operator listener requires central runtime enablement")
+		if config.OperatorEnabled || config.EnrollmentEnabled {
+			return configuration{}, errors.New("additional listeners require central runtime enablement")
 		}
 		return config, nil
 	}
@@ -259,29 +315,46 @@ func loadConfiguration(path string) (configuration, error) {
 			return configuration{}, errors.New("invalid operator listener trust policy")
 		}
 	}
+	if config.EnrollmentEnabled {
+		host, port, listenErr := net.SplitHostPort(config.EnrollmentListen)
+		parsedPort, portErr := strconv.ParseUint(port, 10, 16)
+		if listenErr != nil || host == "" || port == "" || portErr != nil || parsedPort == 0 || config.EnrollmentListen == config.Listen || config.EnrollmentListen == config.OperatorListen && config.OperatorEnabled || config.EnrollmentCertificateTTLSeconds < 300 || config.EnrollmentCertificateTTLSeconds > 23*60*60 {
+			return configuration{}, errors.New("invalid enrollment listener trust policy")
+		}
+	}
 	return config, nil
 }
 
-func serveCentralListeners(ctx context.Context, cancel context.CancelFunc, nodeServer *controlplane.TLSServer, nodeListener net.Listener, operatorServer *controlplane.OperatorServer, operatorListener net.Listener) error {
-	errorsChannel := make(chan error, 2)
-	go func() { errorsChannel <- nodeServer.Serve(ctx, nodeListener) }()
-	go func() { errorsChannel <- operatorServer.Serve(ctx, operatorListener) }()
+type centralListener struct {
+	listener net.Listener
+	serve    func(context.Context, net.Listener) error
+}
+
+func serveCentralListeners(ctx context.Context, cancel context.CancelFunc, listeners []centralListener) error {
+	if ctx == nil || cancel == nil || len(listeners) == 0 {
+		return errors.New("invalid central listeners")
+	}
+	errorsChannel := make(chan error, len(listeners))
+	for _, listener := range listeners {
+		go func(current centralListener) { errorsChannel <- current.serve(ctx, current.listener) }(listener)
+	}
 	received := 0
 	var first error
 	select {
 	case <-ctx.Done():
 	case first = <-errorsChannel:
 		received = 1
-		if first == nil {
+		if first == nil && ctx.Err() == nil {
 			first = errors.New("central listener stopped unexpectedly")
 		} else if ctx.Err() != nil && (errors.Is(first, context.Canceled) || errors.Is(first, net.ErrClosed)) {
 			first = nil
 		}
 		cancel()
 	}
-	_ = nodeListener.Close()
-	_ = operatorListener.Close()
-	for received < 2 {
+	for _, listener := range listeners {
+		_ = listener.listener.Close()
+	}
+	for received < len(listeners) {
 		err := <-errorsChannel
 		received++
 		if first == nil && err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
@@ -352,7 +425,7 @@ func loadEnrollmentBundle() (enrollmentBundle, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&bundle); err != nil || decoder.Decode(&struct{}{}) != io.EOF || bundle.Version != 1 || len(bundle.Enrollments) > 10000 {
+	if err = decoder.Decode(&bundle); err != nil || decoder.Decode(&struct{}{}) != io.EOF || bundle.Version != 1 || len(bundle.Enrollments) > 10000 || len(bundle.EnrollmentTokens) > 10000 {
 		return enrollmentBundle{}, errors.New("invalid enrollment trust bundle")
 	}
 	return bundle, nil
@@ -433,7 +506,7 @@ func loadTLSConfiguration(caPath, expectedFingerprint string, now time.Time) (*t
 }
 
 func readProtectedFile(path string, maximum int64, secret bool) ([]byte, error) {
-	registered := path == configPath || path == serverCertificatePath || path == serverPrivateKeyPath || path == clientCAPath || path == operatorCAPath || path == intentSigningKeyPath || path == revocationSigningKeyPath || path == enrollmentBundlePath
+	registered := path == configPath || path == serverCertificatePath || path == serverPrivateKeyPath || path == clientCAPath || path == operatorCAPath || path == enrollmentCAKeyPath || path == intentSigningKeyPath || path == revocationSigningKeyPath || path == enrollmentBundlePath
 	if !registered || maximum <= 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errors.New("unregistered protected file")
 	}
