@@ -237,6 +237,12 @@ export const pages: Record<string, PageDefinition> = {
     columns:[{key:"name",label:"Service"},{key:"health",label:"Health",format:"status"},{key:"active",label:"Active",format:"status"},{key:"configuration",label:"Configuration",format:"status"},{key:"externally_functional",label:"Functional",format:"status"},{key:"observed_at",label:"Observed",format:"date"}],
     emptyTitle:"No service observations",emptyBody:"The collector has not published a managed-service observation yet."
   },
+  productUpdates: {
+    id:"productUpdates",title:"Product updates",description:"Signed release checks, immutable staging plans, apply progress, proven rollback eligibility, and explicit recovery state.",resourceKind:"product_update.release",listOperation:"product_update.status.list",
+    columns:[{key:"current_version",label:"Current"},{key:"current_channel",label:"Channel"},{key:"target_version",label:"Target"},{key:"check_status",label:"Check",format:"status"},{key:"plan_status",label:"Plan",format:"status"},{key:"apply_status",label:"Apply",format:"status"},{key:"rollback_status",label:"Rollback",format:"status"},{key:"recovery_status",label:"Recovery",format:"status"},{key:"updated_at",label:"Updated",format:"date"}],
+    rowActions:[{id:"plan",label:"Stage plan",operation:"product_update.plan",mutating:true,assurance:"mfa",resourceTypes:["checked"]},{id:"apply",label:"Apply staged release",operation:"product_update.apply",mutating:true,assurance:"phishing_resistant",tone:"warning",resourceTypes:["planned"],confirmation:"Apply the staged, signature-verified release. Automatic rollback is attempted only if preflight proves it; otherwise an ambiguous effect enters explicit recovery.",fields:[{key:"expected_duration_seconds",label:"Maintenance window (seconds)",type:"number",required:true,defaultValue:1800,helper:"The signed manifest must remain fresh through this bounded window."}]}],
+    globalActions:[{id:"check",label:"Check signed release",operation:"product_update.check",mutating:true,assurance:"mfa",fields:[{key:"manifest_id",label:"Release manifest",type:"text",required:true,helper:"Selects an entry from the node's fixed authenticated release source; URLs and host paths are not accepted."}]}],emptyTitle:"Current release only",emptyBody:"No signed candidate has been checked on this node."
+  },
   observability: {
     id:"observability",title:"Metrics & usage",description:"Materialized tenant usage and limits backed by bounded historical metric retention; unavailable evidence remains visibly unknown.",resourceKind:"observability.usage",listOperation:"observability.usage.list",
     columns:[{key:"dimension",label:"Dimension"},{key:"used",label:"Used",format:"number"},{key:"limit",label:"Limit",format:"number"},{key:"unit",label:"Unit"},{key:"limit_state",label:"Limit state",format:"status"},{key:"missing_reason",label:"Evidence gap"},{key:"updated_at",label:"Observed",format:"date"}],
@@ -338,6 +344,7 @@ export const navigation: NavigationGroup[] = [
   ]},
   {id:"system",label:"System",items:[
     {id:"users",label:"Users & tenants",route:"/users",icon:"UsersThree",pageId:"users",keywords:["reseller","role","quota"]},
+    {id:"product-updates",label:"Product updates",route:"/product-updates",icon:"ArrowCircleDown",pageId:"productUpdates",keywords:["version","channel","update","rollback","recovery"]},
     {id:"engines",label:"Engines & PHP",route:"/engines",icon:"SlidersHorizontal",pageId:"engines",keywords:["ols","litespeed enterprise","license"]},
     {id:"integrations",label:"Integrations",route:"/integrations",icon:"PlugsConnected",pageId:"integrations",keywords:["cloudflare","s3","smtp"]},
     {id:"audit",label:"Audit & activity",route:"/audit",icon:"ListMagnifyingGlass",pageId:"audit",keywords:["events","evidence","history"]}
