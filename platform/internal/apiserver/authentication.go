@@ -28,7 +28,7 @@ func (authenticator IdentityAuthenticator) Authenticate(ctx context.Context, mat
 		raw, err := decodeCredential(material.SessionToken); if err != nil { return Actor{}, ErrUnauthenticated }
 		var csrf []byte
 		if material.CSRFToken != "" { csrf, err = decodeCredential(material.CSRFToken); if err != nil { clearSecret(raw); return Actor{}, ErrUnauthenticated } }
-		session, principal, err := authenticator.Service.ValidateSession(ctx, id, raw, csrf, meta.ClientIP)
+		session, principal, err := authenticator.Service.ValidateSession(ctx, id, raw, csrf, meta.ClientIP, meta.UserAgentDigest)
 		clearSecret(raw); clearSecret(csrf)
 		if err != nil { return Actor{}, mapIdentityError(err) }
 		return Actor{PrincipalID: principal.ID, CredentialID: session.CredentialID, SessionID: session.ID, AuthzEpoch: principal.AuthzEpoch, Assurance: session.Assurance, CredentialKind: CredentialSession}, nil

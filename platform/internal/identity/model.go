@@ -22,6 +22,7 @@ var (
 	ErrDelegationExceeded  = errors.New("identity: delegation ceiling exceeded")
 	ErrQuotaExceeded       = errors.New("identity: quota exceeded")
 	ErrAssuranceRequired   = errors.New("identity: additional assurance required")
+	ErrSessionBindingStepUp = fmt.Errorf("%w: session binding changed", ErrAssuranceRequired)
 	ErrCredentialCompromised = errors.New("identity: credential compromised")
 )
 
@@ -485,6 +486,61 @@ const (
 	AssurancePhishingResistant AssuranceLevel = 3
 )
 
+type SessionBindingMode string
+
+const (
+	SessionBindingNone          SessionBindingMode = "none"
+	SessionBindingExactAddress  SessionBindingMode = "exact_address"
+	SessionBindingPrefix        SessionBindingMode = "prefix"
+	SessionBindingRiskBasedStepUp SessionBindingMode = "risk_based_step_up"
+)
+
+type SessionBindingPolicy struct {
+	Mode           SessionBindingMode
+	IPv4PrefixBits uint8
+	IPv6PrefixBits uint8
+}
+
+func DefaultSessionBindingPolicy() SessionBindingPolicy {
+	return SessionBindingPolicy{Mode: SessionBindingExactAddress, IPv4PrefixBits: 32, IPv6PrefixBits: 128}
+}
+
+func (p SessionBindingPolicy) Validate() error {
+	switch p.Mode {
+	case SessionBindingNone:
+		if p.IPv4PrefixBits != 0 || p.IPv6PrefixBits != 0 { return fmt.Errorf("%w: session binding none", ErrInvalid) }
+	case SessionBindingExactAddress:
+		if p.IPv4PrefixBits != 32 || p.IPv6PrefixBits != 128 { return fmt.Errorf("%w: session binding exact address", ErrInvalid) }
+	case SessionBindingPrefix, SessionBindingRiskBasedStepUp:
+		if p.IPv4PrefixBits == 0 || p.IPv4PrefixBits > 32 || p.IPv6PrefixBits == 0 || p.IPv6PrefixBits > 128 { return fmt.Errorf("%w: session binding prefix", ErrInvalid) }
+	default:
+		return fmt.Errorf("%w: session binding mode", ErrInvalid)
+	}
+	return nil
+}
+
+func (p SessionBindingPolicy) PrefixFor(source netip.Addr) (netip.Prefix, error) {
+	if err := p.Validate(); err != nil || !source.IsValid() { return netip.Prefix{}, ErrInvalid }
+	source = source.Unmap()
+	bits := source.BitLen()
+	if p.Mode == SessionBindingPrefix || p.Mode == SessionBindingRiskBasedStepUp {
+		if source.Is4() { bits = int(p.IPv4PrefixBits) } else { bits = int(p.IPv6PrefixBits) }
+	}
+	return netip.PrefixFrom(source, bits).Masked(), nil
+}
+
+type PrincipalSessionPolicy struct {
+	PrincipalID ID
+	Binding     SessionBindingPolicy
+	Generation  uint64
+	UpdatedAt   time.Time
+}
+
+func (p PrincipalSessionPolicy) Validate() error {
+	if !p.PrincipalID.Valid() || p.Generation == 0 || p.UpdatedAt.IsZero() { return fmt.Errorf("%w: principal session policy", ErrInvalid) }
+	return p.Binding.Validate()
+}
+
 type Session struct {
 	ID                ID
 	PrincipalID       ID
@@ -492,6 +548,7 @@ type Session struct {
 	AuthzEpoch        uint64
 	CredentialEpoch   uint64
 	Assurance         AssuranceLevel
+	BindingPolicy     SessionBindingPolicy
 	SourcePrefix      netip.Prefix
 	UserAgentDigest   string
 	CSRFSecretDigest  string
@@ -503,10 +560,29 @@ type Session struct {
 }
 
 func (s Session) Validate() error {
-	if !s.ID.Valid() || !s.PrincipalID.Valid() || !s.CredentialID.Valid() || s.AuthzEpoch == 0 || s.CredentialEpoch == 0 || s.Assurance < AssurancePassword || s.Assurance > AssurancePhishingResistant || !s.SourcePrefix.IsValid() || s.CreatedAt.IsZero() || !s.ExpiresAt.After(s.CreatedAt) || s.AbsoluteExpiresAt.Before(s.ExpiresAt) {
+	if !s.ID.Valid() || !s.PrincipalID.Valid() || !s.CredentialID.Valid() || s.AuthzEpoch == 0 || s.CredentialEpoch == 0 || s.Assurance < AssurancePassword || s.Assurance > AssurancePhishingResistant || s.BindingPolicy.Validate() != nil || !s.SourcePrefix.IsValid() || s.SourcePrefix != s.SourcePrefix.Masked() || s.CreatedAt.IsZero() || s.LastSeenAt.Before(s.CreatedAt) || !s.ExpiresAt.After(s.CreatedAt) || s.AbsoluteExpiresAt.Before(s.ExpiresAt) {
 		return fmt.Errorf("%w: session", ErrInvalid)
 	}
+	expectedBits := s.SourcePrefix.Addr().BitLen()
+	if s.BindingPolicy.Mode == SessionBindingPrefix || s.BindingPolicy.Mode == SessionBindingRiskBasedStepUp {
+		if s.SourcePrefix.Addr().Is4() { expectedBits = int(s.BindingPolicy.IPv4PrefixBits) } else { expectedBits = int(s.BindingPolicy.IPv6PrefixBits) }
+	}
+	if s.SourcePrefix.Bits() != expectedBits { return fmt.Errorf("%w: session binding prefix", ErrInvalid) }
+	if s.RevokedAt != nil && s.RevokedAt.Before(s.CreatedAt) { return fmt.Errorf("%w: session revocation", ErrInvalid) }
 	return nil
+}
+
+type SessionMetadata struct {
+	ID                ID
+	Assurance         AssuranceLevel
+	BindingPolicy     SessionBindingPolicy
+	SourcePrefix      netip.Prefix
+	UserAgentDigest   string
+	CreatedAt         time.Time
+	LastSeenAt        time.Time
+	ExpiresAt         time.Time
+	AbsoluteExpiresAt time.Time
+	RevokedAt         *time.Time
 }
 
 type Usage struct {
