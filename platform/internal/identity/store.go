@@ -29,6 +29,33 @@ CREATE TABLE IF NOT EXISTS identity_memberships (
  state TEXT NOT NULL, generation BIGINT NOT NULL, created_at TIMESTAMP NOT NULL,
  updated_at TIMESTAMP NOT NULL, UNIQUE(principal_id, tenant_id)
 );
+CREATE TABLE IF NOT EXISTS identity_human_users (
+ identity_id TEXT PRIMARY KEY, primary_tenant_id TEXT NOT NULL,
+ display_name TEXT NOT NULL, profile_principal_id TEXT NOT NULL,
+ state TEXT NOT NULL, revision BIGINT NOT NULL, authz_epoch BIGINT NOT NULL,
+ created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
+ suspended_at TIMESTAMP, deletion_requested_at TIMESTAMP,
+ retention_deadline TIMESTAMP, deleted_at TIMESTAMP,
+ tombstone_digest TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_human_users_primary ON identity_human_users(primary_tenant_id,identity_id);
+CREATE TABLE IF NOT EXISTS identity_human_user_identifiers (
+ identity_id TEXT NOT NULL, kind TEXT NOT NULL, normalized_value TEXT NOT NULL,
+ verified_at TIMESTAMP NOT NULL, PRIMARY KEY(identity_id,kind),
+ UNIQUE(kind,normalized_value)
+);
+CREATE TABLE IF NOT EXISTS identity_human_user_memberships (
+ identity_id TEXT NOT NULL, membership_id TEXT NOT NULL UNIQUE,
+ tenant_id TEXT NOT NULL, role_ceiling TEXT NOT NULL,
+ lifecycle_suspended INTEGER NOT NULL, created_at TIMESTAMP NOT NULL,
+ updated_at TIMESTAMP NOT NULL, PRIMARY KEY(identity_id,tenant_id)
+);
+CREATE INDEX IF NOT EXISTS identity_human_memberships_tenant ON identity_human_user_memberships(tenant_id,identity_id);
+CREATE TABLE IF NOT EXISTS identity_human_resource_ownership (
+ identity_id TEXT NOT NULL, tenant_id TEXT NOT NULL, resource_kind TEXT NOT NULL,
+ resource_id TEXT NOT NULL, PRIMARY KEY(identity_id,tenant_id,resource_kind,resource_id)
+);
+CREATE INDEX IF NOT EXISTS identity_human_ownership_subject ON identity_human_resource_ownership(identity_id,tenant_id);
 CREATE TABLE IF NOT EXISTS identity_invitations (
  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, intended_email TEXT NOT NULL,
  inviter_id TEXT NOT NULL, role_id TEXT NOT NULL, role_ceiling_json TEXT NOT NULL,

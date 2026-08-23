@@ -548,7 +548,8 @@ func invalidateRoleSubjectsTx(ctx context.Context, tx *sql.Tx, roleID ID, now ti
 
 func invalidateRoleSubjectTx(ctx context.Context, tx *sql.Tx, subjectID ID, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE identity_principals SET authz_epoch=authz_epoch+1,generation=generation+1,updated_at=? WHERE id=?`, now, subjectID); err != nil { return err }
-	_, err := tx.ExecContext(ctx, `UPDATE identity_service_principals SET authz_epoch=authz_epoch+1,generation=generation+1,updated_at=? WHERE principal_id=? AND state<>'deleted'`, now, subjectID)
+	if _, err := tx.ExecContext(ctx, `UPDATE identity_service_principals SET authz_epoch=authz_epoch+1,generation=generation+1,updated_at=? WHERE principal_id=? AND state<>'deleted'`, now, subjectID); err != nil { return err }
+	_, err := tx.ExecContext(ctx, `UPDATE identity_human_users SET authz_epoch=(SELECT authz_epoch FROM identity_principals WHERE id=?),revision=revision+1,updated_at=? WHERE identity_id=? AND state IN ('active','suspended')`, subjectID, now, subjectID)
 	return err
 }
 
@@ -584,7 +585,9 @@ func (s *Service) AssignManagedRoleBinding(ctx context.Context, command AssignMa
 	tx, err := s.store.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable}); if err != nil { return ManagedRoleBinding{}, err }; defer tx.Rollback()
 	if err = validateRoleActorTx(ctx, tx, command.Actor, command.TenantID); err != nil { return ManagedRoleBinding{}, err }
 	var roleState string; var roleRevision uint64; err = tx.QueryRowContext(ctx, `SELECT state,revision FROM identity_role_catalog WHERE role_id=? AND tenant_id=?`, value.RoleID, value.TenantID).Scan(&roleState, &roleRevision); if errors.Is(err, sql.ErrNoRows) { err = ErrNotFound }; if err == nil && (RoleLifecycleState(roleState) != RoleActive || roleRevision != role.Revision) { err = ErrStaleGeneration }
-	if err == nil { err = validateBindingSubjectTx(ctx, tx, value.TenantID, value.SubjectKind, value.SubjectID) }; if err == nil { err = insertManagedBindingTx(ctx, tx, value) }; if err == nil { err = invalidateRoleSubjectTx(ctx, tx, value.SubjectID, now) }
+	if err == nil { err = validateBindingSubjectTx(ctx, tx, value.TenantID, value.SubjectKind, value.SubjectID) }
+	if err == nil && value.SubjectKind == SubjectPrincipal { err = validateHumanRoleAssignmentTx(ctx, tx, value.TenantID, value.SubjectID, role) }
+	if err == nil { err = insertManagedBindingTx(ctx, tx, value) }; if err == nil { err = invalidateRoleSubjectTx(ctx, tx, value.SubjectID, now) }
 	if err != nil { return ManagedRoleBinding{}, err }; if err = tx.Commit(); err != nil { return ManagedRoleBinding{}, err }
 	s.auditRole(ctx, command.Actor.PrincipalID, value.TenantID, "role_binding.assign", "role_binding", value.ID, nil, value, nil, "applied")
 	return value, nil

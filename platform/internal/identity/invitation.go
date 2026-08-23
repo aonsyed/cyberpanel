@@ -376,6 +376,9 @@ func (s *Service) AcceptInvitation(ctx context.Context, actor ActorContext, tena
 			return Invitation{}, err
 		}
 	}
+	if err = ensureHumanUserFromInvitationTx(ctx, tx, principal, membership, invitation, role, now); err != nil {
+		return Invitation{}, err
+	}
 	bindingID, err := derivedID("binding", invitation.ID.String()+"\x00"+principal.ID.String())
 	if err != nil {
 		return Invitation{}, err
