@@ -1,8 +1,9 @@
 [Unit]
 Description=CyberPanel isolated product updater
 Documentation=https://github.com/aonsyed/cyberpanel
-After=local-fs.target systemd-user-sessions.service
+After=local-fs.target systemd-tmpfiles-setup.service systemd-user-sessions.service
 Before=panel-execd.service panel-core.service panel-gateway.service
+RequiresMountsFor=/opt/cyberpanel /var/lib/cyberpanel/product-updater /var/lib/cyberpanel/control/product-update-staging /var/backups/cyberpanel/product-updates
 
 [Service]
 Type=simple
