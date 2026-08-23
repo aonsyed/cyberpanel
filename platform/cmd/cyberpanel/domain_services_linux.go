@@ -374,8 +374,9 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	backupConsoleEdge,err:=newBackupEdge(backupRuntime.Catalog,&restoreWorkflow,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize backup console edge: %w",err)}
 	migrationRuntime,err:=localmigration.New(ctx,repositories.ControlDB,repositories.Migrations);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration runtime: %w",err)}
 	migrationConsoleEdge,err:=newMigrationEdge(migrationRuntime,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration console edge: %w",err)}
-	localHAProviders,err:=newLocalMariaDBHAProviders(ctx,&repositories.HA,databaseExecutor,databaseExecutor,catalog,activationClient,configuration.Engine.Listeners,nil,nil,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize local MariaDB HA providers: %w",err)}
-	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,localHAProviders,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}
+	haApprovalAuthority,_:=newHAPromotionApprovalAuthority(&repositories.HA,identityStore,runtimeClock{}.Now)
+	localHAProviders,err:=newLocalMariaDBHAProviders(ctx,&repositories.HA,databaseExecutor,databaseExecutor,catalog,activationClient,configuration.Engine.Listeners,haApprovalAuthority,nil,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize local MariaDB HA providers: %w",err)}
+	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,localHAProviders,haApprovalAuthority,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}
 	federationConsoleEdge,err:=newFederationEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize federation console edge: %w",err)}
 	maintenanceRepository,err:=maintenance.NewRepository(repositories.ControlDB);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("open maintenance-window repository: %w",err)}
 	if err=maintenanceRepository.Bootstrap(ctx);err!=nil{return apiserver.DomainServices{},fmt.Errorf("bootstrap maintenance-window repository: %w",err)}

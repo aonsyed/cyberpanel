@@ -730,6 +730,28 @@ type HAPromotionExecutePayload struct {
 	FenceProviderBindings  string `json:"fence_provider_bindings,omitempty"`
 }
 
+type HAPromotionApprovalPayload struct {
+	ApprovalID          string    `json:"approval_id"`
+	PlanDigest          string    `json:"plan_digest"`
+	FenceChallenge      string    `json:"fence_challenge"`
+	TenantAuthzEpoch    uint64    `json:"tenant_authz_epoch"`
+	IssuedAt            time.Time `json:"issued_at"`
+	ExpiresAt           time.Time `json:"expires_at"`
+	Signature           string    `json:"signature"`
+}
+
+type HAPromotionApprovalProjection struct {
+	ID                  string    `json:"id"`
+	TenantID            string    `json:"tenant_id"`
+	PromotionID         string    `json:"promotion_id"`
+	ActorID             string    `json:"actor_id"`
+	PlanDigest          string    `json:"plan_digest"`
+	FenceChallenge      string    `json:"fence_challenge"`
+	PromotionGeneration uint64    `json:"promotion_generation"`
+	AcceptedAt          time.Time `json:"accepted_at"`
+	ExpiresAt           time.Time `json:"expires_at"`
+}
+
 type HAPromotionEffectProjection struct {
 	Sequence      uint32    `json:"sequence"`
 	EffectID      string    `json:"effect_id"`
@@ -1113,6 +1135,10 @@ type HAEdgeService interface {
 	ExecutePromotion(context.Context, EdgeCall, HAPromotionExecutePayload) (EdgeMutation[HAPromotionProjection], error)
 }
 
+type HAPromotionApprovalEdgeService interface {
+	ApprovePromotion(context.Context, EdgeCall, HAPromotionApprovalPayload) (EdgeMutation[HAPromotionApprovalProjection], error)
+}
+
 type MigrationEdgeService interface {
 	ListMigrations(context.Context, EdgeCall, EdgePagePayload) (EdgePage[MigrationProjection], error)
 	InspectMigration(context.Context, EdgeCall) (MigrationProjection, error)
@@ -1278,6 +1304,7 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("ha.node.health", "fleet:observe", password, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
 		consoleOperation("ha.node.drain", "ha:manage", mfa, true, func() any { return &HANodeDrainPayload{} }, validateHANodeDrain, edgeInstallationExistingMutationScope),
 		consoleOperation("ha.promotion.plan", "ha:manage", phishingResistant, true, func() any { return &HAPromotionPlanPayload{} }, validateHAPromotionPlan, edgeInstallationExistingMutationScope),
+		consoleOperation("ha.promotion.approval.submit", "ha:manage", phishingResistant, true, func() any { return &HAPromotionApprovalPayload{} }, validateHAPromotionApproval, edgeTenantExistingMutationScope),
 		consoleOperation("ha.promotion.execute", "ha:manage", phishingResistant, true, func() any { return &HAPromotionExecutePayload{} }, validateHAPromotionExecute, edgeInstallationExistingMutationScope),
 
 		consoleOperation("migration.provider.list", "migration:manage", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantListScope),
@@ -1730,6 +1757,15 @@ func validateHAPromotionPlan(value any) error {
 	payload := value.(*HAPromotionPlanPayload)
 	explicitWriterContext := payload.ProtectedResourceID != "" || payload.WriterLeaseGeneration != 0
 	if !validEdgeID(payload.CandidateNodeID) || payload.MaximumDataLoss < 0 || payload.MaximumDataLoss > 24*time.Hour || explicitWriterContext && (!validEdgeID(payload.ProtectedResourceID) || payload.WriterLeaseGeneration == 0) { return invalid("promotion plan") }
+	return nil
+}
+
+func validateHAPromotionApproval(value any) error {
+	payload := value.(*HAPromotionApprovalPayload)
+	now := time.Now().UTC()
+	if !validEdgeID(payload.ApprovalID) || !validDigestReference(payload.PlanDigest) || payload.FenceChallenge != payload.PlanDigest || payload.TenantAuthzEpoch == 0 || payload.IssuedAt.IsZero() || payload.IssuedAt.After(now) || !payload.ExpiresAt.After(payload.IssuedAt) || payload.ExpiresAt.Sub(payload.IssuedAt) > ha.MaximumPromotionApprovalLifetime || !now.Before(payload.ExpiresAt) || len(payload.Signature) < 64 || len(payload.Signature) > 4096 {
+		return invalid("promotion approval")
+	}
 	return nil
 }
 
@@ -2515,6 +2551,12 @@ func bindConsoleEdgeContractsThree(registry *Registry, services DomainServices) 
 			result, err := services.HAEdge.PlanPromotion(ctx, edgeCall(inv), *value.(*HAPromotionPlanPayload)); if err != nil { return OperationResult{}, mapHAEdgeError(err) }
 			return edgeOperationResult(http.StatusCreated, result), nil
 		}); err != nil { return err }
+		if approvals, ok := services.HAEdge.(HAPromotionApprovalEdgeService); ok {
+			if err := registry.Bind("ha.promotion.approval.submit", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+				result, err := approvals.ApprovePromotion(ctx, edgeCall(inv), *value.(*HAPromotionApprovalPayload)); if err != nil { return OperationResult{}, mapHAEdgeError(err) }
+				return edgeOperationResult(http.StatusCreated, result), nil
+			}); err != nil { return err }
+		}
 		if err := registry.Bind("ha.promotion.execute", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.HAEdge.ExecutePromotion(ctx, edgeCall(inv), *value.(*HAPromotionExecutePayload)); if err != nil { return OperationResult{}, mapHAEdgeError(err) }
 			return edgeOperationResult(http.StatusAccepted, result), nil

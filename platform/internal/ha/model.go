@@ -56,6 +56,7 @@ type SiteID string
 type ContainerApplicationID string
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
+var promotionApprovalIdempotencyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{15,191}$`)
 func validID(value string) bool { return idPattern.MatchString(value) }
 func requireID(kind, value string) error { if !validID(value) { return fmt.Errorf("%w: %s identifier", ErrInvalid, kind) }; return nil }
 func validDigest(value string) bool { if len(value) != sha256.Size*2 { return false }; _, err := hex.DecodeString(value); return err == nil && strings.ToLower(value) == value }
@@ -146,7 +147,49 @@ type TrafficPolicy struct { ID TrafficPolicyID `json:"id"`; GroupID NodeGroupID 
 
 type PromotionState string
 const ( PromotionPlanned PromotionState = "planned"; PromotionChecking PromotionState = "checking"; PromotionFencing PromotionState = "fencing"; PromotionFenced PromotionState = "fenced"; PromotionPromoting PromotionState = "promoting"; PromotionRouting PromotionState = "routing"; PromotionProbing PromotionState = "probing"; PromotionSoaking PromotionState = "soaking"; PromotionCommitted PromotionState = "committed"; PromotionRollingBack PromotionState = "rolling_back"; PromotionRolledBack PromotionState = "rolled_back"; PromotionFailForward PromotionState = "fail_forward"; PromotionReconciliation PromotionState = "reconciliation_required"; PromotionFailed PromotionState = "failed" )
-type Approval struct { ID string `json:"id"`; ActorID string `json:"actor_id"`; Kind string `json:"kind"`; PlanDigest string `json:"plan_digest"`; IssuedAt time.Time `json:"issued_at"`; ExpiresAt time.Time `json:"expires_at"`; Signature string `json:"signature"` }
+const MaximumPromotionApprovalLifetime = 5 * time.Minute
+
+type Approval struct {
+	ID                  string       `json:"id"`
+	TenantID            string       `json:"tenant_id"`
+	PromotionID         PromotionID  `json:"promotion_id"`
+	GroupID             NodeGroupID  `json:"group_id"`
+	ActorID             string       `json:"actor_id"`
+	CredentialID        string       `json:"credential_id"`
+	SessionID           string       `json:"session_id"`
+	AuthzEpoch          uint64       `json:"authz_epoch"`
+	TenantAuthzEpoch    uint64       `json:"tenant_authz_epoch"`
+	PromotionGeneration uint64       `json:"promotion_generation"`
+	Kind                string       `json:"kind"`
+	PlanDigest          string       `json:"plan_digest"`
+	FenceChallenge      string       `json:"fence_challenge"`
+	PhishingResistant   bool         `json:"phishing_resistant"`
+	IssuedAt            time.Time    `json:"issued_at"`
+	ExpiresAt           time.Time    `json:"expires_at"`
+	Signature           string       `json:"signature"`
+}
+
+func (approval Approval) Validate(now time.Time) error {
+	if !validID(approval.ID) || !validID(approval.TenantID) || !validID(string(approval.PromotionID)) || !validID(string(approval.GroupID)) || !validID(approval.ActorID) || !validID(approval.CredentialID) || !validID(approval.SessionID) || approval.AuthzEpoch == 0 || approval.TenantAuthzEpoch == 0 || approval.PromotionGeneration == 0 || approval.Kind != AdministrativeFenceApprovalKind || !validDigest(approval.PlanDigest) || approval.FenceChallenge != approval.PlanDigest || !approval.PhishingResistant || approval.IssuedAt.IsZero() || approval.IssuedAt.After(now) || !approval.ExpiresAt.After(approval.IssuedAt) || approval.ExpiresAt.Sub(approval.IssuedAt) > MaximumPromotionApprovalLifetime || !now.Before(approval.ExpiresAt) || approval.Signature == "" || len(approval.Signature) > 4096 {
+		return ErrDataLossApproval
+	}
+	return nil
+}
+
+type PromotionApprovalAdmission struct {
+	CommandID      CommandID  `json:"command_id"`
+	IdempotencyKey string     `json:"idempotency_key"`
+	Approval       Approval   `json:"approval"`
+	FenceID        FenceID    `json:"fence_id,omitempty"`
+	AcceptedAt     time.Time  `json:"accepted_at"`
+}
+
+func (admission PromotionApprovalAdmission) Validate(now time.Time) error {
+	if now.IsZero() || !validID(string(admission.CommandID)) || !promotionApprovalIdempotencyPattern.MatchString(admission.IdempotencyKey) || admission.AcceptedAt.IsZero() || admission.AcceptedAt.After(now) || admission.FenceID != "" && !validID(string(admission.FenceID)) || admission.Approval.Validate(admission.AcceptedAt) != nil {
+		return ErrDataLossApproval
+	}
+	return nil
+}
 type Promotion struct { ID PromotionID `json:"id"`; CommandID CommandID `json:"command_id"`; GroupID NodeGroupID `json:"group_id"`; ResourceID string `json:"resource_id"`; PreviousWriter NodeID `json:"previous_writer"`; Candidate NodeID `json:"candidate"`; ExpectedGeneration uint64 `json:"expected_generation"`; CheckpointID CheckpointID `json:"checkpoint_id"`; CheckpointFrontier uint64 `json:"checkpoint_frontier"`; MaximumDataLoss time.Duration `json:"maximum_data_loss"`; LeaseID WriterLeaseID `json:"lease_id,omitempty"`; FenceIDs []FenceID `json:"fence_ids"`; TrafficPolicyID TrafficPolicyID `json:"traffic_policy_id"`; Automatic bool `json:"automatic"`; PotentialDataLoss bool `json:"potential_data_loss"`; Approvals []Approval `json:"approvals"`; State PromotionState `json:"state"`; WriteFrontier uint64 `json:"write_frontier"`; Irreversible bool `json:"irreversible"`; Failure string `json:"failure,omitempty"`; Generation uint64 `json:"generation"`; CreatedAt time.Time `json:"created_at"`; UpdatedAt time.Time `json:"updated_at"` }
 
 type PromotionApprovalEvidence struct {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -32,6 +33,23 @@ CREATE TABLE IF NOT EXISTS ha_fences (id TEXT PRIMARY KEY, group_id TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS ha_traffic_policies (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, provider_mode TEXT NOT NULL, generation INTEGER NOT NULL, policy_json BLOB NOT NULL, updated_at TIMESTAMP NOT NULL);
 CREATE TABLE IF NOT EXISTS ha_promotions (id TEXT PRIMARY KEY, command_id TEXT NOT NULL UNIQUE, group_id TEXT NOT NULL, resource_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, promotion_json BLOB NOT NULL, updated_at TIMESTAMP NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS ha_active_promotion ON ha_promotions(resource_id) WHERE state NOT IN ('committed','rolled_back','failed');
+CREATE TABLE IF NOT EXISTS ha_promotion_approvals (
+ approval_id TEXT PRIMARY KEY,
+ promotion_id TEXT NOT NULL,
+ tenant_id TEXT NOT NULL,
+ actor_id TEXT NOT NULL,
+ command_id TEXT NOT NULL UNIQUE,
+ idempotency_key TEXT NOT NULL,
+ plan_digest TEXT NOT NULL,
+ promotion_generation INTEGER NOT NULL,
+ fence_id TEXT NOT NULL DEFAULT '',
+ admission_json BLOB NOT NULL,
+ expires_at TIMESTAMP NOT NULL,
+ accepted_at TIMESTAMP NOT NULL,
+ UNIQUE(promotion_id,actor_id),
+ UNIQUE(promotion_id,idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS ha_promotion_approvals_plan ON ha_promotion_approvals(promotion_id,plan_digest,expires_at);
 CREATE TABLE IF NOT EXISTS ha_failover_runs (id TEXT PRIMARY KEY, promotion_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL, step TEXT NOT NULL, run_json BLOB NOT NULL, updated_at TIMESTAMP NOT NULL);
 CREATE TABLE IF NOT EXISTS ha_backup_copies (id TEXT PRIMARY KEY, recovery_point_id TEXT NOT NULL, target_node_id TEXT NOT NULL, manifest_digest TEXT NOT NULL, copy_json BLOB NOT NULL, verified_at TIMESTAMP NOT NULL, UNIQUE(recovery_point_id, target_node_id));
 CREATE TABLE IF NOT EXISTS ha_mail_topologies (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, writer_node_id TEXT NOT NULL, generation INTEGER NOT NULL, topology_json BLOB NOT NULL, updated_at TIMESTAMP NOT NULL);
@@ -288,6 +306,142 @@ func (r SQLRepository) CreatePromotion(ctx context.Context,v Promotion)error{b,e
 func (r SQLRepository) LoadPromotion(ctx context.Context,id PromotionID)(Promotion,error){var b []byte;e:=r.DB.QueryRowContext(ctx,`SELECT promotion_json FROM ha_promotions WHERE id=?`,id).Scan(&b);if errors.Is(e,sql.ErrNoRows){return Promotion{},ErrNotFound};if e!=nil{return Promotion{},e};var v Promotion;e=decode(b,&v);return v,e}
 func (r SQLRepository) PromotionByCommand(ctx context.Context,id CommandID)(Promotion,error){if r.DB==nil||ctx==nil||!validID(string(id)){return Promotion{},ErrInvalid};var raw []byte;err:=r.DB.QueryRowContext(ctx,`SELECT promotion_json FROM ha_promotions WHERE command_id=?`,id).Scan(&raw);if errors.Is(err,sql.ErrNoRows){return Promotion{},ErrNotFound};if err!=nil{return Promotion{},err};var promotion Promotion;if err=decode(raw,&promotion);err!=nil{return Promotion{},err};return promotion,nil}
 func (r SQLRepository) UpdatePromotion(ctx context.Context,v Promotion,g uint64)error{b,e:=encode(v);if e!=nil{return e};x,e:=r.DB.ExecContext(ctx,`UPDATE ha_promotions SET state=?,generation=?,promotion_json=?,updated_at=? WHERE id=? AND generation=?`,v.State,v.Generation,b,v.UpdatedAt,v.ID,g);if e!=nil{return e};return cas(x)}
+
+func (r SQLRepository) AdmitPromotionApproval(ctx context.Context, admission PromotionApprovalAdmission) (PromotionApprovalAdmission, bool, error) {
+	if r.DB == nil || ctx == nil || admission.FenceID != "" || admission.Validate(admission.AcceptedAt) != nil {
+		return PromotionApprovalAdmission{}, false, ErrDataLossApproval
+	}
+	tx, err := r.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil { return PromotionApprovalAdmission{}, false, err }
+	defer tx.Rollback()
+	if existing, found, loadErr := loadPromotionApprovalAdmission(ctx, tx, `command_id=?`, admission.CommandID); loadErr != nil {
+		return PromotionApprovalAdmission{}, false, loadErr
+	} else if found {
+		if !samePromotionApprovalAdmission(existing, admission) { return PromotionApprovalAdmission{}, false, ErrConflict }
+		if err = tx.Commit(); err != nil { return PromotionApprovalAdmission{}, false, err }
+		return existing, false, nil
+	}
+	var collision uint64
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM ha_promotion_approvals WHERE approval_id=? OR (promotion_id=? AND actor_id=?) OR (promotion_id=? AND idempotency_key=?)`, admission.Approval.ID, admission.Approval.PromotionID, admission.Approval.ActorID, admission.Approval.PromotionID, admission.IdempotencyKey).Scan(&collision)
+	if err != nil { return PromotionApprovalAdmission{}, false, err }
+	if collision != 0 { return PromotionApprovalAdmission{}, false, ErrConflict }
+	var promotionRaw []byte
+	err = tx.QueryRowContext(ctx, `SELECT promotion_json FROM ha_promotions WHERE id=? AND generation=? AND state=?`, admission.Approval.PromotionID, admission.Approval.PromotionGeneration, PromotionPlanned).Scan(&promotionRaw)
+	if errors.Is(err, sql.ErrNoRows) { return PromotionApprovalAdmission{}, false, ErrStaleGeneration }
+	if err != nil { return PromotionApprovalAdmission{}, false, err }
+	var promotion Promotion
+	if err = decode(promotionRaw, &promotion); err != nil { return PromotionApprovalAdmission{}, false, err }
+	planDigest, digestErr := PromotionPlanDigest(promotion)
+	if digestErr != nil || planDigest != admission.Approval.PlanDigest || promotion.ID != admission.Approval.PromotionID || promotion.GroupID != admission.Approval.GroupID || promotion.Generation != admission.Approval.PromotionGeneration {
+		return PromotionApprovalAdmission{}, false, errors.Join(digestErr, ErrConflict)
+	}
+	raw, err := encode(admission)
+	if err != nil { return PromotionApprovalAdmission{}, false, err }
+	_, err = tx.ExecContext(ctx, `INSERT INTO ha_promotion_approvals(approval_id,promotion_id,tenant_id,actor_id,command_id,idempotency_key,plan_digest,promotion_generation,fence_id,admission_json,expires_at,accepted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, admission.Approval.ID, admission.Approval.PromotionID, admission.Approval.TenantID, admission.Approval.ActorID, admission.CommandID, admission.IdempotencyKey, admission.Approval.PlanDigest, admission.Approval.PromotionGeneration, "", raw, admission.Approval.ExpiresAt, admission.AcceptedAt)
+	if err != nil { return PromotionApprovalAdmission{}, false, errors.Join(err, ErrConflict) }
+	if err = tx.Commit(); err != nil { return PromotionApprovalAdmission{}, false, err }
+	return admission, true, nil
+}
+
+func (r SQLRepository) PromotionApprovalAdmission(ctx context.Context, id string) (PromotionApprovalAdmission, error) {
+	if r.DB == nil || ctx == nil || !validID(id) { return PromotionApprovalAdmission{}, ErrInvalid }
+	admission, found, err := loadPromotionApprovalAdmission(ctx, r.DB, `approval_id=?`, id)
+	if err != nil { return PromotionApprovalAdmission{}, err }
+	if !found { return PromotionApprovalAdmission{}, ErrNotFound }
+	return admission, nil
+}
+
+func (r SQLRepository) PromotionApprovalAdmissions(ctx context.Context, promotionID PromotionID, planDigest string, now time.Time) ([]PromotionApprovalAdmission, error) {
+	if r.DB == nil || ctx == nil || !validID(string(promotionID)) || !validDigest(planDigest) || now.IsZero() { return nil, ErrInvalid }
+	rows, err := r.DB.QueryContext(ctx, `SELECT admission_json,fence_id FROM ha_promotion_approvals WHERE promotion_id=? AND plan_digest=? AND expires_at>? ORDER BY actor_id,approval_id`, promotionID, planDigest, now)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	values := make([]PromotionApprovalAdmission, 0, 2)
+	for rows.Next() {
+		var raw []byte
+		var fenceID FenceID
+		if err = rows.Scan(&raw, &fenceID); err != nil { return nil, err }
+		var admission PromotionApprovalAdmission
+		if decode(raw, &admission) != nil || admission.Approval.PromotionID != promotionID || admission.Approval.PlanDigest != planDigest || admission.FenceID != "" { return nil, ErrInvalid }
+		admission.FenceID = fenceID
+		values = append(values, admission)
+		if len(values) > maximumAdministrativeFenceApprovals { return nil, ErrConflict }
+	}
+	if err = rows.Err(); err != nil { return nil, err }
+	if len(values) == 0 { return nil, ErrNotFound }
+	return values, nil
+}
+
+func (r SQLRepository) BindPromotionApprovalFence(ctx context.Context, approvalID string, fenceID FenceID) error {
+	if r.DB == nil || ctx == nil || !validID(approvalID) || !validID(string(fenceID)) { return ErrInvalid }
+	result, err := r.DB.ExecContext(ctx, `UPDATE ha_promotion_approvals SET fence_id=? WHERE approval_id=? AND (fence_id='' OR fence_id=?)`, fenceID, approvalID, fenceID)
+	if err != nil { return err }
+	if rows, countErr := result.RowsAffected(); countErr != nil || rows != 1 { return errors.Join(countErr, ErrConflict) }
+	return nil
+}
+
+func (r SQLRepository) AttachPromotionApprovals(ctx context.Context, promotionID PromotionID, generation uint64, planDigest string, approvals []Approval, now time.Time) (Promotion, error) {
+	if r.DB == nil || ctx == nil || !validID(string(promotionID)) || generation == 0 || !validDigest(planDigest) || now.IsZero() || len(approvals) < minimumAdministrativeFenceApprovals || len(approvals) > maximumAdministrativeFenceApprovals { return Promotion{}, ErrDataLossApproval }
+	canonical := append([]Approval(nil), approvals...)
+	sort.Slice(canonical, func(left, right int) bool { if canonical[left].ActorID == canonical[right].ActorID { return canonical[left].ID < canonical[right].ID }; return canonical[left].ActorID < canonical[right].ActorID })
+	tenantID := canonical[0].TenantID
+	identifiers := make(map[string]struct{}, len(canonical))
+	for index, approval := range canonical {
+		if approval.Validate(now) != nil || approval.TenantID != tenantID || approval.GroupID != canonical[0].GroupID || approval.PromotionID != promotionID || approval.PromotionGeneration != generation || approval.PlanDigest != planDigest || approval.FenceChallenge != planDigest || index > 0 && canonical[index-1].ActorID == approval.ActorID { return Promotion{}, ErrDataLossApproval }
+		if _, duplicate := identifiers[approval.ID]; duplicate { return Promotion{}, ErrDataLossApproval }
+		identifiers[approval.ID] = struct{}{}
+	}
+	tx, err := r.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil { return Promotion{}, err }
+	defer tx.Rollback()
+	for _, approval := range canonical {
+		stored, found, loadErr := loadPromotionApprovalAdmission(ctx, tx, `approval_id=?`, approval.ID)
+		if loadErr != nil || !found || !samePromotionApproval(stored.Approval, approval) { return Promotion{}, errors.Join(loadErr, ErrDataLossApproval) }
+	}
+	var raw []byte
+	err = tx.QueryRowContext(ctx, `SELECT promotion_json FROM ha_promotions WHERE id=? AND generation=? AND state=?`, promotionID, generation, PromotionPlanned).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) { return Promotion{}, ErrStaleGeneration }
+	if err != nil { return Promotion{}, err }
+	var promotion Promotion
+	if err = decode(raw, &promotion); err != nil { return Promotion{}, err }
+	digest, digestErr := PromotionPlanDigest(promotion)
+	if digestErr != nil || digest != planDigest || promotion.GroupID != canonical[0].GroupID { return Promotion{}, errors.Join(digestErr, ErrConflict) }
+	if len(promotion.Approvals) != 0 && !samePromotionApprovals(promotion.Approvals, canonical) { return Promotion{}, ErrConflict }
+	promotion.Approvals = canonical
+	raw, err = encode(promotion)
+	if err != nil { return Promotion{}, err }
+	result, err := tx.ExecContext(ctx, `UPDATE ha_promotions SET promotion_json=? WHERE id=? AND generation=? AND state=?`, raw, promotion.ID, generation, PromotionPlanned)
+	if err != nil { return Promotion{}, err }
+	if err = cas(result); err != nil { return Promotion{}, err }
+	if err = tx.Commit(); err != nil { return Promotion{}, err }
+	return promotion, nil
+}
+
+func loadPromotionApprovalAdmission(ctx context.Context, queryer interface{ QueryRowContext(context.Context, string, ...any) *sql.Row }, predicate string, argument any) (PromotionApprovalAdmission, bool, error) {
+	var raw []byte
+	var fenceID FenceID
+	err := queryer.QueryRowContext(ctx, `SELECT admission_json,fence_id FROM ha_promotion_approvals WHERE `+predicate, argument).Scan(&raw, &fenceID)
+	if errors.Is(err, sql.ErrNoRows) { return PromotionApprovalAdmission{}, false, nil }
+	if err != nil { return PromotionApprovalAdmission{}, false, err }
+	var admission PromotionApprovalAdmission
+	if decode(raw, &admission) != nil || admission.FenceID != "" { return PromotionApprovalAdmission{}, false, ErrInvalid }
+	admission.FenceID = fenceID
+	return admission, true, nil
+}
+
+func samePromotionApprovalAdmission(left, right PromotionApprovalAdmission) bool {
+	return left.CommandID == right.CommandID && left.IdempotencyKey == right.IdempotencyKey && samePromotionApproval(left.Approval, right.Approval)
+}
+
+func samePromotionApprovals(left, right []Approval) bool {
+	if len(left) != len(right) { return false }
+	for index := range left { if !samePromotionApproval(left[index], right[index]) { return false } }
+	return true
+}
+
+func samePromotionApproval(left, right Approval) bool {
+	return left.ID == right.ID && left.TenantID == right.TenantID && left.PromotionID == right.PromotionID && left.GroupID == right.GroupID && left.ActorID == right.ActorID && left.CredentialID == right.CredentialID && left.SessionID == right.SessionID && left.AuthzEpoch == right.AuthzEpoch && left.TenantAuthzEpoch == right.TenantAuthzEpoch && left.PromotionGeneration == right.PromotionGeneration && left.Kind == right.Kind && left.PlanDigest == right.PlanDigest && left.FenceChallenge == right.FenceChallenge && left.PhishingResistant == right.PhishingResistant && left.IssuedAt.Equal(right.IssuedAt) && left.ExpiresAt.Equal(right.ExpiresAt) && left.Signature == right.Signature
+}
 func (r SQLRepository) CreateFailoverRun(ctx context.Context,v FailoverRun)error{b,e:=encode(v);if e!=nil{return e};_,e=r.DB.ExecContext(ctx,`INSERT INTO ha_failover_runs (id,promotion_id,state,step,run_json,updated_at) VALUES (?,?,?,?,?,?)`,v.ID,v.PromotionID,v.State,v.Step,b,v.UpdatedAt);return e}
 func (r SQLRepository) LoadFailoverRun(ctx context.Context,id FailoverRunID)(FailoverRun,error){var b []byte;e:=r.DB.QueryRowContext(ctx,`SELECT run_json FROM ha_failover_runs WHERE id=?`,id).Scan(&b);if errors.Is(e,sql.ErrNoRows){return FailoverRun{},ErrNotFound};if e!=nil{return FailoverRun{},e};var v FailoverRun;e=decode(b,&v);return v,e}
 func (r SQLRepository) UpdateFailoverRun(ctx context.Context,v FailoverRun)error{b,e:=encode(v);if e!=nil{return e};x,e:=r.DB.ExecContext(ctx,`UPDATE ha_failover_runs SET state=?,step=?,run_json=?,updated_at=? WHERE id=?`,v.State,v.Step,b,v.UpdatedAt,v.ID);if e!=nil{return e};return one(x)}

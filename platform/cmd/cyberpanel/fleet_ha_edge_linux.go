@@ -35,17 +35,18 @@ type fleetHAEdge struct {
 	verifier   ha.EnrollmentVerifier
 	failover   ha.FailoverCoordinator
 	providers  *localMariaDBHAProviders
+	approvals  *haPromotionApprovalAuthority
 	now        func() time.Time
 }
 
-func newFleetHAEdge(repository *ha.SQLRepository, providers *localMariaDBHAProviders, now func() time.Time) (*fleetHAEdge, error) {
+func newFleetHAEdge(repository *ha.SQLRepository, providers *localMariaDBHAProviders, approvals *haPromotionApprovalAuthority, now func() time.Time) (*fleetHAEdge, error) {
 	if repository == nil || repository.DB == nil {
 		return nil, errors.New("fleet edge requires high-availability authority")
 	}
 	if now == nil {
 		now = time.Now
 	}
-	edge := &fleetHAEdge{repository:repository, providers:providers, now:now}
+	edge := &fleetHAEdge{repository:repository, providers:providers, approvals:approvals, now:now}
 	edge.groups = ha.GroupService{Store:*repository, Now:now}
 	edge.verifier = ha.EnrollmentVerifier{Now:now}
 	edge.failover = ha.FailoverCoordinator{Store:*repository, Now:now}
@@ -527,8 +528,39 @@ func (edge *fleetHAEdge) PlanPromotion(ctx context.Context, call apiserver.EdgeC
 	return promotionMutation(promotion, promotionPlanDigest(promotion)), nil
 }
 
+func (edge *fleetHAEdge) ApprovePromotion(ctx context.Context, call apiserver.EdgeCall, payload apiserver.HAPromotionApprovalPayload) (apiserver.EdgeMutation[apiserver.HAPromotionApprovalProjection], error) {
+	if edge == nil || edge.repository == nil || edge.approvals == nil || ctx == nil || call.TenantID == "" || call.ResourceID == "" || call.CommandID == "" || call.IdempotencyKey == "" || call.ExpectedGeneration == 0 || call.PrincipalID == "" || call.CredentialID == "" || call.SessionID == "" || call.AuthzEpoch == 0 || call.Assurance < identity.AssurancePhishingResistant {
+		return apiserver.EdgeMutation[apiserver.HAPromotionApprovalProjection]{}, ha.ErrUnsupported
+	}
+	promotion, err := edge.repository.LoadPromotion(ctx, ha.PromotionID(call.ResourceID))
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.HAPromotionApprovalProjection]{}, err
+	}
+	planDigest, err := ha.PromotionPlanDigest(promotion)
+	if err != nil || promotion.State != ha.PromotionPlanned || promotion.Generation != call.ExpectedGeneration || payload.PlanDigest != planDigest || payload.FenceChallenge != planDigest {
+		return apiserver.EdgeMutation[apiserver.HAPromotionApprovalProjection]{}, errors.Join(err, ha.ErrDataLossApproval)
+	}
+	approval := ha.Approval{
+		ID:payload.ApprovalID, TenantID:call.TenantID, PromotionID:promotion.ID, GroupID:promotion.GroupID,
+		ActorID:call.PrincipalID, CredentialID:call.CredentialID, SessionID:call.SessionID,
+		AuthzEpoch:call.AuthzEpoch, TenantAuthzEpoch:payload.TenantAuthzEpoch, PromotionGeneration:promotion.Generation,
+		Kind:ha.AdministrativeFenceApprovalKind, PlanDigest:payload.PlanDigest, FenceChallenge:payload.FenceChallenge,
+		PhishingResistant:true, IssuedAt:payload.IssuedAt.UTC(), ExpiresAt:payload.ExpiresAt.UTC(), Signature:payload.Signature,
+	}
+	admission, _, err := edge.approvals.Admit(ctx, promotion, ha.PromotionApprovalAdmission{CommandID:ha.CommandID(call.CommandID),IdempotencyKey:call.IdempotencyKey,Approval:approval})
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.HAPromotionApprovalProjection]{}, err
+	}
+	projection := apiserver.HAPromotionApprovalProjection{
+		ID:admission.Approval.ID, TenantID:admission.Approval.TenantID, PromotionID:string(admission.Approval.PromotionID),
+		ActorID:admission.Approval.ActorID, PlanDigest:admission.Approval.PlanDigest, FenceChallenge:admission.Approval.FenceChallenge,
+		PromotionGeneration:admission.Approval.PromotionGeneration, AcceptedAt:admission.AcceptedAt, ExpiresAt:admission.Approval.ExpiresAt,
+	}
+	return apiserver.EdgeMutation[apiserver.HAPromotionApprovalProjection]{OperationID:call.CommandID,State:"accepted",Generation:promotion.Generation,Resource:projection},nil
+}
+
 func (edge *fleetHAEdge) ExecutePromotion(ctx context.Context, call apiserver.EdgeCall, payload apiserver.HAPromotionExecutePayload) (apiserver.EdgeMutation[apiserver.HAPromotionProjection], error) {
-	if edge == nil || edge.repository == nil || ctx == nil || call.TenantID != "" || call.ResourceID == "" || call.CommandID == "" || call.ExpectedGeneration == 0 || call.Assurance < identity.AssurancePhishingResistant || payload.PromotionID == "" || payload.WriterLeaseGeneration == 0 || payload.PlanDigest == "" {
+	if edge == nil || edge.repository == nil || edge.approvals == nil || ctx == nil || call.TenantID != "" || call.ResourceID == "" || call.CommandID == "" || call.ExpectedGeneration == 0 || call.Assurance < identity.AssurancePhishingResistant || payload.PromotionID == "" || payload.WriterLeaseGeneration == 0 || payload.PlanDigest == "" {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrInvalid
 	}
 	selectedWriter, err := edge.repository.LoadNode(ctx, ha.NodeID(call.ResourceID))
@@ -569,6 +601,10 @@ func (edge *fleetHAEdge) ExecutePromotion(ctx context.Context, call apiserver.Ed
 		policy,loadErr:=edge.repository.LoadTrafficPolicy(ctx,promotion.TrafficPolicyID);if loadErr!=nil{return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{},loadErr}
 		coordinator,loadErr=edge.providers.coordinator(*edge.repository,group,promotion,policy,edge.now);if loadErr!=nil{return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{},loadErr}
 	}
+	acceptedApprovals, err := edge.approvals.ApprovalsForPromotion(ctx, promotion, payload.PlanDigest)
+	if err != nil { return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err }
+	promotion, err = edge.repository.AttachPromotionApprovals(ctx, promotion.ID, promotion.Generation, payload.PlanDigest, acceptedApprovals, edge.now().UTC())
+	if err != nil { return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err }
 	promotion, run, executeErr := coordinator.Execute(ctx, request)
 	if executeErr != nil && !errors.Is(executeErr, ha.ErrReconciliationRequired) {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, executeErr
