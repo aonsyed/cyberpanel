@@ -29,6 +29,7 @@ type Runtime struct {
 	catalog    *catalog.SQLCatalog
 	activator  VerifiedActivator
 	renderers  map[webengine.Edition]native.Renderer
+	lifecycle  *LinuxManagementClient
 	activation sync.Mutex
 	now        func() time.Time
 }
@@ -47,11 +48,13 @@ func NewRuntime(catalogValue *catalog.SQLCatalog, activator VerifiedActivator, r
 	if len(byEdition) != 2 {
 		return nil, ErrInvalid
 	}
-	return &Runtime{catalog: catalogValue, activator: activator, renderers: byEdition, now: time.Now}, nil
+	lifecycle, err := NewLocalLinuxManagementClient()
+	if err != nil { return nil, err }
+	return &Runtime{catalog: catalogValue, activator: activator, renderers: byEdition, lifecycle: lifecycle, now: time.Now}, nil
 }
 
 func (*Runtime) ManagementCapabilities() Capabilities {
-	return Capabilities{Inspect: true, Tune: true}
+	return Capabilities{Inspect: true, Install: true, Convert: true, Upgrade: true, Remove: true, Tune: true}
 }
 
 func DefaultGlobalTuning() GlobalTuning {
@@ -99,8 +102,9 @@ func canonicalTuning(value GlobalTuning) (webengine.WebEngineTuning, error) {
 	}, nil
 }
 
-func (runtime *Runtime) Resolve(context.Context, ArtifactRequest) (ArtifactPlan, error) {
-	return ArtifactPlan{}, ErrUnsupported
+func (runtime *Runtime) Resolve(ctx context.Context, request ArtifactRequest) (ArtifactPlan, error) {
+	if runtime == nil || runtime.lifecycle == nil { return ArtifactPlan{}, ErrInvalid }
+	return resolveLocalArtifact(ctx, request, false)
 }
 
 func (runtime *Runtime) BuildTarget(ctx context.Context, edition webengine.Edition, snapshotGeneration uint64) (native.ConfigGeneration, error) {
@@ -123,9 +127,11 @@ func (runtime *Runtime) BuildTarget(ctx context.Context, edition webengine.Editi
 }
 
 func (runtime *Runtime) Inspect(ctx context.Context, edition webengine.Edition) (Installation, error) {
-	if runtime == nil || runtime.catalog == nil {
+	if runtime == nil || runtime.catalog == nil || runtime.lifecycle == nil {
 		return Installation{}, ErrInvalid
 	}
+	observed, err := runtime.lifecycle.Inspect(ctx, edition)
+	if err != nil { return Installation{}, err }
 	state, err := runtime.catalog.NodeState(ctx)
 	if err != nil {
 		return Installation{}, err
@@ -133,11 +139,10 @@ func (runtime *Runtime) Inspect(ctx context.Context, edition webengine.Edition) 
 	if edition != state.Configuration.Engine.Edition {
 		return Installation{}, ErrNotFound
 	}
-	return Installation{
-		ID: "node-webengine", Edition: edition, Channel: ChannelPinned, State: StateActive,
-		Generation: state.Configuration.Engine.Tuning.Generation, ActiveConfigDigest: state.AppliedDigest,
-		InstalledAt: state.UpdatedAt, UpdatedAt: state.UpdatedAt,
-	}, nil
+	observed.ID,observed.Edition,observed.State="node-webengine",edition,StateActive
+	observed.Generation,observed.ActiveConfigDigest=state.Configuration.Engine.Tuning.Generation,state.AppliedDigest
+	if observed.InstalledAt.IsZero(){observed.InstalledAt=state.UpdatedAt};observed.UpdatedAt=state.UpdatedAt
+	return observed, nil
 }
 
 func (runtime *Runtime) ApplyGlobalTuning(ctx context.Context, request EffectRequest, tuning GlobalTuning) (EffectReceipt, error) {
@@ -223,8 +228,8 @@ func (runtime *Runtime) ApplyGlobalTuning(ctx context.Context, request EffectReq
 	return receipt, nil
 }
 
-func (*Runtime) Install(context.Context, EffectRequest, ArtifactPlan) (EffectReceipt, error) {
-	return EffectReceipt{}, ErrUnsupported
+func (runtime *Runtime) Install(ctx context.Context, request EffectRequest, plan ArtifactPlan) (EffectReceipt, error) {
+	if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.Install(ctx,request,plan)
 }
 func (*Runtime) ApplyLicense(context.Context, EffectRequest, LicenseRequest) (LicenseStatus, error) {
 	return LicenseStatus{}, ErrUnsupported
@@ -250,8 +255,8 @@ func (*Runtime) ConfirmService(context.Context, SwitchReceipt) (ProbeReceipt, er
 func (*Runtime) RestoreService(context.Context, SwitchReceipt) (ProbeReceipt, error) {
 	return ProbeReceipt{}, ErrUnsupported
 }
-func (*Runtime) Remove(context.Context, EffectRequest, webengine.Edition) (EffectReceipt, error) {
-	return EffectReceipt{}, ErrUnsupported
+func (runtime *Runtime) Remove(ctx context.Context, request EffectRequest, edition webengine.Edition) (EffectReceipt, error) {
+	if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.Remove(ctx,request,edition)
 }
 func (*Runtime) InstallPHP(context.Context, EffectRequest, PHPArtifactPlan) (EffectReceipt, error) {
 	return EffectReceipt{}, ErrUnsupported
@@ -262,6 +267,9 @@ func (*Runtime) ApplyPHPProfile(context.Context, EffectRequest, PHPProfile) (Eff
 func (*Runtime) RestartPHPPool(context.Context, EffectRequest, string) (EffectReceipt, error) {
 	return EffectReceipt{}, ErrUnsupported
 }
+
+func(runtime *Runtime)Upgrade(ctx context.Context,request EffectRequest,plan ArtifactPlan)(EffectReceipt,error){if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.Upgrade(ctx,request,plan)}
+func(runtime *Runtime)ConvertEdition(ctx context.Context,request EffectRequest,plan ArtifactPlan,generation native.ConfigGeneration,window time.Duration)(SwitchReceipt,error){if runtime==nil||runtime.lifecycle==nil{return SwitchReceipt{},ErrInvalid};return runtime.lifecycle.ConvertEdition(ctx,request,plan,generation,window)}
 
 func validEffectToken(value string) bool {
 	if value == "" || len(value) > 160 {
@@ -308,3 +316,4 @@ var _ ArtifactCatalog = (*Runtime)(nil)
 var _ TargetRenderer = (*Runtime)(nil)
 var _ Executor = (*Runtime)(nil)
 var _ CapabilityProvider = (*Runtime)(nil)
+var _ LifecycleExecutor = (*Runtime)(nil)

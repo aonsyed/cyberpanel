@@ -27,6 +27,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation/fsstore"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/lswsruntime"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/management"
 )
 
 const webEngineConfigurationRoot = "/usr/local/lsws/conf"
@@ -53,6 +54,10 @@ func main() {
 	activationPolicy, err := webactivation.NewPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize web-engine activation peer policy: %v", err) }
 	activationListener, err := webactivation.ListenDefault(controlGID); if err != nil { log.Fatalf("listen on web-engine activation socket: %v", err) }; defer activationListener.Close()
 	activationServer := &webactivation.Server{Authorizer: activationPolicy, Handler: activationBroker, MaximumConcurrent: 32}
+	managementHost,err:=management.NewLinuxLifecycleHost();if err!=nil{log.Fatalf("initialize web-engine management host: %v",err)}
+	managementPolicy,err:=management.NewLinuxManagementPeerPolicy(controlUID);if err!=nil{log.Fatalf("initialize web-engine management peer policy: %v",err)}
+	managementListener,err:=management.ListenLinuxManagementBroker(controlGID);if err!=nil{log.Fatalf("listen on web-engine management socket: %v",err)};defer managementListener.Close()
+	managementServer:=&management.LinuxManagementBrokerServer{Authorizer:managementPolicy,Handler:managementHost,MaximumConcurrent:8}
 	materialClient, err := secrets.NewLocalMaterialClient(); if err != nil { log.Fatalf("connect protected secret broker: %v", err) }
 	installationOwner, err := secrets.NewID("installation"); if err != nil { log.Fatalf("construct installation secret owner: %v", err) }
 	databaseSecrets, err := database.NewLinuxSecretBrokerSource(materialClient, installationOwner); if err != nil { log.Fatalf("initialize database secret source: %v", err) }
@@ -119,9 +124,10 @@ func main() {
 	backupListener,err:=backup.ListenLinuxBackupBroker(controlGID);if err!=nil{log.Fatalf("listen on backup broker socket: %v",err)};defer backupListener.Close()
 	backupServer:=&backup.LinuxBackupBrokerServer{Authorizer:backupPolicy,Executor:backupHost,MaximumConcurrent:16}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM); defer cancel()
-	serveErrors := make(chan serveResult, 11)
+	serveErrors := make(chan serveResult, 12)
 	go func() { serveErrors <- serveResult{name: "siteops", err: server.Serve(listener)} }()
 	go func() { serveErrors <- serveResult{name: "web-engine activation", err: activationServer.Serve(activationListener)} }()
+	go func() { serveErrors <- serveResult{name: "web-engine management", err: managementServer.Serve(managementListener)} }()
 	go func() { serveErrors <- serveResult{name: "database", err: databaseServer.Serve(databaseListener)} }()
 	go func() { serveErrors <- serveResult{name: "operations", err: operationsServer.Serve(operationsListener)} }()
 	go func() { serveErrors <- serveResult{name: "access", err: accessServer.Serve(accessListener)} }()
@@ -136,6 +142,7 @@ func main() {
 	case <-ctx.Done():
 		_ = listener.Close()
 		_ = activationListener.Close()
+		_ = managementListener.Close()
 		_ = databaseListener.Close()
 		_ = operationsListener.Close()
 		_ = accessListener.Close()
@@ -145,10 +152,11 @@ func main() {
 		_ = certificateListener.Close()
 		_ = applicationListener.Close()
 		_ = backupListener.Close()
-		for count := 0; count < 11; count++ { result := <-serveErrors; if result.err != nil && !errors.Is(result.err, net.ErrClosed) { log.Printf("%s server stopped: %v", result.name, result.err) } }
+		for count := 0; count < 12; count++ { result := <-serveErrors; if result.err != nil && !errors.Is(result.err, net.ErrClosed) { log.Printf("%s server stopped: %v", result.name, result.err) } }
 	case result := <-serveErrors:
 		_ = listener.Close()
 		_ = activationListener.Close()
+		_ = managementListener.Close()
 		_ = databaseListener.Close()
 		_ = operationsListener.Close()
 		_ = accessListener.Close()

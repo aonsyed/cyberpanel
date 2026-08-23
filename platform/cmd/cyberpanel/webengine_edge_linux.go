@@ -32,7 +32,7 @@ func (edge *webEngineEdge) WebEngineCapabilities() apiserver.WebEngineEdgeCapabi
 		return apiserver.WebEngineEdgeCapabilities{}
 	}
 	capabilities := edge.service.Capabilities()
-	return apiserver.WebEngineEdgeCapabilities{List: capabilities.Inspect, Tuning: capabilities.Tune}
+	return apiserver.WebEngineEdgeCapabilities{List: capabilities.Inspect, Tuning: capabilities.Tune, Upgrade: capabilities.Upgrade}
 }
 
 func (edge *webEngineEdge) ListInstallations(ctx context.Context, call apiserver.EdgeCall, page apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.WebEngineProjection], error) {
@@ -46,6 +46,7 @@ func (edge *webEngineEdge) ListInstallations(ctx context.Context, call apiserver
 	if err != nil {
 		return apiserver.EdgePage[apiserver.WebEngineProjection]{}, err
 	}
+	if installation.State == management.StateAbsent { return apiserver.EdgePage[apiserver.WebEngineProjection]{Items: []apiserver.WebEngineProjection{}}, nil }
 	tuning, err := edge.service.CurrentTuning(ctx)
 	if err != nil {
 		return apiserver.EdgePage[apiserver.WebEngineProjection]{}, err
@@ -115,8 +116,13 @@ func (*webEngineEdge) ConfigureLicense(context.Context, apiserver.EdgeCall, apis
 	return apiserver.EdgeMutation[apiserver.WebEngineProjection]{}, management.ErrUnsupported
 }
 
-func (*webEngineEdge) Upgrade(context.Context, apiserver.EdgeCall, apiserver.WebEngineUpgradePayload) (apiserver.EdgeMutation[apiserver.WebEngineProjection], error) {
-	return apiserver.EdgeMutation[apiserver.WebEngineProjection]{}, management.ErrUnsupported
+func (edge *webEngineEdge) Upgrade(ctx context.Context, call apiserver.EdgeCall, payload apiserver.WebEngineUpgradePayload) (apiserver.EdgeMutation[apiserver.WebEngineProjection], error) {
+	if edge==nil||edge.service==nil||ctx==nil||call.TenantID!=""||call.ResourceID!="node-webengine"||call.ExpectedGeneration==0||call.CommandID==""||call.PrincipalID==""||call.CredentialID==""||call.AuthzEpoch==0{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},management.ErrInvalid}
+	current,err:=edge.service.Installation(ctx);if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err};if current.ID!=call.ResourceID||current.Edition!=edge.edition||current.Generation!=call.ExpectedGeneration||current.State!=management.StateActive{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},management.ErrConflict}
+	channel:=current.Channel;if payload.Channel!=""{channel=management.Channel(payload.Channel)}
+	installation,err:=edge.service.Upgrade(ctx,management.UpgradeCommand{CommandID:call.CommandID,Version:payload.Version,Channel:channel,ExpectedGeneration:call.ExpectedGeneration,Fence:call.ExpectedGeneration+1,CommitAuthorizationDigest:webEngineAuthorizationDigest(call)});if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err}
+	tuning,err:=edge.service.CurrentTuning(ctx);if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err};if tuning.Generation!=installation.Generation{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},management.ErrConflict}
+	return apiserver.EdgeMutation[apiserver.WebEngineProjection]{OperationID:webEngineEffectID(call.CommandID,"upgrade",payload.Version),State:string(installation.State),Generation:installation.Generation,Resource:webEngineProjection(installation,tuning)},nil
 }
 
 func (*webEngineEdge) CreatePHPProfile(context.Context, apiserver.EdgeCall, apiserver.WebEnginePHPProfilePayload) (apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection], error) {
