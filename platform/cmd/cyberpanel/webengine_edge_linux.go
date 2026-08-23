@@ -7,11 +7,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
+	"os"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
+	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/management"
 )
@@ -33,7 +37,7 @@ func (edge *webEngineEdge) WebEngineCapabilities() apiserver.WebEngineEdgeCapabi
 		return apiserver.WebEngineEdgeCapabilities{}
 	}
 	capabilities := edge.service.Capabilities()
-	return apiserver.WebEngineEdgeCapabilities{List: capabilities.Inspect, Tuning: capabilities.Tune, Upgrade: capabilities.Upgrade, Remove: capabilities.Remove}
+	return apiserver.WebEngineEdgeCapabilities{List: capabilities.Inspect, License: capabilities.RefreshLicense && edge.edition == webengine.EditionLiteSpeedEnterprise, Tuning: capabilities.Tune, Upgrade: capabilities.Upgrade, Remove: capabilities.Remove, PHPProfile: capabilities.InstallPHP}
 }
 
 func (edge *webEngineEdge) ListInstallations(ctx context.Context, call apiserver.EdgeCall, page apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.WebEngineProjection], error) {
@@ -113,8 +117,13 @@ func (edge *webEngineEdge) ConfigureTuning(ctx context.Context, call apiserver.E
 	}, nil
 }
 
-func (*webEngineEdge) ConfigureLicense(context.Context, apiserver.EdgeCall, apiserver.WebEngineLicensePayload, []byte) (apiserver.EdgeMutation[apiserver.WebEngineProjection], error) {
-	return apiserver.EdgeMutation[apiserver.WebEngineProjection]{}, management.ErrUnsupported
+func (edge *webEngineEdge) ConfigureLicense(ctx context.Context, call apiserver.EdgeCall, payload apiserver.WebEngineLicensePayload, secret []byte) (apiserver.EdgeMutation[apiserver.WebEngineProjection], error) {
+	defer wipeBytes(secret)
+	if edge==nil||edge.service==nil||ctx==nil||call.TenantID!=""||call.ResourceID!="node-webengine"||call.ExpectedGeneration==0||call.CommandID==""||call.PrincipalID==""||call.CredentialID==""||call.AuthzEpoch==0||payload.Edition!=string(webengine.EditionLiteSpeedEnterprise)||edge.edition!=webengine.EditionLiteSpeedEnterprise||len(secret)==0||len(secret)>1<<20{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},management.ErrInvalid}
+	current,err:=edge.service.Installation(ctx);if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err};if current.ID!=call.ResourceID||current.Edition!=edge.edition||current.Generation!=call.ExpectedGeneration||current.State!=management.StateActive{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},management.ErrConflict}
+	releaseDigest,err:=webEngineExecutableDigest("/usr/local/libexec/cyberpanel/panel-execd");if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err};secretID,err:=secrets.NewID("lse_"+webEngineDigest(call.CommandID,call.IdempotencyKey,call.ResourceID)[:48]);if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},management.ErrInvalid};owner,_:=secrets.NewID("installation");resource,_:=secrets.NewID("node-webengine")
+	secretClient,err:=secrets.NewLocalManagementClient();if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err};_,err=secretClient.Put(ctx,secrets.PutRequest{ID:secretID,OwnerTenantID:owner,Purpose:secrets.PurposeAuthentication,Audience:secrets.AudienceBinding{AdapterID:management.LinuxLicenseSecretAdapterID,AdapterVersion:management.LinuxLicenseSecretAdapterVersion,Account:"installation",Origin:"local://panel-execd",ResourceKind:"webengine",ResourceID:resource,ResourceGeneration:call.ExpectedGeneration+1,Operations:[]secrets.Operation{secrets.OperationAuthenticate},ConsumerReleaseDigest:releaseDigest},Plaintext:append([]byte(nil),secret...)});if err!=nil&&!errors.Is(err,secrets.ErrConflict){return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err}
+	status,err:=edge.service.ConfigureLicense(ctx,management.LicenseCommand{CommandID:call.CommandID,License:management.LicenseRequest{Mode:management.LicenseModeSerial,SecretRef:secretID.String()},ExpectedGeneration:call.ExpectedGeneration,Fence:call.ExpectedGeneration+1,CommitAuthorizationDigest:webEngineAuthorizationDigest(call)});if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err};installation,err:=edge.service.Installation(ctx);if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err};tuning,err:=edge.service.CurrentTuning(ctx);if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err};if installation.Generation!=call.ExpectedGeneration+1||installation.License.ReceiptDigest!=status.ReceiptDigest||tuning.Generation!=call.ExpectedGeneration{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},management.ErrAmbiguous};projection:=webEngineProjection(installation,tuning);return apiserver.EdgeMutation[apiserver.WebEngineProjection]{OperationID:webEngineEffectID(call.CommandID,"license",call.ResourceID),State:string(status.State),Generation:installation.Generation,Resource:projection},nil
 }
 
 func (edge *webEngineEdge) Upgrade(ctx context.Context, call apiserver.EdgeCall, payload apiserver.WebEngineUpgradePayload) (apiserver.EdgeMutation[apiserver.WebEngineProjection], error) {
@@ -159,9 +168,12 @@ func (edge *webEngineEdge) Remove(ctx context.Context, call apiserver.EdgeCall, 
 	}, nil
 }
 
-func (*webEngineEdge) CreatePHPProfile(context.Context, apiserver.EdgeCall, apiserver.WebEnginePHPProfilePayload) (apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection], error) {
-	return apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection]{}, management.ErrUnsupported
+func (edge *webEngineEdge) CreatePHPProfile(ctx context.Context, call apiserver.EdgeCall, payload apiserver.WebEnginePHPProfilePayload) (apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection], error) {
+	if edge==nil||edge.service==nil||ctx==nil||call.TenantID!=""||call.ResourceID!="node-webengine"||call.ExpectedGeneration==0||call.CommandID==""||call.PrincipalID==""||call.CredentialID==""||call.AuthzEpoch==0{return apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection]{},management.ErrInvalid};current,err:=edge.service.Installation(ctx);if err!=nil{return apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection]{},err};if current.ID!=call.ResourceID||current.Edition!=edge.edition||current.Generation!=call.ExpectedGeneration||current.State!=management.StateActive{return apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection]{},management.ErrConflict}
+	memory:=payload.MemoryBytes;if memory==0{memory=256<<20};upload:=memory/4;if upload>64<<20{upload=64<<20};profile,err:=edge.service.CreatePHPProfile(ctx,management.PHPProfileCommand{CommandID:call.CommandID,Profile:management.PHPProfile{ID:payload.Name,Version:payload.Version,Extensions:append([]string(nil),payload.Extensions...),MemoryLimitBytes:memory,UploadLimitBytes:upload,BodyLimitBytes:upload,RequestTimeout:300*time.Second,MaxConnections:8,MaxChildren:8},ExpectedGeneration:call.ExpectedGeneration,Fence:call.ExpectedGeneration+1,CommitAuthorizationDigest:webEngineAuthorizationDigest(call)});if err!=nil{return apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection]{},err};projection:=apiserver.WebEnginePHPProfileProjection{ID:profile.ID,Name:profile.ID,Version:profile.Version,Extensions:append([]string(nil),profile.Extensions...),MemoryBytes:profile.MemoryLimitBytes,State:"active",Generation:profile.Generation};return apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection]{OperationID:webEngineEffectID(call.CommandID,"php",profile.ID),State:"active",Generation:profile.Generation,Resource:projection},nil
 }
+
+func webEngineExecutableDigest(path string)(string,error){info,err:=os.Lstat(path);if err!=nil||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()&0o111==0||info.Mode().Perm()&0o022!=0{return "",management.ErrInvalid};metadata,ok:=info.Sys().(*syscall.Stat_t);if !ok||metadata.Uid!=0{return "",management.ErrInvalid};file,err:=os.Open(path);if err!=nil{return "",err};hash:=sha256.New();_,copyErr:=io.Copy(hash,io.LimitReader(file,1<<30+1));closeErr:=file.Close();if copyErr!=nil||closeErr!=nil{return "",errors.Join(copyErr,closeErr)};return hex.EncodeToString(hash.Sum(nil)),nil}
 
 func webEngineProjection(installation management.Installation, tuning management.GlobalTuning) apiserver.WebEngineProjection {
 	licenseState := string(installation.License.State)

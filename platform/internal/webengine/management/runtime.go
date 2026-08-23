@@ -54,7 +54,7 @@ func NewRuntime(catalogValue *catalog.SQLCatalog, activator VerifiedActivator, r
 }
 
 func (*Runtime) ManagementCapabilities() Capabilities {
-	return Capabilities{Inspect: true, Install: true, Convert: true, Upgrade: true, Remove: true, Tune: true}
+	return Capabilities{Inspect: true, Install: true, Convert: true, Upgrade: true, Remove: true, RefreshLicense: true, InstallPHP: true, Tune: true}
 }
 
 func DefaultGlobalTuning() GlobalTuning {
@@ -231,11 +231,11 @@ func (runtime *Runtime) ApplyGlobalTuning(ctx context.Context, request EffectReq
 func (runtime *Runtime) Install(ctx context.Context, request EffectRequest, plan ArtifactPlan) (EffectReceipt, error) {
 	if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.Install(ctx,request,plan)
 }
-func (*Runtime) ApplyLicense(context.Context, EffectRequest, LicenseRequest) (LicenseStatus, error) {
-	return LicenseStatus{}, ErrUnsupported
+func (runtime *Runtime) ApplyLicense(ctx context.Context, request EffectRequest, license LicenseRequest) (LicenseStatus, error) {
+	if runtime==nil||runtime.lifecycle==nil{return LicenseStatus{},ErrInvalid};return runtime.lifecycle.ApplyLicense(ctx,request,license)
 }
-func (*Runtime) RefreshLicense(context.Context, EffectRequest) (LicenseStatus, error) {
-	return LicenseStatus{}, ErrUnsupported
+func (runtime *Runtime) RefreshLicense(ctx context.Context, request EffectRequest) (LicenseStatus, error) {
+	if runtime==nil||runtime.lifecycle==nil{return LicenseStatus{},ErrInvalid};return runtime.lifecycle.RefreshLicense(ctx,request)
 }
 func (*Runtime) StageGeneration(context.Context, EffectRequest, native.ConfigGeneration) (EffectReceipt, error) {
 	return EffectReceipt{}, ErrUnsupported
@@ -258,14 +258,18 @@ func (*Runtime) RestoreService(context.Context, SwitchReceipt) (ProbeReceipt, er
 func (runtime *Runtime) Remove(ctx context.Context, request EffectRequest, edition webengine.Edition) (EffectReceipt, error) {
 	if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.Remove(ctx,request,edition)
 }
-func (*Runtime) InstallPHP(context.Context, EffectRequest, PHPArtifactPlan) (EffectReceipt, error) {
-	return EffectReceipt{}, ErrUnsupported
+func (runtime *Runtime) InstallPHP(ctx context.Context, request EffectRequest, plan PHPArtifactPlan) (EffectReceipt, error) {
+	if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.InstallPHP(ctx,request,plan)
 }
-func (*Runtime) ApplyPHPProfile(context.Context, EffectRequest, PHPProfile) (EffectReceipt, error) {
-	return EffectReceipt{}, ErrUnsupported
+func (runtime *Runtime) ApplyPHPProfile(ctx context.Context, request EffectRequest, profile PHPProfile) (EffectReceipt, error) {
+	if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.ApplyPHPProfile(ctx,request,profile)
 }
 func (*Runtime) RestartPHPPool(context.Context, EffectRequest, string) (EffectReceipt, error) {
 	return EffectReceipt{}, ErrUnsupported
+}
+
+func (runtime *Runtime) RollbackPHP(ctx context.Context, request EffectRequest, plan PHPArtifactPlan, previous *PHPProfile) (EffectReceipt, error) {
+	if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.RollbackPHP(ctx,request,plan,previous)
 }
 
 func(runtime *Runtime)Upgrade(ctx context.Context,request EffectRequest,plan ArtifactPlan)(EffectReceipt,error){if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.Upgrade(ctx,request,plan)}

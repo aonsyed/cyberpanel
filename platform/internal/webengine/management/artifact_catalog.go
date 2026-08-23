@@ -3,11 +3,15 @@ package management
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 )
@@ -15,6 +19,9 @@ import (
 const (
 	localArtifactCatalogPath = "/etc/cyberpanel/webengine/catalog.json"
 	localArtifactCatalogLimit = 8 << 20
+	localPHPArtifactCatalogPath = "/etc/cyberpanel/webengine/php-catalog.json"
+	localPHPArtifactTrustRoot = "/etc/cyberpanel/webengine/php-trust.d"
+	localPHPArtifactCatalogLimit = 8 << 20
 )
 
 type localArtifactCatalog struct {
@@ -29,6 +36,166 @@ type localArtifactCatalogEntry struct {
 	Architecture string `json:"architecture"`
 	Channel Channel `json:"channel"`
 	Plan ArtifactPlan `json:"plan"`
+}
+
+type localPHPCatalogPayload struct {
+	SchemaVersion uint32 `json:"schema_version"`
+	Sequence uint64 `json:"sequence"`
+	IssuedAt time.Time `json:"issued_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	KeyID string `json:"key_id"`
+	Entries []localPHPCatalogEntry `json:"entries"`
+}
+
+type signedLocalPHPCatalog struct {
+	SchemaVersion uint32 `json:"schema_version"`
+	Sequence uint64 `json:"sequence"`
+	IssuedAt time.Time `json:"issued_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	KeyID string `json:"key_id"`
+	Entries []localPHPCatalogEntry `json:"entries"`
+	Signature string `json:"signature"`
+}
+
+type localPHPCatalogEntry struct {
+	OS string `json:"os"`
+	OSVersion string `json:"os_version"`
+	Architecture string `json:"architecture"`
+	Version string `json:"version"`
+	RepositorySnapshotDigest string `json:"repository_snapshot_digest"`
+	BinaryPathID string `json:"binary_path_id"`
+	Packages []PackageArtifact `json:"packages"`
+	Extensions []string `json:"extensions"`
+}
+
+func (runtime *Runtime) ResolvePHP(ctx context.Context, version string, extensions []string) (PHPArtifactPlan, error) {
+	if runtime == nil || runtime.lifecycle == nil {
+		return PHPArtifactPlan{}, ErrInvalid
+	}
+	return resolveLocalPHPArtifact(ctx, version, extensions, false)
+}
+
+func resolveLocalPHPArtifact(ctx context.Context, version string, extensions []string, requireRoot bool) (PHPArtifactPlan, error) {
+	if ctx == nil || ctx.Err() != nil || !validPHPVersion(version) {
+		return PHPArtifactPlan{}, ErrInvalid
+	}
+	wantedExtensions := canonicalExtensions(extensions)
+	if len(extensions) != len(wantedExtensions) || !equalStrings(wantedExtensions, wantedExtensions) {
+		return PHPArtifactPlan{}, ErrInvalid
+	}
+	osName, osVersion, architecture, err := localPlatformTuple()
+	if err != nil {
+		return PHPArtifactPlan{}, err
+	}
+	payload, digest, err := readSignedLocalPHPCatalog(requireRoot, time.Now().UTC())
+	if err != nil {
+		return PHPArtifactPlan{}, err
+	}
+	var selected PHPArtifactPlan
+	for _, entry := range payload.Entries {
+		if validateLocalPHPEntry(entry) != nil {
+			return PHPArtifactPlan{}, ErrInvalid
+		}
+		if entry.OS != osName || entry.OSVersion != osVersion || entry.Architecture != architecture || entry.Version != version || !equalStrings(entry.Extensions, wantedExtensions) {
+			continue
+		}
+		if selected.Version != "" {
+			return PHPArtifactPlan{}, ErrConflict
+		}
+		selected = PHPArtifactPlan{Version: entry.Version, RepositorySnapshotDigest: entry.RepositorySnapshotDigest,
+			BinaryPathID: entry.BinaryPathID, CatalogDigest: digest, CatalogSequence: payload.Sequence,
+			Packages: append([]PackageArtifact(nil), entry.Packages...), Extensions: append([]string(nil), entry.Extensions...)}
+	}
+	if selected.Version == "" {
+		return PHPArtifactPlan{}, ErrUnsupported
+	}
+	return selected, nil
+}
+
+func readSignedLocalPHPCatalog(requireRoot bool, now time.Time) (localPHPCatalogPayload, string, error) {
+	info, err := os.Lstat(localPHPArtifactCatalogPath)
+	if err != nil {
+		return localPHPCatalogPayload{}, "", err
+	}
+	if !safeLocalCatalogFile(info, localPHPArtifactCatalogLimit, requireRoot) {
+		return localPHPCatalogPayload{}, "", ErrInvalid
+	}
+	content, err := os.ReadFile(localPHPArtifactCatalogPath)
+	if err != nil {
+		return localPHPCatalogPayload{}, "", err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.DisallowUnknownFields()
+	var signed signedLocalPHPCatalog
+	if decoder.Decode(&signed) != nil || decoder.Decode(&struct{}{}) != io.EOF || signed.SchemaVersion != 1 || signed.Sequence == 0 ||
+		signed.IssuedAt.IsZero() || signed.ExpiresAt.IsZero() || signed.IssuedAt.After(now.Add(5*time.Minute)) || !signed.ExpiresAt.After(now) ||
+		!signed.ExpiresAt.After(signed.IssuedAt) || signed.ExpiresAt.Sub(signed.IssuedAt) > 370*24*time.Hour || !safeLifecycleToken(signed.KeyID) ||
+		len(signed.Entries) == 0 || len(signed.Entries) > 4096 {
+		return localPHPCatalogPayload{}, "", ErrInvalid
+	}
+	payload := localPHPCatalogPayload{SchemaVersion: signed.SchemaVersion, Sequence: signed.Sequence, IssuedAt: signed.IssuedAt,
+		ExpiresAt: signed.ExpiresAt, KeyID: signed.KeyID, Entries: signed.Entries}
+	canonical, err := json.Marshal(payload)
+	if err != nil {
+		return localPHPCatalogPayload{}, "", err
+	}
+	key, err := readLocalPHPTrustKey(signed.KeyID, requireRoot)
+	if err != nil {
+		return localPHPCatalogPayload{}, "", err
+	}
+	signature, err := base64.StdEncoding.DecodeString(signed.Signature)
+	if err != nil || len(signature) != ed25519.SignatureSize || !ed25519.Verify(key, canonical, signature) {
+		return localPHPCatalogPayload{}, "", ErrConflict
+	}
+	for _, entry := range payload.Entries {
+		if validateLocalPHPEntry(entry) != nil {
+			return localPHPCatalogPayload{}, "", ErrInvalid
+		}
+	}
+	return payload, linuxManagementDigest(canonical), nil
+}
+
+func readLocalPHPTrustKey(keyID string, requireRoot bool) (ed25519.PublicKey, error) {
+	path := filepath.Join(localPHPArtifactTrustRoot, keyID+".pub")
+	if filepath.Dir(path) != localPHPArtifactTrustRoot {
+		return nil, ErrInvalid
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !safeLocalCatalogFile(info, 4096, requireRoot) {
+		return nil, ErrInvalid
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(content)))
+	if err != nil || len(decoded) != ed25519.PublicKeySize {
+		return nil, ErrInvalid
+	}
+	return ed25519.PublicKey(decoded), nil
+}
+
+func safeLocalCatalogFile(info os.FileInfo, limit int64, requireRoot bool) bool {
+	return info != nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o022 == 0 &&
+		info.Size() > 0 && info.Size() <= limit && (!requireRoot || rootOwnedFile(info))
+}
+
+func validateLocalPHPEntry(entry localPHPCatalogEntry) error {
+	if !validLifecycleTuple(entry.OS, entry.OSVersion, entry.Architecture) || !validPHPVersion(entry.Version) ||
+		!validSHA256(entry.RepositorySnapshotDigest) || entry.BinaryPathID != "lsphp"+strings.ReplaceAll(entry.Version, ".", "") ||
+		len(entry.Packages) == 0 || len(entry.Packages) > 64 || len(entry.Extensions) > 32 ||
+		!equalStrings(entry.Extensions, canonicalExtensions(entry.Extensions)) {
+		return ErrInvalid
+	}
+	seen := map[string]bool{}
+	for _, item := range entry.Packages {
+		if !safeLifecycleToken(item.Name) || !safeLifecycleVersion(item.Version) || !validSHA256(item.Digest) ||
+			!safeLifecycleToken(item.RepositoryID) || seen[item.Name] || item.Name != entry.BinaryPathID && !strings.HasPrefix(item.Name, entry.BinaryPathID+"-") {
+			return ErrInvalid
+		}
+		seen[item.Name] = true
+	}
+	return nil
 }
 
 func resolveLocalArtifact(ctx context.Context, request ArtifactRequest, requireRoot bool) (ArtifactPlan, error) {

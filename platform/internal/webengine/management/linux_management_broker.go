@@ -32,6 +32,11 @@ const (
 	LinuxManagementUpgrade LinuxManagementOperation = "lifecycle.upgrade"
 	LinuxManagementConvert LinuxManagementOperation = "lifecycle.convert"
 	LinuxManagementRemove LinuxManagementOperation = "lifecycle.remove"
+	LinuxManagementLicenseConfigure LinuxManagementOperation = "license.configure"
+	LinuxManagementLicenseRefresh LinuxManagementOperation = "license.refresh"
+	LinuxManagementPHPInstall LinuxManagementOperation = "php.install"
+	LinuxManagementPHPProfileApply LinuxManagementOperation = "php.profile.apply"
+	LinuxManagementPHPRollback LinuxManagementOperation = "php.rollback"
 )
 
 type LinuxManagementRequest struct {
@@ -57,8 +62,14 @@ type linuxManagementResponse struct {
 type lifecyclePlanInput struct{Request EffectRequest `json:"request"`;Plan ArtifactPlan `json:"plan"`}
 type lifecycleConvertInput struct{Request EffectRequest `json:"request"`;Plan ArtifactPlan `json:"plan"`;Generation native.ConfigGeneration `json:"generation"`;RollbackWindow time.Duration `json:"rollback_window"`}
 type lifecycleRemoveInput struct{Request EffectRequest `json:"request"`;Edition webengine.Edition `json:"edition"`}
+type licenseConfigureInput struct{Request EffectRequest `json:"request"`;License LicenseRequest `json:"license"`}
+type licenseRefreshInput struct{Request EffectRequest `json:"request"`}
+type phpInstallInput struct{Request EffectRequest `json:"request"`;Plan PHPArtifactPlan `json:"plan"`}
+type phpProfileInput struct{Request EffectRequest `json:"request"`;Profile PHPProfile `json:"profile"`}
+type phpRollbackInput struct{Request EffectRequest `json:"request"`;Plan PHPArtifactPlan `json:"plan"`;Previous *PHPProfile `json:"previous,omitempty"`}
 
 type LinuxManagementBrokerHandler interface { HandleManagement(context.Context, LinuxManagementRequest) (any, error) }
+type LinuxLicensePHPBrokerHandler interface { HandleLicensePHP(context.Context, LinuxManagementRequest) (any, error) }
 type LinuxManagementPeerAuthorizer interface { Authorize(net.Conn) error }
 
 type LinuxManagementBrokerServer struct {
@@ -80,7 +91,15 @@ func (server *LinuxManagementBrokerServer) serve(connection net.Conn) {
 	var request LinuxManagementRequest
 	if readLinuxManagementFrame(connection,&request)!=nil||request.validate(now)!=nil{return}
 	_=connection.SetDeadline(request.Deadline);ctx,cancel:=context.WithDeadline(context.Background(),request.Deadline);defer cancel()
-	result,handleErr:=server.Handler.HandleManagement(ctx,request);payload,_:=json.Marshal(result)
+	var result any
+	var handleErr error
+	if linuxLicensePHPOperation(request.Operation) {
+		handler, ok := server.Handler.(LinuxLicensePHPBrokerHandler)
+		if !ok { handleErr = ErrUnsupported } else { result, handleErr = handler.HandleLicensePHP(ctx, request) }
+	} else {
+		result,handleErr=server.Handler.HandleManagement(ctx,request)
+	}
+	payload,_:=json.Marshal(result)
 	response:=linuxManagementResponse{Version:linuxManagementProtocolVersion,RequestID:request.RequestID,Operation:request.Operation,Succeeded:handleErr==nil,Payload:payload,PayloadDigest:linuxManagementDigest(payload),CompletedAt:time.Now().UTC()}
 	if handleErr!=nil{response.ErrorCode=classifyLinuxManagementError(handleErr)}
 	if response.validate(request,time.Now().UTC())!=nil{return};_=writeLinuxManagementFrame(connection,response)
@@ -109,8 +128,14 @@ func(client *LinuxManagementClient)Install(ctx context.Context,request EffectReq
 func(client *LinuxManagementClient)Upgrade(ctx context.Context,request EffectRequest,plan ArtifactPlan)(output EffectReceipt,err error){err=client.call(ctx,LinuxManagementUpgrade,lifecyclePlanInput{request,plan},&output);return}
 func(client *LinuxManagementClient)ConvertEdition(ctx context.Context,request EffectRequest,plan ArtifactPlan,generation native.ConfigGeneration,window time.Duration)(output SwitchReceipt,err error){err=client.call(ctx,LinuxManagementConvert,lifecycleConvertInput{request,plan,generation,window},&output);return}
 func(client *LinuxManagementClient)Remove(ctx context.Context,request EffectRequest,edition webengine.Edition)(output EffectReceipt,err error){err=client.call(ctx,LinuxManagementRemove,lifecycleRemoveInput{request,edition},&output);return}
+func(client *LinuxManagementClient)ApplyLicense(ctx context.Context,request EffectRequest,license LicenseRequest)(output LicenseStatus,err error){err=client.call(ctx,LinuxManagementLicenseConfigure,licenseConfigureInput{request,license},&output);return}
+func(client *LinuxManagementClient)RefreshLicense(ctx context.Context,request EffectRequest)(output LicenseStatus,err error){err=client.call(ctx,LinuxManagementLicenseRefresh,licenseRefreshInput{request},&output);return}
+func(client *LinuxManagementClient)InstallPHP(ctx context.Context,request EffectRequest,plan PHPArtifactPlan)(output EffectReceipt,err error){err=client.call(ctx,LinuxManagementPHPInstall,phpInstallInput{request,plan},&output);return}
+func(client *LinuxManagementClient)ApplyPHPProfile(ctx context.Context,request EffectRequest,profile PHPProfile)(output EffectReceipt,err error){err=client.call(ctx,LinuxManagementPHPProfileApply,phpProfileInput{request,profile},&output);return}
+func(client *LinuxManagementClient)RollbackPHP(ctx context.Context,request EffectRequest,plan PHPArtifactPlan,previous *PHPProfile)(output EffectReceipt,err error){err=client.call(ctx,LinuxManagementPHPRollback,phpRollbackInput{request,plan,previous},&output);return}
 
 func(request LinuxManagementRequest)validate(now time.Time)error{if request.Version!=linuxManagementProtocolVersion||len(request.RequestID)<8||len(request.RequestID)>96||request.Operation==""||request.Deadline.IsZero()||!request.Deadline.After(now)||request.Deadline.After(now.Add(31*time.Minute))||len(request.Payload)==0||len(request.Payload)>linuxManagementMaximumFrame||request.PayloadDigest!=linuxManagementDigest(request.Payload){return ErrInvalid};return nil}
+func linuxLicensePHPOperation(operation LinuxManagementOperation)bool{switch operation{case LinuxManagementLicenseConfigure,LinuxManagementLicenseRefresh,LinuxManagementPHPInstall,LinuxManagementPHPProfileApply,LinuxManagementPHPRollback:return true;default:return false}}
 func(response linuxManagementResponse)validate(request LinuxManagementRequest,now time.Time)error{if response.Version!=linuxManagementProtocolVersion||response.RequestID!=request.RequestID||response.Operation!=request.Operation||response.CompletedAt.IsZero()||response.CompletedAt.After(now.Add(time.Minute))||response.PayloadDigest!=linuxManagementDigest(response.Payload){return ErrAmbiguous};if response.Succeeded{if response.ErrorCode!=""{return ErrAmbiguous}}else if response.ErrorCode==""{return ErrAmbiguous};return nil}
 func linuxManagementDigest(value []byte)string{sum:=sha256.Sum256(value);return hex.EncodeToString(sum[:])}
 func classifyLinuxManagementError(err error)string{switch{case errors.Is(err,ErrInvalid):return "invalid";case errors.Is(err,ErrNotFound):return "not_found";case errors.Is(err,ErrConflict):return "conflict";case errors.Is(err,ErrUnsupported):return "unsupported";case errors.Is(err,ErrLicense):return "license";case errors.Is(err,ErrAmbiguous):return "ambiguous";default:return "failed"}}

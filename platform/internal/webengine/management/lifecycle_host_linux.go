@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
+	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation/fsstore"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/native"
@@ -37,8 +38,13 @@ const (
 	lifecycleEditionPath = "/etc/cyberpanel/engine.edition"
 	lifecycleConfigurationRoot = "/usr/local/lsws/conf"
 	lifecycleBinaryPath = "/usr/local/lsws/bin/lshttpd"
+	lifecycleLicenseAdapterPath = "/usr/local/libexec/cyberpanel/lse-license"
+	lifecyclePHPProfileRoot = "/var/lib/cyberpanel/webengine/php-profiles"
+	lifecyclePHPActivePath = "/var/lib/cyberpanel/webengine/php-active.json"
 	lifecycleService = "lsws.service"
 	lifecycleMaximumStateBytes = 32 << 20
+	LinuxLicenseSecretAdapterID = "cyberpanel.webengine.lse-license"
+	LinuxLicenseSecretAdapterVersion = "v1"
 )
 
 type lifecycleHostState struct {
@@ -65,6 +71,10 @@ type lifecycleJournal struct {
 	Version uint32 `json:"version"`
 	Host lifecycleHostState `json:"host"`
 	Effects map[string]lifecycleEffectRecord `json:"effects"`
+	License LicenseStatus `json:"license,omitempty"`
+	PHPProfiles map[string]PHPProfile `json:"php_profiles,omitempty"`
+	ActivePHP *PHPProfile `json:"active_php,omitempty"`
+	PHPCatalogSequence uint64 `json:"php_catalog_sequence,omitempty"`
 }
 
 type LinuxLifecycleHost struct { mu sync.Mutex; journal lifecycleJournal; now func()time.Time }
@@ -75,7 +85,8 @@ func NewLinuxLifecycleHost()(*LinuxLifecycleHost,error){
 	if os.Geteuid()!=0{return nil,ErrInvalid}
 	if err:=ensureLifecycleDirectory(lifecycleStateRoot,0o700);err!=nil{return nil,err}
 	if err:=ensureLifecycleDirectory(lifecyclePackageRoot,0o700);err!=nil{return nil,err}
-	host:=&LinuxLifecycleHost{journal:lifecycleJournal{Version:1,Effects:map[string]lifecycleEffectRecord{}},now:time.Now}
+	if err:=ensurePHPProfileDirectory();err!=nil{return nil,err}
+	host:=&LinuxLifecycleHost{journal:lifecycleJournal{Version:1,Effects:map[string]lifecycleEffectRecord{},PHPProfiles:map[string]PHPProfile{}},now:time.Now}
 	if err:=host.load();err!=nil{return nil,err};return host,nil
 }
 
@@ -90,6 +101,79 @@ func(host *LinuxLifecycleHost)HandleManagement(ctx context.Context,request Linux
 	payload,marshalErr:=json.Marshal(result);if marshalErr!=nil{err=errors.Join(ErrAmbiguous,marshalErr);payload=[]byte("null")};record:=host.journal.Effects[key];record.State,record.Payload,record.ErrorCode,record.CompletedAt="completed",payload,classifyLinuxManagementError(err),host.now().UTC();if err==nil{record.ErrorCode=""};host.journal.Effects[key]=record
 	if persistErr:=host.persist();persistErr!=nil{return result,errors.Join(ErrAmbiguous,persistErr)};return result,err
 }
+
+func(host *LinuxLifecycleHost)HandleLicensePHP(ctx context.Context,request LinuxManagementRequest)(any,error){
+	if host==nil||ctx==nil||!linuxLicensePHPOperation(request.Operation){return nil,ErrInvalid};host.mu.Lock();defer host.mu.Unlock()
+	effect,err:=licensePHPEffect(request);if err!=nil{return nil,err};key:=string(request.Operation)+":"+effect;digest:=linuxManagementDigest(append([]byte(string(request.Operation)+"\x00"),request.Payload...))
+	if record,found:=host.journal.Effects[key];found{if record.RequestDigest!=digest{return nil,ErrConflict};if record.State!="completed"{return nil,ErrAmbiguous};return append(json.RawMessage(nil),record.Payload...),linuxManagementFailure(record.ErrorCode)}
+	host.prune();if len(host.journal.Effects)>=2048{return nil,ErrConflict};now:=host.now().UTC();host.journal.Effects[key]=lifecycleEffectRecord{Key:key,RequestDigest:digest,State:"pending",StartedAt:now};if err=host.persist();err!=nil{return nil,err}
+	var result any
+	switch request.Operation{
+	case LinuxManagementLicenseConfigure:var input licenseConfigureInput;if decodeLifecyclePayload(request.Payload,&input)==nil{result,err=host.configureLicense(ctx,input)}else{err=ErrInvalid}
+	case LinuxManagementLicenseRefresh:var input licenseRefreshInput;if decodeLifecyclePayload(request.Payload,&input)==nil{result,err=host.refreshLicense(ctx,input)}else{err=ErrInvalid}
+	case LinuxManagementPHPInstall:var input phpInstallInput;if decodeLifecyclePayload(request.Payload,&input)==nil{result,err=host.installPHP(ctx,input)}else{err=ErrInvalid}
+	case LinuxManagementPHPProfileApply:var input phpProfileInput;if decodeLifecyclePayload(request.Payload,&input)==nil{result,err=host.applyPHPProfile(ctx,input)}else{err=ErrInvalid}
+	case LinuxManagementPHPRollback:var input phpRollbackInput;if decodeLifecyclePayload(request.Payload,&input)==nil{result,err=host.rollbackPHP(ctx,input)}else{err=ErrInvalid}
+	default:err=ErrUnsupported}
+	payload,marshalErr:=json.Marshal(result);if marshalErr!=nil{err=errors.Join(ErrAmbiguous,marshalErr);payload=[]byte("null")};record:=host.journal.Effects[key];record.State,record.Payload,record.ErrorCode,record.CompletedAt="completed",payload,classifyLinuxManagementError(err),host.now().UTC();if err==nil{record.ErrorCode=""};host.journal.Effects[key]=record
+	if persistErr:=host.persist();persistErr!=nil{return result,errors.Join(ErrAmbiguous,persistErr)};return result,err
+}
+
+type localLicenseObservation struct{State webengine.LicenseState `json:"state"`;Limits LicenseLimits `json:"limits"`;ExpiresAt time.Time `json:"expires_at,omitempty"`}
+
+func(host *LinuxLifecycleHost)configureLicense(ctx context.Context,input licenseConfigureInput)(LicenseStatus,error){
+	request,license:=input.Request,input.License;expected:=digestJSON(struct{Mode string `json:"mode"`;SecretRef string `json:"secret_ref,omitempty"`;Trial bool `json:"trial"`;Generation uint64 `json:"generation"`}{license.Mode,license.SecretRef,license.Trial,request.ExpectedGeneration})
+	if validateLicensePHPEffect(request,expected,true)!=nil||!validLicenseRequest(license){return LicenseStatus{},ErrInvalid};if err:=host.requireEnterpriseGeneration(ctx,request.ExpectedGeneration);err!=nil{return LicenseStatus{},err}
+	var material []byte
+	if !license.Trial{var err error;material,err=readLicenseMaterial(ctx,license.SecretRef);if err!=nil{return LicenseStatus{},ErrLicense};defer wipeLicenseMaterial(material)}
+	observation,err:=runLicenseAdapter(ctx,"configure",license.Mode,material);fingerprint:="";if len(material)>0{sum:=sha256.Sum256(material);fingerprint=hex.EncodeToString(sum[:])}
+	status:=LicenseStatus{Mode:license.Mode,SecretRef:license.SecretRef,SerialFingerprint:fingerprint,State:observation.State,Limits:observation.Limits,CheckedAt:host.now().UTC(),ExpiresAt:observation.ExpiresAt}
+	status.ReceiptDigest=licenseReceiptDigest(status,request);if err!=nil{return status,err};host.journal.License=status;host.journal.Host.Generation=request.ExpectedGeneration+1;host.journal.Host.Fence=request.Fence;host.journal.Host.UpdatedAt=status.CheckedAt;return status,nil
+}
+
+func(host *LinuxLifecycleHost)refreshLicense(ctx context.Context,input licenseRefreshInput)(LicenseStatus,error){
+	request:=input.Request;stored:=host.journal.License;expected:=digestJSON(struct{Mode,SecretRef,PriorReceipt string;Generation uint64}{stored.Mode,stored.SecretRef,stored.ReceiptDigest,request.ExpectedGeneration})
+	if validateLicensePHPEffect(request,expected,false)!=nil||!validStoredLicense(stored)||request.LicenseMode!=stored.Mode||request.SecretRef!=stored.SecretRef||request.SerialFingerprint!=stored.SerialFingerprint{return LicenseStatus{},ErrConflict};if err:=host.requireEnterpriseGeneration(ctx,request.ExpectedGeneration);err!=nil{return LicenseStatus{},err}
+	observation,err:=runLicenseAdapter(ctx,"refresh",stored.Mode,nil);status:=LicenseStatus{Mode:stored.Mode,SecretRef:stored.SecretRef,SerialFingerprint:stored.SerialFingerprint,State:observation.State,Limits:observation.Limits,CheckedAt:host.now().UTC(),ExpiresAt:observation.ExpiresAt};status.ReceiptDigest=licenseReceiptDigest(status,request);if err!=nil{return status,err};host.journal.License=status;host.journal.Host.Generation=request.ExpectedGeneration+1;host.journal.Host.Fence=request.Fence;host.journal.Host.UpdatedAt=status.CheckedAt;return status,nil
+}
+
+func(host *LinuxLifecycleHost)installPHP(ctx context.Context,input phpInstallInput)(EffectReceipt,error){
+	request,plan:=input.Request,input.Plan;receipt:=EffectReceipt{EffectID:request.EffectID,PlanDigest:request.PlanDigest,Generation:request.ExpectedGeneration+1,Fence:request.Fence}
+	if validateLicensePHPEffect(request,request.PlanDigest,true)!=nil{return receipt,ErrInvalid};if err:=host.adoptGeneration(ctx,request.ExpectedGeneration);err!=nil{return receipt,err};resolved,paths,err:=authorizePHPPlan(ctx,plan);if err!=nil{return receipt,err};if resolved.CatalogSequence<host.journal.PHPCatalogSequence{return receipt,ErrConflict}
+	if err=installLifecyclePackages(ctx,paths);err==nil{err=verifyPHPBinary(ctx,resolved)};receipt.ObservedAt=host.now().UTC();if err!=nil{return receipt,errors.Join(ErrAmbiguous,err)};host.journal.PHPCatalogSequence=resolved.CatalogSequence;receipt.Outcome="confirmed";receipt.EvidenceDigest=digestJSON(resolved);return receipt,nil
+}
+
+func(host *LinuxLifecycleHost)applyPHPProfile(ctx context.Context,input phpProfileInput)(EffectReceipt,error){
+	request,profile:=input.Request,input.Profile;receipt:=EffectReceipt{EffectID:request.EffectID,PlanDigest:request.PlanDigest,Generation:request.ExpectedGeneration+1,Fence:request.Fence}
+	plan,_,err:=authorizePHPPlan(ctx,PHPArtifactPlan{Version:profile.Version,BinaryPathID:profile.BinaryPathID,CatalogDigest:profile.CatalogDigest,CatalogSequence:profile.CatalogSequence,Extensions:profile.Extensions});if err!=nil{return receipt,err}
+	expected:=digestJSON(struct{Plan PHPArtifactPlan `json:"plan"`;Profile PHPProfile `json:"profile"`}{plan,profile});if validateLicensePHPEffect(request,expected,true)!=nil||!validPHPProfile(profile,plan){return receipt,ErrInvalid};if err=host.adoptGeneration(ctx,request.ExpectedGeneration);err!=nil{return receipt,err};if plan.CatalogSequence<host.journal.PHPCatalogSequence{return receipt,ErrConflict};if err=installedLifecyclePlan(ctx,ArtifactPlan{Packages:plan.Packages});err==nil{err=verifyPHPBinary(ctx,plan)};if err==nil{err=writePHPProfile(profile)};receipt.ObservedAt=host.now().UTC();if err!=nil{return receipt,errors.Join(ErrAmbiguous,err)}
+	copy:=profile;host.journal.PHPProfiles[profile.ID]=profile;host.journal.ActivePHP=&copy;host.journal.PHPCatalogSequence=plan.CatalogSequence;host.journal.Host.Generation=request.ExpectedGeneration+1;host.journal.Host.Fence=request.Fence;host.journal.Host.UpdatedAt=receipt.ObservedAt;receipt.Outcome="confirmed";receipt.EvidenceDigest=digestJSON(profile);return receipt,nil
+}
+
+func(host *LinuxLifecycleHost)rollbackPHP(ctx context.Context,input phpRollbackInput)(EffectReceipt,error){
+	request:=input.Request;receipt:=EffectReceipt{EffectID:request.EffectID,PlanDigest:request.PlanDigest,Generation:request.ExpectedGeneration+1,Fence:request.Fence,ObservedAt:host.now().UTC()};if validateLicensePHPEffect(request,request.PlanDigest,true)!=nil{return receipt,ErrInvalid}
+	var err error;if input.Previous==nil{err=removePHPActiveProfile();host.journal.ActivePHP=nil}else{previous:=*input.Previous;plan,_,resolveErr:=authorizePHPPlan(ctx,PHPArtifactPlan{Version:previous.Version,BinaryPathID:previous.BinaryPathID,CatalogDigest:previous.CatalogDigest,CatalogSequence:previous.CatalogSequence,Extensions:previous.Extensions});if resolveErr!=nil||!validPHPProfile(previous,plan){return receipt,errors.Join(ErrAmbiguous,resolveErr)};if err=verifyPHPBinary(ctx,plan);err==nil{err=writePHPProfile(previous)};if err==nil{copy:=previous;host.journal.PHPProfiles[previous.ID]=previous;host.journal.ActivePHP=&copy}}
+	if err!=nil{return receipt,errors.Join(ErrAmbiguous,err)};host.journal.Host.Generation=request.ExpectedGeneration;receipt.Outcome="rolled_back";receipt.EvidenceDigest=digestJSON(input.Previous);return receipt,nil
+}
+
+func(host *LinuxLifecycleHost)requireEnterpriseGeneration(ctx context.Context,expected uint64)error{if err:=host.adoptGeneration(ctx,expected);err!=nil{return err};edition,err:=readLifecycleEdition();if err!=nil||edition!=webengine.EditionLiteSpeedEnterprise||host.journal.Host.Plan.Edition!=webengine.EditionLiteSpeedEnterprise{return ErrConflict};return nil}
+func validateLicensePHPEffect(request EffectRequest,digest string,authorization bool)error{if !validEffectToken(request.EffectID)||request.ExpectedGeneration==0||request.Fence!=request.ExpectedGeneration+1||!validSHA256(request.PlanDigest)||request.PlanDigest!=digest||authorization&&!validSHA256(request.CommitAuthorizationDigest){return ErrInvalid};return nil}
+func licensePHPEffect(request LinuxManagementRequest)(string,error){switch request.Operation{case LinuxManagementLicenseConfigure:var input licenseConfigureInput;if decodeLifecyclePayload(request.Payload,&input)!=nil{return "",ErrInvalid};return input.Request.EffectID,nil;case LinuxManagementLicenseRefresh:var input licenseRefreshInput;if decodeLifecyclePayload(request.Payload,&input)!=nil{return "",ErrInvalid};return input.Request.EffectID,nil;case LinuxManagementPHPInstall:var input phpInstallInput;if decodeLifecyclePayload(request.Payload,&input)!=nil{return "",ErrInvalid};return input.Request.EffectID,nil;case LinuxManagementPHPProfileApply:var input phpProfileInput;if decodeLifecyclePayload(request.Payload,&input)!=nil{return "",ErrInvalid};return input.Request.EffectID,nil;case LinuxManagementPHPRollback:var input phpRollbackInput;if decodeLifecyclePayload(request.Payload,&input)!=nil{return "",ErrInvalid};return input.Request.EffectID,nil;default:return "",ErrUnsupported}}
+
+func readLicenseMaterial(ctx context.Context,reference string)([]byte,error){secretID,err:=secrets.NewID(reference);if err!=nil{return nil,ErrInvalid};owner,err:=secrets.NewID("installation");if err!=nil{return nil,ErrInvalid};resource,err:=secrets.NewID("node-webengine");if err!=nil{return nil,ErrInvalid};client,err:=secrets.NewLocalMaterialClient();if err!=nil{return nil,err};response,err:=client.Read(ctx,secrets.MaterialRequest{SecretID:secretID,OwnerTenantID:owner,Purpose:secrets.PurposeAuthentication,Operation:secrets.OperationAuthenticate,AdapterID:LinuxLicenseSecretAdapterID,AdapterVersion:LinuxLicenseSecretAdapterVersion,ResourceID:resource});if err!=nil{return nil,err};if len(response.Material)==0||len(response.Material)>1<<20{wipeLicenseMaterial(response.Material);return nil,ErrInvalid};return response.Material,nil}
+func wipeLicenseMaterial(material []byte){for index:=range material{material[index]=0}}
+
+func runLicenseAdapter(ctx context.Context,action,mode string,material []byte)(localLicenseObservation,error){var observation localLicenseObservation;if ctx==nil||(action!="configure"&&action!="refresh")||(mode!=LicenseModeSerial&&mode!=LicenseModeLicenseKey&&mode!=LicenseModeTrial){return observation,ErrInvalid};info,err:=os.Lstat(lifecycleLicenseAdapterPath);if err!=nil||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()&0o111==0||info.Mode().Perm()&0o022!=0||!rootOwnedFile(info){return observation,ErrUnsupported};command:=exec.CommandContext(ctx,lifecycleLicenseAdapterPath,action,mode);command.Env=[]string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin","LANG=C.UTF-8","LC_ALL=C.UTF-8"};command.Stdin=bytes.NewReader(material);var output bytes.Buffer;command.Stdout=&output;command.Stderr=io.Discard;if err=command.Run();err!=nil||output.Len()==0||output.Len()>1<<20{return observation,ErrLicense};decoder:=json.NewDecoder(bytes.NewReader(output.Bytes()));decoder.DisallowUnknownFields();if decoder.Decode(&observation)!=nil||decoder.Decode(&struct{}{})!=io.EOF||!validLicenseObservation(observation){return localLicenseObservation{},ErrLicense};return observation,nil}
+func validLicenseObservation(value localLicenseObservation)bool{switch value.State{case webengine.LicenseActive,webengine.LicenseTrial,LicenseUnknown,LicenseGrace,LicenseExpired,LicenseRevoked,LicenseInvalid,LicenseOverLimit,LicenseUnavailable:default:return false};if value.Limits.Workers>100000||value.Limits.Domains>10000000||value.Limits.MemoryBytes>1<<50||len(value.Limits.Features)>128{return false};for index,feature:=range value.Limits.Features{if !safeLifecycleToken(feature)||index>0&&value.Limits.Features[index-1]>=feature{return false}};return true}
+
+func authorizePHPPlan(ctx context.Context,requested PHPArtifactPlan)(PHPArtifactPlan,[]string,error){resolved,err:=resolveLocalPHPArtifact(ctx,requested.Version,requested.Extensions,true);if err!=nil{return PHPArtifactPlan{},nil,err};if requested.BinaryPathID!=resolved.BinaryPathID||requested.CatalogDigest!=resolved.CatalogDigest||requested.CatalogSequence!=resolved.CatalogSequence{return PHPArtifactPlan{},nil,ErrConflict};if len(requested.Packages)>0&&digestJSON(requested)!=digestJSON(resolved){return PHPArtifactPlan{},nil,ErrConflict};osName,_,architecture,err:=localPlatformTuple();if err!=nil{return PHPArtifactPlan{},nil,err};paths:=make([]string,0,len(resolved.Packages));for _,item:=range resolved.Packages{path,resolveErr:=resolveLifecyclePackage(ctx,item,resolved.RepositorySnapshotDigest,osName,architecture);if resolveErr!=nil{return PHPArtifactPlan{},nil,resolveErr};paths=append(paths,path)};sort.Strings(paths);return resolved,paths,nil}
+
+func verifyPHPBinary(ctx context.Context,plan PHPArtifactPlan)error{if !validPHPVersion(plan.Version)||plan.BinaryPathID!="lsphp"+strings.ReplaceAll(plan.Version,".",""){return ErrInvalid};path:=filepath.Join("/usr/local/lsws",plan.BinaryPathID,"bin","lsphp");if filepath.Clean(path)!=path{return ErrInvalid};info,err:=os.Lstat(path);if err!=nil||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()&0o111==0||info.Mode().Perm()&0o022!=0||!rootOwnedFile(info){return ErrAmbiguous};command:=exec.CommandContext(ctx,path,"-v");command.Env=[]string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin","LANG=C.UTF-8","LC_ALL=C.UTF-8"};output,err:=command.Output();if err!=nil||len(output)==0||len(output)>1<<20||!strings.HasPrefix(strings.TrimSpace(string(output)),"PHP "+plan.Version+"."){return ErrAmbiguous};return nil}
+
+func ensurePHPProfileDirectory()error{if err:=os.Mkdir(lifecyclePHPProfileRoot,0o700);err!=nil&&!errors.Is(err,fs.ErrExist){return err};info,err:=os.Lstat(lifecyclePHPProfileRoot);if err!=nil||!info.IsDir()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()!=0o700||!rootOwnedFile(info){return ErrInvalid};real,err:=filepath.EvalSymlinks(lifecyclePHPProfileRoot);if err!=nil||real!=lifecyclePHPProfileRoot{return ErrInvalid};return nil}
+func writePHPProfile(profile PHPProfile)error{content,err:=json.Marshal(profile);if err!=nil||len(content)==0||len(content)>1<<20{return ErrInvalid};if err=atomicPHPFile(filepath.Join(lifecyclePHPProfileRoot,profile.ID+".json"),content);err!=nil{return err};return atomicPHPFile(lifecyclePHPActivePath,content)}
+func atomicPHPFile(path string,content []byte)error{if filepath.Dir(path)!=lifecycleStateRoot&&filepath.Dir(path)!=lifecyclePHPProfileRoot{return ErrInvalid};temporary:=path+".new";_ = os.Remove(temporary);file,err:=os.OpenFile(temporary,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0o600);if err!=nil{return err};written,writeErr:=file.Write(content);syncErr:=file.Sync();closeErr:=file.Close();if writeErr!=nil||syncErr!=nil||closeErr!=nil||written!=len(content){_ = os.Remove(temporary);return errors.Join(writeErr,syncErr,closeErr)};if err=os.Rename(temporary,path);err!=nil{_ = os.Remove(temporary);return err};directory,err:=os.Open(filepath.Dir(path));if err!=nil{return err};err=directory.Sync();return errors.Join(err,directory.Close())}
+func removePHPActiveProfile()error{err:=os.Remove(lifecyclePHPActivePath);if errors.Is(err,fs.ErrNotExist){return nil};if err!=nil{return err};directory,err:=os.Open(lifecycleStateRoot);if err!=nil{return err};err=directory.Sync();return errors.Join(err,directory.Close())}
 
 func(host *LinuxLifecycleHost)inspect(ctx context.Context,edition webengine.Edition)(Installation,error){
 	if edition!=webengine.EditionOpenLiteSpeed&&edition!=webengine.EditionLiteSpeedEnterprise{return Installation{},ErrInvalid}
@@ -171,8 +255,9 @@ func(policy *LinuxManagementPeerPolicy)Authorize(connection net.Conn)error{unix,
 func ListenLinuxManagementBroker(controlGID uint32)(*net.UnixListener,error){if os.Geteuid()!=0||controlGID==0{return nil,ErrInvalid};info,err:=os.Lstat("/run/cyberpanel");if err!=nil||!info.IsDir()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()!=0o711{return nil,ErrInvalid};if info,err=os.Lstat(LinuxManagementSocketPath);err==nil{if info.Mode()&os.ModeSocket==0{return nil,ErrInvalid};if err=os.Remove(LinuxManagementSocketPath);err!=nil{return nil,err}}else if !errors.Is(err,fs.ErrNotExist){return nil,err};listener,err:=net.ListenUnix("unix",&net.UnixAddr{Name:LinuxManagementSocketPath,Net:"unix"});if err!=nil{return nil,err};if err=os.Chown(LinuxManagementSocketPath,0,int(controlGID));err==nil{err=os.Chmod(LinuxManagementSocketPath,0o660)};if err!=nil{listener.Close();return nil,err};return listener,nil}
 
 func ensureLifecycleDirectory(path string,mode fs.FileMode)error{if path!=lifecycleStateRoot&&path!=lifecyclePackageRoot{return ErrInvalid};if err:=os.Mkdir(path,mode);err!=nil&&!errors.Is(err,fs.ErrExist){return err};info,err:=os.Lstat(path);if err!=nil||!info.IsDir()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()!=mode||!rootOwnedFile(info){return ErrInvalid};real,err:=filepath.EvalSymlinks(path);if err!=nil||real!=path{return ErrInvalid};return nil}
-func(host *LinuxLifecycleHost)load()error{path:=filepath.Join(lifecycleStateRoot,lifecycleStateFile);info,err:=os.Lstat(path);if errors.Is(err,fs.ErrNotExist){return nil};if err!=nil||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()!=0o600||!rootOwnedFile(info)||info.Size()<=0||info.Size()>lifecycleMaximumStateBytes{return ErrInvalid};content,err:=os.ReadFile(path);if err!=nil{return err};var journal lifecycleJournal;if decodeLifecyclePayload(content,&journal)!=nil||journal.Version!=1||journal.Effects==nil||len(journal.Effects)>2048{return ErrInvalid};host.journal=journal;return nil}
+func(host *LinuxLifecycleHost)load()error{path:=filepath.Join(lifecycleStateRoot,lifecycleStateFile);info,err:=os.Lstat(path);if errors.Is(err,fs.ErrNotExist){return nil};if err!=nil||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()!=0o600||!rootOwnedFile(info)||info.Size()<=0||info.Size()>lifecycleMaximumStateBytes{return ErrInvalid};content,err:=os.ReadFile(path);if err!=nil{return err};var journal lifecycleJournal;if decodeLifecyclePayload(content,&journal)!=nil||journal.Version!=1||journal.Effects==nil||len(journal.Effects)>2048{return ErrInvalid};if journal.PHPProfiles==nil{journal.PHPProfiles=map[string]PHPProfile{}};host.journal=journal;return nil}
 func(host *LinuxLifecycleHost)persist()error{content,err:=json.Marshal(host.journal);if err!=nil||len(content)==0||len(content)>lifecycleMaximumStateBytes{return ErrInvalid};temporary:=filepath.Join(lifecycleStateRoot,lifecycleStateTemporary);target:=filepath.Join(lifecycleStateRoot,lifecycleStateFile);_ = os.Remove(temporary);file,err:=os.OpenFile(temporary,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0o600);if err!=nil{return err};written,writeErr:=file.Write(content);syncErr:=file.Sync();closeErr:=file.Close();if writeErr!=nil||syncErr!=nil||closeErr!=nil||written!=len(content){_ = os.Remove(temporary);return errors.Join(writeErr,syncErr,closeErr)};if err=os.Rename(temporary,target);err!=nil{_ = os.Remove(temporary);return err};directory,err:=os.Open(lifecycleStateRoot);if err!=nil{return err};err=directory.Sync();return errors.Join(err,directory.Close())}
 func(host *LinuxLifecycleHost)prune(){if len(host.journal.Effects)<2048{return};completed:=make([]lifecycleEffectRecord,0,len(host.journal.Effects));for _,record:=range host.journal.Effects{if record.State=="completed"{completed=append(completed,record)}};sort.Slice(completed,func(left,right int)bool{return completed[left].CompletedAt.Before(completed[right].CompletedAt)});remove:=len(host.journal.Effects)-2047;for index:=0;index<remove&&index<len(completed);index++{delete(host.journal.Effects,completed[index].Key)}}
 
 var _ LinuxManagementBrokerHandler = (*LinuxLifecycleHost)(nil)
+var _ LinuxLicensePHPBrokerHandler = (*LinuxLifecycleHost)(nil)
