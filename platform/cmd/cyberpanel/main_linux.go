@@ -114,9 +114,20 @@ func runCore(configuration coreConfiguration) error {
 		RecoverySocket:apiserver.SocketOptions{Path:configuration.RecoverySocket,DirectoryMode:0750,SocketMode:0600,UID:-1,GID:-1},
 		GatewayUIDs:[]uint32{gatewayUID},EnableRecovery:true,ShutdownTimeout:30*time.Second,
 	}}
+	malwareSchedules, err := newMalwareScheduleRunner(domainServices.Malware)
+	if err != nil { return fmt.Errorf("initialize malware scheduler: %w", err) }
 	if domainServices.HostingPreviews != nil { go domainServices.HostingPreviews.RunJanitor(ctx, 30*time.Second) }
 	if domainServices.Campaigns != nil { go domainServices.Campaigns.RunDispatchQueue(ctx, time.Second, 4) }
-	return process.Run(ctx)
+	malwareScheduleContext, stopMalwareSchedules := context.WithCancel(ctx)
+	malwareScheduleDone := make(chan error, 1)
+	go func() { malwareScheduleDone <- malwareSchedules.Run(malwareScheduleContext) }()
+	processErr := process.Run(ctx)
+	stopMalwareSchedules()
+	malwareScheduleErr := <-malwareScheduleDone
+	if malwareScheduleErr != nil && !errors.Is(malwareScheduleErr, context.Canceled) {
+		processErr = errors.Join(processErr, fmt.Errorf("malware scheduler stopped: %w", malwareScheduleErr))
+	}
+	return processErr
 }
 
 func loadCoreConfiguration(path string) (coreConfiguration, error) {
