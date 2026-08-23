@@ -16,7 +16,7 @@ func NewID(value string)(ID,error){value=strings.TrimSpace(value);if !idPattern.
 func(id ID)Valid()bool{return idPattern.MatchString(string(id))}
 func(id ID)String()string{return string(id)}
 type Purpose string
-const(PurposeDatabase Purpose="database";PurposeDNSProvider Purpose="dns_provider";PurposeACME Purpose="acme";PurposeMailRelay Purpose="mail_relay";PurposeBackupRepository Purpose="backup_repository";PurposeRegistry Purpose="registry";PurposeGit Purpose="git";PurposeTLSKey Purpose="tls_key";PurposeDKIMKey Purpose="dkim_key";PurposeFederation Purpose="federation";PurposeAuthentication Purpose="authentication")
+const(PurposeDatabase Purpose="database";PurposeDNSProvider Purpose="dns_provider";PurposeACME Purpose="acme";PurposeMailRelay Purpose="mail_relay";PurposeBackupRepository Purpose="backup_repository";PurposeRegistry Purpose="registry";PurposeGit Purpose="git";PurposeTLSKey Purpose="tls_key";PurposeDKIMKey Purpose="dkim_key";PurposeFederation Purpose="federation";PurposeAuthentication Purpose="authentication";PurposeMalwareApproval Purpose="malware_approval")
 type State string
 const(StateActive State="active";StateRetiring State="retiring";StateRevoked State="revoked";StateDestroyed State="destroyed")
 type Operation string
@@ -30,5 +30,5 @@ type ConsumerIdentity struct{ID ID;PID uint32;ProcessStart uint64;ExecutableDige
 func(c ConsumerIdentity)Validate()error{if !c.ID.Valid()||c.PID==0||c.ProcessStart==0||len(c.ExecutableDigest)!=64||len(c.ReleaseDigest)!=64||!c.TenantID.Valid()||c.AdapterID==""||c.AdapterVersion==""{return ErrInvalid};return nil}
 type DeliveryGrant struct{ID,SecretID,TenantID ID;SecretVersion uint64;Operation Operation;Consumer ConsumerIdentity;AudienceDigest,RequestDigest string;ExpiresAt time.Time;ConsumedAt *time.Time}
 func(g DeliveryGrant)Validate()error{if !g.ID.Valid()||!g.SecretID.Valid()||!g.TenantID.Valid()||g.SecretVersion==0||g.Consumer.Validate()!=nil||len(g.AudienceDigest)!=64||len(g.RequestDigest)!=64||g.ExpiresAt.IsZero(){return ErrInvalid};return nil}
-func validPurpose(value Purpose)bool{switch value{case PurposeDatabase,PurposeDNSProvider,PurposeACME,PurposeMailRelay,PurposeBackupRepository,PurposeRegistry,PurposeGit,PurposeTLSKey,PurposeDKIMKey,PurposeFederation,PurposeAuthentication:return true};return false}
+func validPurpose(value Purpose)bool{switch value{case PurposeDatabase,PurposeDNSProvider,PurposeACME,PurposeMailRelay,PurposeBackupRepository,PurposeRegistry,PurposeGit,PurposeTLSKey,PurposeDKIMKey,PurposeFederation,PurposeAuthentication,PurposeMalwareApproval:return true};return false}
 func canonicalOperations(values []Operation)[]Operation{out:=append([]Operation(nil),values...);sort.Slice(out,func(i,j int)bool{return out[i]<out[j]});return out}
