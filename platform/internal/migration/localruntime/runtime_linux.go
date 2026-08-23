@@ -26,6 +26,7 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 	cyberpanelextractor "github.com/aonsyed/cyberpanel/platform/internal/migration/cyberpanel"
+	"github.com/aonsyed/cyberpanel/platform/internal/migration/cyberpanelbackup"
 )
 
 const (
@@ -46,6 +47,7 @@ type Runtime struct {
 	Target       *migration.CanonicalTargetImporter
 	Chunks       *migration.ChunkStore
 	cpanel       *cPanelIntake
+	cyberPanelBackup *cyberpanelbackup.Intake
 	maintenanceMu     sync.Mutex
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
@@ -59,6 +61,7 @@ type Config struct {
 	CPanelIntakePath         string
 	CPanelQuarantinePath     string
 	MaximumCPanelBundleBytes uint64
+	EnableCyberPanelBackup   bool
 }
 
 func New(ctx context.Context, db *sql.DB, repository *migration.SQLRepository) (*Runtime, error) {
@@ -66,6 +69,7 @@ func New(ctx context.Context, db *sql.DB, repository *migration.SQLRepository) (
 		TrustPath:            DefaultTrustPath,
 		CPanelIntakePath:     DefaultCPanelIntakePath,
 		CPanelQuarantinePath: DefaultCPanelQuarantinePath,
+		EnableCyberPanelBackup: true,
 	})
 }
 
@@ -122,19 +126,37 @@ func NewWithConfig(ctx context.Context, db *sql.DB, repository *migration.SQLRep
 			return nil, err
 		}
 	}
+	var backupIntake *cyberpanelbackup.Intake
+	if config.EnableCyberPanelBackup {
+		backupIntake, err = cyberpanelbackup.New(verifier)
+		if err != nil {
+			return nil, err
+		}
+	}
 	stager.WithReferenceStore(scopes)
-	source := &scopedExtractorSource{scopes:scopes, cpanel:cpanelIntake, clients:map[migration.ID]scopedClient{}, chunks:map[string][]migration.ID{}}
+	localSources := []localMigrationSource{}
+	if cpanelIntake != nil {
+		localSources = append(localSources, cpanelIntake)
+	}
+	if backupIntake != nil {
+		localSources = append(localSources, backupIntake)
+	}
+	source := &scopedExtractorSource{scopes:scopes, locals:localSources, clients:map[migration.ID]scopedClient{}, chunks:map[string][]migration.ID{}}
 	orchestrator, err := migration.NewOrchestrator(repository, verifier, source, source, target)
 	if err != nil {
 		return nil, err
 	}
 	orchestrator.WithChunkStager(stager)
 	closeChunks = false
-	return &Runtime{Repository: repository, Scopes: scopes, Orchestrator: orchestrator, Target: target, Chunks: chunks, cpanel: cpanelIntake}, nil
+	return &Runtime{Repository: repository, Scopes: scopes, Orchestrator: orchestrator, Target: target, Chunks: chunks, cpanel: cpanelIntake, cyberPanelBackup: backupIntake}, nil
 }
 
 func (runtime *Runtime) CPanelAvailable() bool {
 	return runtime != nil && runtime.cpanel != nil && runtime.cpanel.Ready()
+}
+
+func (runtime *Runtime) CyberPanelBackupAvailable() bool {
+	return runtime != nil && runtime.cyberPanelBackup != nil && runtime.cyberPanelBackup.Ready()
 }
 
 func (runtime *Runtime) StartChunkMaintenance(ctx context.Context, auditor migration.ChunkMaintenanceAuditor) error {
@@ -169,6 +191,13 @@ func (runtime *Runtime) AdmitCPanel(ctx context.Context, tenantID, endpoint stri
 		return CPanelAdmission{}, migration.ErrBlocked
 	}
 	return runtime.cpanel.Admit(ctx, tenantID, endpoint)
+}
+
+func (runtime *Runtime) AdmitCyberPanelBackup(ctx context.Context, tenantID, endpoint string) (cyberpanelbackup.Admission, error) {
+	if !runtime.CyberPanelBackupAvailable() {
+		return cyberpanelbackup.Admission{}, migration.ErrBlocked
+	}
+	return runtime.cyberPanelBackup.Admit(ctx, tenantID, endpoint)
 }
 
 func (runtime *Runtime) Close() error {
@@ -270,7 +299,13 @@ func loadTrustPolicy(path string) (migration.ManifestTrustPolicy, error) {
 }
 
 type scopedClient struct{ endpoint string; client *cyberpanelextractor.Client }
-type scopedExtractorSource struct{ scopes *migration.RuntimeScopeStore; cpanel *cPanelIntake; mu sync.RWMutex; clients map[migration.ID]scopedClient; chunks map[string][]migration.ID }
+type localMigrationSource interface {
+	Discover(context.Context, migration.RuntimeScope) (migration.Manifest, error)
+	OpenChunk(context.Context, migration.RuntimeScope, string, uint64, uint64) ([]byte, error)
+	Generation(context.Context, migration.RuntimeScope) (uint64, error)
+	OwnsEndpoint(string) bool
+}
+type scopedExtractorSource struct{ scopes *migration.RuntimeScopeStore; locals []localMigrationSource; mu sync.RWMutex; clients map[migration.ID]scopedClient; chunks map[string][]migration.ID }
 
 func (source *scopedExtractorSource) Discover(ctx context.Context, id migration.ID) (migration.Manifest, error) {
 	scope, local, err := source.localScope(ctx, id)
@@ -278,8 +313,8 @@ func (source *scopedExtractorSource) Discover(ctx context.Context, id migration.
 		return migration.Manifest{}, err
 	}
 	var manifest migration.Manifest
-	if local {
-		manifest, err = source.cpanel.Discover(ctx, scope)
+	if local != nil {
+		manifest, err = local.Discover(ctx, scope)
 	} else {
 		var client *cyberpanelextractor.Client
 		client, err = source.client(ctx, id)
@@ -320,9 +355,9 @@ func (source *scopedExtractorSource) OpenChunk(ctx context.Context, digest strin
 	var result error
 	for _, id := range ids {
 		scope, local, err := source.localScope(ctx, id)
-		if err == nil && local {
+		if err == nil && local != nil {
 			var value []byte
-			value, err = source.cpanel.OpenChunk(ctx, scope, digest, offset, length)
+			value, err = local.OpenChunk(ctx, scope, digest, offset, length)
 			if err == nil {
 				return value, nil
 			}
@@ -347,8 +382,8 @@ func (source *scopedExtractorSource) Generation(ctx context.Context, id migratio
 	if err != nil {
 		return 0, err
 	}
-	if local {
-		return source.cpanel.Generation(ctx, scope)
+	if local != nil {
+		return local.Generation(ctx, scope)
 	}
 	client, err := source.client(ctx, id)
 	if err != nil {
@@ -362,7 +397,7 @@ func (source *scopedExtractorSource) Quiesce(ctx context.Context, id migration.I
 	if err != nil {
 		return migration.SourceFence{}, err
 	}
-	if local {
+	if local != nil {
 		return migration.SourceFence{}, migration.ErrBlocked
 	}
 	client, err := source.client(ctx, id)
@@ -377,7 +412,7 @@ func (source *scopedExtractorSource) Unquiesce(ctx context.Context, fence migrat
 	if err != nil {
 		return err
 	}
-	if local {
+	if local != nil {
 		return migration.ErrBlocked
 	}
 	client, err := source.client(ctx, fence.MigrationID)
@@ -392,7 +427,7 @@ func (source *scopedExtractorSource) FinalDelta(ctx context.Context, fence migra
 	if err != nil {
 		return migration.Manifest{}, err
 	}
-	if local {
+	if local != nil {
 		return migration.Manifest{}, migration.ErrBlocked
 	}
 	client, err := source.client(ctx, fence.MigrationID)
@@ -407,7 +442,7 @@ func (source *scopedExtractorSource) CommitSource(ctx context.Context, fence mig
 	if err != nil {
 		return err
 	}
-	if local {
+	if local != nil {
 		return migration.ErrBlocked
 	}
 	client, err := source.client(ctx, fence.MigrationID)
@@ -422,7 +457,7 @@ func (source *scopedExtractorSource) RollbackSource(ctx context.Context, fence m
 	if err != nil {
 		return err
 	}
-	if local {
+	if local != nil {
 		return migration.ErrBlocked
 	}
 	client, err := source.client(ctx, fence.MigrationID)
@@ -432,21 +467,23 @@ func (source *scopedExtractorSource) RollbackSource(ctx context.Context, fence m
 	return client.RollbackSource(ctx, fence)
 }
 
-func (source *scopedExtractorSource) localScope(ctx context.Context, id migration.ID) (migration.RuntimeScope, bool, error) {
+func (source *scopedExtractorSource) localScope(ctx context.Context, id migration.ID) (migration.RuntimeScope, localMigrationSource, error) {
 	if source == nil || source.scopes == nil || ctx == nil || !id.Valid() {
-		return migration.RuntimeScope{}, false, migration.ErrInvalid
+		return migration.RuntimeScope{}, nil, migration.ErrInvalid
 	}
 	scope, err := source.scopes.LoadByMigration(ctx, id)
 	if err != nil {
-		return migration.RuntimeScope{}, false, err
+		return migration.RuntimeScope{}, nil, err
 	}
-	if source.cpanel != nil && source.cpanel.OwnsEndpoint(scope.SourceEndpoint) {
-		return scope, true, nil
+	for _, local := range source.locals {
+		if local != nil && local.OwnsEndpoint(scope.SourceEndpoint) {
+			return scope, local, nil
+		}
 	}
 	if strings.HasPrefix(scope.SourceEndpoint, "file:") {
-		return migration.RuntimeScope{}, false, migration.ErrBlocked
+		return migration.RuntimeScope{}, nil, migration.ErrBlocked
 	}
-	return scope, false, nil
+	return scope, nil, nil
 }
 
 func (source *scopedExtractorSource) client(ctx context.Context, id migration.ID) (*cyberpanelextractor.Client, error) {
@@ -457,8 +494,10 @@ func (source *scopedExtractorSource) client(ctx context.Context, id migration.ID
 	if err != nil {
 		return nil, err
 	}
-	if source.cpanel != nil && source.cpanel.OwnsEndpoint(scope.SourceEndpoint) {
-		return nil, migration.ErrConflict
+	for _, local := range source.locals {
+		if local != nil && local.OwnsEndpoint(scope.SourceEndpoint) {
+			return nil, migration.ErrConflict
+		}
 	}
 	source.mu.RLock()
 	cached, found := source.clients[id]

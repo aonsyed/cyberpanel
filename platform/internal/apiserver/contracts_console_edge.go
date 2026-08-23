@@ -1799,15 +1799,15 @@ func validateMigrationCreate(value any) error {
 	switch payload.Source {
 	case "cyberpanel":
 		if !validApprovedEndpoint(payload.SourceEndpoint) { return invalid("migration source endpoint") }
-	case "cpanel":
-		if !validCPanelIntakeEndpoint(payload.SourceEndpoint) { return invalid("migration source endpoint") }
+	case "cpanel", "cyberpanel_backup":
+		if !validMigrationIntakeEndpoint(payload.SourceEndpoint) { return invalid("migration source endpoint") }
 	default:
 		return invalid("migration source")
 	}
 	return nil
 }
 
-func validCPanelIntakeEndpoint(value string) bool {
+func validMigrationIntakeEndpoint(value string) bool {
 	if len(value) == 0 || len(value) > 2048 { return false }
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme != "file" || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" { return false }

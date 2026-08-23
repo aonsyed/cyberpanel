@@ -368,7 +368,7 @@ func scanMigration(id ID, row scanner) (Migration, error) {
 }
 
 func validateMigration(value Migration) error {
-	if !value.ID.Valid() || (value.Source != SourceCyberPanel && value.Source != SourceCPanel && value.Source != SourceCanonical) || !validPhase(value.Phase) || value.AttemptID == "" || value.Fence == 0 || value.CreatedAt.IsZero() || value.UpdatedAt.IsZero() || value.UpdatedAt.Before(value.CreatedAt) {
+	if !value.ID.Valid() || (value.Source != SourceCyberPanel && value.Source != SourceCyberPanelBackup && value.Source != SourceCPanel && value.Source != SourceCanonical) || !validPhase(value.Phase) || value.AttemptID == "" || value.Fence == 0 || value.CreatedAt.IsZero() || value.UpdatedAt.IsZero() || value.UpdatedAt.Before(value.CreatedAt) {
 		return ErrInvalid
 	}
 	return nil

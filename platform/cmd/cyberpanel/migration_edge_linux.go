@@ -47,6 +47,9 @@ func (edge *migrationEdge) ListMigrationProviders(ctx context.Context, call apis
 	if edge.runtime.CPanelAvailable() {
 		providers = append(providers, apiserver.MigrationProviderProjection{Source:"cpanel", Transport:"local_quarantine", EndpointScheme:"file", NetworkRequired:false, CreationOperation:"migration.create"})
 	}
+	if edge.runtime.CyberPanelBackupAvailable() {
+		providers = append(providers, apiserver.MigrationProviderProjection{Source:"cyberpanel_backup", Transport:"local_quarantine", EndpointScheme:"file", NetworkRequired:false, CreationOperation:"migration.create"})
+	}
 	return providers, nil
 }
 
@@ -159,6 +162,16 @@ func (edge *migrationEdge) CreateMigration(ctx context.Context, call apiserver.E
 			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
 		}
 		if admission.Manifest.Source != migration.SourceCPanel || !admission.Manifest.MigrationID.Valid() {
+			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrInvalid
+		}
+		id = admission.Manifest.MigrationID
+		sourceEndpoint = admission.SourceEndpoint
+	case migration.SourceCyberPanelBackup:
+		admission, err := edge.runtime.AdmitCyberPanelBackup(ctx, call.TenantID, payload.SourceEndpoint)
+		if err != nil {
+			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+		}
+		if admission.Manifest.Source != migration.SourceCyberPanelBackup || !admission.Manifest.MigrationID.Valid() {
 			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrInvalid
 		}
 		id = admission.Manifest.MigrationID
@@ -592,7 +605,7 @@ func validateMigrationEndpoint(source migration.SourceKind, endpoint string) err
 		if parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" || parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
 			return migration.ErrInvalid
 		}
-	case migration.SourceCPanel:
+	case migration.SourceCPanel, migration.SourceCyberPanelBackup:
 		path := parsed.Path
 		if parsed.Scheme != "file" || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || (&url.URL{Scheme:"file", Path:path}).String() != endpoint {
 			return migration.ErrInvalid

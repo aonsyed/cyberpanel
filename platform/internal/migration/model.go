@@ -60,9 +60,10 @@ const (
 type SourceKind string
 
 const (
-	SourceCyberPanel SourceKind = "cyberpanel"
-	SourceCPanel     SourceKind = "cpanel"
-	SourceCanonical  SourceKind = "canonical"
+	SourceCyberPanel       SourceKind = "cyberpanel"
+	SourceCyberPanelBackup SourceKind = "cyberpanel_backup"
+	SourceCPanel           SourceKind = "cpanel"
+	SourceCanonical        SourceKind = "canonical"
 )
 
 type Provenance struct {
@@ -414,7 +415,7 @@ func canonicalChunks(values []Chunk) []Chunk {
 }
 
 func validSource(value SourceKind) bool {
-	return value == SourceCyberPanel || value == SourceCPanel || value == SourceCanonical
+	return value == SourceCyberPanel || value == SourceCyberPanelBackup || value == SourceCPanel || value == SourceCanonical
 }
 
 func validManifestChunk(value Chunk) bool {
