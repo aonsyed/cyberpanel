@@ -34,6 +34,8 @@ const (
 	OperationGroupDelete    Operation = "group.delete"
 	OperationSettingsRead   Operation = "settings.read"
 	OperationSettingsWrite  Operation = "settings.write"
+	OperationIdentityRead   Operation = "identity.read"
+	OperationIdentityWrite  Operation = "identity.write"
 	OperationSieveRead      Operation = "sieve.read"
 	OperationSieveWrite     Operation = "sieve.write"
 	OperationSieveRedirect  Operation = "sieve.redirect"
@@ -70,6 +72,14 @@ type AuditEvent struct {
 type AuditSink interface { RecordWebmailData(context.Context, AuditEvent) error }
 type ForwardingPolicy interface { AuthorizeSieveRedirect(context.Context, Scope, string) error }
 type AutoresponderResolver interface { ResolveAutoresponder(context.Context, Scope, maildata.AutoresponderID, uint64) (maildata.AutoresponderRule, error) }
+type VacationLifecycle interface {
+	Create(context.Context, maildata.AutoresponderCreateRequest) (maildata.AutoresponderRule, error)
+	Inspect(context.Context, maildata.AutoresponderCall) (maildata.AutoresponderRule, error)
+	Enable(context.Context, maildata.AutoresponderCall) (maildata.AutoresponderRule, error)
+	Suspend(context.Context, maildata.AutoresponderCall) (maildata.AutoresponderRule, error)
+	Update(context.Context, maildata.AutoresponderUpdateRequest) (maildata.AutoresponderRule, error)
+	Delete(context.Context, maildata.AutoresponderCall) error
+}
 
 type Repository interface {
 	PutContact(context.Context, Contact, uint64) error
@@ -103,6 +113,7 @@ type Service struct {
 	SieveRuntime    ManageSieveRuntime
 	Forwarding      ForwardingPolicy
 	Autoresponders  AutoresponderResolver
+	Vacations       VacationLifecycle
 	ExpertParser    ExpertSieveParser
 	Now             func() time.Time
 }
@@ -158,7 +169,7 @@ func (service *Service) UpdateContact(ctx context.Context, call Call, id string,
 	return current, nil
 }
 
-type MergeContactRequest struct { TargetID string; TargetRevision uint64; SourceID string; SourceRevision uint64; PreferSource FieldMask; RetainFor time.Duration }
+type MergeContactRequest struct { TargetID string `json:"target_id"`; TargetRevision uint64 `json:"target_revision"`; SourceID string `json:"source_id"`; SourceRevision uint64 `json:"source_revision"`; PreferSource FieldMask `json:"prefer_source"`; RetainFor time.Duration `json:"retain_for"` }
 
 func (service *Service) MergeContacts(ctx context.Context, call Call, request MergeContactRequest) (Contact, error) {
 	if err := service.ready(call); err != nil { return Contact{}, err }
@@ -279,6 +290,129 @@ func (service *Service) SavePreferences(ctx context.Context, call Call, value We
 	return normalized, nil
 }
 
+func (service *Service) ListIdentities(ctx context.Context, call Call) ([]Identity, uint64, error) {
+	if err := service.ready(call); err != nil { return nil, 0, err }
+	if err := service.authorize(ctx, call, OperationIdentityRead, "", false); err != nil { return nil, 0, err }
+	preferences, err := service.Repository.GetPreferences(ctx, call.Scope)
+	if err != nil { return nil, 0, err }
+	return append([]Identity(nil), preferences.Identities...), preferences.Revision, nil
+}
+
+func (service *Service) SaveIdentity(ctx context.Context, call Call, identity Identity, expectedPreferences uint64) (Identity, uint64, error) {
+	if err := service.ready(call); err != nil { return Identity{}, 0, err }
+	if err := service.authorize(ctx, call, OperationIdentityWrite, identity.ID, false); err != nil { return Identity{}, 0, err }
+	preferences, err := service.Repository.GetPreferences(ctx, call.Scope)
+	if err != nil { return Identity{}, 0, err }
+	if preferences.Revision != expectedPreferences { return Identity{}, 0, ErrConflict }
+	found := false
+	for index := range preferences.Identities { if preferences.Identities[index].ID == identity.ID { preferences.Identities[index] = identity; found = true } }
+	if !found { if len(preferences.Identities) == MaximumIdentities { return Identity{}, 0, ErrLimit }; preferences.Identities = append(preferences.Identities, identity) }
+	preferences.Revision++; preferences.UpdatedAt = service.now()
+	preferences, err = NormalizePreferences(preferences)
+	if err != nil { return Identity{}, 0, err }
+	if err = service.Repository.PutPreferences(ctx, preferences, expectedPreferences); err != nil { return Identity{}, 0, err }
+	for _, value := range preferences.Identities { if value.ID == identity.ID { return value, preferences.Revision, service.audit(ctx, call, OperationIdentityWrite, identity.ID, expectedPreferences, preferences.Revision, "") } }
+	return Identity{}, 0, ErrIntegrity
+}
+
+func (service *Service) DeleteIdentity(ctx context.Context, call Call, id string, expectedPreferences uint64) (uint64, error) {
+	if err := service.ready(call); err != nil { return 0, err }
+	if err := service.authorize(ctx, call, OperationIdentityWrite, id, false); err != nil { return 0, err }
+	preferences, err := service.Repository.GetPreferences(ctx, call.Scope)
+	if err != nil { return 0, err }
+	if preferences.Revision != expectedPreferences || len(preferences.Identities) < 2 { return 0, ErrConflict }
+	next := make([]Identity, 0, len(preferences.Identities)-1); deletedDefault := false
+	for _, value := range preferences.Identities { if value.ID == id { deletedDefault = value.Default; continue }; next = append(next, value) }
+	if len(next) == len(preferences.Identities) { return 0, ErrNotFound }
+	if deletedDefault { next[0].Default = true }
+	preferences.Identities = next; preferences.Revision++; preferences.UpdatedAt = service.now()
+	preferences, err = NormalizePreferences(preferences)
+	if err != nil { return 0, err }
+	if err = service.Repository.PutPreferences(ctx, preferences, expectedPreferences); err != nil { return 0, err }
+	return preferences.Revision, service.audit(ctx, call, OperationIdentityWrite, id, expectedPreferences, preferences.Revision, "")
+}
+
+func (service *Service) GetSieveRule(ctx context.Context, call Call, id string) (SieveRule, error) {
+	if err := service.ready(call); err != nil { return SieveRule{}, err }
+	if err := service.authorize(ctx, call, OperationSieveRead, id, false); err != nil { return SieveRule{}, err }
+	return service.Repository.GetSieveRule(ctx, call.Scope, id)
+}
+
+func (service *Service) ListSieveRules(ctx context.Context, call Call) ([]SieveRule, SieveActivation, error) {
+	if err := service.ready(call); err != nil { return nil, SieveActivation{}, err }
+	if err := service.authorize(ctx, call, OperationSieveRead, "", false); err != nil { return nil, SieveActivation{}, err }
+	rules, err := service.Repository.ListSieveRules(ctx, call.Scope)
+	if err != nil { return nil, SieveActivation{}, err }
+	active, err := service.Repository.ActiveSieve(ctx, call.Scope)
+	return rules, active, err
+}
+
+func (service *Service) ValidateSieveRules(ctx context.Context, call Call, rules []SieveRule) (SieveProgram, error) {
+	if err := service.sieveReady(call); err != nil { return SieveProgram{}, err }
+	if err := service.authorize(ctx, call, OperationSieveRead, "validate", false); err != nil { return SieveProgram{}, err }
+	now := service.now()
+	for index := range rules { rules[index].Scope = call.Scope; if rules[index].Revision == 0 { rules[index].Revision = 1 }; if rules[index].UpdatedAt.IsZero() { rules[index].UpdatedAt = now }; if err := service.authorizeSieveRule(ctx, call, rules[index]); err != nil { return SieveProgram{}, err }; if err := service.validateVacation(ctx, rules[index]); err != nil { return SieveProgram{}, err } }
+	return CompileSieveProgram(call.Scope, 1, rules, now)
+}
+
+func (service *Service) ValidateExpertSieve(ctx context.Context, call Call, text string) ([]SieveRule, SieveProgram, error) {
+	if err := service.sieveReady(call); err != nil || service.ExpertParser == nil { if err != nil { return nil, SieveProgram{}, err }; return nil, SieveProgram{}, ErrInvalid }
+	if err := service.authorize(ctx, call, OperationSieveRead, "validate", false); err != nil { return nil, SieveProgram{}, err }
+	rules, err := ParseExpertSieve(ctx, service.ExpertParser, call.Scope, text)
+	if err != nil { return nil, SieveProgram{}, err }
+	for _, rule := range rules { if err = service.authorizeSieveRule(ctx, call, rule); err != nil { return nil, SieveProgram{}, err }; if err = service.validateVacation(ctx, rule); err != nil { return nil, SieveProgram{}, err } }
+	program, err := CompileSieveProgram(call.Scope, 1, rules, service.now())
+	return rules, program, err
+}
+
+type VacationRequest struct {
+	DomainID          maildata.DomainID             `json:"domain_id"`
+	RuleID            maildata.AutoresponderID      `json:"rule_id"`
+	MailboxGeneration uint64                        `json:"mailbox_generation"`
+	ExpectedGeneration uint64                       `json:"expected_generation"`
+	Settings          maildata.AutoresponderSettings `json:"settings"`
+}
+
+func (service *Service) CreateVacation(ctx context.Context, call Call, request VacationRequest) (maildata.AutoresponderRule, error) {
+	if err := service.vacationReady(call, request); err != nil { return maildata.AutoresponderRule{}, err }
+	if request.ExpectedGeneration != 0 { return maildata.AutoresponderRule{}, ErrInvalid }
+	return service.Vacations.Create(ctx, maildata.AutoresponderCreateRequest{OperationID: call.OperationID, ActorID: call.ActorID, Scope: service.vacationScope(call, request), MailboxGeneration: request.MailboxGeneration, Settings: request.Settings})
+}
+
+func (service *Service) InspectVacation(ctx context.Context, call Call, request VacationRequest) (maildata.AutoresponderRule, error) {
+	if err := service.vacationReady(call, request); err != nil { return maildata.AutoresponderRule{}, err }
+	if request.ExpectedGeneration == 0 { return maildata.AutoresponderRule{}, ErrInvalid }
+	return service.Vacations.Inspect(ctx, service.vacationCall(call, request))
+}
+
+func (service *Service) UpdateVacation(ctx context.Context, call Call, request VacationRequest) (maildata.AutoresponderRule, error) {
+	if err := service.vacationReady(call, request); err != nil { return maildata.AutoresponderRule{}, err }
+	if request.ExpectedGeneration == 0 { return maildata.AutoresponderRule{}, ErrInvalid }
+	return service.Vacations.Update(ctx, maildata.AutoresponderUpdateRequest{Call: service.vacationCall(call, request), Settings: request.Settings})
+}
+
+func (service *Service) SetVacationEnabled(ctx context.Context, call Call, request VacationRequest, enabled bool) (maildata.AutoresponderRule, error) {
+	if err := service.vacationReady(call, request); err != nil { return maildata.AutoresponderRule{}, err }
+	if request.ExpectedGeneration == 0 { return maildata.AutoresponderRule{}, ErrInvalid }
+	if enabled { return service.Vacations.Enable(ctx, service.vacationCall(call, request)) }
+	return service.Vacations.Suspend(ctx, service.vacationCall(call, request))
+}
+
+func (service *Service) DeleteVacation(ctx context.Context, call Call, request VacationRequest) error {
+	if err := service.vacationReady(call, request); err != nil { return err }
+	if request.ExpectedGeneration == 0 { return ErrInvalid }
+	return service.Vacations.Delete(ctx, service.vacationCall(call, request))
+}
+
+func (service *Service) vacationReady(call Call, request VacationRequest) error {
+	if err := service.ready(call); err != nil { return err }
+	if service.Vacations == nil || !opaquePattern.MatchString(string(request.DomainID)) || !opaquePattern.MatchString(string(request.RuleID)) || request.MailboxGeneration == 0 || request.MailboxGeneration > MaximumRevision || request.ExpectedGeneration > MaximumRevision { return ErrInvalid }
+	return nil
+}
+
+func (service *Service) vacationScope(call Call, request VacationRequest) maildata.AutoresponderScope { return maildata.AutoresponderScope{TenantID: call.Scope.TenantID, DomainID: request.DomainID, MailboxID: maildata.MailboxID(call.Scope.MailboxID), RuleID: request.RuleID} }
+func (service *Service) vacationCall(call Call, request VacationRequest) maildata.AutoresponderCall { return maildata.AutoresponderCall{OperationID: call.OperationID, ActorID: call.ActorID, Scope: service.vacationScope(call, request), ExpectedGeneration: request.ExpectedGeneration, MailboxGeneration: request.MailboxGeneration} }
+
 func (service *Service) SaveSieveRule(ctx context.Context, call Call, rule SieveRule, expected uint64) (SieveRule, SieveActivation, error) {
 	if err := service.sieveReady(call); err != nil { return SieveRule{}, SieveActivation{}, err }
 	rule.Scope = call.Scope; rule.Revision = expected+1; rule.UpdatedAt = service.now()
@@ -396,22 +530,22 @@ func (service *Service) activateSieve(ctx context.Context, call Call) (SieveActi
 	if err = service.Repository.StageSieveGeneration(ctx, program); err != nil { return SieveActivation{}, err }
 	stage, err := service.SieveRuntime.Stage(ctx, ManageSieveStageRequest{OperationID: call.OperationID, Program: program})
 	if err != nil || !validStageReceipt(stage, call, program) { return SieveActivation{}, errors.Join(ErrActivation, err) }
-	validated, err := service.SieveRuntime.ValidateCompile(ctx, ManageSieveValidationRequest{Scope: call.Scope, Generation: program.Generation, Digest: program.Digest})
+	validated, err := service.SieveRuntime.ValidateCompile(ctx, ManageSieveValidationRequest{Scope: call.Scope, Generation: program.Generation, Digest: program.Digest, Program: program})
 	if err != nil || !validValidationReceipt(validated, program) { return SieveActivation{}, errors.Join(ErrActivation, err) }
-	request := ManageSieveActivationRequest{OperationID: call.OperationID, Scope: call.Scope, ExpectedDigest: active.Digest, Program: program}
+	request := ManageSieveActivationRequest{OperationID: call.OperationID, Scope: call.Scope, ExpectedGeneration: active.Generation, ExpectedDigest: active.Digest, Program: program}
 	receipt, err := service.SieveRuntime.ActivateCAS(ctx, request)
 	if err != nil || !validActivationReceipt(receipt, request) {
-		rollbackErr := service.restoreSieveRuntime(ctx, call, active, program.Digest)
+		rollbackErr := service.restoreSieveRuntime(ctx, call, active, program.Generation, program.Digest)
 		return SieveActivation{}, errors.Join(ErrActivation, err, rollbackErr)
 	}
 	desired := SieveActivation{Scope: call.Scope, Generation: program.Generation, Digest: program.Digest, UpdatedAt: service.now()}
 	if err = service.Repository.ActivateSieveCAS(ctx, desired, active.Digest); err == nil { return desired, nil }
-	rollbackErr := service.restoreSieveRuntime(ctx, call, active, program.Digest)
+	rollbackErr := service.restoreSieveRuntime(ctx, call, active, program.Generation, program.Digest)
 	return SieveActivation{}, errors.Join(ErrActivation, err, rollbackErr)
 }
 
-func (service *Service) restoreSieveRuntime(ctx context.Context, call Call, active SieveActivation, expectedDigest string) error {
-	rollback := ManageSieveActivationRequest{OperationID: call.OperationID + ".rollback", Scope: call.Scope, ExpectedDigest: expectedDigest, Rollback: true}
+func (service *Service) restoreSieveRuntime(ctx context.Context, call Call, active SieveActivation, expectedGeneration uint64, expectedDigest string) error {
+	rollback := ManageSieveActivationRequest{OperationID: call.OperationID + ".rollback", Scope: call.Scope, ExpectedGeneration: expectedGeneration, ExpectedDigest: expectedDigest, Rollback: true}
 	if active.Generation == 0 { rollback.Remove = true } else { previous, err := service.Repository.GetSieveProgram(ctx, call.Scope, active.Generation); if err != nil { return err }; rollback.Program = previous }
 	rolledBack, rollbackErr := service.SieveRuntime.ActivateCAS(ctx, rollback)
 	if rollbackErr != nil { return rollbackErr }
@@ -423,10 +557,22 @@ type BackupManifest struct {
 	Schema    string         `json:"schema"`
 	Scope     Scope          `json:"scope"`
 	Counts    map[string]int `json:"counts"`
+	SourcePreconditions BackupPreconditions `json:"source_preconditions"`
 	Objects   int            `json:"objects"`
 	Bytes     int64          `json:"bytes"`
 	Digest    string         `json:"digest"`
+	BindingDigest string     `json:"binding_digest"`
 	CreatedAt time.Time      `json:"created_at"`
+}
+
+type BackupPreconditions struct {
+	MaximumContactRevision uint64 `json:"maximum_contact_revision"`
+	MaximumGroupRevision   uint64 `json:"maximum_group_revision"`
+	ContactsGenerationDigest string `json:"contacts_generation_digest"`
+	GroupsGenerationDigest   string `json:"groups_generation_digest"`
+	PreferencesRevision    uint64 `json:"preferences_revision"`
+	ActiveSieveGeneration  uint64 `json:"active_sieve_generation"`
+	ActiveSieveDigest      string `json:"active_sieve_digest,omitempty"`
 }
 
 type backupRecord struct { Kind string `json:"kind"`; Document json.RawMessage `json:"document"` }
@@ -438,27 +584,38 @@ func (service *Service) ExportSettingsBackup(ctx context.Context, call Call, wri
 	manifest := BackupManifest{Schema: "webmail-settings/v1", Scope: call.Scope, Counts: map[string]int{}, CreatedAt: service.now()}
 	write := func(kind string, value any) error { if manifest.Objects == maximumObjects { return ErrLimit }; raw, err := json.Marshal(value); if err != nil { return err }; record, err := json.Marshal(backupRecord{Kind: kind, Document: raw}); if err != nil { return err }; record = append(record, '\n'); if _, err = bounded.Write(record); err != nil { return err }; manifest.Counts[kind]++; manifest.Objects++; return nil }
 	cursor := ""
-	for { page, err := service.Repository.ListContacts(ctx, ContactQuery{Scope: call.Scope, Cursor: cursor, Limit: MaximumPageSize}); if err != nil { return BackupManifest{}, err }; for _, value := range page.Contacts { if err = write("contact", value); err != nil { return BackupManifest{}, err } }; if page.NextCursor == "" { break }; cursor = page.NextCursor }
+	contactGenerations := sha256.New()
+	for { page, err := service.Repository.ListContacts(ctx, ContactQuery{Scope: call.Scope, Cursor: cursor, Limit: MaximumPageSize}); if err != nil { return BackupManifest{}, err }; for _, value := range page.Contacts { if value.Revision > manifest.SourcePreconditions.MaximumContactRevision { manifest.SourcePreconditions.MaximumContactRevision = value.Revision }; generation, _ := json.Marshal([2]any{value.ID,value.Revision}); _, _ = contactGenerations.Write(generation); if err = write("contact", value); err != nil { return BackupManifest{}, err } }; if page.NextCursor == "" { break }; cursor = page.NextCursor }
+	manifest.SourcePreconditions.ContactsGenerationDigest = hex.EncodeToString(contactGenerations.Sum(nil))
 	after := ""
-	for { groups, next, err := service.Repository.ListGroups(ctx, call.Scope, after, MaximumPageSize); if err != nil { return BackupManifest{}, err }; for _, value := range groups { if err = write("group", value); err != nil { return BackupManifest{}, err } }; if next == "" { break }; after = next }
+	groupGenerations := sha256.New()
+	for { groups, next, err := service.Repository.ListGroups(ctx, call.Scope, after, MaximumPageSize); if err != nil { return BackupManifest{}, err }; for _, value := range groups { if value.Revision > manifest.SourcePreconditions.MaximumGroupRevision { manifest.SourcePreconditions.MaximumGroupRevision = value.Revision }; generation, _ := json.Marshal([2]any{value.ID,value.Revision}); _, _ = groupGenerations.Write(generation); if err = write("group", value); err != nil { return BackupManifest{}, err } }; if next == "" { break }; after = next }
+	manifest.SourcePreconditions.GroupsGenerationDigest = hex.EncodeToString(groupGenerations.Sum(nil))
 	preferences, err := service.Repository.GetPreferences(ctx, call.Scope)
-	if err == nil { if err = write("preferences", preferences); err != nil { return BackupManifest{}, err } } else if !errors.Is(err, ErrNotFound) { return BackupManifest{}, err }
+	if err == nil { manifest.SourcePreconditions.PreferencesRevision = preferences.Revision; if err = write("preferences", preferences); err != nil { return BackupManifest{}, err }; manifest.Counts["identity"] = len(preferences.Identities) } else if !errors.Is(err, ErrNotFound) { return BackupManifest{}, err }
 	rules, err := service.Repository.ListSieveRules(ctx, call.Scope)
 	if err != nil { return BackupManifest{}, err }
 	for _, value := range rules { if err = write("sieve_rule", value); err != nil { return BackupManifest{}, err } }
+	active, err := service.Repository.ActiveSieve(ctx, call.Scope)
+	if err != nil { return BackupManifest{}, err }
+	manifest.SourcePreconditions.ActiveSieveGeneration, manifest.SourcePreconditions.ActiveSieveDigest = active.Generation, active.Digest
 	manifest.Bytes = bounded.written; manifest.Digest = hex.EncodeToString(hasher.Sum(nil))
+	manifest.BindingDigest = backupManifestBinding(manifest)
 	if err = service.audit(ctx, call, OperationBackupExport, "manifest", 0, uint64(manifest.Objects), manifest.Digest); err != nil { return BackupManifest{}, err }
 	return manifest, nil
 }
 
 type RestoreMode string
 const ( RestoreCreateOnly RestoreMode = "create_only"; RestoreReconcile RestoreMode = "reconcile"; RestoreMigrate RestoreMode = "migrate" )
-type RestoreRequest struct { Call Call; Reader io.ReadSeeker; Manifest BackupManifest; Mode RestoreMode }
+type RestoreRequest struct { Call Call; Reader io.ReadSeeker; Manifest BackupManifest; ExpectedCurrent BackupPreconditions; Mode RestoreMode }
 
 func (service *Service) RestoreSettingsBackup(ctx context.Context, request RestoreRequest) error {
-	if err := service.ready(request.Call); err != nil || request.Reader == nil || request.Manifest.Schema != "webmail-settings/v1" || request.Manifest.Scope != request.Call.Scope || request.Manifest.Objects < 0 || request.Manifest.Objects > MaximumBackupObjects || request.Manifest.Bytes < 0 || request.Manifest.Bytes > MaximumBackupBytes || !validDigest(request.Manifest.Digest) || request.Mode != RestoreCreateOnly && request.Mode != RestoreReconcile && request.Mode != RestoreMigrate { if err != nil { return err }; return ErrInvalid }
+	if err := service.ready(request.Call); err != nil || request.Reader == nil || request.Manifest.Schema != "webmail-settings/v1" || request.Manifest.Scope != request.Call.Scope || request.Manifest.Objects < 0 || request.Manifest.Objects > MaximumBackupObjects || request.Manifest.Bytes < 0 || request.Manifest.Bytes > MaximumBackupBytes || !validDigest(request.Manifest.Digest) || !validDigest(request.Manifest.BindingDigest) || request.Manifest.BindingDigest != backupManifestBinding(request.Manifest) || !validDigest(request.Manifest.SourcePreconditions.ContactsGenerationDigest) || !validDigest(request.Manifest.SourcePreconditions.GroupsGenerationDigest) || (request.Manifest.SourcePreconditions.ActiveSieveGeneration == 0) != (request.Manifest.SourcePreconditions.ActiveSieveDigest == "") || request.Manifest.SourcePreconditions.ActiveSieveDigest != "" && !validDigest(request.Manifest.SourcePreconditions.ActiveSieveDigest) || request.Manifest.Counts["identity"] > MaximumIdentities || request.Mode != RestoreCreateOnly && request.Mode != RestoreReconcile && request.Mode != RestoreMigrate { if err != nil { return err }; return ErrInvalid }
 	operation := OperationBackupRestore; if request.Mode == RestoreMigrate { operation = OperationBackupMigrate }
 	if err := service.authorize(ctx, request.Call, operation, "manifest", true); err != nil { return err }
+	currentPreconditions, err := service.currentBackupPreconditions(ctx, request.Call.Scope)
+	if err != nil { return err }
+	if currentPreconditions != request.ExpectedCurrent { return ErrConflict }
 	if err := verifyBackupReader(request.Reader, request.Manifest); err != nil { return err }
 	if err := service.validateBackupRecords(ctx, request); err != nil { return err }
 	if _, err := request.Reader.Seek(0, io.SeekStart); err != nil { return err }
@@ -473,6 +630,7 @@ func (service *Service) RestoreSettingsBackup(ctx context.Context, request Resto
 		var record backupRecord
 		if json.Unmarshal(scanner.Bytes(), &record) != nil { return ErrIntegrity }
 		actualCounts[record.Kind]++
+		if record.Kind == "preferences" { var value WebmailPreferences; if json.Unmarshal(record.Document, &value) != nil { return ErrIntegrity }; actualCounts["identity"] += len(value.Identities) }
 		switch record.Kind {
 		case "contact":
 			var value Contact; if json.Unmarshal(record.Document, &value) != nil || value.Scope != request.Call.Scope { return ErrIntegrity }; current, err := service.Repository.GetContact(ctx, value.Scope, value.ID); expected := uint64(0); if err == nil { if request.Mode == RestoreCreateOnly { return ErrConflict }; expected = current.Revision; value.CreatedAt = current.CreatedAt } else if !errors.Is(err, ErrNotFound) { return err }; value.Revision = expected+1; value.UpdatedAt = service.now(); if expected == 0 { value.CreatedAt = value.UpdatedAt }; if request.Mode == RestoreMigrate { value.Provenance = Provenance{Kind: ProvenanceMigrated, SourceDigest: request.Manifest.Digest, ImportedAt: timePointer(value.UpdatedAt)} }; if err = service.Repository.PutContact(ctx, value, expected); err != nil { return err }
@@ -486,7 +644,7 @@ func (service *Service) RestoreSettingsBackup(ctx context.Context, request Resto
 		}
 	}
 	if err := scanner.Err(); err != nil || seen != request.Manifest.Objects || !sameCounts(actualCounts, request.Manifest.Counts) { if err != nil { return err }; return ErrIntegrity }
-	if request.Manifest.Counts["sieve_rule"] > 0 || request.Mode != RestoreCreateOnly && len(currentRules) > 0 { if err := service.Repository.ReplaceSieveRulesCAS(ctx, request.Call.Scope, restoredRules, sieveExpected); err != nil { return err }; if _, err := service.activateSieve(ctx, request.Call); err != nil { return err } }
+	if request.Manifest.Counts["sieve_rule"] > 0 || request.Mode != RestoreCreateOnly && len(currentRules) > 0 { if _, err := CompileSieveProgram(request.Call.Scope, 1, restoredRules, service.now()); err != nil { return err }; active, activeErr := service.Repository.ActiveSieve(ctx, request.Call.Scope); if activeErr != nil { return activeErr }; if active.Generation != request.ExpectedCurrent.ActiveSieveGeneration || active.Digest != request.ExpectedCurrent.ActiveSieveDigest { return ErrConflict }; if err := service.Repository.ReplaceSieveRulesCAS(ctx, request.Call.Scope, restoredRules, sieveExpected); err != nil { return err }; if _, err := service.activateSieve(ctx, request.Call); err != nil { return err } }
 	return service.audit(ctx, request.Call, operation, "manifest", 0, uint64(seen), request.Manifest.Digest)
 }
 
@@ -502,31 +660,59 @@ func verifyBackupReader(reader io.ReadSeeker, manifest BackupManifest) error {
 func (service *Service) validateBackupRecords(ctx context.Context, request RestoreRequest) error {
 	if _, err := request.Reader.Seek(0, io.SeekStart); err != nil { return err }
 	scanner := bufio.NewScanner(io.LimitReader(request.Reader, request.Manifest.Bytes+1)); scanner.Buffer(make([]byte, 4096), 4<<20)
-	counts := map[string]int{}; seen, phase := 0, 0; rules := make([]SieveRule, 0)
+	counts := map[string]int{}; seen, phase := 0, 0; rules := make([]SieveRule, 0); source := BackupPreconditions{ActiveSieveGeneration:request.Manifest.SourcePreconditions.ActiveSieveGeneration,ActiveSieveDigest:request.Manifest.SourcePreconditions.ActiveSieveDigest}; contactGenerations, groupGenerations := sha256.New(), sha256.New()
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil { return err }
 		seen++; if seen > request.Manifest.Objects { return ErrIntegrity }
 		var record backupRecord
 		if json.Unmarshal(scanner.Bytes(), &record) != nil { return ErrIntegrity }
 		counts[record.Kind]++
+		if record.Kind == "preferences" { var value WebmailPreferences; if json.Unmarshal(record.Document, &value) != nil { return ErrIntegrity }; counts["identity"] += len(value.Identities) }
 		nextPhase := map[string]int{"contact": 0, "group": 1, "preferences": 2, "sieve_rule": 3}[record.Kind]
 		if nextPhase < phase || record.Kind == "preferences" && counts[record.Kind] > 1 { return ErrIntegrity }; phase = nextPhase
 		switch record.Kind {
 		case "contact":
-			var value Contact; if json.Unmarshal(record.Document, &value) != nil || value.Scope != request.Call.Scope { return ErrIntegrity }; if _, err := NormalizeContact(value); err != nil { return ErrIntegrity }
+			var value Contact; if json.Unmarshal(record.Document, &value) != nil || value.Scope != request.Call.Scope { return ErrIntegrity }; if _, err := NormalizeContact(value); err != nil { return ErrIntegrity }; if value.Revision > source.MaximumContactRevision { source.MaximumContactRevision = value.Revision }; generation, _ := json.Marshal([2]any{value.ID,value.Revision}); _, _ = contactGenerations.Write(generation)
 		case "group":
-			var value ContactGroup; if json.Unmarshal(record.Document, &value) != nil || value.Scope != request.Call.Scope { return ErrIntegrity }; if _, err := NormalizeGroup(value); err != nil { return ErrIntegrity }
+			var value ContactGroup; if json.Unmarshal(record.Document, &value) != nil || value.Scope != request.Call.Scope { return ErrIntegrity }; if _, err := NormalizeGroup(value); err != nil { return ErrIntegrity }; if value.Revision > source.MaximumGroupRevision { source.MaximumGroupRevision = value.Revision }; generation, _ := json.Marshal([2]any{value.ID,value.Revision}); _, _ = groupGenerations.Write(generation)
 		case "preferences":
-			var value WebmailPreferences; if json.Unmarshal(record.Document, &value) != nil || value.Scope != request.Call.Scope { return ErrIntegrity }; if _, err := NormalizePreferences(value); err != nil { return ErrIntegrity }
+			var value WebmailPreferences; if json.Unmarshal(record.Document, &value) != nil || value.Scope != request.Call.Scope { return ErrIntegrity }; if _, err := NormalizePreferences(value); err != nil { return ErrIntegrity }; source.PreferencesRevision = value.Revision
 		case "sieve_rule":
 			var value SieveRule; if json.Unmarshal(record.Document, &value) != nil || value.Scope != request.Call.Scope { return ErrIntegrity }; normalized, err := NormalizeSieveRule(value); if err != nil { return ErrIntegrity }; if err = service.authorizeSieveRule(ctx, request.Call, normalized); err != nil { return err }; if err = service.validateVacation(ctx, normalized); err != nil { return err }; rules = append(rules, normalized)
 		default: return ErrIntegrity
 		}
 	}
 	if err := scanner.Err(); err != nil { return err }
-	if seen != request.Manifest.Objects || !sameCounts(counts, request.Manifest.Counts) { return ErrIntegrity }
+	source.ContactsGenerationDigest, source.GroupsGenerationDigest = hex.EncodeToString(contactGenerations.Sum(nil)), hex.EncodeToString(groupGenerations.Sum(nil))
+	if seen != request.Manifest.Objects || !sameCounts(counts, request.Manifest.Counts) || source != request.Manifest.SourcePreconditions { return ErrIntegrity }
 	if len(rules) > 0 { if _, err := CompileSieveProgram(request.Call.Scope, 1, rules, service.now()); err != nil { return err } }
 	return nil
+}
+
+func backupManifestBinding(manifest BackupManifest) string { raw, _ := json.Marshal(struct{Schema string `json:"schema"`;Scope Scope `json:"scope"`;Counts map[string]int `json:"counts"`;Source BackupPreconditions `json:"source"`;Objects int `json:"objects"`;Bytes int64 `json:"bytes"`;Digest string `json:"digest"`}{manifest.Schema,manifest.Scope,manifest.Counts,manifest.SourcePreconditions,manifest.Objects,manifest.Bytes,manifest.Digest});sum:=sha256.Sum256(raw);return hex.EncodeToString(sum[:]) }
+
+func (service *Service) currentBackupPreconditions(ctx context.Context, scope Scope) (BackupPreconditions, error) {
+	result := BackupPreconditions{}
+	contactGenerations := sha256.New()
+	cursor := ""
+	for { page, err := service.Repository.ListContacts(ctx, ContactQuery{Scope: scope, Cursor: cursor, Limit: MaximumPageSize}); if err != nil { return BackupPreconditions{}, err }; for _, value := range page.Contacts { if value.Revision > result.MaximumContactRevision { result.MaximumContactRevision = value.Revision }; generation, _ := json.Marshal([2]any{value.ID,value.Revision}); _, _ = contactGenerations.Write(generation) }; if page.NextCursor == "" { break }; cursor = page.NextCursor }
+	result.ContactsGenerationDigest = hex.EncodeToString(contactGenerations.Sum(nil))
+	after := ""
+	groupGenerations := sha256.New()
+	for { groups, next, err := service.Repository.ListGroups(ctx, scope, after, MaximumPageSize); if err != nil { return BackupPreconditions{}, err }; for _, value := range groups { if value.Revision > result.MaximumGroupRevision { result.MaximumGroupRevision = value.Revision }; generation, _ := json.Marshal([2]any{value.ID,value.Revision}); _, _ = groupGenerations.Write(generation) }; if next == "" { break }; after = next }
+	result.GroupsGenerationDigest = hex.EncodeToString(groupGenerations.Sum(nil))
+	preferences, err := service.Repository.GetPreferences(ctx, scope)
+	if err == nil { result.PreferencesRevision = preferences.Revision } else if !errors.Is(err, ErrNotFound) { return BackupPreconditions{}, err }
+	active, err := service.Repository.ActiveSieve(ctx, scope)
+	if err != nil { return BackupPreconditions{}, err }
+	result.ActiveSieveGeneration, result.ActiveSieveDigest = active.Generation, active.Digest
+	return result, nil
+}
+
+func (service *Service) CurrentBackupPreconditions(ctx context.Context, call Call) (BackupPreconditions, error) {
+	if err := service.ready(call); err != nil { return BackupPreconditions{}, err }
+	if err := service.authorize(ctx, call, OperationSettingsRead, "preconditions", false); err != nil { return BackupPreconditions{}, err }
+	return service.currentBackupPreconditions(ctx, call.Scope)
 }
 
 func (service *Service) authorizeSieveRule(ctx context.Context, call Call, rule SieveRule) error {
@@ -585,7 +771,7 @@ func mergeMetadata(left, right []MetadataField) []MetadataField { values := map[
 
 func validStageReceipt(receipt ManageSieveReceipt, call Call, program SieveProgram) bool { return receipt.OperationID == call.OperationID && receipt.Scope == call.Scope && receipt.Generation == program.Generation && receipt.Digest == program.Digest && !receipt.Activated }
 func validValidationReceipt(receipt ManageSieveReceipt, program SieveProgram) bool { return receipt.Scope == program.Scope && receipt.Generation == program.Generation && receipt.Digest == program.Digest && receipt.Validated && !receipt.Activated }
-func validActivationReceipt(receipt ManageSieveReceipt, request ManageSieveActivationRequest) bool { if request.Remove { return receipt.OperationID == request.OperationID && receipt.Scope == request.Scope && receipt.PreviousDigest == request.ExpectedDigest && receipt.Activated && receipt.Digest == "" }; return receipt.OperationID == request.OperationID && receipt.Scope == request.Scope && receipt.Generation == request.Program.Generation && receipt.Digest == request.Program.Digest && receipt.PreviousDigest == request.ExpectedDigest && receipt.Validated && receipt.Activated }
+func validActivationReceipt(receipt ManageSieveReceipt, request ManageSieveActivationRequest) bool { if request.Remove { return receipt.OperationID == request.OperationID && receipt.Scope == request.Scope && receipt.PreviousGeneration == request.ExpectedGeneration && receipt.PreviousDigest == request.ExpectedDigest && receipt.Activated && receipt.Generation == 0 && receipt.Digest == "" }; return receipt.OperationID == request.OperationID && receipt.Scope == request.Scope && receipt.Generation == request.Program.Generation && receipt.Digest == request.Program.Digest && receipt.PreviousGeneration == request.ExpectedGeneration && receipt.PreviousDigest == request.ExpectedDigest && receipt.Validated && receipt.Activated }
 func sameEvaluation(left, right SieveEvaluation) bool { leftJSON, _ := json.Marshal(left); rightJSON, _ := json.Marshal(right); return string(leftJSON) == string(rightJSON) }
 func sameCounts(left, right map[string]int) bool { if len(left) != len(right) { return false }; for key, value := range left { if right[key] != value { return false } }; return true }
 func digestCounts(values ...int) string { raw, _ := json.Marshal(values); sum := sha256.Sum256(raw); return hex.EncodeToString(sum[:]) }

@@ -243,9 +243,9 @@ func EvaluateSieve(program SieveProgram, message SieveTestMessage) (SieveEvaluat
 }
 
 type ManageSieveStageRequest struct { OperationID string; Program SieveProgram }
-type ManageSieveValidationRequest struct { Scope Scope; Generation uint64; Digest string }
-type ManageSieveActivationRequest struct { OperationID string; Scope Scope; ExpectedDigest string; Program SieveProgram; Remove bool; Rollback bool }
-type ManageSieveReceipt struct { OperationID string; Scope Scope; Generation uint64; Digest string; PreviousDigest string; Validated bool; Activated bool }
+type ManageSieveValidationRequest struct { Scope Scope; Generation uint64; Digest string; Program SieveProgram }
+type ManageSieveActivationRequest struct { OperationID string; Scope Scope; ExpectedGeneration uint64; ExpectedDigest string; Program SieveProgram; Remove bool; Rollback bool }
+type ManageSieveReceipt struct { OperationID string; Scope Scope; Generation uint64; Digest string; PreviousGeneration uint64; PreviousDigest string; Validated bool; Activated bool }
 
 type ManageSieveRuntime interface {
 	Stage(context.Context, ManageSieveStageRequest) (ManageSieveReceipt, error)
