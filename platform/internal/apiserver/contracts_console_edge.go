@@ -670,13 +670,23 @@ type HAPromotionProjection struct {
 }
 
 type MigrationProjection struct {
-	ID         string    `json:"id"`
-	Source     string    `json:"source"`
-	State      string    `json:"state"`
-	Phase      string    `json:"phase"`
-	Progress   uint8     `json:"progress"`
-	Generation uint64    `json:"generation"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID                 string    `json:"id"`
+	Source             string    `json:"source"`
+	State              string    `json:"state"`
+	Phase              string    `json:"phase"`
+	Progress           uint8     `json:"progress"`
+	ResourcesTotal     uint64    `json:"resources_total,omitempty"`
+	ResourcesCompleted uint64    `json:"resources_completed,omitempty"`
+	ResourceErrors     uint64    `json:"resource_errors,omitempty"`
+	BytesTransferred   uint64    `json:"bytes_transferred,omitempty"`
+	ObjectsTransferred uint64    `json:"objects_transferred,omitempty"`
+	ErrorCode          string    `json:"error_code,omitempty"`
+	ErrorMessage       string    `json:"error_message,omitempty"`
+	Cancelable         bool      `json:"cancelable"`
+	Generation         uint64    `json:"generation"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	RollbackDeadline   *time.Time `json:"rollback_deadline,omitempty"`
 }
 
 type MigrationCreatePayload struct {
@@ -976,7 +986,9 @@ type HAEdgeService interface {
 
 type MigrationEdgeService interface {
 	ListMigrations(context.Context, EdgeCall, EdgePagePayload) (EdgePage[MigrationProjection], error)
+	InspectMigration(context.Context, EdgeCall) (MigrationProjection, error)
 	CreateMigration(context.Context, EdgeCall, MigrationCreatePayload) (EdgeMutation[MigrationProjection], error)
+	CancelMigration(context.Context, EdgeCall) (EdgeMutation[MigrationProjection], error)
 	Inventory(context.Context, EdgeCall, MigrationInventoryPayload) (EdgeMutation[MigrationProjection], error)
 	Plan(context.Context, EdgeCall, MigrationPlanPayload) (EdgeMutation[MigrationProjection], error)
 	Sync(context.Context, EdgeCall, MigrationSyncPayload) (EdgeMutation[MigrationProjection], error)
@@ -987,7 +999,7 @@ type MigrationEdgeService interface {
 // unbound until every authority required by that stage is present. Implementors
 // that do not expose this optional interface retain the complete legacy surface.
 type MigrationEdgeCapabilities struct {
-	List, Create, Inventory, Plan, Sync, Cutover bool
+	List, Inspect, Create, Cancel, Inventory, Plan, Sync, Cutover bool
 }
 
 type MigrationEdgeCapabilityProvider interface {
@@ -1128,7 +1140,9 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("ha.promotion.plan", "ha:manage", phishingResistant, true, func() any { return &HAPromotionPlanPayload{} }, validateHAPromotionPlan, edgeInstallationExistingMutationScope),
 
 		consoleOperation("migration.list", "migration:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
+		consoleOperation("migration.inspect", "migration:manage", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantResourceReadScope),
 		consoleOperation("migration.create", "migration:manage", mfa, true, func() any { return &MigrationCreatePayload{} }, validateMigrationCreate, edgeTenantCreateScope),
+		consoleOperation("migration.cancel", "migration:manage", mfa, true, func() any { return &EmptyPayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("migration.inventory", "migration:manage", password, true, func() any { return &MigrationInventoryPayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("migration.plan", "migration:manage", mfa, true, func() any { return &MigrationPlanPayload{} }, validateMigrationPlan, edgeTenantExistingMutationScope),
 		consoleOperation("migration.sync", "migration:manage", mfa, true, func() any { return &MigrationSyncPayload{} }, validateMigrationSync, edgeTenantExistingMutationScope),
@@ -1568,7 +1582,7 @@ func validateHAPromotionPlan(value any) error {
 
 func validateMigrationCreate(value any) error {
 	payload := value.(*MigrationCreatePayload)
-	if payload.Source != "cyberpanel" && payload.Source != "cpanel" && payload.Source != "canonical" { return invalid("migration source") }
+	if payload.Source != "cyberpanel" { return invalid("migration source") }
 	if !validApprovedEndpoint(payload.SourceEndpoint) { return invalid("migration source endpoint") }
 	return nil
 }
@@ -2289,15 +2303,23 @@ func bindConsoleEdgeContractsThree(registry *Registry, services DomainServices) 
 		}); err != nil { return err }
 	}
 	if services.MigrationEdge != nil {
-		capabilities := MigrationEdgeCapabilities{List:true,Create:true,Inventory:true,Plan:true,Sync:true,Cutover:true}
+		capabilities := MigrationEdgeCapabilities{List:true,Inspect:true,Create:true,Cancel:true,Inventory:true,Plan:true,Sync:true,Cutover:true}
 		if provider, ok := services.MigrationEdge.(MigrationEdgeCapabilityProvider); ok { capabilities=provider.MigrationCapabilities() }
 		if capabilities.List { if err := registry.Bind("migration.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.MigrationEdge.ListMigrations(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result}, nil
 		}); err != nil { return err } }
+		if capabilities.Inspect { if err := registry.Bind("migration.inspect", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.MigrationEdge.InspectMigration(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result, Generation:result.Generation}, nil
+		}); err != nil { return err } }
 		if capabilities.Create { if err := registry.Bind("migration.create", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.MigrationEdge.CreateMigration(ctx, edgeCall(inv), *value.(*MigrationCreatePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return edgeOperationResult(http.StatusCreated, result), nil
+		}); err != nil { return err } }
+		if capabilities.Cancel { if err := registry.Bind("migration.cancel", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.MigrationEdge.CancelMigration(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusOK, result), nil
 		}); err != nil { return err } }
 		if capabilities.Inventory { if err := registry.Bind("migration.inventory", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.MigrationEdge.Inventory(ctx, edgeCall(inv), *value.(*MigrationInventoryPayload)); if err != nil { return OperationResult{}, mapDomainError(err) }

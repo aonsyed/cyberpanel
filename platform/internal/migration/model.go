@@ -54,6 +54,7 @@ const (
 	PhaseFailedTerminal     Phase = "failed_terminal"
 	PhaseRollingBack        Phase = "rolling_back"
 	PhaseRolledBack         Phase = "rolled_back"
+	PhaseCanceled           Phase = "canceled"
 )
 
 type SourceKind string

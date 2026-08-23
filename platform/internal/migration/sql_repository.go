@@ -168,6 +168,8 @@ func (r *SQLRepository) Transition(ctx context.Context, id ID, from, to Phase, c
 		value.TargetGeneration++
 	case PhasePausedRetryable, PhaseBlockedPolicy, PhaseFailedTerminal:
 		value.ErrorCode = checkpoint
+	case PhaseCanceled:
+		value.ErrorCode, value.ErrorMessage = "", ""
 	default:
 		value.ErrorCode, value.ErrorMessage = "", ""
 	}
@@ -374,7 +376,7 @@ func validateMigration(value Migration) error {
 
 func validPhase(value Phase) bool {
 	switch value {
-	case PhaseCreated, PhaseDiscovering, PhaseInventoried, PhasePlanned, PhaseReady, PhaseBaseSync, PhaseQuiescing, PhaseFinalSync, PhaseCutoverReady, PhaseCutoverCommitting, PhaseVerifying, PhaseCommitted, PhaseCleanup, PhasePausedRetryable, PhaseBlockedPolicy, PhaseFailedTerminal, PhaseRollingBack, PhaseRolledBack:
+	case PhaseCreated, PhaseDiscovering, PhaseInventoried, PhasePlanned, PhaseReady, PhaseBaseSync, PhaseQuiescing, PhaseFinalSync, PhaseCutoverReady, PhaseCutoverCommitting, PhaseVerifying, PhaseCommitted, PhaseCleanup, PhasePausedRetryable, PhaseBlockedPolicy, PhaseFailedTerminal, PhaseRollingBack, PhaseRolledBack, PhaseCanceled:
 		return true
 	default:
 		return false
@@ -383,7 +385,15 @@ func validPhase(value Phase) bool {
 
 func transitionAllowed(from, to Phase) bool {
 	if to == PhasePausedRetryable || to == PhaseBlockedPolicy || to == PhaseFailedTerminal {
-		return from != PhaseCommitted && from != PhaseCleanup && from != PhaseRolledBack && from != PhaseFailedTerminal
+		return from != PhaseCommitted && from != PhaseCleanup && from != PhaseRolledBack && from != PhaseFailedTerminal && from != PhaseCanceled
+	}
+	if to == PhaseCanceled {
+		switch from {
+		case PhaseCreated, PhaseDiscovering, PhaseInventoried, PhasePlanned, PhaseReady, PhaseBaseSync, PhaseQuiescing, PhasePausedRetryable, PhaseBlockedPolicy:
+			return true
+		default:
+			return false
+		}
 	}
 	allowed := map[Phase][]Phase{
 		PhaseCreated: {PhaseDiscovering}, PhaseDiscovering: {PhaseInventoried}, PhaseInventoried: {PhasePlanned},

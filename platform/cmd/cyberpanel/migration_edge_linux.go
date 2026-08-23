@@ -33,7 +33,7 @@ func newMigrationEdge(runtime *localmigration.Runtime, now func() time.Time) (*m
 }
 
 func (*migrationEdge) MigrationCapabilities() apiserver.MigrationEdgeCapabilities {
-	return apiserver.MigrationEdgeCapabilities{List:true,Create:true,Inventory:true,Plan:true,Sync:true,Cutover:true}
+	return apiserver.MigrationEdgeCapabilities{List:true,Inspect:true,Create:true,Cancel:true,Inventory:true,Plan:true,Sync:true,Cutover:true}
 }
 
 func (edge *migrationEdge) ListMigrations(ctx context.Context, call apiserver.EdgeCall, payload apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.MigrationProjection], error) {
@@ -55,6 +55,25 @@ func (edge *migrationEdge) ListMigrations(ctx context.Context, call apiserver.Ed
 	return apiserver.EdgePage[apiserver.MigrationProjection]{Items: items, NextCursor: next, Total: total}, nil
 }
 
+func (edge *migrationEdge) InspectMigration(ctx context.Context, call apiserver.EdgeCall) (apiserver.MigrationProjection, error) {
+	if edge == nil || edge.runtime == nil || ctx == nil || strings.TrimSpace(call.TenantID) == "" || call.ExpectedGeneration != 0 {
+		return apiserver.MigrationProjection{}, migration.ErrInvalid
+	}
+	id, err := migration.NewID(call.ResourceID)
+	if err != nil {
+		return apiserver.MigrationProjection{}, err
+	}
+	scope, err := edge.runtime.Scopes.Load(ctx, call.TenantID, id)
+	if err != nil {
+		return apiserver.MigrationProjection{}, err
+	}
+	value, err := edge.runtime.Repository.Migration(ctx, id)
+	if err != nil {
+		return apiserver.MigrationProjection{}, err
+	}
+	return edge.projection(ctx, value, scope), nil
+}
+
 func (edge *migrationEdge) CreateMigration(ctx context.Context, call apiserver.EdgeCall, payload apiserver.MigrationCreatePayload) (apiserver.EdgeMutation[apiserver.MigrationProjection], error) {
 	if edge == nil || edge.runtime == nil || ctx == nil || strings.TrimSpace(call.TenantID) == "" || strings.TrimSpace(call.CommandID) == "" {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrInvalid
@@ -62,17 +81,10 @@ func (edge *migrationEdge) CreateMigration(ctx context.Context, call apiserver.E
 	if err := validateMigrationEndpoint(payload.SourceEndpoint); err != nil {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
 	}
-	var source migration.SourceKind
-	switch payload.Source {
-	case string(migration.SourceCyberPanel):
-		source = migration.SourceCyberPanel
-	case string(migration.SourceCPanel):
-		source = migration.SourceCPanel
-	case string(migration.SourceCanonical):
-		source = migration.SourceCanonical
-	default:
+	if payload.Source != string(migration.SourceCyberPanel) {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrInvalid
 	}
+	source := migration.SourceCyberPanel
 	id := migrationID(call.CommandID, call.TenantID)
 	now := edge.now().UTC()
 	scope := migration.RuntimeScope{MigrationID: id, TenantID: call.TenantID, SourceEndpoint: payload.SourceEndpoint, Generation: 1, LastCommandID: call.CommandID, UpdatedAt: now}
@@ -99,6 +111,34 @@ func (edge *migrationEdge) CreateMigration(ctx context.Context, call apiserver.E
 		if createdScope {
 			_ = edge.runtime.Scopes.RemoveUnstarted(ctx, call.TenantID, id, call.CommandID)
 		}
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	return migrationMutation(call.CommandID, value, scope, edge.projection(ctx, value, scope)), nil
+}
+
+func (edge *migrationEdge) CancelMigration(ctx context.Context, call apiserver.EdgeCall) (apiserver.EdgeMutation[apiserver.MigrationProjection], error) {
+	value, scope, err := edge.loadScoped(ctx, call)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	if value.Phase == migration.PhaseCanceled {
+		return migrationMutation(call.CommandID, value, scope, edge.projection(ctx, value, scope)), nil
+	}
+	if !edge.migrationCancelable(ctx, value) {
+		switch value.Phase {
+		case migration.PhaseQuiescing, migration.PhaseFinalSync, migration.PhaseCutoverReady, migration.PhaseCutoverCommitting, migration.PhaseVerifying, migration.PhaseCommitted, migration.PhaseCleanup, migration.PhasePausedRetryable, migration.PhaseRollingBack:
+			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrWriteFrontier
+		default:
+			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrConflict
+		}
+	}
+	from := value.Phase
+	scope, err = edge.runtime.Scopes.Claim(ctx, call.TenantID, value.ID, call.ExpectedGeneration, call.CommandID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
+	}
+	value, err = edge.runtime.Repository.Transition(ctx, value.ID, from, migration.PhaseCanceled, "canceled:"+string(from), value.SourceGeneration)
+	if err != nil {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
 	}
 	return migrationMutation(call.CommandID, value, scope, edge.projection(ctx, value, scope)), nil
@@ -343,17 +383,98 @@ func (edge *migrationEdge) loadScoped(ctx context.Context, call apiserver.EdgeCa
 }
 
 func (edge *migrationEdge) projection(ctx context.Context, value migration.Migration, scope migration.RuntimeScope) apiserver.MigrationProjection {
-	state := migrationState(value.Phase)
-	if value.Phase == migration.PhasePlanned && value.PlanDigest != "" {
-		if plan, err := edge.runtime.Repository.Plan(ctx, value.PlanDigest); err == nil && len(plan.Unsupported) > 0 {
-			state = "blocked"
+	state := migrationState(value)
+	var resourcesTotal, resourcesCompleted, resourceErrors, bytesTransferred, objectsTransferred uint64
+	if value.PlanDigest != "" {
+		if plan, err := edge.runtime.Repository.Plan(ctx, value.PlanDigest); err == nil {
+			resourcesTotal = uint64(len(plan.Mappings))
+			if value.Phase == migration.PhasePlanned && len(plan.Unsupported) > 0 {
+				state = "blocked"
+			}
 		}
 	}
 	updated := value.UpdatedAt
 	if scope.UpdatedAt.After(updated) {
 		updated = scope.UpdatedAt
 	}
-	return apiserver.MigrationProjection{ID: value.ID.String(), Source: string(value.Source), State: state, Phase: string(value.Phase), Progress: migrationProgress(value.Phase), Generation: scope.Generation, UpdatedAt: updated}
+	if progress, err := edge.runtime.Repository.Progress(ctx, value.ID); err == nil {
+		if uint64(len(progress)) > resourcesTotal {
+			resourcesTotal = uint64(len(progress))
+		}
+		for _, item := range progress {
+			bytesTransferred = saturatingMigrationTotal(bytesTransferred, item.BytesTransferred)
+			objectsTransferred = saturatingMigrationTotal(objectsTransferred, item.ObjectsTransferred)
+			if item.ErrorCode != "" {
+				resourceErrors++
+			} else {
+				resourcesCompleted++
+			}
+			if item.UpdatedAt.After(updated) {
+				updated = item.UpdatedAt
+			}
+		}
+	}
+	errorCode, errorMessage := redactedMigrationError(value, state)
+	if resourceErrors > 0 && errorCode == "" {
+		errorCode, errorMessage = "MIGRATION_RESOURCE_ERRORS", "One or more resources require operator attention. Sensitive source details are available only in local audit evidence."
+	}
+	var rollbackDeadline *time.Time
+	if !value.RollbackDeadline.IsZero() {
+		deadline := value.RollbackDeadline
+		rollbackDeadline = &deadline
+	}
+	return apiserver.MigrationProjection{ID:value.ID.String(),Source:string(value.Source),State:state,Phase:string(value.Phase),Progress:migrationProgress(value),ResourcesTotal:resourcesTotal,ResourcesCompleted:resourcesCompleted,ResourceErrors:resourceErrors,BytesTransferred:bytesTransferred,ObjectsTransferred:objectsTransferred,ErrorCode:errorCode,ErrorMessage:errorMessage,Cancelable:edge.migrationCancelable(ctx,value),Generation:scope.Generation,CreatedAt:value.CreatedAt,UpdatedAt:updated,RollbackDeadline:rollbackDeadline}
+}
+
+func (edge *migrationEdge) migrationCancelable(ctx context.Context, value migration.Migration) bool {
+	if edge == nil || edge.runtime == nil || ctx == nil {
+		return false
+	}
+	switch value.Phase {
+	case migration.PhaseCreated, migration.PhaseDiscovering, migration.PhaseInventoried, migration.PhasePlanned, migration.PhaseReady, migration.PhaseBaseSync, migration.PhaseBlockedPolicy:
+		return true
+	case migration.PhaseQuiescing, migration.PhasePausedRetryable:
+		var fence migration.SourceFence
+		return errors.Is(edge.runtime.Repository.Receipt(ctx, value.ID, "source_fence", &fence), migration.ErrNotFound)
+	default:
+		return false
+	}
+}
+
+func saturatingMigrationTotal(total, value uint64) uint64 {
+	if total > ^uint64(0)-value {
+		return ^uint64(0)
+	}
+	return total + value
+}
+
+func redactedMigrationError(value migration.Migration, state string) (string, string) {
+	switch value.ErrorCode {
+	case "DISCOVERY_FAILED", "SOURCE_QUIESCE_FAILED", "SOURCE_COMMIT_FAILED":
+		return "MIGRATION_SOURCE_UNAVAILABLE", "The approved source agent could not complete the requested stage. Sensitive connection details are retained only in local audit evidence."
+	case "SOURCE_GENERATION_MOVED":
+		return "MIGRATION_SOURCE_CHANGED", "The source changed after the approved snapshot and must be inventoried again."
+	case "MANIFEST_REJECTED", "FINAL_DELTA_REJECTED":
+		return "MIGRATION_SOURCE_DATA_REJECTED", "Signed source data failed target validation. Raw source fields are not exposed through this API."
+	case "CHUNK_STAGE_FAILED", "FINAL_CHUNK_STAGE_FAILED":
+		return "MIGRATION_TRANSFER_FAILED", "Encrypted migration data could not be staged completely."
+	case "TARGET_PREPARE_FAILED", "RESOURCE_IMPORT_FAILED", "FINAL_APPLY_FAILED":
+		return "MIGRATION_IMPORT_FAILED", "The target could not materialize all approved resources in quarantine."
+	case "DARK_VERIFY_FAILED", "POST_WRITE_VERIFY_FAILED":
+		return "MIGRATION_VERIFICATION_FAILED", "Target verification did not satisfy the approved migration plan."
+	case "ACTIVATION_AMBIGUOUS", "ACTIVATION_RECEIPT_INVALID":
+		return "MIGRATION_ACTIVATION_UNCERTAIN", "Activation requires operator reconciliation before any retry or cancellation."
+	case "":
+		if state == "blocked" {
+			return "MIGRATION_BLOCKED", "The source inventory contains unsupported or unresolved items. No provider compatibility is implied."
+		}
+		if value.Phase == migration.PhaseFailedTerminal {
+			return "MIGRATION_FAILED", "The migration stopped and requires operator review. Sensitive runtime details are retained only in local audit evidence."
+		}
+		return "", ""
+	default:
+		return "MIGRATION_REQUIRES_ATTENTION", "The migration requires operator review. Sensitive runtime details are retained only in local audit evidence."
+	}
 }
 
 func migrationMutation(operationID string, value migration.Migration, scope migration.RuntimeScope, projection apiserver.MigrationProjection) apiserver.EdgeMutation[apiserver.MigrationProjection] {
@@ -380,8 +501,8 @@ func validateMigrationEndpoint(endpoint string) error {
 	return nil
 }
 
-func migrationState(phase migration.Phase) string {
-	switch phase {
+func migrationState(value migration.Migration) string {
+	switch value.Phase {
 	case migration.PhaseCreated, migration.PhaseDiscovering, migration.PhaseInventoried, migration.PhasePlanned, migration.PhaseReady:
 		return "pending"
 	case migration.PhaseBaseSync, migration.PhaseQuiescing, migration.PhaseFinalSync, migration.PhaseCutoverReady, migration.PhaseCutoverCommitting, migration.PhaseVerifying, migration.PhaseCommitted:
@@ -394,12 +515,18 @@ func migrationState(phase migration.Phase) string {
 		return "blocked"
 	case migration.PhaseRolledBack:
 		return "rolled_back"
+	case migration.PhaseCanceled:
+		return "canceled"
 	default:
 		return "failed"
 	}
 }
 
-func migrationProgress(phase migration.Phase) uint8 {
+func migrationProgress(value migration.Migration) uint8 {
+	phase := value.Phase
+	if phase == migration.PhaseCanceled && strings.HasPrefix(value.LastCheckpoint, "canceled:") {
+		phase = migration.Phase(strings.TrimPrefix(value.LastCheckpoint, "canceled:"))
+	}
 	switch phase {
 	case migration.PhaseCreated: return 0
 	case migration.PhaseDiscovering: return 5
