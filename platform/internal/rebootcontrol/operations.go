@@ -154,6 +154,29 @@ func (marker RecoveryMarker) Validate() error {
 	return nil
 }
 
+// ValidateBinding proves that a durable marker belongs to the exact stored
+// plan and fenced state that a recovery command will advance.
+func (marker RecoveryMarker) ValidateBinding(plan Plan, state State) error {
+	if marker.Validate() != nil || plan.Validate() != nil || state.Validate() != nil ||
+		marker.PlanID != plan.ID || marker.PlanID != state.PlanID || marker.PlanDigest != plan.Digest ||
+		marker.NodeID != plan.NodeID || marker.NodeID != state.NodeID || marker.Fence != state.Fence ||
+		marker.SourceBootID != plan.SourceBoot.BootID ||
+		marker.MaintenanceOccurrenceID != plan.Maintenance.OccurrenceID ||
+		marker.MaintenanceDigest != plan.Maintenance.OccurrenceDigest ||
+		marker.ExpectedBoot.RequireBootIDChange != plan.ExpectedBoot.RequireBootIDChange ||
+		marker.ExpectedBoot.KernelRelease != plan.ExpectedBoot.KernelRelease ||
+		marker.ExpectedBoot.KernelDigest != plan.ExpectedBoot.KernelDigest ||
+		marker.ExpectedBoot.BootSlot != plan.ExpectedBoot.BootSlot ||
+		!marker.ExpectedBoot.ReturnDeadline.Equal(plan.ExpectedBoot.ReturnDeadline) ||
+		marker.Rollback != plan.Rollback || marker.CheckpointReceiptDigest != state.CheckpointReceiptDigest ||
+		marker.Digest != state.MarkerDigest ||
+		marker.RebootOperationID != deterministicOperationID("reboot", plan.ID, state.Fence) ||
+		marker.ArmedAt.Before(plan.RequestedAt) || !marker.ArmedAt.Before(plan.ExpiresAt) {
+		return ErrIntegrity
+	}
+	return nil
+}
+
 type MarkerArmResult struct {
 	Committed      bool   `json:"committed"`
 	Partial        bool   `json:"partial"`
