@@ -5,12 +5,15 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/packagemaint"
+	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 )
 
 // packageMaintenancePlanResolver is a fixed, release-pinned native resolver.
@@ -45,6 +48,71 @@ func newPackageMaintenanceLinuxEdge(repository *packagemaint.SQLRepository, inve
 	edge := &packageMaintenanceLinuxEdge{repository: repository, inventory: inventory, resolver: resolver,
 		nodeID: nodeID, manager: manager, now: now}
 	edge.service = packagemaint.Service{Store: repository, Authorizer: authorizer, Executor: executor, Now: now}
+	return edge, nil
+}
+
+func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now func() time.Time) (*packageMaintenanceLinuxEdge, error) {
+	if ctx == nil || database == nil {
+		return nil, packagemaint.ErrInvalid
+	}
+	configured, err := packagemaint.LinuxRuntimeConfigured()
+	if err != nil {
+		return nil, err
+	}
+	if !configured {
+		return nil, nil
+	}
+	if now == nil {
+		now = time.Now
+	}
+	catalog, err := packagemaint.LoadDefaultLinuxRuntimeCatalog(now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("load signed package-maintenance catalog: %w", err)
+	}
+	manager, err := packagemaint.DetectLinuxManager()
+	if err != nil || manager != catalog.Manager {
+		return nil, fmt.Errorf("package-maintenance support tuple is unavailable: %w", packagemaint.ErrUnsupported)
+	}
+	repository, err := packagemaint.NewSQLRepository(database)
+	if err != nil {
+		return nil, err
+	}
+	if err = repository.Bootstrap(ctx); err != nil {
+		return nil, err
+	}
+	client, err := packagemaint.NewLocalLinuxClient()
+	if err != nil {
+		return nil, fmt.Errorf("connect package-maintenance executor: %w", err)
+	}
+	material, err := secrets.NewLocalMaterialClient()
+	if err != nil {
+		return nil, fmt.Errorf("connect package-maintenance authorization broker: %w", err)
+	}
+	authorizer, err := packagemaint.NewProtectedLinuxAuthorizer(material, catalog, now)
+	if err != nil {
+		return nil, err
+	}
+	edge, err := newPackageMaintenanceLinuxEdge(repository, client, client, authorizer, client,
+		catalog.NodeID, catalog.Manager, now)
+	if err != nil {
+		return nil, err
+	}
+	operation, err := repository.LatestOperation(ctx, catalog.NodeID, catalog.Manager)
+	if errors.Is(err, packagemaint.ErrNotFound) {
+		return edge, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if operation.State != packagemaint.OperationAuthorized && operation.State != packagemaint.OperationRunning &&
+		operation.State != packagemaint.OperationVerifying {
+		return edge, nil
+	}
+	reconciled, reconcileErr := edge.service.ReconcileRestart(ctx, operation.ID)
+	if reconcileErr != nil && reconciled.State != packagemaint.OperationFailed &&
+		reconciled.State != packagemaint.OperationRecoveryRequired && reconciled.State != packagemaint.OperationRecovered {
+		return nil, fmt.Errorf("reconcile package-maintenance operation %s: %w", operation.ID, reconcileErr)
+	}
 	return edge, nil
 }
 

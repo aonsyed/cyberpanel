@@ -21,6 +21,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/siteops"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/webactivation"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
+	"github.com/aonsyed/cyberpanel/platform/internal/packagemaint"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
 	"github.com/aonsyed/cyberpanel/platform/internal/dns"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
@@ -125,8 +126,22 @@ func main() {
 	backupPolicy,err:=backup.NewLinuxBackupPeerPolicy(controlUID);if err!=nil{log.Fatalf("initialize backup peer policy: %v",err)}
 	backupListener,err:=backup.ListenLinuxBackupBroker(controlGID);if err!=nil{log.Fatalf("listen on backup broker socket: %v",err)};defer backupListener.Close()
 	backupServer:=&backup.LinuxBackupBrokerServer{Authorizer:backupPolicy,Executor:backupHost,MaximumConcurrent:16}
+	var packageMaintenanceListener *net.UnixListener
+	var packageMaintenanceServer *packagemaint.LinuxBrokerServer
+	packageMaintenanceConfigured,err:=packagemaint.LinuxRuntimeConfigured();if err!=nil{log.Fatalf("inspect package-maintenance deployment: %v",err)}
+	if packageMaintenanceConfigured{
+		packageCatalog,loadErr:=packagemaint.LoadDefaultLinuxRuntimeCatalog(time.Now().UTC());if loadErr!=nil{log.Fatalf("load signed package-maintenance catalog: %v",loadErr)}
+		packageRuntime,runtimeErr:=packagemaint.NewLinuxSignedRuntime(packageCatalog,nil,time.Now);if runtimeErr!=nil{log.Fatalf("initialize package-maintenance runtime: %v",runtimeErr)}
+		packageJournal,journalErr:=packagemaint.NewLinuxJournal(packagemaint.DefaultLinuxJournalRoot);if journalErr!=nil{log.Fatalf("open package-maintenance effect journal: %v",journalErr)}
+		packageBroker,brokerErr:=packagemaint.NewLinuxBroker(packageRuntime,packageJournal,time.Now);if brokerErr!=nil{log.Fatalf("initialize package-maintenance broker: %v",brokerErr)}
+		packagePolicy,policyErr:=secrets.NewLinuxMaterialPeerAuthorizer(controlUID);if policyErr!=nil{log.Fatalf("initialize package-maintenance peer policy: %v",policyErr)}
+		packageMaintenanceListener,err=packagemaint.ListenLinuxBroker(controlGID);if err!=nil{log.Fatalf("listen on package-maintenance socket: %v",err)};defer packageMaintenanceListener.Close()
+		packageMaintenanceServer=&packagemaint.LinuxBrokerServer{Authorizer:packagePolicy,Broker:packageBroker,MaximumConcurrent:8}
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM); defer cancel()
-	serveErrors := make(chan serveResult, 12)
+	serverCount:=12
+	if packageMaintenanceServer!=nil{serverCount++}
+	serveErrors := make(chan serveResult, serverCount)
 	go func() { serveErrors <- serveResult{name: "siteops", err: server.Serve(listener)} }()
 	go func() { serveErrors <- serveResult{name: "web-engine activation", err: activationServer.Serve(activationListener)} }()
 	go func() { serveErrors <- serveResult{name: "web-engine management", err: managementServer.Serve(managementListener)} }()
@@ -139,6 +154,7 @@ func main() {
 	go func() { serveErrors <- serveResult{name: "certificates", err: certificateServer.Serve(certificateListener)} }()
 	go func() { serveErrors <- serveResult{name: "applications", err: applicationServer.Serve(applicationListener)} }()
 	go func() { serveErrors <- serveResult{name: "backup", err: backupServer.Serve(backupListener)} }()
+	if packageMaintenanceServer!=nil{go func(){serveErrors<-serveResult{name:"package maintenance",err:packageMaintenanceServer.Serve(packageMaintenanceListener)}}()}
 	go collectTombstones(ctx, executor)
 	select {
 	case <-ctx.Done():
@@ -154,7 +170,8 @@ func main() {
 		_ = certificateListener.Close()
 		_ = applicationListener.Close()
 		_ = backupListener.Close()
-		for count := 0; count < 12; count++ { result := <-serveErrors; if result.err != nil && !errors.Is(result.err, net.ErrClosed) { log.Printf("%s server stopped: %v", result.name, result.err) } }
+		if packageMaintenanceListener!=nil{_ = packageMaintenanceListener.Close()}
+		for count := 0; count < serverCount; count++ { result := <-serveErrors; if result.err != nil && !errors.Is(result.err, net.ErrClosed) { log.Printf("%s server stopped: %v", result.name, result.err) } }
 	case result := <-serveErrors:
 		_ = listener.Close()
 		_ = activationListener.Close()
@@ -168,6 +185,7 @@ func main() {
 		_ = certificateListener.Close()
 		_ = applicationListener.Close()
 		_ = backupListener.Close()
+		if packageMaintenanceListener!=nil{_ = packageMaintenanceListener.Close()}
 		if result.err != nil && !errors.Is(result.err, net.ErrClosed) { log.Fatalf("%s server failed: %v", result.name, result.err) }
 		log.Fatalf("%s server stopped unexpectedly", result.name)
 	}

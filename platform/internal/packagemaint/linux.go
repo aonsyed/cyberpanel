@@ -23,6 +23,7 @@ const (
 	dpkgQueryPath = "/usr/bin/dpkg-query"
 	dnfPath       = "/usr/bin/dnf"
 	rpmPath       = "/usr/bin/rpm"
+	systemctlPath = "/usr/bin/systemctl"
 )
 
 type CommandResult struct {
@@ -826,10 +827,12 @@ func allowedInvocation(executable string, argv []string) bool {
 		}
 		return validAPTMutation(argv)
 	case dnfPath:
-		if equalStrings(argv, []string{"-q", "--cacheonly", "repolist", "--enabled"}) || equalStrings(argv, []string{"-q", "--cacheonly", "check-update"}) || equalStrings(argv, []string{"-q", "--cacheonly", "updateinfo", "list", "--security", "--available"}) || equalStrings(argv, []string{"-q", "--cacheonly", "versionlock", "list"}) {
+		if equalStrings(argv, []string{"-q", "--cacheonly", "repolist", "--enabled"}) || equalStrings(argv, []string{"-q", "--cacheonly", "repoinfo", "--enabled"}) || equalStrings(argv, []string{"-q", "--cacheonly", "check-update"}) || equalStrings(argv, []string{"-q", "--cacheonly", "updateinfo", "list", "--security", "--available"}) || equalStrings(argv, []string{"-q", "--cacheonly", "versionlock", "list"}) {
 			return true
 		}
 		return validDNFMutation(argv)
+	case systemctlPath:
+		return validLinuxSystemdProbeInvocation(argv)
 	default:
 		return false
 	}
