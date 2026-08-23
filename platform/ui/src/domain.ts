@@ -60,6 +60,16 @@ export interface PageDefinition {
   emptyBody: string;
 }
 
+export type MaintenanceScopeKind = "tenant" | "node" | "resource";
+export type MaintenanceScheduleKind = "absolute" | "weekly";
+export type MaintenanceOperationClass = "routine" | "disruptive" | "upgrade" | "backup" | "restore" | "certificate" | "security" | "recovery";
+export interface MaintenanceWindowScope { kind:MaintenanceScopeKind;node_id?:string;resource_kind?:string;resource_id?:string }
+export interface MaintenanceWindowSchedule { kind:MaintenanceScheduleKind;starts_at?:string;ends_at?:string;weekdays?:Array<1|2|3|4|5|6|7>;local_start_minute?:number;duration_seconds?:number;effective_from?:string;effective_until?:string;fold?:"earlier"|"later"|"reject";gap?:"skip"|"next_valid"|"reject" }
+export interface MaintenanceWindowSpec { scope:MaintenanceWindowScope;time_zone:string;schedule:MaintenanceWindowSchedule;maximum_duration_seconds:number;effect:"allow"|"deny";operation_classes:MaintenanceOperationClass[];drain:{mode:"none"|"graceful"|"required";before_start_seconds?:number;before_end_seconds?:number};missed:"skip"|"defer"|"deny";emergency_override:"forbidden"|"high_assurance" }
+export interface MaintenanceOccurrence { id:string;digest:string;window_id:string;window_generation:number;scope:MaintenanceWindowScope;starts_at:string;ends_at:string;effect:"allow"|"deny";operation_classes:MaintenanceOperationClass[];phase:"planned"|"draining"|"active"|"ending"|"completed"|"missed";materialized:boolean }
+export interface MaintenanceConflict { kind:"overlap"|"blackout";other_window_id:string;other_occurrence_id:string;blocking_window_id?:string;starts_at:string;ends_at:string;operation_classes:MaintenanceOperationClass[] }
+export interface MaintenanceWindowResource extends MaintenanceWindowSpec { id:string;type:"active"|"canceled";tenant_id:string;approval:{configuration_assurance:"phishing_resistant";execution_approval:"policy"|"independent";emergency_override:"forbidden"|"high_assurance"};state:"active"|"canceled";occurrences:MaintenanceOccurrence[];next_occurrence_at?:string;projection_from:string;projection_through:string;projection_truncated:boolean;conflicts:MaintenanceConflict[];conflict_state:"clear"|"overlap"|"blackout";conflict_truncated:boolean;generation:number;created_at:string;updated_at:string }
+
 const lifecycleActions = (prefix: string): ActionDefinition[] => [
   { id: "suspend", label: "Suspend", operation: `${prefix}.suspend`, mutating: true, tone: "warning", confirmation: "New application traffic and scheduled work will stop. Stored data remains intact." },
   { id: "resume", label: "Resume", operation: `${prefix}.resume`, mutating: true, tone: "healthy" },
@@ -249,6 +259,12 @@ export const pages: Record<string, PageDefinition> = {
     rowActions:[{id:"plan",label:"Plan security updates",operation:"package_maintenance.plan",mutating:true,assurance:"mfa",resourceTypes:["ready_to_plan"],fields:[{key:"valid_for_seconds",label:"Plan validity (seconds)",type:"number",required:true,defaultValue:1800,helper:"The fixed native resolver selects only signed pending security updates and their exact dependency closure."}]},{id:"apply",label:"Apply guarded plan",operation:"package_maintenance.apply",mutating:true,assurance:"phishing_resistant",tone:"warning",resourceTypes:["planned"],confirmation:"Apply the exact signed, generation-bound transaction. A started effect is never blindly replayed; ambiguous results retain their recovery evidence and require reconciliation."}],
     globalActions:[{id:"refresh",label:"Refresh signed inventory",operation:"package_maintenance.refresh",mutating:true,assurance:"mfa"}],emptyTitle:"No package inventory",emptyBody:"Refresh the fixed local package manager inventory before planning security maintenance."
   },
+  maintenanceWindows: {
+    id:"maintenanceWindows",title:"Maintenance windows",description:"Scoped one-shot and weekly windows with explicit timezone/DST policy, immutable occurrence IDs, approval requirements, and blackout or overlap evidence.",resourceKind:"maintenance_window.window",scope:"installation",listOperation:"maintenance_window.list",
+    createAction:{id:"create",label:"Create window",operation:"maintenance_window.create",mutating:true,assurance:"phishing_resistant",fields:[{key:"spec_json",label:"Window specification JSON",type:"textarea",required:true,helper:"Provide one complete typed WindowSpec. Weekly schedules require an IANA timezone plus explicit fold and gap policy; shell commands and general cron expressions are not accepted."}]},
+    columns:[{key:"scope.kind",label:"Scope"},{key:"schedule.kind",label:"Schedule"},{key:"time_zone",label:"Timezone"},{key:"effect",label:"Effect",format:"status"},{key:"operation_classes",label:"Operations"},{key:"next_occurrence_at",label:"Next occurrence",format:"date"},{key:"approval.execution_approval",label:"Approval"},{key:"conflict_state",label:"Conflicts",format:"status"},{key:"state",label:"State",format:"status"},{key:"updated_at",label:"Updated",format:"date"}],
+    rowActions:[{id:"update",label:"Replace policy",operation:"maintenance_window.update",mutating:true,assurance:"phishing_resistant",fields:[{key:"spec_json",label:"Complete replacement specification",type:"textarea",required:true,helper:"Changing policy advances the generation, so projected occurrence IDs change while materialized historical IDs remain immutable."}]},{id:"cancel",label:"Cancel window",operation:"maintenance_window.cancel",mutating:true,assurance:"phishing_resistant",tone:"critical",resourceTypes:["active"],confirmation:"Future admission through this window stops immediately. Historical materialized occurrences remain addressable."}],emptyTitle:"No maintenance windows",emptyBody:"Create a bounded host window before admitting product updates, package maintenance, or controlled reboots."
+  },
   observability: {
     id:"observability",title:"Metrics & usage",description:"Materialized tenant usage and limits backed by bounded historical metric retention; unavailable evidence remains visibly unknown.",resourceKind:"observability.usage",listOperation:"observability.usage.list",
     columns:[{key:"dimension",label:"Dimension"},{key:"used",label:"Used",format:"number"},{key:"limit",label:"Limit",format:"number"},{key:"unit",label:"Unit"},{key:"limit_state",label:"Limit state",format:"status"},{key:"missing_reason",label:"Evidence gap"},{key:"updated_at",label:"Observed",format:"date"}],
@@ -350,6 +366,7 @@ export const navigation: NavigationGroup[] = [
   ]},
   {id:"system",label:"System",items:[
     {id:"users",label:"Users & tenants",route:"/users",icon:"UsersThree",pageId:"users",keywords:["reseller","role","quota"]},
+    {id:"maintenance-windows",label:"Maintenance windows",route:"/maintenance-windows",icon:"CalendarCheck",pageId:"maintenanceWindows",keywords:["window","timezone","dst","blackout","approval"]},
     {id:"package-maintenance",label:"Package maintenance",route:"/package-maintenance",icon:"Package",pageId:"packageMaintenance",keywords:["apt","dnf","security updates","repositories","reboot","recovery"]},
     {id:"product-updates",label:"Product updates",route:"/product-updates",icon:"ArrowCircleDown",pageId:"productUpdates",keywords:["version","channel","update","rollback","recovery"]},
     {id:"engines",label:"Engines & PHP",route:"/engines",icon:"SlidersHorizontal",pageId:"engines",keywords:["ols","litespeed enterprise","license"]},

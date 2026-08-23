@@ -44,6 +44,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
 	"github.com/aonsyed/cyberpanel/platform/internal/maildelivery"
+	"github.com/aonsyed/cyberpanel/platform/internal/maintenance"
 	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 	localmigration "github.com/aonsyed/cyberpanel/platform/internal/migration/localruntime"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
@@ -376,6 +377,10 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	localHAProviders,err:=newLocalMariaDBHAProviders(ctx,&repositories.HA,databaseExecutor,databaseExecutor,catalog,activationClient,configuration.Engine.Listeners,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize local MariaDB HA providers: %w",err)}
 	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,localHAProviders,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}
 	federationConsoleEdge,err:=newFederationEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize federation console edge: %w",err)}
+	maintenanceRepository,err:=maintenance.NewRepository(repositories.ControlDB);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("open maintenance-window repository: %w",err)}
+	if err=maintenanceRepository.Bootstrap(ctx);err!=nil{return apiserver.DomainServices{},fmt.Errorf("bootstrap maintenance-window repository: %w",err)}
+	maintenanceEvaluator,err:=maintenance.NewEvaluator(maintenanceRepository,maintenance.EvaluatorConfig{});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize maintenance-window evaluator: %w",err)}
+	maintenanceWindows,err:=maintenance.NewWindowService(maintenanceRepository,maintenanceEvaluator,maintenance.WindowServiceConfig{Now:runtimeClock{}.Now});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize maintenance-window service: %w",err)}
 	productUpdateEdge,err:=assembleProductUpdateEdge(ctx,repositories.ControlDB,auditService,runtimeClock{});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize product-update catalog: %w",err)}
 	packageMaintenanceEdge,err:=assemblePackageMaintenanceEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize package-maintenance runtime: %w",err)}
 	if err=migrationRuntime.StartChunkMaintenance(ctx,migrationChunkMaintenanceAudit{service:auditService});err!=nil{_=migrationRuntime.Close();return apiserver.DomainServices{},fmt.Errorf("start migration chunk maintenance: %w",err)}
@@ -397,6 +402,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		OperationsEdge:   operationsConsoleEdge,
 		ProductUpdates:   productUpdateEdge,
 		PackageMaintenance: packageMaintenanceEdge,
+		MaintenanceWindows: maintenanceWindows,
 		MailControl:      mailCoordinator,
 		MailQueue:        mailClient,
 		MailEdge:         mailConsoleEdge,
