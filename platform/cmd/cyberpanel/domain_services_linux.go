@@ -3,12 +3,24 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/textproto"
+	"os"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
@@ -33,6 +45,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/maildelivery"
 	localmigration "github.com/aonsyed/cyberpanel/platform/internal/migration/localruntime"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
+	securewebmail "github.com/aonsyed/cyberpanel/platform/internal/webmail"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/accesspolicy"
 	webcatalog "github.com/aonsyed/cyberpanel/platform/internal/webengine/catalog"
@@ -83,7 +96,20 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if telemetryErr:=mailConsoleEdge.enableTelemetry(ctx,repositories.Operations,operationsCoordinator,auditService);telemetryErr!=nil{mailConsoleEdge.setTelemetryUnavailable("telemetry_initialization_failed");mailTelemetryReady=false}
 	webmailKey,err:=mail.LoadMailSessionCredential(mail.MailSessionCredentialPath);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("load webmail session authority: %w",err)};defer func(){for index:=range webmailKey{webmailKey[index]=0}}()
 	webmailService,mailSessions,err:=mail.NewLocalWebmailService(webmailKey,"cyberpanel-webmail",mailHostname,repositories.Webmail,repositories.MailControl);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize webmail runtime: %w",err)}
-	webmailConsoleEdge,err:=newWebmailEdge(webmailService,repositories.Webmail);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize webmail console edge: %w",err)}
+	legacyWebmailEdge,err:=newWebmailEdge(webmailService,repositories.Webmail);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize webmail console edge: %w",err)}
+	if auditService==nil{return apiserver.DomainServices{},fmt.Errorf("initialize webmail runtime: audit authority is unavailable")}
+	webmailRepository,err:=securewebmail.NewSQLiteRepository(repositories.ControlDB);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("open secure webmail repository: %w",err)}
+	webmailBackend,err:=securewebmail.NewDovecotBackend(securewebmail.Endpoint{TLSAddress:"127.0.0.1:993",TLSServerName:mailHostname,DialTimeout:5*time.Second,CommandTimeout:20*time.Second});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize Dovecot OAuth backend: %w",err)}
+	secureWebmailService,err:=securewebmail.NewService(webmailRepository,secureWebmailDirectory{store:repositories.MailControl},secureWebmailAudit{service:auditService},webmailBackend,"cyberpanel-webmail",90*time.Second);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize secure webmail service: %w",err)}
+	const webmailBlobRoot="/var/lib/cyberpanel/webmail/blobs"
+	if err=os.MkdirAll(webmailBlobRoot,0700);err!=nil{return apiserver.DomainServices{},fmt.Errorf("create webmail blob store: %w",err)}
+	webmailBlobs,err:=securewebmail.NewLocalBlobStore(webmailBlobRoot);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("open webmail blob store: %w",err)}
+	webmailImages,err:=securewebmail.NewHTTPRemoteImageProxy(net.DefaultResolver,&net.Dialer{Timeout:5*time.Second},64<<20);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize webmail image proxy: %w",err)}
+	if err=secureWebmailService.ConfigureContent(securewebmail.ContentDependencies{Blobs:webmailBlobs,Scanner:localClamScanner{socket:"/run/clamd/cyberpanel.sock"},Images:webmailImages,Submitter:localWebmailSubmitter{address:"127.0.0.1:25"},Spam:failClosedSpamReporter{}});err!=nil{return apiserver.DomainServices{},fmt.Errorf("configure secure webmail content: %w",err)}
+	if err=secureWebmailService.Bootstrap(ctx);err!=nil{return apiserver.DomainServices{},fmt.Errorf("bootstrap secure webmail: %w",err)}
+	if err=bootstrapWebmailDovecotTokens(ctx,repositories.ControlDB);err!=nil{return apiserver.DomainServices{},fmt.Errorf("bootstrap Dovecot token bridge: %w",err)}
+	if err=serveWebmailTokenInfo(ctx,repositories.ControlDB,repositories.MailControl);err!=nil{return apiserver.DomainServices{},fmt.Errorf("start Dovecot token introspection: %w",err)}
+	webmailConsoleEdge:=integratedWebmailEdge{secure:secureWebmailService,legacy:legacyWebmailEdge}
 	repositories.MailDeliveryPolicy.ResolveLimit=mail.ControlDeliveryLimitResolver(repositories.MailControl,mail.DeliveryLimit{HourlyMessages:500,MonthlyMessages:100000,HourlyRecipients:500,MonthlyRecipients:100000,MaxMessageBytes:16<<20,MaxRecipientsPerMessage:1})
 	unsubscribeKey,err:=mail.LoadCampaignUnsubscribeCredential(mail.CampaignUnsubscribeCredentialPath);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("load campaign unsubscribe authority: %w",err)};defer func(){for index:=range unsubscribeKey{unsubscribeKey[index]=0}}()
 	campaignSender,err:=mail.NewLocalCampaignSender(repositories.Marketing,repositories.MailControl,repositories.MailDeliveryPolicy,mailHostname,unsubscribeKey,"https://"+panelRegistrableDomain+"/unsubscribe");if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize campaign delivery runtime: %w",err)}
@@ -451,3 +477,72 @@ func (sink cyberMailAudit) RecordMailDelivery(ctx context.Context, record mailde
 type cyberpanelDKIMRuntime struct{client *mail.MailDaemonClient}
 
 func(runtime cyberpanelDKIMRuntime)ApplyDKIMGeneration(ctx context.Context,effect mail.EffectRequest,generation mail.ConfigGeneration)(mail.DKIMRuntimeReceipt,error){receipt:=mail.DKIMRuntimeReceipt{};if runtime.client==nil{return receipt,mail.ErrInvalidCommand};applied,activation,err:=runtime.client.ApplyGeneration(ctx,effect,generation);receipt.Effect=applied;receipt.GenerationDigest=activation.GenerationDigest;receipt.RolledBack=activation.RolledBack;if err!=nil{return receipt,err};reload,reloadErr:=runtime.client.ControlService(ctx,mail.ServiceOpenDKIM,mail.ServiceReload);receipt.OpenDKIMReloadDigest=reload.EvidenceDigest;probe,probeErr:=runtime.client.ControlService(ctx,mail.ServiceOpenDKIM,mail.ServiceProbe);receipt.OpenDKIMProbeDigest=probe.EvidenceDigest;receipt.OpenDKIMActive=probe.Active;if reloadErr!=nil{return receipt,reloadErr};if probeErr!=nil{return receipt,probeErr};if !probe.Active{return receipt,mail.ErrInvalidReceipt};return receipt,nil}
+
+type integratedWebmailEdge struct{secure *securewebmail.Service;legacy apiserver.WebmailEdgeService}
+func(edge integratedWebmailEdge)SecureWebmail()*securewebmail.Service{return edge.secure}
+func(edge integratedWebmailEdge)ListContacts(ctx context.Context,call apiserver.EdgeCall,session mail.MailSession,page apiserver.EdgePagePayload)(apiserver.EdgePage[mail.Contact],error){if edge.legacy==nil{return apiserver.EdgePage[mail.Contact]{},mail.ErrUnauthorized};return edge.legacy.ListContacts(ctx,call,session,page)}
+func(edge integratedWebmailEdge)ListSieveRules(ctx context.Context,call apiserver.EdgeCall,session mail.MailSession,page apiserver.EdgePagePayload)(apiserver.EdgePage[mail.SieveRule],error){if edge.legacy==nil{return apiserver.EdgePage[mail.SieveRule]{},mail.ErrUnauthorized};return edge.legacy.ListSieveRules(ctx,call,session,page)}
+
+type secureWebmailDirectory struct{store mail.SQLControlRepository}
+
+func(directory secureWebmailDirectory)ListMailAccounts(ctx context.Context,_ securewebmail.Principal,tenant string)([]securewebmail.AuthorizedMailAccount,error){
+	mailboxes,next,err:=directory.store.List(ctx,tenant,mail.ResourceMailbox,500,"");if err!=nil{return nil,err};if next!=""{return nil,securewebmail.ErrLimit}
+	domains,next,err:=directory.store.List(ctx,tenant,mail.ResourceDomain,500,"");if err!=nil{return nil,err};if next!=""{return nil,securewebmail.ErrLimit}
+	domainNames:=make(map[mail.DomainID]string,len(domains));for _,resource:=range domains{if resource.State!=mail.StateActive{continue};var domain mail.Domain;if json.Unmarshal(resource.Spec,&domain)!=nil||domain.ID==""||domain.Tenant!=tenant||domain.Name==""{return nil,securewebmail.ErrProtocol};domainNames[domain.ID]=domain.Name}
+	accounts:=make([]securewebmail.AuthorizedMailAccount,0,len(mailboxes));for _,resource:=range mailboxes{if resource.State!=mail.StateActive{continue};var mailbox mail.Mailbox;if json.Unmarshal(resource.Spec,&mailbox)!=nil||string(mailbox.ID)!=resource.ID||!mailbox.Enabled||resource.Generation==0{continue};domain:=domainNames[mailbox.Domain];if domain==""{continue};address:=strings.ToLower(mailbox.Local+"@"+domain);accounts=append(accounts,securewebmail.AuthorizedMailAccount{TenantID:tenant,MailboxID:resource.ID,DisplayLabel:address,AddressLabel:address,AuthorizationEpoch:resource.Generation,Enabled:true})}
+	return accounts,nil
+}
+
+func(directory secureWebmailDirectory)AuthorizeMailbox(ctx context.Context,_ securewebmail.Principal,tenant,mailboxID string)(securewebmail.AuthorizedMailAccount,error){
+	resource,found,err:=directory.store.Load(ctx,tenant,mail.ResourceMailbox,mailboxID);if err!=nil{return securewebmail.AuthorizedMailAccount{},err};if !found||resource.State!=mail.StateActive||resource.Generation==0{return securewebmail.AuthorizedMailAccount{},securewebmail.ErrNotFound}
+	var mailbox mail.Mailbox;if json.Unmarshal(resource.Spec,&mailbox)!=nil||string(mailbox.ID)!=mailboxID||!mailbox.Enabled{return securewebmail.AuthorizedMailAccount{},securewebmail.ErrNotFound}
+	domainResource,found,err:=directory.store.Load(ctx,tenant,mail.ResourceDomain,string(mailbox.Domain));if err!=nil{return securewebmail.AuthorizedMailAccount{},err};if !found||domainResource.State!=mail.StateActive{return securewebmail.AuthorizedMailAccount{},securewebmail.ErrNotFound}
+	var domain mail.Domain;if json.Unmarshal(domainResource.Spec,&domain)!=nil||domain.ID!=mailbox.Domain||domain.Tenant!=tenant||domain.Name==""{return securewebmail.AuthorizedMailAccount{},securewebmail.ErrProtocol}
+	address:=strings.ToLower(mailbox.Local+"@"+domain.Name);return securewebmail.AuthorizedMailAccount{TenantID:tenant,MailboxID:mailboxID,DisplayLabel:address,AddressLabel:address,AuthorizationEpoch:resource.Generation,Enabled:true},nil
+}
+
+type secureWebmailAudit struct{service *audit.Service}
+
+func(sink secureWebmailAudit)RecordWebmailSecurity(ctx context.Context,event securewebmail.AuditEvent)error{
+	if sink.service==nil{return securewebmail.ErrUnavailable};sum:=sha256.Sum256([]byte(event.RequestID+"\x00"+event.Operation+"\x00"+event.MailboxDigest+"\x00"+event.OccurredAt.UTC().Format(time.RFC3339Nano)));request:=sha256.Sum256([]byte(event.RequestID));outcome:=audit.OutcomeAllowed;switch event.Outcome{case"denied":outcome=audit.OutcomeDenied;case"failed":outcome=audit.OutcomeFailed}
+	_,err:=sink.service.RecordDecision(ctx,audit.Event{ID:"webmail-"+hex.EncodeToString(sum[:24]),Class:audit.ClassSecurity,Action:"webmail."+event.Operation,Actor:audit.Actor{PrincipalID:event.UserDigest,SessionID:event.SessionDigest,TenantID:event.TenantID},Target:audit.Target{Kind:"mailbox",ID:event.MailboxDigest,TenantID:event.TenantID},Outcome:outcome,RequestDigest:hex.EncodeToString(request[:]),OccurredAt:event.OccurredAt},nil);return err
+}
+
+type localWebmailSubmitter struct{address string}
+var postfixQueuePattern=regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+
+func(submitter localWebmailSubmitter)Submit(ctx context.Context,envelope securewebmail.SubmissionEnvelope,source io.Reader,maximum uint64)(string,error){
+	if ctx==nil||source==nil||submitter.address!="127.0.0.1:25"||maximum==0||maximum>securewebmail.MaximumComposeBytes{return "",securewebmail.ErrInvalid}
+	connection,err:=(&net.Dialer{Timeout:5*time.Second}).DialContext(ctx,"tcp",submitter.address);if err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)};defer connection.Close();stop:=context.AfterFunc(ctx,func(){_=connection.SetDeadline(time.Now())});defer stop();_=connection.SetDeadline(time.Now().Add(30*time.Second));protocol:=textproto.NewConn(connection)
+	if _,_,err=protocol.ReadResponse(220);err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)};if err=webmailSMTPCommand(protocol,250,"EHLO localhost");err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)};if err=webmailSMTPCommand(protocol,250,"MAIL FROM:<"+envelope.From+">");err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)}
+	for _,recipient:=range envelope.Recipients{if err=webmailSMTPCommand(protocol,250,"RCPT TO:<"+recipient+">");err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)}};if err=webmailSMTPCommand(protocol,354,"DATA");err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)}
+	writer:=protocol.DotWriter();written,copyErr:=io.Copy(writer,io.LimitReader(source,int64(maximum)+1));if copyErr!=nil||uint64(written)>maximum{if uint64(written)>maximum{return "",securewebmail.ErrLimit};return "",errors.Join(securewebmail.ErrUnavailable,copyErr)};if err=writer.Close();err!=nil{return "",errors.Join(securewebmail.ErrPartial,err)}
+	_,reply,err:=protocol.ReadResponse(250);if err!=nil{var protocolError *textproto.Error;if errors.As(err,&protocolError){return "",errors.Join(securewebmail.ErrUnavailable,err)};return "",errors.Join(securewebmail.ErrPartial,err)};_,_=protocol.Cmd("QUIT")
+	marker:="queued as ";index:=strings.LastIndex(strings.ToLower(reply),marker);if index<0{return "",errors.Join(securewebmail.ErrPartial,securewebmail.ErrProtocol)};fields:=strings.Fields(reply[index+len(marker):]);if len(fields)==0{return "",errors.Join(securewebmail.ErrPartial,securewebmail.ErrProtocol)};queue:=strings.Trim(fields[0],".[]()");if !postfixQueuePattern.MatchString(queue){return "",errors.Join(securewebmail.ErrPartial,securewebmail.ErrProtocol)};return queue,nil
+}
+
+func webmailSMTPCommand(connection *textproto.Conn,code int,command string)error{id,err:=connection.Cmd("%s",command);if err!=nil{return err};connection.StartResponse(id);defer connection.EndResponse(id);_,_,err=connection.ReadResponse(code);return err}
+
+type localClamScanner struct{socket string}
+
+func(scanner localClamScanner)Scan(ctx context.Context,source io.Reader,maximum uint64)(string,error){
+	if ctx==nil||source==nil||scanner.socket!="/run/clamd/cyberpanel.sock"||maximum==0||maximum>securewebmail.MaximumAttachmentBytes{return "",securewebmail.ErrInvalid};connection,err:=(&net.Dialer{Timeout:5*time.Second}).DialContext(ctx,"unix",scanner.socket);if err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)};defer connection.Close();stop:=context.AfterFunc(ctx,func(){_=connection.SetDeadline(time.Now())});defer stop();_=connection.SetDeadline(time.Now().Add(60*time.Second));if _,err=connection.Write([]byte("zINSTREAM\x00"));err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)}
+	buffer:=make([]byte,32<<10);limited:=io.LimitReader(source,int64(maximum)+1);var total uint64;for{read,readErr:=limited.Read(buffer);if read>0{total+=uint64(read);if total>maximum{return "",securewebmail.ErrLimit};var length [4]byte;binary.BigEndian.PutUint32(length[:],uint32(read));if _,err=connection.Write(length[:]);err==nil{_,err=connection.Write(buffer[:read])};if err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)}};if errors.Is(readErr,io.EOF){break};if readErr!=nil{return "",readErr}}
+	if _,err=connection.Write([]byte{0,0,0,0});err!=nil{return "",errors.Join(securewebmail.ErrUnavailable,err)};reply,err:=bufio.NewReaderSize(connection,4096).ReadString(0);if err!=nil||len(reply)>4096{return "",errors.Join(securewebmail.ErrUnavailable,err)};reply=strings.TrimSuffix(reply,"\x00");if strings.HasSuffix(reply,": OK"){return "clean",nil};if strings.HasSuffix(reply," FOUND"){return "infected",nil};return "",securewebmail.ErrUnavailable
+}
+
+type failClosedSpamReporter struct{}
+func(failClosedSpamReporter)Report(context.Context,securewebmail.BlobOwner,[]securewebmail.MessageIdentity,bool)error{return securewebmail.ErrUnavailable}
+
+type webmailTokenInfo struct{database *sql.DB;directory secureWebmailDirectory}
+
+func bootstrapWebmailDovecotTokens(ctx context.Context,database *sql.DB)error{if ctx==nil||database==nil{return securewebmail.ErrInvalid};_,err:=database.ExecContext(ctx,`CREATE TABLE IF NOT EXISTS webmail_dovecot_tokens_v1(token_digest TEXT PRIMARY KEY CHECK(length(token_digest)=64),tenant_id TEXT NOT NULL,mailbox_id TEXT NOT NULL,authz_epoch INTEGER NOT NULL,expires_at INTEGER NOT NULL,consumed_at INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS webmail_dovecot_grant_consumed_v1 AFTER UPDATE OF consumed_at ON webmail_grants_v1 WHEN NEW.consumed_at IS NOT NULL AND OLD.consumed_at IS NULL BEGIN INSERT OR REPLACE INTO webmail_dovecot_tokens_v1(token_digest,tenant_id,mailbox_id,authz_epoch,expires_at,consumed_at) VALUES(NEW.token_digest,NEW.tenant_id,NEW.mailbox_id,NEW.authz_epoch,NEW.expires_at,NEW.consumed_at); END;`);if err!=nil{return err};_,err=database.ExecContext(ctx,`DELETE FROM webmail_dovecot_tokens_v1 WHERE expires_at<=?`,time.Now().UTC().UnixNano());return err}
+
+func serveWebmailTokenInfo(ctx context.Context,database *sql.DB,store mail.SQLControlRepository)error{
+	if ctx==nil||database==nil||store.DB==nil{return securewebmail.ErrInvalid};listener,err:=net.Listen("tcp","127.0.0.1:18090");if err!=nil{return err};server:=&http.Server{Handler:webmailTokenInfo{database:database,directory:secureWebmailDirectory{store:store}},ReadHeaderTimeout:3*time.Second,ReadTimeout:5*time.Second,WriteTimeout:5*time.Second,IdleTimeout:5*time.Second,MaxHeaderBytes:8<<10};go func(){ticker:=time.NewTicker(time.Minute);defer ticker.Stop();for{select{case<-ctx.Done():shutdown,cancel:=context.WithTimeout(context.Background(),3*time.Second);_=server.Shutdown(shutdown);cancel();return;case now:=<-ticker.C:_,_=database.ExecContext(ctx,`DELETE FROM webmail_dovecot_tokens_v1 WHERE expires_at<=?`,now.UTC().UnixNano())}}}();go func(){_=server.Serve(listener)}();return nil
+}
+
+func(handler webmailTokenInfo)ServeHTTP(writer http.ResponseWriter,request *http.Request){
+	writer.Header().Set("Cache-Control","no-store");writer.Header().Set("Content-Type","application/json");active:=func(){writer.WriteHeader(http.StatusUnauthorized);_,_=writer.Write([]byte(`{"active":false}`))};if request.Method!=http.MethodGet&&request.Method!=http.MethodPost{active();return};token:="";authorization:=strings.TrimSpace(request.Header.Get("Authorization"));if strings.HasPrefix(authorization,"Bearer "){token=strings.TrimSpace(strings.TrimPrefix(authorization,"Bearer "))};if token==""{token=request.URL.Query().Get("access_token")};if token==""&&request.Method==http.MethodPost{request.Body=http.MaxBytesReader(writer,request.Body,4<<10);if request.ParseForm()==nil{token=request.Form.Get("token")}};if len(token)<32||len(token)>256||strings.ContainsAny(token,"\x00\r\n\t "){active();return};digest:=sha256.Sum256([]byte(token));digestString:=hex.EncodeToString(digest[:]);now:=time.Now().UTC();var tenant,mailbox string;var epoch uint64;var expires,consumed int64;err:=handler.database.QueryRowContext(request.Context(),`SELECT tenant_id,mailbox_id,authz_epoch,expires_at,consumed_at FROM webmail_dovecot_tokens_v1 WHERE token_digest=? AND expires_at>?`,digestString,now.UnixNano()).Scan(&tenant,&mailbox,&epoch,&expires,&consumed);if err!=nil||consumed<=0||expires<=now.UnixNano(){active();return};account,err:=handler.directory.AuthorizeMailbox(request.Context(),securewebmail.Principal{UserID:"dovecot",SessionID:"introspection"},tenant,mailbox);if err!=nil||account.AuthorizationEpoch!=epoch{active();return};result,err:=handler.database.ExecContext(request.Context(),`DELETE FROM webmail_dovecot_tokens_v1 WHERE token_digest=? AND consumed_at=? AND expires_at>?`,digestString,consumed,now.UnixNano());if err!=nil{active();return};rows,err:=result.RowsAffected();if err!=nil||rows!=1{active();return};_,_=handler.database.ExecContext(request.Context(),`UPDATE webmail_grants_v1 SET revoked_at=? WHERE token_digest=? AND consumed_at=? AND revoked_at IS NULL`,now.UnixNano(),digestString,consumed);writer.WriteHeader(http.StatusOK);_=json.NewEncoder(writer).Encode(map[string]any{"active":true,"email":account.AddressLabel,"username":account.AddressLabel,"scope":"imap"})
+}
