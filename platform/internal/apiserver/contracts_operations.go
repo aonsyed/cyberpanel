@@ -11,6 +11,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
+	"github.com/aonsyed/cyberpanel/platform/internal/redisservice"
 )
 
 type ResourceProfilePayload struct{NodeID operations.ResourceID `json:"node_id"`;Profile operations.ResourceProfile `json:"profile"`}
@@ -28,6 +29,52 @@ type LogsPayload struct{NodeID operations.ResourceID `json:"node_id"`;SiteID str
 type PackagePayload struct{NodeID operations.ResourceID `json:"node_id"`;ApprovalRef operations.ResourceID `json:"approval_ref"`;Transaction operations.PackageTransaction `json:"transaction"`}
 type ManagedServicePayload struct{NodeID operations.ResourceID `json:"node_id"`;Service operations.ManagedService `json:"service"`}
 
+type RedisSpecPayload struct{InstanceID string `json:"instance_id,omitempty"`;Spec redisservice.InstanceSpec `json:"spec"`;SpecJSON string `json:"spec_json,omitempty"`}
+type RedisConsumerPayload struct{ConsumerID string `json:"consumer_id"`;Kind string `json:"kind"`;ACLUser string `json:"acl_user"`;Database uint8 `json:"database"`;Active bool `json:"active"`}
+type RedisConsumerDeletePayload struct{ConsumerID string `json:"consumer_id"`}
+type RedisUpgradePayload struct{RedisVersion string `json:"redis_version"`;QualificationDigest string `json:"qualification_digest"`;Manager operations.PackageManager `json:"manager"`;Architecture operations.ResourceID `json:"architecture"`;FromPackageVersion string `json:"from_package_version"`;ToPackageVersion string `json:"to_package_version"`;RecoveryPointRef operations.ResourceID `json:"recovery_point_ref"`;MaintenanceRef operations.ResourceID `json:"maintenance_ref"`;ApprovalRef operations.ResourceID `json:"approval_ref"`}
+type RedisBackupPayload struct{Artifact redisservice.ArtifactDescriptor `json:"artifact"`;ArtifactJSON string `json:"artifact_json,omitempty"`}
+type RedisRestorePayload struct{ArtifactID string `json:"artifact_id"`;RecoveryArtifactRef string `json:"recovery_artifact_ref"`}
+type RedisDeletePayload struct{RecoveryArtifactRef string `json:"recovery_artifact_ref"`}
+
+type RedisProjection struct {
+	ID string `json:"id"`
+	TenantID string `json:"tenant_id,omitempty"`
+	Purpose redisservice.Purpose `json:"purpose"`
+	Version string `json:"version"`
+	Listener redisservice.ListenerMode `json:"listener"`
+	Lifecycle redisservice.LifecycleState `json:"lifecycle"`
+	Health redisservice.HealthState `json:"health"`
+	Drift redisservice.DriftState `json:"drift"`
+	Consumers uint64 `json:"consumers"`
+	Generation uint64 `json:"generation"`
+	ConfigGeneration uint64 `json:"config_generation"`
+	ConsumerGeneration uint64 `json:"consumer_generation,omitempty"`
+	StatusReason string `json:"status_reason,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+type RedisDetail struct{Projection RedisProjection `json:"projection"`;Spec redisservice.InstanceSpec `json:"spec"`;Observed *redisservice.InstanceObservation `json:"observed,omitempty"`;Consumers redisservice.ConsumerSnapshot `json:"consumers"`}
+type RedisMutation struct{OperationID string `json:"operation_id"`;State string `json:"state"`;Generation uint64 `json:"generation"`;Resource RedisProjection `json:"resource"`}
+type RedisBackupResult struct{State string `json:"state"`;Artifact redisservice.ArtifactDescriptor `json:"artifact"`;Generation uint64 `json:"generation"`}
+type RedisRestorePlan struct{State string `json:"state"`;InstanceID redisservice.InstanceID `json:"instance_id"`;Artifact redisservice.ArtifactDescriptor `json:"artifact"`;RecoveryArtifact redisservice.ArtifactDescriptor `json:"recovery_artifact"`;ExpectedGeneration uint64 `json:"expected_generation"`;ConsumerGeneration uint64 `json:"consumer_generation"`}
+
+type RedisEdgeService interface {
+	ListRedis(context.Context,EdgeCall,EdgePagePayload)(EdgePage[RedisProjection],error)
+	GetRedis(context.Context,EdgeCall)(RedisDetail,error)
+	CreateRedis(context.Context,EdgeCall,redisservice.InstanceSpec)(RedisMutation,error)
+	ConfigureRedis(context.Context,EdgeCall,redisservice.InstanceSpec)(RedisMutation,error)
+	StartRedis(context.Context,EdgeCall)(RedisMutation,error)
+	StopRedis(context.Context,EdgeCall)(RedisMutation,error)
+	RestartRedis(context.Context,EdgeCall)(RedisMutation,error)
+	UpgradeRedis(context.Context,EdgeCall,RedisUpgradePayload)(RedisMutation,error)
+	HealthRedis(context.Context,EdgeCall)(RedisMutation,error)
+	BindRedisConsumer(context.Context,EdgeCall,RedisConsumerPayload)(RedisMutation,error)
+	UnbindRedisConsumer(context.Context,EdgeCall,string)(RedisMutation,error)
+	RecordRedisBackup(context.Context,EdgeCall,redisservice.ArtifactDescriptor)(RedisBackupResult,error)
+	PlanRedisRestore(context.Context,EdgeCall,RedisRestorePayload)(RedisRestorePlan,error)
+	DeleteRedis(context.Context,EdgeCall,string)(RedisMutation,error)
+}
+
 func registerOperationsContracts(registry *Registry)error{
 	definitions:=[]Operation{
 		{Name:"operations.resource_profile.apply",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &ResourceProfilePayload{}},ResolveScope:tenantOrInstallationScope},
@@ -44,6 +91,20 @@ func registerOperationsContracts(registry *Registry)error{
 		{Name:"operations.logs.query",Permission:identity.MustPermission("operations:observe"),Assurance:identity.AssurancePassword,Auth:AuthRequired,Mutating:false,NewPayload:func()any{return &LogsPayload{}},ResolveScope:tenantOrInstallationScope},
 		{Name:"operations.package.apply",Permission:identity.MustPermission("package:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &PackagePayload{}},ResolveScope:installationScope},
 		{Name:"operations.managed_service.reconcile",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &ManagedServicePayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.create",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,MaximumBodyBytes:256<<10,NewPayload:func()any{return &RedisSpecPayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.list",Permission:identity.MustPermission("operations:observe"),Assurance:identity.AssurancePassword,Auth:AuthRequired,Mutating:false,NewPayload:func()any{return &EdgePagePayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.get",Permission:identity.MustPermission("operations:observe"),Assurance:identity.AssurancePassword,Auth:AuthRequired,Mutating:false,NewPayload:func()any{return &struct{}{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.configure",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,MaximumBodyBytes:256<<10,NewPayload:func()any{return &RedisSpecPayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.start",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &struct{}{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.stop",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssurancePhishingResistant,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &struct{}{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.restart",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &struct{}{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.upgrade",Permission:identity.MustPermission("package:manage"),Assurance:identity.AssurancePhishingResistant,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &RedisUpgradePayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.health",Permission:identity.MustPermission("operations:observe"),Assurance:identity.AssurancePassword,Auth:AuthRequired,Mutating:false,NewPayload:func()any{return &struct{}{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.consumer.bind",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &RedisConsumerPayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.consumer.unbind",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &RedisConsumerDeletePayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.backup.record",Permission:identity.MustPermission("backup:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,MaximumBodyBytes:256<<10,NewPayload:func()any{return &RedisBackupPayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.restore.plan",Permission:identity.MustPermission("backup:restore"),Assurance:identity.AssurancePhishingResistant,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &RedisRestorePayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"redis.instance.delete",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssurancePhishingResistant,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &RedisDeletePayload{}},ResolveScope:tenantOrInstallationScope},
 	}
 	for _,definition:=range definitions{if err:=register(registry,definition);err!=nil{return err}}
 	return nil
@@ -72,7 +133,61 @@ func bindOperations(registry *Registry,services DomainServices)error{
 	if err:=bind("operations.metrics.query",func(inv Invocation,value any)(operations.Command,error){p:=value.(*MetricsPayload);header,err:=operationHeader(inv,p.NodeID,operations.ResourceID{},p.SiteID,observationCapability(inv));return operations.QueryMetrics{Header:header,Scope:enforcementScope(header),Names:p.Names,Start:p.Start,End:p.End,Step:p.Step,Limit:p.Limit},err});err!=nil{return err}
 	if err:=bind("operations.logs.query",func(inv Invocation,value any)(operations.Command,error){p:=value.(*LogsPayload);header,err:=operationHeader(inv,p.NodeID,operations.ResourceID{},p.SiteID,observationCapability(inv));return operations.OpenLogStream{Header:header,Source:p.Source,Service:p.Service,Start:p.Start,End:p.End,MinimumSeverity:p.MinimumSeverity,Cursor:p.Cursor,Limit:p.Limit},err});err!=nil{return err}
 	if err:=bind("operations.package.apply",func(inv Invocation,value any)(operations.Command,error){p:=value.(*PackagePayload);header,err:=operationHeader(inv,p.NodeID,p.ApprovalRef,"",operations.CapabilityNodePackages);p.Transaction.Metadata.NodeID=p.NodeID;p.Transaction.Metadata.Generation=1;return operations.RequestPackageTransaction{Header:header,Transaction:p.Transaction},err});err!=nil{return err}
-	return bind("operations.managed_service.reconcile",func(inv Invocation,value any)(operations.Command,error){p:=value.(*ManagedServicePayload);header,err:=operationHeader(inv,p.NodeID,operations.ResourceID{},p.Service.Metadata.SiteID.String(),operations.CapabilityNodeOperations);p.Service.Metadata.NodeID=p.NodeID;p.Service.Metadata.Generation=generation(inv.Request.ExpectedGeneration);p.Service.Metadata.TenantID=header.TenantID;p.Service.Metadata.SiteID=header.SiteID;return operations.ReconcileManagedService{Header:header,Service:p.Service,ExpectedGeneration:inv.Request.ExpectedGeneration},err})
+	if err:=bind("operations.managed_service.reconcile",func(inv Invocation,value any)(operations.Command,error){p:=value.(*ManagedServicePayload);header,err:=operationHeader(inv,p.NodeID,operations.ResourceID{},p.Service.Metadata.SiteID.String(),operations.CapabilityNodeOperations);p.Service.Metadata.NodeID=p.NodeID;p.Service.Metadata.Generation=generation(inv.Request.ExpectedGeneration);p.Service.Metadata.TenantID=header.TenantID;p.Service.Metadata.SiteID=header.SiteID;return operations.ReconcileManagedService{Header:header,Service:p.Service,ExpectedGeneration:inv.Request.ExpectedGeneration},err});err!=nil{return err}
+	return bindRedisOperations(registry,services)
 }
 
 func mapOperationsError(err error)error{switch{case err==nil:return nil;case errors.Is(err,operations.ErrInvalidCommand)||errors.Is(err,operations.ErrInvalidResource):return ErrInvalidRequest;case errors.Is(err,operations.ErrUnauthorized):return ErrForbidden;case errors.Is(err,operations.ErrNotFound):return ErrNotFound;case errors.Is(err,operations.ErrConflict)||errors.Is(err,operations.ErrIdempotency):return ErrConflict;default:return err}}
+
+func redisSpecFromPayload(payload *RedisSpecPayload)(redisservice.InstanceSpec,error){
+	if payload==nil{return redisservice.InstanceSpec{},ErrInvalidRequest}
+	direct:=payload.Spec.ID!=""
+	encoded:=payload.SpecJSON!=""
+	if direct==encoded{return redisservice.InstanceSpec{},ErrInvalidRequest}
+	if direct{return payload.Spec,nil}
+	if len(payload.SpecJSON)>redisservice.MaxRepositoryBytes{return redisservice.InstanceSpec{},ErrInvalidRequest}
+	var spec redisservice.InstanceSpec
+	if decodeStrict([]byte(payload.SpecJSON),&spec)!=nil{return redisservice.InstanceSpec{},ErrInvalidRequest}
+	return spec,nil
+}
+
+func redisArtifactFromPayload(payload *RedisBackupPayload)(redisservice.ArtifactDescriptor,error){
+	if payload==nil{return redisservice.ArtifactDescriptor{},ErrInvalidRequest}
+	direct:=payload.Artifact.ID!=""
+	encoded:=payload.ArtifactJSON!=""
+	if direct==encoded{return redisservice.ArtifactDescriptor{},ErrInvalidRequest}
+	if direct{return payload.Artifact,nil}
+	if len(payload.ArtifactJSON)>redisservice.MaxRepositoryBytes{return redisservice.ArtifactDescriptor{},ErrInvalidRequest}
+	var artifact redisservice.ArtifactDescriptor
+	if decodeStrict([]byte(payload.ArtifactJSON),&artifact)!=nil{return redisservice.ArtifactDescriptor{},ErrInvalidRequest}
+	return artifact,nil
+}
+
+func bindRedisOperations(registry *Registry,services DomainServices)error{
+	edge,ok:=services.OperationsEdge.(RedisEdgeService)
+	if !ok||edge==nil{return nil}
+	bind:=func(name string,handler OperationHandler)error{return registry.Bind(name,handler)}
+	if err:=bind("redis.instance.list",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){result,err:=edge.ListRedis(ctx,edgeCall(inv),*value.(*EdgePagePayload));if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusOK,Value:result},nil});err!=nil{return err}
+	if err:=bind("redis.instance.get",func(ctx context.Context,inv Invocation,_ any)(OperationResult,error){result,err:=edge.GetRedis(ctx,edgeCall(inv));if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusOK,Value:result,Generation:result.Projection.Generation},nil});err!=nil{return err}
+	if err:=bind("redis.instance.create",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){payload:=value.(*RedisSpecPayload);spec,err:=redisSpecFromPayload(payload);if err!=nil{return OperationResult{},err};if payload.InstanceID!=""&&payload.InstanceID!=string(spec.ID){return OperationResult{},ErrInvalidRequest};call:=edgeCall(inv);if call.ResourceID==""{call.ResourceID=string(spec.ID)};result,err:=edge.CreateRedis(ctx,call,spec);if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusCreated,Value:result,Generation:result.Generation},nil});err!=nil{return err}
+	if err:=bind("redis.instance.configure",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){spec,err:=redisSpecFromPayload(value.(*RedisSpecPayload));if err!=nil{return OperationResult{},err};result,err:=edge.ConfigureRedis(ctx,edgeCall(inv),spec);if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusOK,Value:result,Generation:result.Generation},nil});err!=nil{return err}
+	for name,handler:=range map[string]func(context.Context,EdgeCall)(RedisMutation,error){"redis.instance.start":edge.StartRedis,"redis.instance.stop":edge.StopRedis,"redis.instance.restart":edge.RestartRedis,"redis.instance.health":edge.HealthRedis}{method:=handler;if err:=bind(name,func(ctx context.Context,inv Invocation,_ any)(OperationResult,error){result,err:=method(ctx,edgeCall(inv));if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusOK,Value:result,Generation:result.Generation},nil});err!=nil{return err}}
+	if err:=bind("redis.instance.upgrade",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){result,err:=edge.UpgradeRedis(ctx,edgeCall(inv),*value.(*RedisUpgradePayload));if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusOK,Value:result,Generation:result.Generation},nil});err!=nil{return err}
+	if err:=bind("redis.consumer.bind",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){result,err:=edge.BindRedisConsumer(ctx,edgeCall(inv),*value.(*RedisConsumerPayload));if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusOK,Value:result,Generation:result.Generation},nil});err!=nil{return err}
+	if err:=bind("redis.consumer.unbind",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){result,err:=edge.UnbindRedisConsumer(ctx,edgeCall(inv),value.(*RedisConsumerDeletePayload).ConsumerID);if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusOK,Value:result,Generation:result.Generation},nil});err!=nil{return err}
+	if err:=bind("redis.backup.record",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){artifact,err:=redisArtifactFromPayload(value.(*RedisBackupPayload));if err!=nil{return OperationResult{},err};result,err:=edge.RecordRedisBackup(ctx,edgeCall(inv),artifact);if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusCreated,Value:result,Generation:result.Generation},nil});err!=nil{return err}
+	if err:=bind("redis.restore.plan",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){result,err:=edge.PlanRedisRestore(ctx,edgeCall(inv),*value.(*RedisRestorePayload));if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusCreated,Value:result,Generation:result.ExpectedGeneration},nil});err!=nil{return err}
+	return bind("redis.instance.delete",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){result,err:=edge.DeleteRedis(ctx,edgeCall(inv),value.(*RedisDeletePayload).RecoveryArtifactRef);if err!=nil{return OperationResult{},mapRedisError(err)};return OperationResult{Status:http.StatusOK,Value:result,Generation:result.Generation},nil})
+}
+
+func mapRedisError(err error)error{
+	switch{
+	case err==nil:return nil
+	case errors.Is(err,redisservice.ErrInvalid),errors.Is(err,redisservice.ErrCapacity):return ErrInvalidRequest
+	case errors.Is(err,redisservice.ErrUnauthorized):return ErrForbidden
+	case errors.Is(err,redisservice.ErrNotFound):return ErrNotFound
+	case errors.Is(err,redisservice.ErrConflict),errors.Is(err,redisservice.ErrStale),errors.Is(err,redisservice.ErrConsumersPresent):return ErrConflict
+	case errors.Is(err,redisservice.ErrUnsupported),errors.Is(err,redisservice.ErrMaintenanceRequired),errors.Is(err,redisservice.ErrAmbiguous):return ErrOperationUnavailable
+	default:return mapOperationsError(err)
+	}
+}

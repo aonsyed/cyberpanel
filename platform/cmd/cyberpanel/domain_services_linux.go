@@ -23,14 +23,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/access"
+	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
 	"github.com/aonsyed/cyberpanel/platform/internal/audit"
 	"github.com/aonsyed/cyberpanel/platform/internal/backup"
 	backupproviders "github.com/aonsyed/cyberpanel/platform/internal/backup/providers"
-	"github.com/aonsyed/cyberpanel/platform/internal/containers"
 	"github.com/aonsyed/cyberpanel/platform/internal/certificates"
+	"github.com/aonsyed/cyberpanel/platform/internal/containers"
 	"github.com/aonsyed/cyberpanel/platform/internal/database"
 	"github.com/aonsyed/cyberpanel/platform/internal/dns"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/siteops"
@@ -40,10 +40,11 @@ import (
 	hostingservice "github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
-	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
 	"github.com/aonsyed/cyberpanel/platform/internal/maildelivery"
 	localmigration "github.com/aonsyed/cyberpanel/platform/internal/migration/localruntime"
+	"github.com/aonsyed/cyberpanel/platform/internal/operations"
+	"github.com/aonsyed/cyberpanel/platform/internal/redisservice"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 	securewebmail "github.com/aonsyed/cyberpanel/platform/internal/webmail"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
@@ -84,7 +85,10 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		return apiserver.DomainServices{}, fmt.Errorf("connect operations executor: %w", err)
 	}
 	operationsCoordinator := operations.NewCoordinator(repositories.Operations, operationsExecutor, runtimeClock{})
-	operationsConsoleEdge, err := newOperationsEdge(operationsCoordinator, repositories.Operations, "local")
+	redisRepository,err:=redisservice.NewSQLiteRepository(repositories.ControlDB)
+	if err!=nil{return apiserver.DomainServices{},fmt.Errorf("open managed Redis repository: %w",err)}
+	if err=redisRepository.Init(ctx);err!=nil{return apiserver.DomainServices{},fmt.Errorf("bootstrap managed Redis repository: %w",err)}
+	operationsConsoleEdge, err := newOperationsEdge(operationsCoordinator, repositories.Operations, redisRepository, "local")
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize operations console edge: %w", err)
 	}
