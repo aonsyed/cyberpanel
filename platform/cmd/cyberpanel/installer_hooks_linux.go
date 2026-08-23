@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -123,6 +124,7 @@ func bootstrapSecrets()([]string,error){
 	if _,signerErr:=os.Lstat(paths.SignerPath);errors.Is(signerErr,os.ErrNotExist){if _,err=apiserver.RotateLocalTrust(paths,time.Now().UTC());err!=nil{return nil,err}}else if signerErr!=nil{return nil,signerErr}
 	for _,path:=range []string{paths.SignerPath,paths.TrustPath}{if err=os.Chown(path,uid,gid);err!=nil{return nil,err}}
 	secretRoot:="/etc/cyberpanel/secrets";if err=ensureOwnedDirectory(secretRoot,0700,0,0);err!=nil{return nil,err}
+	malwarePaths,err:=bootstrapMalwareWorkerTrust(secretRoot);if err!=nil{return nil,err}
 	auditKey:=filepath.Join(secretRoot,"audit-signing.key");if _,err=ensureRandomFile(auditKey,ed25519.PrivateKeySize,0600,0,0,func()([]byte,error){_,private,keyErr:=ed25519.GenerateKey(rand.Reader);return private,keyErr});err!=nil{return nil,err}
 	webmailSessionKey:=filepath.Join(secretRoot,"webmail-session.key");if _,err=ensureRandomFile(webmailSessionKey,32,0600,0,0,nil);err!=nil{return nil,err}
 	marketingUnsubscribeKey:=filepath.Join(secretRoot,"marketing-unsubscribe.key");if _,err=ensureRandomFile(marketingUnsubscribeKey,32,0600,0,0,nil);err!=nil{return nil,err}
@@ -135,7 +137,23 @@ func bootstrapSecrets()([]string,error){
 	for _,path:=range []string{filepath.Join(authRoot,"wrapping.key"),filepath.Join(authRoot,"lookup.pepper")}{if _,err=ensureRandomFile(path,32,0400,0,0,nil);err!=nil{return nil,err}}
 	defaultCertificatePaths,err:=bootstrapDefaultWebCertificate();if err!=nil{return nil,err}
 	changed:=[]string{paths.SignerPath,paths.TrustPath,auditKey,webmailSessionKey,marketingUnsubscribeKey,webmailMaster,secretKey,secretDatabase,secretEpoch,filepath.Join(authRoot,"wrapping.key"),filepath.Join(authRoot,"lookup.pepper")}
+	changed=append(changed,malwarePaths...)
 	return append(changed,defaultCertificatePaths...),nil
+}
+
+func bootstrapMalwareWorkerTrust(secretRoot string)([]string,error){
+	stateRoot,quarantineRoot:="/var/lib/cyberpanel/site-taskd-malware","/var/lib/cyberpanel/malware-quarantine"
+	for _,path:=range []string{stateRoot,quarantineRoot}{if err:=ensureOwnedDirectory(path,0700,0,0);err!=nil{return nil,err}}
+	trustRoot:="/etc/cyberpanel/trust";if err:=ensureOwnedDirectory(trustRoot,0755,0,0);err!=nil{return nil,err}
+	privatePath,publicPath:=filepath.Join(secretRoot,"site-taskd-malware-signing.key"),filepath.Join(trustRoot,"site-taskd-malware.pub")
+	if _,privateErr:=os.Lstat(privatePath);errors.Is(privateErr,os.ErrNotExist){if _,publicErr:=os.Lstat(publicPath);publicErr==nil{return nil,errors.New("malware worker public key exists without its signing key")}else if !errors.Is(publicErr,os.ErrNotExist){return nil,publicErr}}else if privateErr!=nil{return nil,privateErr}
+	if _,err:=ensureRandomFile(privatePath,ed25519.PrivateKeySize,0400,0,0,func()([]byte,error){_,private,keyErr:=ed25519.GenerateKey(rand.Reader);return private,keyErr});err!=nil{return nil,err}
+	private,err:=os.ReadFile(privatePath);if err!=nil{return nil,err};defer wipeBytes(private)
+	if len(private)!=ed25519.PrivateKeySize{return nil,errors.New("malware worker signing key has invalid size")}
+	public,ok:=ed25519.PrivateKey(private).Public().(ed25519.PublicKey);if !ok||len(public)!=ed25519.PublicKeySize{return nil,errors.New("malware worker signing key is invalid")}
+	if _,err=ensureOwnedFile(publicPath,0444,0,0,public);err!=nil{return nil,err}
+	installed,err:=os.ReadFile(publicPath);if err!=nil||!bytes.Equal(installed,public){return nil,errors.Join(errors.New("malware worker trust key does not match signing key"),err)}
+	return []string{stateRoot,quarantineRoot,trustRoot,privatePath,publicPath},nil
 }
 
 // bootstrapDefaultWebCertificate creates the root-owned fallback identity

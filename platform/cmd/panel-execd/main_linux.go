@@ -20,6 +20,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/containers"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/siteops"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/webactivation"
+	"github.com/aonsyed/cyberpanel/platform/internal/malwarescan"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	"github.com/aonsyed/cyberpanel/platform/internal/packagemaint"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
@@ -36,11 +37,25 @@ const webEngineConfigurationRoot = "/usr/local/lsws/conf"
 type serveResult struct { name string; err error }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == malwarescan.LinuxMalwareWorkerMode {
+		if err := malwarescan.RunLinuxMalwareSiteWorker(); err != nil { log.Fatalf("run site malware worker: %v", err) }
+		return
+	}
+	if len(os.Args) != 1 { log.Fatal("panel-execd received unsupported arguments") }
 	if os.Geteuid() != 0 { log.Fatal("panel-execd must run as root") }
 	edition, err := siteops.LoadEngineEdition(); if err != nil { log.Fatalf("load web-engine edition: %v", err) }
 	controlUID, controlGID, err := siteops.LookupControlIdentity(); if err != nil { log.Fatalf("resolve control-plane identity: %v", err) }
 	backend, err := siteops.NewLinuxStateBackend(); if err != nil { log.Fatalf("open durable registry backend: %v", err) }; defer backend.Close()
 	registry, err := siteops.NewDurableRegistryWithUIDAvailability(backend, siteops.DefaultUIDMinimum, siteops.DefaultUIDMaximum, siteops.LinuxUIDAvailable); if err != nil { log.Fatalf("open durable site registry: %v", err) }
+	malwareResolver := malwarescan.LinuxMalwareSiteResolverFunc(func(_ context.Context, target malwarescan.TargetLocator) (malwarescan.LinuxMalwareSiteRegistration, error) {
+		binding, found, resolveErr := registry.BindingForSite(string(target.Site)); if resolveErr != nil { return malwarescan.LinuxMalwareSiteRegistration{}, resolveErr }
+		if !found { return malwarescan.LinuxMalwareSiteRegistration{}, malwarescan.ErrNotFound }
+		if binding.TenantID != string(target.Tenant) || binding.SiteID != string(target.Site) || binding.SiteKey != string(target.Root) || binding.RootGeneration == 0 || binding.RootGeneration != target.RootGeneration || binding.UID < siteops.DefaultUIDMinimum || binding.GID != binding.UID { return malwarescan.LinuxMalwareSiteRegistration{}, malwarescan.ErrProtected }
+		switch binding.State { case siteops.BindingActive, siteops.BindingSuspended, siteops.BindingQuarantined: default: return malwarescan.LinuxMalwareSiteRegistration{}, malwarescan.ErrProtected }
+		return malwarescan.LinuxMalwareSiteRegistration{Tenant:target.Tenant,Site:target.Site,Root:target.Root,RootGeneration:binding.RootGeneration,SiteKey:binding.SiteKey,UID:binding.UID,GID:binding.GID},nil
+	})
+	malwareWorker, err := malwarescan.NewLinuxMalwareWorkerServer(malwareResolver, controlUID); if err != nil { log.Fatalf("initialize malware worker: %v", err) }; defer malwareWorker.Close()
+	malwareListener, err := malwarescan.ListenLinuxMalwareWorker(controlGID); if err != nil { log.Fatalf("listen on malware worker socket: %v", err) }; defer malwareListener.Close()
 	host, err := siteops.NewLinuxHost(); if err != nil { log.Fatalf("initialize privileged host: %v", err) }; defer host.Close()
 	executor, err := siteops.NewExecutor(registry, host, siteops.InstalledPHPResolver{}, siteops.Config{Edition: edition, Retention: siteops.DefaultRetention}); if err != nil { log.Fatalf("initialize site executor: %v", err) }
 	policy, err := siteops.NewPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize peer policy: %v", err) }
@@ -139,7 +154,7 @@ func main() {
 		packageMaintenanceServer=&packagemaint.LinuxBrokerServer{Authorizer:packagePolicy,Broker:packageBroker,MaximumConcurrent:8}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM); defer cancel()
-	serverCount:=12
+	serverCount:=13
 	if packageMaintenanceServer!=nil{serverCount++}
 	serveErrors := make(chan serveResult, serverCount)
 	go func() { serveErrors <- serveResult{name: "siteops", err: server.Serve(listener)} }()
@@ -154,6 +169,7 @@ func main() {
 	go func() { serveErrors <- serveResult{name: "certificates", err: certificateServer.Serve(certificateListener)} }()
 	go func() { serveErrors <- serveResult{name: "applications", err: applicationServer.Serve(applicationListener)} }()
 	go func() { serveErrors <- serveResult{name: "backup", err: backupServer.Serve(backupListener)} }()
+	go func() { serveErrors <- serveResult{name: "malware worker", err: malwareWorker.Serve(malwareListener)} }()
 	if packageMaintenanceServer!=nil{go func(){serveErrors<-serveResult{name:"package maintenance",err:packageMaintenanceServer.Serve(packageMaintenanceListener)}}()}
 	go collectTombstones(ctx, executor)
 	select {
@@ -170,6 +186,7 @@ func main() {
 		_ = certificateListener.Close()
 		_ = applicationListener.Close()
 		_ = backupListener.Close()
+		_ = malwareListener.Close()
 		if packageMaintenanceListener!=nil{_ = packageMaintenanceListener.Close()}
 		for count := 0; count < serverCount; count++ { result := <-serveErrors; if result.err != nil && !errors.Is(result.err, net.ErrClosed) { log.Printf("%s server stopped: %v", result.name, result.err) } }
 	case result := <-serveErrors:
@@ -185,6 +202,7 @@ func main() {
 		_ = certificateListener.Close()
 		_ = applicationListener.Close()
 		_ = backupListener.Close()
+		_ = malwareListener.Close()
 		if packageMaintenanceListener!=nil{_ = packageMaintenanceListener.Close()}
 		if result.err != nil && !errors.Is(result.err, net.ErrClosed) { log.Fatalf("%s server failed: %v", result.name, result.err) }
 		log.Fatalf("%s server stopped unexpectedly", result.name)

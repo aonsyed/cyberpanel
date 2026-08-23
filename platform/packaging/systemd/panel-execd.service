@@ -8,6 +8,7 @@ Before=panel-core.service lsws.service
 [Service]
 Type=simple
 ExecStart=/usr/local/libexec/cyberpanel/panel-execd
+LoadCredential=site-taskd-malware-signing.key:/etc/cyberpanel/secrets/site-taskd-malware-signing.key
 User=root
 Group=root
 UMask=0027
@@ -29,7 +30,7 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
-ProtectControlGroups=true
+ProtectControlGroups=false
 ProtectClock=true
 LockPersonality=true
 RestrictSUIDSGID=true
@@ -38,7 +39,7 @@ RestrictNamespaces=~cgroup
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL CAP_SETGID CAP_SETUID CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_MKNOD CAP_AUDIT_WRITE
-ReadWritePaths=/etc /var/lib/cyberpanel /var/lib/cyberpanel-containers /var/backups/cyberpanel /run/cyberpanel /run/user /etc/systemd/system /usr/local/lsws/conf
+ReadWritePaths=/etc /var/lib/cyberpanel /var/lib/cyberpanel/site-taskd-malware /var/lib/cyberpanel/malware-quarantine /var/lib/cyberpanel-containers /var/backups/cyberpanel /run/cyberpanel /run/user /sys/fs/cgroup /etc/systemd/system /usr/local/lsws/conf
 LimitNOFILE=4096
 TasksMax=256
 
