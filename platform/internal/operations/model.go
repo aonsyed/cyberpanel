@@ -344,7 +344,7 @@ func (resource FirewallPolicy) Meta() Metadata { return resource.Metadata }
 func (resource FirewallPolicy) Validate() error {
 	if validateNodeMetadata(resource.Metadata) != nil || (resource.Backend != FirewallNFTables && resource.Backend != FirewallFirewalld) ||
 		!validFirewallAction(resource.DefaultInbound) || !validFirewallAction(resource.DefaultForward) || !validFirewallAction(resource.DefaultOutbound) ||
-		len(resource.Rules) > 4096 || resource.ManagementProbe.Port == 0 || resource.ManagementProbe.MinimumSuccesses == 0 || len(resource.ManagementProbe.SourceCIDRs) == 0 { return ErrInvalidResource }
+		len(resource.Rules) > 4096 || resource.ManagementProbe.Port == 0 || resource.ManagementProbe.MinimumSuccesses == 0 || resource.ManagementProbe.MinimumSuccesses > 8 || len(resource.ManagementProbe.SourceCIDRs) == 0 || len(resource.ManagementProbe.SourceCIDRs) > 32 { return ErrInvalidResource }
 	seen := make(map[string]struct{}, len(resource.Rules)); priorities := make(map[uint16]struct{}, len(resource.Rules))
 	for _, rule := range resource.Rules {
 		if validateFirewallRule(rule) != nil { return ErrInvalidResource }
@@ -381,7 +381,7 @@ func (resource SSHPolicy) Meta() Metadata { return resource.Metadata }
 func (resource SSHPolicy) Validate() error {
 	if validateNodeMetadata(resource.Metadata) != nil || resource.Port == 0 ||
 		(resource.Authentication != SSHKeysOnly && resource.Authentication != SSHKeysAndMFA) || resource.IdleTimeout <= 0 || resource.IdleTimeout > 24*time.Hour ||
-		resource.MaxAuthTries == 0 || resource.MaxAuthTries > 20 || resource.MaxSessions == 0 || resource.ManagementProbe.Port != resource.Port || len(resource.ManagementProbe.SourceCIDRs) == 0 { return ErrInvalidResource }
+		resource.MaxAuthTries == 0 || resource.MaxAuthTries > 20 || resource.MaxSessions == 0 || resource.ManagementProbe.Port != resource.Port || resource.ManagementProbe.MinimumSuccesses == 0 || resource.ManagementProbe.MinimumSuccesses > 8 || len(resource.ManagementProbe.SourceCIDRs) == 0 || len(resource.ManagementProbe.SourceCIDRs) > 32 { return ErrInvalidResource }
 	for _, group := range resource.AllowedGroups { if group.IsZero() { return ErrInvalidResource } }
 	return nil
 }

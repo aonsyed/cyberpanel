@@ -142,7 +142,18 @@ func NewLinuxOperationsExecutor(config LinuxOperationsConfig) (*LinuxOperationsE
 }
 
 func ensureOperationsStateRoot(root string) error {
-	for _, directory := range []string{root, filepath.Join(root, "effects"), filepath.Join(root, "generations"), filepath.Join(root, "runtime")} {
+	for _, directory := range []string{
+		root,
+		filepath.Join(root, "effects"),
+		filepath.Join(root, "generations"),
+		filepath.Join(root, "runtime"),
+		filepath.Join(root, "security"),
+		filepath.Join(root, "security", "leases"),
+		filepath.Join(root, "security", "firewall"),
+		filepath.Join(root, "security", "firewall", "generations"),
+		filepath.Join(root, "security", "ssh"),
+		filepath.Join(root, "security", "ssh", "generations"),
+	} {
 		if err := os.MkdirAll(directory, 0o700); err != nil { return err }
 		info, err := os.Lstat(directory); if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 { return errors.New("unsafe operations state directory") }
 		if err = os.Chown(directory, 0, 0); err != nil { return err }
@@ -178,9 +189,17 @@ func (executor *LinuxOperationsExecutor) ObserveOrApply(ctx context.Context, req
 			if restoreErr != nil || externalErr != nil {
 				var tokenErr error;token,tokenErr = newCompensationToken();if tokenErr!=nil{return EffectReceipt{},tokenErr}; receipt.MutationObserved = true; receipt.CompensationToken = token
 				if restoreErr != nil || request.Kind==EffectResourceProfile || request.Kind==EffectServicePolicy { retainedSnapshots=result.Snapshots }
+				receipt.Outcome = EffectAmbiguous
+				receipt.FailureCode = "rollback_ambiguous"
 			}
 		}
+		if errors.Is(effectErr, ErrCompensationFailed) {
+			receipt.Outcome = EffectAmbiguous
+			receipt.MutationObserved = result.MutationObserved
+			if receipt.FailureCode == "" || receipt.FailureCode == "host_operation_failed" { receipt.FailureCode = "security_state_ambiguous" }
+		}
 	}
+	if receipt.Outcome == EffectAmbiguous { receipt.ProofDigest = effectProof(request, result) }
 	record := operationsJournalRecord{Request: request, Receipt: receipt, Snapshots: retainedSnapshots, CompensationToken: token}
 	if err := executor.storeJournal(record); err != nil { return EffectReceipt{}, err }
 	return receipt, effectErr
@@ -211,8 +230,8 @@ func (executor *LinuxOperationsExecutor) apply(ctx context.Context, request Effe
 	case EffectResourceProfile: return executor.applyResourceProfile(ctx, *request.ResourceProfile)
 	case EffectTransferReset: return executor.resetTransfer(*request.TransferReset)
 	case EffectTransferSample: return executor.sampleTransfer(*request.TransferSample)
-	case EffectFirewallPolicy: return executor.applyFirewall(ctx, *request.FirewallPolicy)
-	case EffectSSHPolicy: return executor.applySSHPolicy(ctx, *request.SSHPolicy)
+	case EffectFirewallPolicy: return executor.applyFirewall(ctx, request, *request.FirewallPolicy)
+	case EffectSSHPolicy: return executor.applySSHPolicy(ctx, request, *request.SSHPolicy)
 	case EffectPutSSHKey: return executor.putSSHKey(*request.PutSSHKey)
 	case EffectDeleteSSHKey: return executor.deleteSSHKey(*request.DeleteSSHKey)
 	case EffectWAFPolicy: return executor.applyWAF(ctx, *request.WAFPolicy)

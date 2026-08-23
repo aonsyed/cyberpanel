@@ -65,6 +65,7 @@ func main() {
 	operationsSecrets, err := operations.NewLinuxOperationsSecretBrokerSource(materialClient, installationOwner); if err != nil { log.Fatalf("initialize operations secret source: %v", err) }
 	operationsConfig := operations.DefaultLinuxOperationsConfig(); operationsConfig.Secrets = operationsSecrets
 	operationsExecutor, err := operations.NewLinuxOperationsExecutor(operationsConfig); if err != nil { log.Fatalf("initialize operations executor: %v", err) }
+	if err = operationsExecutor.ResumeSecurityWatchdogs(context.Background()); err != nil { log.Fatalf("recover unconfirmed firewall/SSH transaction: %v", err) }
 	operationsPolicy, err := operations.NewOperationsBrokerPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize operations peer policy: %v", err) }
 	operationsListener, err := operations.ListenOperationsBroker(controlGID); if err != nil { log.Fatalf("listen on operations broker socket: %v", err) }; defer operationsListener.Close()
 	operationsServer := &operations.OperationsBrokerServer{Authorizer:operationsPolicy,Handler:operationsExecutor,MaximumConcurrent:64}

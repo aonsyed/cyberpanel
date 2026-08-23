@@ -23,44 +23,170 @@ import (
 	"time"
 )
 
-func (executor *LinuxOperationsExecutor) applyFirewall(ctx context.Context, effect FirewallPolicyEffect) (linuxEffectResult, error) {
+func (executor *LinuxOperationsExecutor) applyFirewall(ctx context.Context, request EffectRequest, effect FirewallPolicyEffect) (linuxEffectResult, error) {
+	if replay, done, err := executor.replaySecurityEffect(ctx, request); done || err != nil {
+		return replay, err
+	}
 	policy := effect.Policy
-	if err := executor.guardGeneration(KindFirewallPolicy, policy.ID, policy.Generation, policy); err != nil { return linuxEffectResult{}, err }
-	if err:=validateManagementReachability(policy);err!=nil{return linuxEffectResult{},err}
-	candidateDigest, _ := activationDigest(policy)
-	if err := probeTCP(ctx, policy.ManagementProbe.Port, policy.ManagementProbe.MinimumSuccesses); err != nil { return linuxEffectResult{}, err }
-	var path string; var content []byte; var extraFiles map[string][]byte; var validateBinary string; var validateArguments []string; var commitBinary string; var commitArguments []string
-	switch policy.Backend {
-	case FirewallNFTables:
-		path = "/etc/cyberpanel/firewall.nft"; content = renderNFTables(policy)
-		if _, listErr := executor.runner.Run(ctx,"/usr/sbin/nft","list","table","inet","cyberpanel"); listErr != nil { content=bytes.TrimPrefix(content,[]byte("flush table inet cyberpanel\n")) }
-		candidatePath, candidateErr := executor.writeCandidate("firewall", content); if candidateErr != nil { return linuxEffectResult{}, candidateErr }; defer os.Remove(candidatePath)
-		validateBinary, validateArguments = "/usr/sbin/nft", []string{"--check", "--file", candidatePath}
-		commitBinary, commitArguments = "/usr/sbin/nft", []string{"--file", path}
-	case FirewallFirewalld:
-		path = "/etc/firewalld/zones/cyberpanel.xml"; content = renderFirewalld(policy)
-		extraFiles=renderFirewalldPolicies(policy)
-		validateBinary, validateArguments = "/usr/bin/firewall-cmd", []string{"--check-config"}
-		commitBinary, commitArguments = "/usr/bin/firewall-cmd", []string{"--reload"}
-	default:
+	if policy.Backend != FirewallNFTables {
 		return linuxEffectResult{}, ErrInvalidEffect
 	}
-	var snapshot operationsFileSnapshot;var snapshots []operationsFileSnapshot; var stageOutput []byte; var err error
-	if policy.Backend == FirewallFirewalld {
-		snapshot, err = executor.replaceManagedFile(path, content, 0o600); if err != nil { return linuxEffectResult{}, err }
-		snapshots=append(snapshots,snapshot);paths:=make([]string,0,len(extraFiles));for candidatePath:=range extraFiles{paths=append(paths,candidatePath)};sort.Strings(paths);for _,candidatePath:=range paths{candidateSnapshot,replaceErr:=executor.replaceManagedFile(candidatePath,extraFiles[candidatePath],0o600);if replaceErr!=nil{return linuxEffectResult{Snapshots:snapshots,MutationObserved:true},replaceErr};snapshots=append(snapshots,candidateSnapshot)}
-		stageOutput, err = executor.runner.Run(ctx, validateBinary, validateArguments...); if err != nil { return linuxEffectResult{Snapshots:snapshots,MutationObserved:true}, fmt.Errorf("firewall validation: %w: %s", err, boundedText(stageOutput, 2048)) }
-	} else {
-		stageOutput, err = executor.runner.Run(ctx, validateBinary, validateArguments...); if err != nil { return linuxEffectResult{}, fmt.Errorf("firewall validation: %w: %s", err, boundedText(stageOutput, 2048)) }
-		snapshot, err = executor.replaceManagedFile(path, content, 0o600); if err != nil { return linuxEffectResult{}, err }
-		snapshots=append(snapshots,snapshot)
+	if err := validateProtectedManagementProbe(policy.ManagementProbe); err != nil {
+		return linuxEffectResult{}, err
 	}
-	result := linuxEffectResult{Snapshots: snapshots, MutationObserved: true}
-	commitOutput, err := executor.runner.Run(ctx, commitBinary, commitArguments...); if err != nil { return result, fmt.Errorf("firewall commit: %w: %s", err, boundedText(commitOutput, 2048)) }
-	if err = probeTCP(ctx, policy.ManagementProbe.Port, policy.ManagementProbe.MinimumSuccesses); err != nil { return result, err }
-	if err = executor.storeGeneration(KindFirewallPolicy, policy.ID, policy.Generation, candidateDigest); err != nil { return result, err }
-	result.Activation = activationEvidence(ActivationMakeBeforeBreak, candidateDigest, snapshotDigest(snapshot), digestBytes(stageOutput), digestBytes(commitOutput))
+	if err := validateManagementReachability(policy); err != nil {
+		return linuxEffectResult{}, err
+	}
+	if err := executor.requireDirectNFTablesOwnership(ctx); err != nil {
+		return linuxEffectResult{}, err
+	}
+	content := renderNFTables(policy)
+	candidate, err := executor.stageSecurityGeneration(KindFirewallPolicy, policy.ID, policy.Generation, policy, content, "nft")
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	previous, same, err := executor.securityGenerationCAS(candidate)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	if same {
+		return linuxEffectResult{MutationObserved: true}, ErrCompensationFailed
+	}
+	runtimePresent, err := executor.nftablesRuntimePresent(ctx)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	if previous == nil && runtimePresent {
+		return linuxEffectResult{}, ErrConflict
+	}
+	if previous != nil {
+		if _, err = executor.verifyNFTGeneration(ctx, *previous, nil); err != nil {
+			return linuxEffectResult{}, ErrConflict
+		}
+	}
+	if _, err = executor.probeLocalTCP(ctx, policy.ManagementProbe.Port, policy.ManagementProbe.MinimumSuccesses); err != nil {
+		return linuxEffectResult{}, err
+	}
+	snapshot, err := executor.snapshotFile("/etc/cyberpanel/firewall.nft")
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	lease, err := executor.armSecurityLease(request, candidate, previous, []operationsFileSnapshot{snapshot}, runtimePresent, nil)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	result := linuxEffectResult{Snapshots: []operationsFileSnapshot{snapshot}, MutationObserved: true}
+	if !runtimePresent {
+		if output, addErr := executor.runner.Run(ctx, "/usr/sbin/nft", "add", "table", "inet", "cyberpanel"); addErr != nil {
+			return result, fmt.Errorf("create managed nftables table: %w: %s", addErr, boundedText(output, 2048))
+		}
+	}
+	validateOutput, err := executor.runner.Run(ctx, "/usr/sbin/nft", "--check", "--file", candidate.NativePath)
+	if err != nil {
+		return result, fmt.Errorf("nftables generation validation: %w: %s", err, boundedText(validateOutput, 2048))
+	}
+	if _, err = executor.replaceManagedFile("/etc/cyberpanel/firewall.nft", content, 0o600); err != nil {
+		return result, err
+	}
+	applyOutput, err := executor.runner.Run(ctx, "/usr/sbin/nft", "--file", candidate.NativePath)
+	if err != nil {
+		return result, fmt.Errorf("nftables atomic commit: %w: %s", err, boundedText(applyOutput, 2048))
+	}
+	observedDigest, err := executor.verifyNFTGeneration(ctx, candidate, &policy)
+	if err != nil {
+		return result, err
+	}
+	managementProof, err := executor.probeLocalTCP(ctx, policy.ManagementProbe.Port, policy.ManagementProbe.MinimumSuccesses)
+	if err != nil {
+		return result, err
+	}
+	activation := &ActivationEvidence{
+		Strategy: ActivationMakeBeforeBreak, CandidateDigest: candidate.PolicyDigest,
+		PreviousDigest: snapshotDigest(snapshot), StageReceiptDigest: candidate.NativeDigest,
+		ProbeReceiptDigest: digestBytes([]byte(observedDigest + "\x00" + managementProof)),
+		CommitReceiptDigest: digestBytes(append(applyOutput, []byte(observedDigest)...)),
+	}
+	if err = executor.storeGeneration(KindFirewallPolicy, policy.ID, policy.Generation, candidate.PolicyDigest); err != nil {
+		return result, err
+	}
+	if err = executor.confirmSecurityLease(request.EffectID, lease.ConfirmationNonce, activation); err != nil {
+		return result, errors.Join(ErrCompensationFailed, err)
+	}
+	result.Activation = activation
 	return result, nil
+}
+
+func (executor *LinuxOperationsExecutor) requireDirectNFTablesOwnership(ctx context.Context) error {
+	output, err := executor.runner.Run(ctx, "/usr/bin/systemctl", "is-active", "firewalld.service")
+	state := strings.TrimSpace(string(output))
+	if state == "active" || state == "activating" || state == "reloading" {
+		return ErrConflict
+	}
+	if err != nil && state != "inactive" && state != "failed" && state != "unknown" && state != "deactivating" {
+		return err
+	}
+	return nil
+}
+
+func (executor *LinuxOperationsExecutor) nftablesRuntimePresent(ctx context.Context) (bool, error) {
+	if _, err := executor.runner.Run(ctx, "/usr/sbin/nft", "list", "table", "inet", "cyberpanel"); err == nil {
+		return true, nil
+	}
+	output, err := executor.runner.Run(ctx, "/usr/sbin/nft", "list", "tables")
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(string(output), "table inet cyberpanel"), nil
+}
+
+func (executor *LinuxOperationsExecutor) verifyNFTGeneration(ctx context.Context, generation securityActiveGeneration, policy *FirewallPolicy) (string, error) {
+	output, err := executor.runner.Run(ctx, "/usr/sbin/nft", "--handle", "list", "table", "inet", "cyberpanel")
+	if err != nil {
+		return "", err
+	}
+	text := string(output)
+	marker := "cyberpanel-generation:" + strconv.FormatUint(generation.Generation, 10) + ":" + generation.PolicyDigest
+	if !strings.Contains(text, marker) {
+		return "", ErrCompensationFailed
+	}
+	if policy != nil {
+		for _, rule := range policy.Rules {
+			if strings.Count(text, "cyberpanel:"+rule.ID.String()) != 1 {
+				return "", ErrCompensationFailed
+			}
+		}
+	}
+	return digestBytes(output), nil
+}
+
+func validateProtectedManagementProbe(probe ManagementProbe) error {
+	if probe.Port == 0 || probe.MinimumSuccesses == 0 || probe.MinimumSuccesses > 8 || len(probe.SourceCIDRs) == 0 || len(probe.SourceCIDRs) > 32 {
+		return ErrInvalidEffect
+	}
+	for _, prefix := range probe.SourceCIDRs {
+		address := prefix.Addr()
+		if !validPrefix(prefix) || prefix.Bits() == 0 || address.IsUnspecified() || address.IsMulticast() {
+			return ErrInvalidEffect
+		}
+	}
+	return nil
+}
+
+func (executor *LinuxOperationsExecutor) probeLocalTCP(ctx context.Context, port uint16, successes uint8) (string, error) {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	var evidence strings.Builder
+	for count := uint8(0); count < successes; count++ {
+		connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
+		if err != nil {
+			return "", err
+		}
+		evidence.WriteString(connection.LocalAddr().String())
+		evidence.WriteByte('>')
+		evidence.WriteString(connection.RemoteAddr().String())
+		evidence.WriteByte('\n')
+		_ = connection.Close()
+	}
+	return digestBytes([]byte(evidence.String())), nil
 }
 
 func validateManagementReachability(policy FirewallPolicy)error{rules:=append([]FirewallRule(nil),policy.Rules...);sort.Slice(rules,func(i,j int)bool{return rules[i].Priority<rules[j].Priority});for _,management:=range policy.ManagementProbe.SourceCIDRs{decided:=false;for _,rule:=range rules{if rule.Protocol!=ProtocolTCP||(rule.Family==FamilyIPv4)!=management.Addr().Is4()||!portRangesContain(rule.DestinationPorts,policy.ManagementProbe.Port)||!sourcesCover(rule.Sources,management){continue};if rule.Action!=FirewallAccept{return ErrInvalidEffect};decided=true;break};if !decided{return ErrInvalidEffect}};return nil}
@@ -70,6 +196,8 @@ func sourcesCover(sources []netip.Prefix,target netip.Prefix)bool{if len(sources
 func renderNFTables(policy FirewallPolicy) []byte {
 	var buffer bytes.Buffer
 	buffer.WriteString("flush table inet cyberpanel\ntable inet cyberpanel {\n")
+	policyDigest, _ := activationDigest(policy)
+	fmt.Fprintf(&buffer, " comment \"cyberpanel-generation:%d:%s\"\n", policy.Generation, policyDigest)
 	renderNFTChain := func(name string, hook string, priority int, defaultAction FirewallAction) {
 		basePolicy:=defaultAction;if basePolicy==FirewallReject{basePolicy=FirewallDrop};fmt.Fprintf(&buffer, " chain %s { type filter hook %s priority %d; policy %s;\n", name, hook, priority, basePolicy)
 		if name == "input" { buffer.WriteString("  ct state established,related accept\n  iifname \"lo\" accept\n") }
@@ -116,27 +244,158 @@ func renderFirewalldPolicies(policy FirewallPolicy)map[string][]byte{zone:=strin
 	"/etc/firewalld/policies/cyberpanel-outbound.xml":[]byte(fmt.Sprintf("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<policy target=\"%s\"><ingress-zone name=\"HOST\"/><egress-zone name=\"ANY\"/></policy>\n",strings.ToUpper(string(policy.DefaultOutbound)))),
 };for _,zoneName:=range []string{"public","external","dmz","work","home","internal","trusted"}{path:="/etc/firewalld/policies/cyberpanel-forward-"+zoneName+".xml";result[path]=[]byte(fmt.Sprintf("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<policy target=\"%s\"><ingress-zone name=\"%s\"/><egress-zone name=\"ANY\"/></policy>\n",strings.ToUpper(string(policy.DefaultForward)),zoneName))};return result}
 
-func (executor *LinuxOperationsExecutor) applySSHPolicy(ctx context.Context, effect SSHPolicyEffect) (linuxEffectResult, error) {
+func (executor *LinuxOperationsExecutor) applySSHPolicy(ctx context.Context, request EffectRequest, effect SSHPolicyEffect) (linuxEffectResult, error) {
+	if replay, done, err := executor.replaySecurityEffect(ctx, request); done || err != nil {
+		return replay, err
+	}
 	policy := effect.Policy
-	if err := executor.guardGeneration(KindSSHPolicy, policy.ID, policy.Generation, policy); err != nil { return linuxEffectResult{}, err }
-	candidateDigest, _ := activationDigest(policy); content,err := renderSSHPolicy(policy);if err!=nil{return linuxEffectResult{},err}; path := "/etc/ssh/sshd_config.d/50-cyberpanel.conf"
-	snapshot, err := executor.replaceManagedFile(path, content, 0o600); if err != nil { return linuxEffectResult{}, err }
+	if err := validateProtectedManagementProbe(policy.ManagementProbe); err != nil {
+		return linuxEffectResult{}, err
+	}
+	content, err := renderSSHPolicy(policy)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	candidate, err := executor.stageSecurityGeneration(KindSSHPolicy, policy.ID, policy.Generation, policy, content, "conf")
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	previous, same, err := executor.securityGenerationCAS(candidate)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	if same {
+		return linuxEffectResult{MutationObserved: true}, ErrCompensationFailed
+	}
+	effective, err := executor.runner.Run(ctx, "/usr/sbin/sshd", "-T", "-f", "/etc/ssh/sshd_config", "-C", "user=root,host=localhost,addr=127.0.0.1")
+	if err != nil {
+		return linuxEffectResult{}, fmt.Errorf("observe current sshd policy: %w: %s", err, boundedText(effective, 2048))
+	}
+	previousPorts := parseSSHDPorts(effective)
+	if len(previousPorts) == 0 {
+		previousPorts = []uint16{22}
+	}
+	snapshot, err := executor.snapshotFile("/etc/ssh/sshd_config.d/50-cyberpanel.conf")
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	lease, err := executor.armSecurityLease(request, candidate, previous, []operationsFileSnapshot{snapshot}, true, previousPorts)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
 	result := linuxEffectResult{Snapshots: []operationsFileSnapshot{snapshot}, MutationObserved: true}
-	validateOutput, err := executor.runner.Run(ctx, "/usr/sbin/sshd", "-t", "-f", "/etc/ssh/sshd_config"); if err != nil { return result, fmt.Errorf("sshd validation: %w: %s", err, boundedText(validateOutput, 2048)) }
-	reloadOutput, err := executor.runner.Run(ctx, "/usr/bin/systemctl", "reload", "sshd.service"); if err != nil { reloadOutput, err = executor.runner.Run(ctx, "/usr/bin/systemctl", "reload", "ssh.service") }; if err != nil { return result, err }
-	if err = probeTCP(ctx, policy.Port, policy.ManagementProbe.MinimumSuccesses); err != nil { return result, err }
-	if err = executor.storeGeneration(KindSSHPolicy, policy.ID, policy.Generation, candidateDigest); err != nil { return result, err }
-	result.Activation = activationEvidence(ActivationMakeBeforeBreak, candidateDigest, snapshotDigest(snapshot), digestBytes(validateOutput), digestBytes(reloadOutput))
+	dualPorts := append([]uint16{policy.Port}, previousPorts...)
+	dualContent, err := renderSSHPolicyPorts(policy, dualPorts)
+	if err != nil {
+		return result, err
+	}
+	if _, err = executor.replaceManagedFile("/etc/ssh/sshd_config.d/50-cyberpanel.conf", dualContent, 0o600); err != nil {
+		return result, err
+	}
+	validateDual, err := executor.runner.Run(ctx, "/usr/sbin/sshd", "-t", "-f", "/etc/ssh/sshd_config")
+	if err != nil {
+		return result, fmt.Errorf("validate dual ssh listener: %w: %s", err, boundedText(validateDual, 2048))
+	}
+	reloadDual, err := executor.reloadSSHD(ctx)
+	if err != nil {
+		return result, err
+	}
+	if _, err = executor.probeSSHListener(ctx, policy.Port, policy.ManagementProbe.MinimumSuccesses); err != nil {
+		return result, err
+	}
+	if _, err = executor.replaceManagedFile("/etc/ssh/sshd_config.d/50-cyberpanel.conf", content, 0o600); err != nil {
+		return result, err
+	}
+	validateFinal, err := executor.runner.Run(ctx, "/usr/sbin/sshd", "-t", "-f", "/etc/ssh/sshd_config")
+	if err != nil {
+		return result, fmt.Errorf("validate final ssh policy: %w: %s", err, boundedText(validateFinal, 2048))
+	}
+	reloadFinal, err := executor.reloadSSHD(ctx)
+	if err != nil {
+		return result, err
+	}
+	effectiveFinal, err := executor.runner.Run(ctx, "/usr/sbin/sshd", "-T", "-f", "/etc/ssh/sshd_config", "-C", "user=root,host=localhost,addr=127.0.0.1")
+	if err != nil {
+		return result, err
+	}
+	finalPorts := parseSSHDPorts(effectiveFinal)
+	if len(finalPorts) != 1 || finalPorts[0] != policy.Port {
+		return result, ErrCompensationFailed
+	}
+	listenerProof, err := executor.probeSSHListener(ctx, policy.Port, policy.ManagementProbe.MinimumSuccesses)
+	if err != nil {
+		return result, err
+	}
+	activation := &ActivationEvidence{
+		Strategy: ActivationMakeBeforeBreak, CandidateDigest: candidate.PolicyDigest,
+		PreviousDigest: snapshotDigest(snapshot), StageReceiptDigest: candidate.NativeDigest,
+		ProbeReceiptDigest: digestBytes(listenerProof),
+		CommitReceiptDigest: digestBytes(append(append(append(append(validateDual, reloadDual...), validateFinal...), reloadFinal...), effectiveFinal...)),
+	}
+	if err = executor.storeGeneration(KindSSHPolicy, policy.ID, policy.Generation, candidate.PolicyDigest); err != nil {
+		return result, err
+	}
+	if err = executor.confirmSecurityLease(request.EffectID, lease.ConfirmationNonce, activation); err != nil {
+		return result, errors.Join(ErrCompensationFailed, err)
+	}
+	result.Activation = activation
 	return result, nil
 }
 
 func renderSSHPolicy(policy SSHPolicy) ([]byte,error) {
+	return renderSSHPolicyPorts(policy, []uint16{policy.Port})
+}
+
+func renderSSHPolicyPorts(policy SSHPolicy, ports []uint16) ([]byte,error) {
 	var buffer bytes.Buffer
-	fmt.Fprintf(&buffer, "# CyberPanel generation %d\nPort %d\nPermitRootLogin %s\nPasswordAuthentication no\nKbdInteractiveAuthentication %s\nPubkeyAuthentication yes\n", policy.Generation, policy.Port, yesNo(policy.AllowRoot), yesNo(policy.Authentication == SSHKeysAndMFA))
+	uniquePorts := map[uint16]struct{}{}
+	buffer.WriteString("# CyberPanel immutable SSH policy generation ")
+	buffer.WriteString(strconv.FormatUint(policy.Generation, 10))
+	buffer.WriteByte('\n')
+	for _, port := range ports {
+		if port == 0 {
+			return nil, ErrInvalidEffect
+		}
+		if _, exists := uniquePorts[port]; exists {
+			continue
+		}
+		uniquePorts[port] = struct{}{}
+		fmt.Fprintf(&buffer, "Port %d\n", port)
+	}
+	fmt.Fprintf(&buffer, "PermitRootLogin %s\nPasswordAuthentication no\nPermitEmptyPasswords no\nKbdInteractiveAuthentication %s\nPubkeyAuthentication yes\n", yesNo(policy.AllowRoot), yesNo(policy.Authentication == SSHKeysAndMFA))
 	if policy.Authentication == SSHKeysAndMFA { buffer.WriteString("AuthenticationMethods publickey,keyboard-interactive:pam\n") } else { buffer.WriteString("AuthenticationMethods publickey\n") }
-	fmt.Fprintf(&buffer, "AllowTcpForwarding %s\nAllowAgentForwarding %s\nClientAliveInterval %d\nClientAliveCountMax 1\nMaxAuthTries %d\nMaxSessions %d\nAuthorizedKeysFile /etc/ssh/authorized_keys/cyberpanel-%%u\n", yesNo(policy.AllowTCPForwarding), yesNo(policy.AllowAgentForwarding), int(policy.IdleTimeout/time.Second), policy.MaxAuthTries, policy.MaxSessions)
+	fmt.Fprintf(&buffer, "AllowTcpForwarding %s\nAllowAgentForwarding %s\nAllowStreamLocalForwarding %s\nGatewayPorts no\nPermitTunnel no\nX11Forwarding no\nPermitUserEnvironment no\nPermitUserRC no\nStrictModes yes\nLoginGraceTime 30\nClientAliveInterval %d\nClientAliveCountMax 1\nMaxAuthTries %d\nMaxSessions %d\nAuthorizedKeysFile /etc/ssh/authorized_keys/cyberpanel-%%u\n", yesNo(policy.AllowTCPForwarding), yesNo(policy.AllowAgentForwarding), yesNo(policy.AllowTCPForwarding), int(policy.IdleTimeout/time.Second), policy.MaxAuthTries, policy.MaxSessions)
 	if len(policy.AllowedGroups) > 0 { groups := make([]string, len(policy.AllowedGroups)); for index, group := range policy.AllowedGroups { name:=group.String();if !managedSSHGroup(name){return nil,ErrInvalidEffect};if _,err:=user.LookupGroup(name);err!=nil{return nil,ErrInvalidEffect};groups[index] = name }; buffer.WriteString("AllowGroups "+strings.Join(groups, " ")+"\n") }
 	return buffer.Bytes(),nil
+}
+
+func (executor *LinuxOperationsExecutor) probeSSHListener(ctx context.Context, port uint16, successes uint8) ([]byte, error) {
+	if successes == 0 || successes > 8 {
+		return nil, ErrInvalidEffect
+	}
+	var evidence []byte
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	for count := uint8(0); count < successes; count++ {
+		connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
+		if err != nil {
+			return evidence, err
+		}
+		_ = connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+		banner := make([]byte, 256)
+		read, readErr := connection.Read(banner)
+		_ = connection.Close()
+		if readErr != nil || read == 0 || !strings.HasPrefix(string(banner[:read]), "SSH-2.0-") {
+			return evidence, ErrCompensationFailed
+		}
+		evidence = append(evidence, bytes.TrimSpace(banner[:read])...)
+		evidence = append(evidence, '\n')
+	}
+	listeners, err := executor.runner.Run(ctx, "/usr/bin/ss", "-H", "-lntp", "sport", "=", ":"+strconv.Itoa(int(port)))
+	if err != nil || !strings.Contains(string(listeners), "sshd") {
+		return evidence, ErrCompensationFailed
+	}
+	evidence = append(evidence, listeners...)
+	return evidence, nil
 }
 
 func (executor *LinuxOperationsExecutor) putSSHKey(effect PutSSHKeyEffect) (linuxEffectResult, error) {

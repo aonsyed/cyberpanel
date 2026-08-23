@@ -319,11 +319,10 @@ func mustActivationDigest(value any)string{digest,_:=activationDigest(value);ret
 func (executor *LinuxOperationsExecutor) rollbackExternal(ctx context.Context, request EffectRequest, snapshots []operationsFileSnapshot) error {
 	switch request.Kind {
 	case EffectFirewallPolicy:
-		if request.FirewallPolicy.Policy.Backend == FirewallNFTables { if snapshotWasAbsent(snapshots,"/etc/cyberpanel/firewall.nft"){_,err:=executor.runner.Run(ctx,"/usr/sbin/nft","delete","table","inet","cyberpanel");return err};_, err := executor.runner.Run(ctx, "/usr/sbin/nft", "--file", "/etc/cyberpanel/firewall.nft"); return err }
+		if request.FirewallPolicy.Policy.Backend == FirewallNFTables { return executor.rollbackSecurityLease(ctx, request.EffectID) }
 		_, err := executor.runner.Run(ctx, "/usr/bin/firewall-cmd", "--reload"); return err
 	case EffectSSHPolicy:
-		if _, err := executor.runner.Run(ctx, "/usr/sbin/sshd", "-t", "-f", "/etc/ssh/sshd_config"); err != nil { return err }
-		if _, err := executor.runner.Run(ctx, "/usr/bin/systemctl", "reload", "sshd.service"); err != nil { _, err = executor.runner.Run(ctx, "/usr/bin/systemctl", "reload", "ssh.service"); return err }; return nil
+		return executor.rollbackSecurityLease(ctx, request.EffectID)
 	case EffectWAFPolicy:
 		if _, err := executor.validateWebConfiguration(ctx); err != nil { return err }; _, err := executor.runner.Run(ctx, "/usr/local/lsws/bin/lswsctrl", "reload"); return err
 	case EffectResourceProfile:
