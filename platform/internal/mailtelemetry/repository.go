@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +119,11 @@ func (repository *SQLiteRepository) Bootstrap(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS mail_abuse_recoveries_scope_v1 ON mail_abuse_recoveries_v1(tenant_id, created_at, recovery_id)`,
 		`CREATE TRIGGER IF NOT EXISTS mail_abuse_recoveries_no_update_v1 BEFORE UPDATE ON mail_abuse_recoveries_v1 BEGIN SELECT RAISE(ABORT, 'mail abuse recovery evidence is immutable'); END`,
 		`CREATE TRIGGER IF NOT EXISTS mail_abuse_recoveries_no_delete_v1 BEFORE DELETE ON mail_abuse_recoveries_v1 BEGIN SELECT RAISE(ABORT, 'mail abuse recovery evidence is immutable'); END`,
+		`CREATE TABLE IF NOT EXISTS mail_telemetry_protected_sources_v1 (
+			tenant_id TEXT NOT NULL, protected_ref TEXT NOT NULL, source_address TEXT NOT NULL, created_at TEXT NOT NULL,
+			PRIMARY KEY(tenant_id, protected_ref), UNIQUE(tenant_id, source_address)) STRICT`,
+		`CREATE TRIGGER IF NOT EXISTS mail_telemetry_protected_sources_no_update_v1 BEFORE UPDATE ON mail_telemetry_protected_sources_v1 BEGIN SELECT RAISE(ABORT, 'protected mail sources are immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS mail_telemetry_protected_sources_no_delete_v1 BEFORE DELETE ON mail_telemetry_protected_sources_v1 BEGIN SELECT RAISE(ABORT, 'protected mail sources are retained as security evidence'); END`,
 	}
 	repository.writer.Lock()
 	defer repository.writer.Unlock()
@@ -269,6 +275,100 @@ func (repository *SQLiteRepository) GetPolicy(ctx context.Context, actor Actor, 
 		return Policy{}, ErrNotFound
 	}
 	return policy, nil
+}
+
+type PolicyPage struct {
+	Policies     []Policy `json:"policies"`
+	NextPolicyID PolicyID `json:"next_policy_id,omitempty"`
+}
+
+func (repository *SQLiteRepository) ListPolicies(ctx context.Context, actor Actor, tenant TenantID, after PolicyID, limit uint16) (PolicyPage, error) {
+	if repository == nil || ctx == nil || !actor.valid() || actor.TenantID != tenant || !validID(string(tenant)) || after != "" && !validID(string(after)) || limit == 0 || limit > MaximumPageSize { return PolicyPage{}, ErrInvalid }
+	if repository.authorizer.AuthorizePolicy(ctx, actor, tenant, "", "", false) != nil { return PolicyPage{}, ErrNotFound }
+	rows, err := repository.db.QueryContext(ctx, `SELECT tenant_id,policy_id,revision,document FROM mail_log_policies_v1 WHERE tenant_id=? AND policy_id>? ORDER BY policy_id LIMIT ?`, tenant, after, int(limit)+1)
+	if err != nil { return PolicyPage{}, err }
+	defer rows.Close()
+	page := PolicyPage{Policies: make([]Policy, 0, limit)}
+	for rows.Next() {
+		policy, scanErr := scanPolicy(rows)
+		if scanErr != nil { return PolicyPage{}, scanErr }
+		if len(page.Policies) == int(limit) { page.NextPolicyID = page.Policies[len(page.Policies)-1].ID; break }
+		if repository.authorizer.AuthorizePolicy(ctx, actor, tenant, policy.DomainID, policy.MailboxID, false) == nil { page.Policies = append(page.Policies, policy) }
+	}
+	return page, rows.Err()
+}
+
+type AbuseFindingPage struct {
+	Findings []AbuseFinding `json:"findings"`
+	NextAt   time.Time      `json:"next_at,omitempty"`
+	NextID   string         `json:"next_id,omitempty"`
+}
+
+func (repository *SQLiteRepository) ListAbuseFindings(ctx context.Context, actor Actor, tenant TenantID, afterAt time.Time, afterID string, limit uint16) (AbuseFindingPage, error) {
+	if repository == nil || ctx == nil || !actor.valid() || actor.TenantID != tenant || !validID(string(tenant)) || (afterID == "") != afterAt.IsZero() || afterID != "" && !validID(afterID) || limit == 0 || limit > MaximumPageSize { return AbuseFindingPage{}, ErrInvalid }
+	if repository.authorizer.AuthorizeTelemetry(ctx, actor, tenant, "", "", false) != nil { return AbuseFindingPage{}, ErrNotFound }
+	arguments := []any{tenant}
+	where := `tenant_id=?`
+	if afterID != "" { where += ` AND (detected_at>? OR (detected_at=? AND finding_id>?))`; arguments = append(arguments, repositoryTime(afterAt), repositoryTime(afterAt), afterID) }
+	arguments = append(arguments, int(limit)+1)
+	rows, err := repository.db.QueryContext(ctx, `SELECT document FROM mail_abuse_findings_v1 WHERE `+where+` ORDER BY detected_at,finding_id LIMIT ?`, arguments...)
+	if err != nil { return AbuseFindingPage{}, err }
+	defer rows.Close()
+	page := AbuseFindingPage{Findings: make([]AbuseFinding, 0, limit)}
+	for rows.Next() {
+		var document []byte
+		var finding AbuseFinding
+		if rows.Scan(&document) != nil || decodeDocument(document, 128<<10, &finding) != nil || !finding.valid() || finding.TenantID != tenant { return AbuseFindingPage{}, ErrIntegrity }
+		if len(page.Findings) == int(limit) { last := page.Findings[len(page.Findings)-1]; page.NextAt, page.NextID = last.DetectedAt, last.ID; break }
+		page.Findings = append(page.Findings, finding)
+	}
+	return page, rows.Err()
+}
+
+type AbuseIntentPage struct {
+	Intents []AbuseIntent `json:"intents"`
+	NextID  string        `json:"next_id,omitempty"`
+}
+
+func (repository *SQLiteRepository) ListAbuseIntents(ctx context.Context, actor Actor, tenant TenantID, afterID string, limit uint16) (AbuseIntentPage, error) {
+	if repository == nil || ctx == nil || !actor.valid() || actor.TenantID != tenant || !validID(string(tenant)) || afterID != "" && !validID(afterID) || limit == 0 || limit > MaximumPageSize { return AbuseIntentPage{}, ErrInvalid }
+	if repository.authorizer.AuthorizeTelemetry(ctx, actor, tenant, "", "", false) != nil { return AbuseIntentPage{}, ErrNotFound }
+	rows, err := repository.db.QueryContext(ctx, `SELECT revision,document FROM mail_abuse_intents_v1 WHERE tenant_id=? AND intent_id>? ORDER BY intent_id LIMIT ?`, tenant, afterID, int(limit)+1)
+	if err != nil { return AbuseIntentPage{}, err }
+	defer rows.Close()
+	page := AbuseIntentPage{Intents: make([]AbuseIntent, 0, limit)}
+	for rows.Next() {
+		var revision uint64
+		var document []byte
+		var intent AbuseIntent
+		if rows.Scan(&revision, &document) != nil || decodeDocument(document, 128<<10, &intent) != nil || !intent.valid() || intent.TenantID != tenant || intent.Revision != revision { return AbuseIntentPage{}, ErrIntegrity }
+		if len(page.Intents) == int(limit) { page.NextID = page.Intents[len(page.Intents)-1].ID; break }
+		page.Intents = append(page.Intents, intent)
+	}
+	return page, rows.Err()
+}
+
+func (repository *SQLiteRepository) StoreProtectedSource(ctx context.Context, tenant TenantID, reference string, source netip.Addr) error {
+	if repository == nil || ctx == nil || !validID(string(tenant)) || !validProtectedSourceRef(reference) || !source.IsValid() || source.IsUnspecified() || source.IsMulticast() { return ErrInvalid }
+	source = source.Unmap()
+	result, err := repository.db.ExecContext(ctx, `INSERT OR IGNORE INTO mail_telemetry_protected_sources_v1(tenant_id,protected_ref,source_address,created_at) VALUES(?,?,?,?)`, tenant, reference, source.String(), repositoryTime(repository.now().UTC()))
+	if err != nil { return err }
+	rows, err := result.RowsAffected()
+	if err != nil { return err }
+	if rows == 0 {
+		var existing string
+		if repository.db.QueryRowContext(ctx, `SELECT source_address FROM mail_telemetry_protected_sources_v1 WHERE tenant_id=? AND protected_ref=?`, tenant, reference).Scan(&existing) != nil || existing != source.String() { return ErrIntegrity }
+	}
+	return nil
+}
+
+func (repository *SQLiteRepository) ResolveProtectedSource(ctx context.Context, tenant TenantID, reference string) (netip.Addr, error) {
+	if repository == nil || ctx == nil || !validID(string(tenant)) || !validProtectedSourceRef(reference) { return netip.Addr{}, ErrInvalid }
+	var raw string
+	if err := repository.db.QueryRowContext(ctx, `SELECT source_address FROM mail_telemetry_protected_sources_v1 WHERE tenant_id=? AND protected_ref=?`, tenant, reference).Scan(&raw); errors.Is(err, sql.ErrNoRows) { return netip.Addr{}, ErrNotFound } else if err != nil { return netip.Addr{}, err }
+	source, err := netip.ParseAddr(raw)
+	if err != nil || !source.IsValid() || source.IsUnspecified() || source.IsMulticast() || source != source.Unmap() { return netip.Addr{}, ErrIntegrity }
+	return source, nil
 }
 
 func (repository *SQLiteRepository) EffectiveMailLogPolicy(ctx context.Context, tenant TenantID, domain DomainID, mailbox MailboxID) (Policy, error) {

@@ -75,6 +75,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	mailProjector := mail.RepositorySnapshotProjector{Store:repositories.MailControl,NodeID:"local",Hostname:mailHostname,Postmaster:mail.Address("postmaster@"+mailHostname),MessageSizeBytes:128<<20}
 	mailCoordinator := &mail.Coordinator{Store:repositories.MailControl,Executor:mail.GenerationExecutor{Projector:mailProjector,Activator:mailClient},Now:runtimeClock{}.Now}
 	mailConsoleEdge,err:=newMailEdge(repositories.MailControl,mailClient);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize mail console edge: %w",err)}
+	mailTelemetryReady:=true
+	if telemetryErr:=mailConsoleEdge.enableTelemetry(ctx,repositories.Operations,operationsCoordinator,auditService);telemetryErr!=nil{mailConsoleEdge.setTelemetryUnavailable("telemetry_initialization_failed");mailTelemetryReady=false}
 	webmailKey,err:=mail.LoadMailSessionCredential(mail.MailSessionCredentialPath);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("load webmail session authority: %w",err)};defer func(){for index:=range webmailKey{webmailKey[index]=0}}()
 	webmailService,mailSessions,err:=mail.NewLocalWebmailService(webmailKey,"cyberpanel-webmail",mailHostname,repositories.Webmail,repositories.MailControl);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize webmail runtime: %w",err)}
 	webmailConsoleEdge,err:=newWebmailEdge(webmailService,repositories.Webmail);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize webmail console edge: %w",err)}
@@ -248,6 +250,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}
 	repositories.WebCatalog = catalog
 	go certificateRenewal.RunQueue(ctx,15*time.Minute,4)
+	if mailTelemetryReady{go mailConsoleEdge.RunMailTelemetry(ctx,15*time.Second)}
 	return apiserver.DomainServices{
 		DashboardEdge:     dashboardConsoleEdge,
 		Hosting:          hostingCoordinator,

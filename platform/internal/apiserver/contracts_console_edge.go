@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"sort"
@@ -19,6 +20,8 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
+	"github.com/aonsyed/cyberpanel/platform/internal/mailtelemetry"
+	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 )
 
 // EdgeCall is the complete authority and concurrency context passed from the
@@ -390,6 +393,133 @@ type MailDiagnosticProjection struct {
 	Checks      []string  `json:"checks"`
 	Findings    []string  `json:"findings"`
 	CompletedAt time.Time `json:"completed_at,omitempty"`
+}
+
+type MailTelemetryHealth struct {
+	State             string    `json:"state"`
+	UnavailableReason string    `json:"unavailable_reason,omitempty"`
+	ObservedAt        time.Time `json:"observed_at,omitempty"`
+	LastIngestAt      time.Time `json:"last_ingest_at,omitempty"`
+}
+
+type MailTelemetryQueryPayload struct {
+	DomainID    string                   `json:"domain_id,omitempty"`
+	MailboxID   string                   `json:"mailbox_id,omitempty"`
+	Categories  []mailtelemetry.Category `json:"categories,omitempty"`
+	Start       time.Time                `json:"start,omitempty"`
+	End         time.Time                `json:"end,omitempty"`
+	Limit       uint16                   `json:"limit,omitempty"`
+	Cursor      string                   `json:"cursor,omitempty"`
+	MaximumRows uint16                   `json:"maximum_rows,omitempty"`
+}
+
+type MailTelemetryEventProjection struct {
+	mailtelemetry.Event
+	IngestionState string `json:"ingestion_state"`
+}
+
+type MailTelemetryEventPage struct {
+	Items      []MailTelemetryEventProjection `json:"items"`
+	NextCursor string                         `json:"next_cursor,omitempty"`
+	Missing    []mailtelemetry.ParseGap       `json:"missing,omitempty"`
+	Truncated  bool                           `json:"truncated,omitempty"`
+	Health     MailTelemetryHealth            `json:"health"`
+}
+
+type MailTelemetryStatisticsPayload struct {
+	DomainID  string    `json:"domain_id,omitempty"`
+	MailboxID string    `json:"mailbox_id,omitempty"`
+	Start     time.Time `json:"start,omitempty"`
+	End       time.Time `json:"end,omitempty"`
+}
+
+type MailTelemetryStatisticsResult struct {
+	Statistics mailtelemetry.Statistics `json:"statistics"`
+	Health     MailTelemetryHealth      `json:"health"`
+}
+
+type MailTelemetryPolicyMutationPayload struct {
+	Action                string `json:"-"`
+	PolicyID              string `json:"policy_id,omitempty"`
+	DomainID              string `json:"domain_id,omitempty"`
+	MailboxID             string `json:"mailbox_id,omitempty"`
+	RetentionDays         uint32 `json:"retention_days,omitempty"`
+	ProviderRetentionDays uint32 `json:"provider_retention_days,omitempty"`
+	StorageBytes          int64  `json:"storage_bytes,omitempty"`
+	ExportAllowed         *bool  `json:"export_allowed,omitempty"`
+	BackupHistory         *bool  `json:"backup_history,omitempty"`
+	MigrationHistory      *bool  `json:"migration_history,omitempty"`
+}
+
+type MailTelemetryPolicyProjection struct {
+	ID                    string    `json:"id"`
+	DomainID              string    `json:"domain_id,omitempty"`
+	MailboxID             string    `json:"mailbox_id,omitempty"`
+	State                 string    `json:"state"`
+	RetentionDays         uint32    `json:"retention_days"`
+	ProviderRetentionDays uint32    `json:"provider_retention_days"`
+	SecurityRetentionDays uint32    `json:"security_retention_days"`
+	AuditRetentionDays    uint32    `json:"audit_retention_days"`
+	StorageBytes          int64     `json:"storage_bytes"`
+	ExportAllowed         bool      `json:"export_allowed"`
+	BackupHistory         bool      `json:"backup_history"`
+	MigrationHistory      bool      `json:"migration_history"`
+	Generation            uint64    `json:"generation"`
+	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+type MailTelemetryPolicyPage struct {
+	Items      []MailTelemetryPolicyProjection `json:"items"`
+	NextCursor string                          `json:"next_cursor,omitempty"`
+	Health     MailTelemetryHealth             `json:"health"`
+}
+
+type MailTelemetryPurgePayload struct {
+	Limit uint16 `json:"limit,omitempty"`
+}
+
+type MailAbusePagePayload struct {
+	Kind   string `json:"-"`
+	Limit  uint16 `json:"limit,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type MailAbuseProjection struct {
+	ID                 string    `json:"id"`
+	Kind               string    `json:"kind"`
+	DomainID           string    `json:"domain_id,omitempty"`
+	MailboxID          string    `json:"mailbox_id,omitempty"`
+	Pattern            string    `json:"pattern,omitempty"`
+	Action             string    `json:"action,omitempty"`
+	State              string    `json:"state"`
+	SourcePseudonym    string    `json:"source_pseudonym"`
+	ProtectedSourceRef string    `json:"protected_source_ref,omitempty"`
+	Observed           uint64    `json:"observed,omitempty"`
+	DistinctTargets    uint64    `json:"distinct_targets,omitempty"`
+	EvidenceDigest     string    `json:"evidence_digest"`
+	BodyDigest         string    `json:"body_digest,omitempty"`
+	MissingData        bool      `json:"missing_data,omitempty"`
+	ProposedBy         string    `json:"proposed_by,omitempty"`
+	ApprovedBy         string    `json:"approved_by,omitempty"`
+	OwnerReceiptID     string    `json:"owner_receipt_id,omitempty"`
+	Generation         uint64    `json:"generation"`
+	OccurredAt         time.Time `json:"occurred_at"`
+	ExpiresAt          time.Time `json:"expires_at,omitempty"`
+}
+
+type MailAbusePage struct {
+	Items      []MailAbuseProjection `json:"items"`
+	NextCursor string                `json:"next_cursor,omitempty"`
+	Health     MailTelemetryHealth   `json:"health"`
+}
+
+type MailAbuseReviewPayload struct {
+	Action           string    `json:"-"`
+	ApprovedDigest   string    `json:"approved_digest,omitempty"`
+	EvidenceRef      string    `json:"evidence_ref,omitempty"`
+	RecoveryIntentID string    `json:"recovery_intent_id,omitempty"`
+	ReasonDigest     string    `json:"reason_digest,omitempty"`
+	AllowUntil       time.Time `json:"allow_until,omitempty"`
 }
 
 type WebmailDirectoryPayload struct {
@@ -790,6 +920,17 @@ type CertificateEdgeService interface {
 type MailEdgeService interface {
 	ListRoutes(context.Context, EdgeCall, EdgePagePayload) (EdgePage[MailRouteProjection], error)
 	RunDiagnostic(context.Context, EdgeCall, MailDiagnosticPayload) (EdgeMutation[MailDiagnosticProjection], error)
+	SearchTelemetry(context.Context, EdgeCall, MailTelemetryQueryPayload) (MailTelemetryEventPage, error)
+	StreamTelemetry(context.Context, EdgeCall, MailTelemetryQueryPayload) (MailTelemetryEventPage, error)
+	TelemetryStatistics(context.Context, EdgeCall, MailTelemetryStatisticsPayload) (MailTelemetryStatisticsResult, error)
+	ListTelemetryPolicies(context.Context, EdgeCall, EdgePagePayload) (MailTelemetryPolicyPage, error)
+	GetTelemetryPolicy(context.Context, EdgeCall) (MailTelemetryPolicyProjection, error)
+	MutateTelemetryPolicy(context.Context, EdgeCall, MailTelemetryPolicyMutationPayload) (EdgeMutation[MailTelemetryPolicyProjection], error)
+	ExportTelemetry(context.Context, EdgeCall, MailTelemetryQueryPayload) (EdgeMutation[mailtelemetry.ExportJob], error)
+	PurgeTelemetry(context.Context, EdgeCall, MailTelemetryPurgePayload) (EdgeMutation[mailtelemetry.PurgeReceipt], error)
+	ListMailAbuse(context.Context, EdgeCall, MailAbusePagePayload) (MailAbusePage, error)
+	InspectMailAbuse(context.Context, EdgeCall) (MailAbuseProjection, error)
+	ReviewMailAbuse(context.Context, EdgeCall, MailAbuseReviewPayload) (EdgeMutation[MailAbuseProjection], error)
 }
 
 type WebmailEdgeService interface {
@@ -941,6 +1082,22 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 
 		consoleOperation("mail.route.list", "mail:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantResourceReadScope),
 		consoleOperation("mail.diagnostic.run", "mail:manage", password, true, func() any { return &MailDiagnosticPayload{} }, validateMailDiagnostic, edgeTenantExistingMutationScope),
+		consoleOperation("mail.telemetry.event.search", "mail:manage", password, false, func() any { return &MailTelemetryQueryPayload{} }, validateMailTelemetryQuery, edgeTenantListScope),
+		consoleOperation("mail.telemetry.event.stream", "mail:manage", password, false, func() any { return &MailTelemetryQueryPayload{} }, validateMailTelemetryQuery, edgeTenantListScope),
+		consoleOperation("mail.telemetry.statistics", "mail:manage", password, false, func() any { return &MailTelemetryStatisticsPayload{} }, validateMailTelemetryStatistics, edgeTenantListScope),
+		consoleOperation("mail.telemetry.policy.list", "mail:manage", password, false, func() any { return &EdgePagePayload{} }, validateMailTelemetryPage, edgeTenantListScope),
+		consoleOperation("mail.telemetry.policy.get", "mail:manage", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantResourceReadScope),
+		consoleOperation("mail.telemetry.policy.create", "mail:manage", mfa, true, func() any { return &MailTelemetryPolicyMutationPayload{} }, validateMailTelemetryPolicyMutation, edgeTenantCreateScope),
+		consoleOperation("mail.telemetry.policy.update", "mail:manage", mfa, true, func() any { return &MailTelemetryPolicyMutationPayload{} }, validateMailTelemetryPolicyUpdate, edgeTenantExistingMutationScope),
+		consoleOperation("mail.telemetry.policy.enable", "mail:manage", mfa, true, func() any { return &MailTelemetryPolicyMutationPayload{} }, validateMailTelemetryPolicyToggle, edgeTenantExistingMutationScope),
+		consoleOperation("mail.telemetry.policy.disable", "mail:manage", mfa, true, func() any { return &MailTelemetryPolicyMutationPayload{} }, validateMailTelemetryPolicyToggle, edgeTenantExistingMutationScope),
+		consoleOperation("mail.telemetry.export", "mail:manage", mfa, true, func() any { return &MailTelemetryQueryPayload{} }, validateMailTelemetryQuery, edgeTenantExistingMutationScope),
+		consoleOperation("mail.telemetry.purge", "mail:manage", mfa, true, func() any { return &MailTelemetryPurgePayload{} }, validateMailTelemetryPurge, edgeTenantExistingMutationScope),
+		consoleOperation("mail.abuse.finding.list", "security:observe", password, false, func() any { return &MailAbusePagePayload{} }, validateMailAbusePage, edgeTenantListScope),
+		consoleOperation("mail.abuse.intent.list", "security:observe", password, false, func() any { return &MailAbusePagePayload{} }, validateMailAbusePage, edgeTenantListScope),
+		consoleOperation("mail.abuse.intent.get", "security:observe", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantResourceReadScope),
+		consoleOperation("mail.abuse.intent.approve", "security:manage", phishingResistant, true, func() any { return &MailAbuseReviewPayload{} }, validateMailAbuseApproval, edgeTenantExistingMutationScope),
+		consoleOperation("mail.abuse.intent.recover", "security:manage", phishingResistant, true, func() any { return &MailAbuseReviewPayload{} }, validateMailAbuseRecovery, edgeTenantExistingMutationScope),
 		consoleOperation("webmail.contact.list", "mail:manage", password, false, func() any { return &WebmailDirectoryPayload{} }, validateWebmailDirectory, webmailScope),
 		consoleOperation("webmail.sieve.list", "mail:manage", password, false, func() any { return &WebmailDirectoryPayload{} }, validateWebmailDirectory, webmailScope),
 		consoleOperation("webmail.message.reply", "mail:manage", password, true, func() any { return &WebmailReplyPayload{} }, validateWebmailReply, webmailScope),
@@ -1215,6 +1372,118 @@ func validateMailDiagnostic(value any) error {
 	if payload.Depth == "" { payload.Depth = "standard" }
 	if payload.Depth != "quick" && payload.Depth != "standard" && payload.Depth != "deep" { return invalid("mail diagnostic") }
 	return nil
+}
+
+func validMailTelemetryScope(domainID, mailboxID string) bool {
+	return (domainID == "" || validEdgeID(domainID)) && (mailboxID == "" || validEdgeID(mailboxID)) && (mailboxID == "" || domainID != "")
+}
+
+func validMailTelemetryWindow(start, end time.Time, requireHours bool) bool {
+	effectiveEnd := end.UTC()
+	if effectiveEnd.IsZero() {
+		effectiveEnd = time.Now().UTC()
+		if requireHours { effectiveEnd = effectiveEnd.Truncate(time.Hour).Add(time.Hour) }
+	}
+	effectiveStart := start.UTC()
+	if effectiveStart.IsZero() { effectiveStart = effectiveEnd.Add(-24*time.Hour) }
+	if !effectiveEnd.After(effectiveStart) || effectiveEnd.Sub(effectiveStart) > mailtelemetry.MaximumSearchWindow { return false }
+	return !requireHours || effectiveStart.Equal(effectiveStart.Truncate(time.Hour)) && effectiveEnd.Equal(effectiveEnd.Truncate(time.Hour))
+}
+
+func validateMailTelemetryQuery(value any) error {
+	payload := value.(*MailTelemetryQueryPayload)
+	if payload.Limit == 0 { payload.Limit = 100 }
+	if payload.MaximumRows == 0 { payload.MaximumRows = mailtelemetry.MaximumPageSize }
+	if !validMailTelemetryScope(payload.DomainID, payload.MailboxID) || !validMailTelemetryWindow(payload.Start, payload.End, false) || payload.Limit > mailtelemetry.MaximumPageSize || payload.MaximumRows > mailtelemetry.MaximumPageSize || len(payload.Cursor) > 1024 || strings.ContainsAny(payload.Cursor, "\x00\r\n") || len(payload.Categories) > mailtelemetry.MaximumPolicyCategories { return invalid("mail telemetry query") }
+	sort.Slice(payload.Categories, func(left, right int) bool { return payload.Categories[left] < payload.Categories[right] })
+	for index, category := range payload.Categories {
+		if !category.Valid() || index > 0 && payload.Categories[index-1] == category { return invalid("mail telemetry category") }
+	}
+	return nil
+}
+
+func validateMailTelemetryPage(value any) error {
+	payload := value.(*EdgePagePayload)
+	if payload.Limit == 0 { payload.Limit = 100 }
+	if payload.Limit > mailtelemetry.MaximumPageSize || len(payload.Cursor) > 1024 || strings.ContainsAny(payload.Cursor, "\x00\r\n\t") { return invalid("mail telemetry page") }
+	return nil
+}
+
+func validateMailTelemetryStatistics(value any) error {
+	payload := value.(*MailTelemetryStatisticsPayload)
+	if payload.DomainID == "" || !validMailTelemetryScope(payload.DomainID, payload.MailboxID) || !validMailTelemetryWindow(payload.Start, payload.End, true) { return invalid("mail telemetry statistics") }
+	return nil
+}
+
+func validateMailTelemetryPolicyMutation(value any) error {
+	payload := value.(*MailTelemetryPolicyMutationPayload)
+	if payload.PolicyID != "" && !validEdgeID(payload.PolicyID) || !validMailTelemetryScope(payload.DomainID, payload.MailboxID) || payload.RetentionDays > 3650 || payload.ProviderRetentionDays > 3650 || payload.RetentionDays > 0 && payload.ProviderRetentionDays > 0 && payload.ProviderRetentionDays < payload.RetentionDays || payload.StorageBytes < 0 || payload.StorageBytes > 1<<50 || payload.StorageBytes > 0 && payload.StorageBytes < 1<<20 { return invalid("mail telemetry policy") }
+	return nil
+}
+
+func validateMailTelemetryPolicyUpdate(value any) error {
+	payload := value.(*MailTelemetryPolicyMutationPayload)
+	if err := validateMailTelemetryPolicyMutation(value); err != nil { return err }
+	if payload.PolicyID != "" || payload.DomainID != "" || payload.MailboxID != "" || payload.RetentionDays == 0 || payload.ProviderRetentionDays == 0 || payload.StorageBytes == 0 || payload.ExportAllowed == nil || payload.BackupHistory == nil || payload.MigrationHistory == nil { return invalid("mail telemetry policy update") }
+	return nil
+}
+
+func validateMailTelemetryPolicyToggle(value any) error {
+	payload := value.(*MailTelemetryPolicyMutationPayload)
+	if payload.PolicyID != "" || payload.DomainID != "" || payload.MailboxID != "" || payload.RetentionDays != 0 || payload.ProviderRetentionDays != 0 || payload.StorageBytes != 0 || payload.ExportAllowed != nil || payload.BackupHistory != nil || payload.MigrationHistory != nil { return invalid("mail telemetry policy toggle") }
+	return nil
+}
+
+func validateMailTelemetryPurge(value any) error {
+	payload := value.(*MailTelemetryPurgePayload)
+	if payload.Limit == 0 { payload.Limit = mailtelemetry.MaximumPageSize }
+	if payload.Limit > mailtelemetry.MaximumPageSize { return invalid("mail telemetry purge") }
+	return nil
+}
+
+func validateMailAbusePage(value any) error {
+	payload := value.(*MailAbusePagePayload)
+	if payload.Limit == 0 { payload.Limit = 100 }
+	if payload.Limit > mailtelemetry.MaximumPageSize || len(payload.Cursor) > 1024 || strings.ContainsAny(payload.Cursor, "\x00\r\n") { return invalid("mail abuse page") }
+	return nil
+}
+
+func validateMailAbuseApproval(value any) error {
+	payload := value.(*MailAbuseReviewPayload)
+	payload.ApprovedDigest = strings.ToLower(strings.TrimSpace(payload.ApprovedDigest))
+	if !validDigestReference(payload.ApprovedDigest) || !validEdgeID(payload.EvidenceRef) || payload.RecoveryIntentID != "" || payload.ReasonDigest != "" || !payload.AllowUntil.IsZero() { return invalid("mail abuse approval") }
+	return nil
+}
+
+func validateMailAbuseRecovery(value any) error {
+	payload := value.(*MailAbuseReviewPayload)
+	payload.ReasonDigest = strings.ToLower(strings.TrimSpace(payload.ReasonDigest))
+	now := time.Now().UTC()
+	if payload.RecoveryIntentID != "" && !validEdgeID(payload.RecoveryIntentID) || !validDigestReference(payload.ReasonDigest) || payload.AllowUntil.IsZero() || !payload.AllowUntil.After(now) || payload.AllowUntil.Sub(now) > mailtelemetry.MaximumBanLifetime || payload.ApprovedDigest != "" || payload.EvidenceRef != "" { return invalid("mail abuse recovery") }
+	return nil
+}
+
+func mapMailTelemetryError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, mailtelemetry.ErrInvalid), errors.Is(err, operations.ErrInvalidResource), errors.Is(err, operations.ErrInvalidCommand):
+		return ErrInvalidRequest
+	case errors.Is(err, mailtelemetry.ErrUnauthorized), errors.Is(err, mailtelemetry.ErrProtected), errors.Is(err, operations.ErrUnauthorized):
+		return ErrForbidden
+	case errors.Is(err, mailtelemetry.ErrNotFound):
+		return ErrNotFound
+	case errors.Is(err, operations.ErrNotFound):
+		return ErrOperationUnavailable
+	case errors.Is(err, mailtelemetry.ErrConflict), errors.Is(err, operations.ErrConflict), errors.Is(err, operations.ErrIdempotency):
+		return ErrConflict
+	case errors.Is(err, mailtelemetry.ErrLimit):
+		return ErrResponseTooLarge
+	case errors.Is(err, mailtelemetry.ErrGap), errors.Is(err, mailtelemetry.ErrIntegrity), errors.Is(err, operations.ErrInvalidReceipt), errors.Is(err, operations.ErrInvalidEffect), errors.Is(err, operations.ErrCompensationFailed):
+		return ErrUnavailable
+	default:
+		return mapMailError(err)
+	}
 }
 
 func validateWebmailDirectory(value any) error {
@@ -1836,6 +2105,67 @@ func bindConsoleEdgeContractsTwo(registry *Registry, services DomainServices) er
 			result, err := services.MailEdge.RunDiagnostic(ctx, edgeCall(inv), *value.(*MailDiagnosticPayload)); if err != nil { return OperationResult{}, mapMailError(err) }
 			return edgeOperationResult(http.StatusAccepted, result), nil
 		}); err != nil { return err }
+		if err := registry.Bind("mail.telemetry.event.search", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.MailEdge.SearchTelemetry(ctx, edgeCall(inv), *value.(*MailTelemetryQueryPayload)); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("mail.telemetry.event.stream", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.MailEdge.StreamTelemetry(ctx, edgeCall(inv), *value.(*MailTelemetryQueryPayload)); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("mail.telemetry.statistics", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.MailEdge.TelemetryStatistics(ctx, edgeCall(inv), *value.(*MailTelemetryStatisticsPayload)); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("mail.telemetry.policy.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.MailEdge.ListTelemetryPolicies(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("mail.telemetry.policy.get", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.MailEdge.GetTelemetryPolicy(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result, Generation:result.Generation}, nil
+		}); err != nil { return err }
+		bindPolicyMutation := func(name, action string, status int) error {
+			return registry.Bind(name, func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+				payload := value.(*MailTelemetryPolicyMutationPayload); payload.Action = action
+				result, err := services.MailEdge.MutateTelemetryPolicy(ctx, edgeCall(inv), *payload); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+				return edgeOperationResult(status, result), nil
+			})
+		}
+		if err := bindPolicyMutation("mail.telemetry.policy.create", "create", http.StatusCreated); err != nil { return err }
+		if err := bindPolicyMutation("mail.telemetry.policy.update", "update", http.StatusAccepted); err != nil { return err }
+		if err := bindPolicyMutation("mail.telemetry.policy.enable", "enable", http.StatusAccepted); err != nil { return err }
+		if err := bindPolicyMutation("mail.telemetry.policy.disable", "disable", http.StatusAccepted); err != nil { return err }
+		if err := registry.Bind("mail.telemetry.export", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.MailEdge.ExportTelemetry(ctx, edgeCall(inv), *value.(*MailTelemetryQueryPayload)); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+			return edgeOperationResult(http.StatusAccepted, result), nil
+		}); err != nil { return err }
+		if err := registry.Bind("mail.telemetry.purge", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.MailEdge.PurgeTelemetry(ctx, edgeCall(inv), *value.(*MailTelemetryPurgePayload)); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+			return edgeOperationResult(http.StatusAccepted, result), nil
+		}); err != nil { return err }
+		bindAbusePage := func(name, kind string) error {
+			return registry.Bind(name, func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+				payload := value.(*MailAbusePagePayload); payload.Kind = kind
+				result, err := services.MailEdge.ListMailAbuse(ctx, edgeCall(inv), *payload); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+				return OperationResult{Status:http.StatusOK, Value:result}, nil
+			})
+		}
+		if err := bindAbusePage("mail.abuse.finding.list", "findings"); err != nil { return err }
+		if err := bindAbusePage("mail.abuse.intent.list", "intents"); err != nil { return err }
+		if err := registry.Bind("mail.abuse.intent.get", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.MailEdge.InspectMailAbuse(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result, Generation:result.Generation}, nil
+		}); err != nil { return err }
+		bindAbuseReview := func(name, action string) error {
+			return registry.Bind(name, func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+				payload := value.(*MailAbuseReviewPayload); payload.Action = action
+				result, err := services.MailEdge.ReviewMailAbuse(ctx, edgeCall(inv), *payload); if err != nil { return OperationResult{}, mapMailTelemetryError(err) }
+				return edgeOperationResult(http.StatusAccepted, result), nil
+			})
+		}
+		if err := bindAbuseReview("mail.abuse.intent.approve", "approve"); err != nil { return err }
+		if err := bindAbuseReview("mail.abuse.intent.recover", "recover"); err != nil { return err }
 	}
 	if services.WebmailEdge != nil && services.Webmail != nil {
 		if err := registry.Bind("webmail.contact.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
