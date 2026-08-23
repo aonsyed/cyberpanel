@@ -42,6 +42,7 @@ const (
 	BrokerApplyWorkload BrokerMethod = "workload.apply"
 	BrokerObserveWorkload BrokerMethod = "workload.observe"
 	BrokerSetLifecycle BrokerMethod = "workload.lifecycle"
+	BrokerRestartWorkload BrokerMethod = "workload.restart"
 	BrokerDeleteWorkload BrokerMethod = "workload.delete"
 	BrokerApplyExposure BrokerMethod = "exposure.apply"
 	BrokerDeleteExposure BrokerMethod = "exposure.delete"
@@ -70,6 +71,7 @@ type BrokerWireRequest struct {
 	WorkloadMutation *WorkloadMutationRequest `json:"workload_mutation,omitempty"`
 	WorkloadObservation *WorkloadObservationRequest `json:"workload_observation,omitempty"`
 	WorkloadLifecycle *WorkloadLifecycleRequest `json:"workload_lifecycle,omitempty"`
+	WorkloadRestart *WorkloadRestartRequest `json:"workload_restart,omitempty"`
 	ExposureMutation *ExposureMutationRequest `json:"exposure_mutation,omitempty"`
 	Exec *ExecRequest `json:"exec,omitempty"`
 	Logs *LogRequest `json:"logs,omitempty"`
@@ -80,7 +82,7 @@ type BrokerWireRequest struct {
 func (request BrokerWireRequest) Validate(now time.Time) error {
 	if request.Version != ContainerBrokerProtocolVersion || !validBrokerRequestID(request.RequestID) || request.Deadline.IsZero() || !request.Deadline.After(now) || request.Deadline.After(now.Add(10*time.Minute)) { return ErrContainerBrokerProtocol }
 	count := 0
-	for _, present := range []bool{request.InstallRuntime!=nil,request.RuntimeMutation!=nil,request.ResolveImage!=nil,request.PullImage!=nil,request.ImageMutation!=nil,request.VolumeMutation!=nil,request.NetworkMutation!=nil,request.WorkloadMutation!=nil,request.WorkloadObservation!=nil,request.WorkloadLifecycle!=nil,request.ExposureMutation!=nil,request.Exec!=nil,request.Logs!=nil,request.VolumeSnapshot!=nil,request.VolumeRestore!=nil} { if present { count++ } }
+	for _, present := range []bool{request.InstallRuntime!=nil,request.RuntimeMutation!=nil,request.ResolveImage!=nil,request.PullImage!=nil,request.ImageMutation!=nil,request.VolumeMutation!=nil,request.NetworkMutation!=nil,request.WorkloadMutation!=nil,request.WorkloadObservation!=nil,request.WorkloadLifecycle!=nil,request.WorkloadRestart!=nil,request.ExposureMutation!=nil,request.Exec!=nil,request.Logs!=nil,request.VolumeSnapshot!=nil,request.VolumeRestore!=nil} { if present { count++ } }
 	if request.Method == BrokerInspectRuntime { if count != 0 { return ErrContainerBrokerProtocol }; return nil }
 	if count != 1 { return ErrContainerBrokerProtocol }
 	switch request.Method {
@@ -94,6 +96,7 @@ func (request BrokerWireRequest) Validate(now time.Time) error {
 	case BrokerApplyWorkload, BrokerDeleteWorkload: if request.WorkloadMutation == nil { return ErrContainerBrokerProtocol }
 	case BrokerObserveWorkload, BrokerStats: if request.WorkloadObservation == nil { return ErrContainerBrokerProtocol }
 	case BrokerSetLifecycle: if request.WorkloadLifecycle == nil { return ErrContainerBrokerProtocol }
+	case BrokerRestartWorkload: if request.WorkloadRestart == nil { return ErrContainerBrokerProtocol }
 	case BrokerApplyExposure, BrokerDeleteExposure: if request.ExposureMutation == nil { return ErrContainerBrokerProtocol }
 	case BrokerExec: if request.Exec == nil { return ErrContainerBrokerProtocol }
 	case BrokerReadLogs:
@@ -131,7 +134,8 @@ func (response BrokerWireResponse) Validate(request BrokerWireRequest, now time.
 	if count != 1 { return ErrContainerBrokerProtocol }
 	switch request.Method {
 	case BrokerInspectRuntime: if response.Capability == nil { return ErrContainerBrokerProtocol }
-	case BrokerInstallRuntime, BrokerRemoveRuntime, BrokerApplyWorkload, BrokerObserveWorkload, BrokerSetLifecycle, BrokerDeleteWorkload: if response.Runtime == nil { return ErrContainerBrokerProtocol }
+	case BrokerInstallRuntime, BrokerRemoveRuntime: if response.Runtime == nil { return ErrContainerBrokerProtocol }
+	case BrokerApplyWorkload, BrokerObserveWorkload, BrokerSetLifecycle, BrokerRestartWorkload, BrokerDeleteWorkload: if response.Runtime == nil || validateWorkloadRuntimeReceipt(request,*response.Runtime,response.ErrorCode)!=nil { return ErrContainerBrokerProtocol }
 	case BrokerResolveImage: if response.Image == nil { return ErrContainerBrokerProtocol }
 	case BrokerPullImage, BrokerDeleteImage: if response.Pull == nil { return ErrContainerBrokerProtocol }
 	case BrokerEnsureVolume, BrokerDeleteVolume: if response.Volume == nil { return ErrContainerBrokerProtocol }
@@ -148,6 +152,7 @@ func (response BrokerWireResponse) Validate(request BrokerWireRequest, now time.
 
 func validBrokerErrorCode(value string) bool { switch value { case "", "invalid_request", "unauthorized", "not_found", "conflict", "stale", "policy_rejected", "in_use", "ambiguous", "unavailable": return true }; return false }
 func validBrokerRequestID(value string) bool { if len(value)!=36 || value[:4]!="req-" { return false }; _,err:=hex.DecodeString(value[4:]);return err==nil }
+func validateWorkloadRuntimeReceipt(request BrokerWireRequest,receipt RuntimeReceipt,errorCode string)error{if !receipt.ResourceID.Valid()||receipt.ObservedAt.IsZero()||receipt.Outcome!="confirmed"&&receipt.Outcome!="rejected"&&receipt.Outcome!="ambiguous"||errorCode==""&&receipt.Outcome!="confirmed"||errorCode!=""&&receipt.Outcome=="confirmed"{return ErrContainerBrokerProtocol};var effect EffectID;var expected uint64;switch request.Method{case BrokerApplyWorkload,BrokerDeleteWorkload:effect=request.WorkloadMutation.EffectID;expected=request.WorkloadMutation.ExpectedGeneration;case BrokerSetLifecycle:effect=request.WorkloadLifecycle.EffectID;expected=request.WorkloadLifecycle.ExpectedGeneration;case BrokerRestartWorkload:effect=request.WorkloadRestart.EffectID;expected=request.WorkloadRestart.ExpectedGeneration;case BrokerObserveWorkload:if receipt.EffectID!=""||receipt.ResourceID!=request.WorkloadObservation.WorkloadID{return ErrContainerBrokerProtocol};expected=request.WorkloadObservation.ExpectedGeneration;default:return ErrContainerBrokerProtocol};if request.Method!=BrokerObserveWorkload&&receipt.EffectID!=effect{return ErrContainerBrokerProtocol};if receipt.Outcome=="confirmed"{if receipt.Generation!=expected+1&&request.Method!=BrokerObserveWorkload||request.Method==BrokerObserveWorkload&&receipt.Generation!=expected||receipt.RuntimeObjectID==""||!validLifecycle(receipt.Lifecycle)||!validWorkloadHealth(receipt.Health){return ErrContainerBrokerProtocol}};return nil}
 
 type ContainerBrokerTransport interface { RoundTrip(context.Context,BrokerWireRequest)(BrokerWireResponse,error) }
 type ContainerBrokerDialer interface { DialContext(context.Context)(net.Conn,error) }
@@ -175,6 +180,7 @@ func(client *ContainerBrokerClient)DeleteNetwork(ctx context.Context,v NetworkMu
 func(client *ContainerBrokerClient)ApplyWorkload(ctx context.Context,v WorkloadMutationRequest)(RuntimeReceipt,error){r,e:=client.call(ctx,BrokerWireRequest{Method:BrokerApplyWorkload,WorkloadMutation:&v});if r.Runtime==nil{return RuntimeReceipt{},e};return *r.Runtime,e}
 func(client *ContainerBrokerClient)ObserveWorkload(ctx context.Context,v WorkloadObservationRequest)(RuntimeReceipt,error){r,e:=client.call(ctx,BrokerWireRequest{Method:BrokerObserveWorkload,WorkloadObservation:&v});if r.Runtime==nil{return RuntimeReceipt{},e};return *r.Runtime,e}
 func(client *ContainerBrokerClient)SetLifecycle(ctx context.Context,v WorkloadLifecycleRequest)(RuntimeReceipt,error){r,e:=client.call(ctx,BrokerWireRequest{Method:BrokerSetLifecycle,WorkloadLifecycle:&v});if r.Runtime==nil{return RuntimeReceipt{},e};return *r.Runtime,e}
+func(client *ContainerBrokerClient)RestartWorkload(ctx context.Context,v WorkloadRestartRequest)(RuntimeReceipt,error){r,e:=client.call(ctx,BrokerWireRequest{Method:BrokerRestartWorkload,WorkloadRestart:&v});if r.Runtime==nil{return RuntimeReceipt{},e};return *r.Runtime,e}
 func(client *ContainerBrokerClient)DeleteWorkload(ctx context.Context,v WorkloadMutationRequest)(RuntimeReceipt,error){r,e:=client.call(ctx,BrokerWireRequest{Method:BrokerDeleteWorkload,WorkloadMutation:&v});if r.Runtime==nil{return RuntimeReceipt{},e};return *r.Runtime,e}
 func(client *ContainerBrokerClient)ApplyExposure(ctx context.Context,v ExposureMutationRequest)(ExposureReceipt,error){r,e:=client.call(ctx,BrokerWireRequest{Method:BrokerApplyExposure,ExposureMutation:&v});if r.Exposure==nil{return ExposureReceipt{},e};return *r.Exposure,e}
 func(client *ContainerBrokerClient)DeleteExposure(ctx context.Context,v ExposureMutationRequest)(ExposureReceipt,error){r,e:=client.call(ctx,BrokerWireRequest{Method:BrokerDeleteExposure,ExposureMutation:&v});if r.Exposure==nil{return ExposureReceipt{},e};return *r.Exposure,e}
@@ -209,6 +215,7 @@ func(server *ContainerBrokerServer)dispatch(ctx context.Context,request BrokerWi
 	case BrokerApplyWorkload:var v RuntimeReceipt;v,err=server.Broker.ApplyWorkload(ctx,*request.WorkloadMutation);response.Runtime=&v
 	case BrokerObserveWorkload:var v RuntimeReceipt;v,err=server.Broker.ObserveWorkload(ctx,*request.WorkloadObservation);response.Runtime=&v
 	case BrokerSetLifecycle:var v RuntimeReceipt;v,err=server.Broker.SetLifecycle(ctx,*request.WorkloadLifecycle);response.Runtime=&v
+	case BrokerRestartWorkload:var v RuntimeReceipt;v,err=server.Broker.RestartWorkload(ctx,*request.WorkloadRestart);response.Runtime=&v
 	case BrokerDeleteWorkload:var v RuntimeReceipt;v,err=server.Broker.DeleteWorkload(ctx,*request.WorkloadMutation);response.Runtime=&v
 	case BrokerApplyExposure:var v ExposureReceipt;v,err=server.Broker.ApplyExposure(ctx,*request.ExposureMutation);response.Exposure=&v
 	case BrokerDeleteExposure:var v ExposureReceipt;v,err=server.Broker.DeleteExposure(ctx,*request.ExposureMutation);response.Exposure=&v
@@ -219,7 +226,7 @@ func(server *ContainerBrokerServer)dispatch(ctx context.Context,request BrokerWi
 	case BrokerRestoreVolumes:var v VolumeSnapshotReceipt;v,err=server.Broker.RestoreVolumes(ctx,*request.VolumeRestore);response.VolumeSnapshot=&v
 	};response.ErrorCode=classifyContainerBrokerError(err);return response}
 
-func brokerRequestEffect(request BrokerWireRequest)EffectID{switch request.Method{case BrokerInstallRuntime:return request.InstallRuntime.EffectID;case BrokerRemoveRuntime:return request.RuntimeMutation.EffectID;case BrokerResolveImage:return request.ResolveImage.EffectID;case BrokerPullImage:return request.PullImage.EffectID;case BrokerDeleteImage:return request.ImageMutation.EffectID;case BrokerEnsureVolume,BrokerDeleteVolume:return request.VolumeMutation.EffectID;case BrokerEnsureNetwork,BrokerDeleteNetwork:return request.NetworkMutation.EffectID;case BrokerApplyWorkload,BrokerDeleteWorkload:return request.WorkloadMutation.EffectID;case BrokerSetLifecycle:return request.WorkloadLifecycle.EffectID;case BrokerApplyExposure,BrokerDeleteExposure:return request.ExposureMutation.EffectID;case BrokerExec:return request.Exec.EffectID;case BrokerSnapshotVolumes:return request.VolumeSnapshot.EffectID;case BrokerRestoreVolumes:return request.VolumeRestore.EffectID};return ""}
+func brokerRequestEffect(request BrokerWireRequest)EffectID{switch request.Method{case BrokerInstallRuntime:return request.InstallRuntime.EffectID;case BrokerRemoveRuntime:return request.RuntimeMutation.EffectID;case BrokerResolveImage:return request.ResolveImage.EffectID;case BrokerPullImage:return request.PullImage.EffectID;case BrokerDeleteImage:return request.ImageMutation.EffectID;case BrokerEnsureVolume,BrokerDeleteVolume:return request.VolumeMutation.EffectID;case BrokerEnsureNetwork,BrokerDeleteNetwork:return request.NetworkMutation.EffectID;case BrokerApplyWorkload,BrokerDeleteWorkload:return request.WorkloadMutation.EffectID;case BrokerSetLifecycle:return request.WorkloadLifecycle.EffectID;case BrokerRestartWorkload:return request.WorkloadRestart.EffectID;case BrokerApplyExposure,BrokerDeleteExposure:return request.ExposureMutation.EffectID;case BrokerExec:return request.Exec.EffectID;case BrokerSnapshotVolumes:return request.VolumeSnapshot.EffectID;case BrokerRestoreVolumes:return request.VolumeRestore.EffectID};return ""}
 
 func validateSnapshotRequest(request VolumeSnapshotRequest)error{if request.EffectID==""||!request.SnapshotID.Valid()||!request.TenantID.Valid()||!request.ApplicationID.Valid()||request.Fence==0||len(request.VolumeIDs)==0||len(request.VolumeIDs)>64{return ErrInvalid};seen:=map[ID]bool{};for _,id:=range request.VolumeIDs{if !id.Valid()||seen[id]{return ErrInvalid};seen[id]=true};return nil}
 func validateRestoreRequest(request VolumeRestoreRequest)error{if request.EffectID==""||!request.SnapshotID.Valid()||!request.TenantID.Valid()||request.Fence==0||len(request.VolumeIDs)==0||len(request.VolumeIDs)>64{return ErrInvalid};seen:=map[ID]bool{};for _,id:=range request.VolumeIDs{if !id.Valid()||seen[id]{return ErrInvalid};seen[id]=true};return nil}

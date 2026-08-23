@@ -10,7 +10,7 @@ type EffectID string
 type FenceToken uint64
 type Grant struct{TenantID ID;ResourceID ID;Operation string;AuthzEpoch uint64;ExpiresAt time.Time;Digest string}
 type ImagePolicyReceipt struct{ImageDigest,SBOMDigest,SignatureDigest,VulnerabilityDigest string;Verdict PolicyVerdict;PolicyVersion string}
-type RuntimeReceipt struct{EffectID EffectID;ResourceID ID;RuntimeObjectID,SpecDigest,ObservedDigest string;Lifecycle Lifecycle;Fence FenceToken;Outcome string;ObservedAt time.Time;ErrorCode string}
+type RuntimeReceipt struct{EffectID EffectID;ResourceID ID;RuntimeObjectID,SpecDigest,ObservedDigest string;Lifecycle Lifecycle;Health WorkloadHealth;Generation uint64;Fence FenceToken;Outcome string;ObservedAt time.Time;ErrorCode string}
 type PullReceipt struct{EffectID EffectID;ImageDigest string;Bytes uint64;Policy ImagePolicyReceipt;Outcome string;ObservedAt time.Time}
 type VolumeReceipt struct{EffectID EffectID;VolumeID ID;RuntimeObjectID string;QuotaBytes,InodeLimit uint64;Outcome string}
 type NetworkReceipt struct{EffectID EffectID;NetworkID ID;RuntimeObjectID string;Outcome string}
@@ -33,6 +33,7 @@ type Broker interface{
 	ApplyWorkload(context.Context,WorkloadMutationRequest)(RuntimeReceipt,error)
 	ObserveWorkload(context.Context,WorkloadObservationRequest)(RuntimeReceipt,error)
 	SetLifecycle(context.Context,WorkloadLifecycleRequest)(RuntimeReceipt,error)
+	RestartWorkload(context.Context,WorkloadRestartRequest)(RuntimeReceipt,error)
 	DeleteWorkload(context.Context,WorkloadMutationRequest)(RuntimeReceipt,error)
 	ApplyExposure(context.Context,ExposureMutationRequest)(ExposureReceipt,error)
 	DeleteExposure(context.Context,ExposureMutationRequest)(ExposureReceipt,error)
@@ -54,6 +55,7 @@ type NetworkMutationRequest struct{EffectID EffectID;Grant Grant;NetworkID ID;Ex
 type WorkloadMutationRequest struct{EffectID EffectID;Grant Grant;WorkloadID ID;ExpectedGeneration uint64;Tier RuntimeTier;Spec WorkloadSpec;SpecDigest string;Fence FenceToken;CommitAuthorizationDigest string}
 type WorkloadObservationRequest struct{Grant Grant;WorkloadID ID;ExpectedGeneration uint64}
 type WorkloadLifecycleRequest struct{EffectID EffectID;Grant Grant;WorkloadID ID;ExpectedGeneration uint64;Lifecycle Lifecycle;Fence FenceToken;CommitAuthorizationDigest string}
+type WorkloadRestartRequest struct{EffectID EffectID;Grant Grant;WorkloadID ID;ExpectedGeneration uint64;Fence FenceToken;CommitAuthorizationDigest string}
 type ExposureMutationRequest struct{EffectID EffectID;Grant Grant;Exposure Exposure;ExpectedGeneration uint64;Fence FenceToken}
 type ExecRequest struct{EffectID EffectID;Grant Grant;ExecGrant ExecGrant;Fence FenceToken;CommitAuthorizationDigest string}
 type LogRequest struct{Grant Grant;WorkloadID ID;Cursor LogCursor;Since time.Time;TailLines,MaxBytes uint64;Follow bool;Deadline time.Time}

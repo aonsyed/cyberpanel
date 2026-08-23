@@ -50,6 +50,15 @@ const(
 	LifecycleDeleted Lifecycle="deleted"
 )
 
+type WorkloadHealth string
+const(
+	HealthUnknown WorkloadHealth="unknown"
+	HealthStarting WorkloadHealth="starting"
+	HealthHealthy WorkloadHealth="healthy"
+	HealthUnhealthy WorkloadHealth="unhealthy"
+	HealthUnavailable WorkloadHealth="unavailable"
+)
+
 type ImageReference struct{ Registry string; Repository string; Digest string; Platform string }
 func(i ImageReference)Validate()error{if strings.TrimSpace(i.Registry)==""||strings.ContainsAny(i.Registry,"/ @\t\r\n")||strings.Trim(i.Repository,"/")==""||strings.ContainsAny(i.Repository," @\t\r\n")||!digestPattern.MatchString(i.Digest){return fmt.Errorf("%w: image reference",ErrInvalid)};if i.Platform!="linux/amd64"&&i.Platform!="linux/arm64"{return fmt.Errorf("%w: platform",ErrInvalid)};return nil}
 
@@ -113,8 +122,8 @@ type WorkloadSpec struct{
 
 func(s WorkloadSpec)Validate(tier RuntimeTier)error{if err:=s.Image.Validate();err!=nil{return err};if !s.CommandID.Valid()||!absoluteContainerPath(s.WorkingDirectory)||len(s.Arguments)>128{return ErrInvalid};if err:=s.User.Validate(tier);err!=nil{return err};if s.Restart!=RestartNever&&s.Restart!=RestartOnFailure&&s.Restart!=RestartUnlessStopped{return ErrInvalid};if s.Update!=UpdateManual&&s.Update!=UpdatePinnedMaintenance{return ErrInvalid};if err:=s.Health.Validate();err!=nil{return err};if err:=s.Limits.Validate();err!=nil{return err};if err:=s.Security.Validate(tier);err!=nil{return err};names:=map[string]bool{};for _,e:=range s.Environment{if err:=e.Validate();err!=nil{return err};if names[e.Name]{return ErrConflict};names[e.Name]=true};targets:=map[string]bool{};for _,m:=range s.Volumes{if err:=m.Validate();err!=nil{return err};if targets[m.Target]{return ErrConflict};targets[m.Target]=true};ports:=map[string]bool{};for _,p:=range s.Ports{if p.Name==""||p.ContainerPort==0||(p.Protocol!=ProtocolTCP&&p.Protocol!=ProtocolUDP)||ports[p.Name]{return ErrInvalid};ports[p.Name]=true};return nil}
 
-type Workload struct{ ID,TenantID,ProjectID,SiteID ID; Name string; Tier RuntimeTier; Spec WorkloadSpec; DesiredLifecycle,ObservedLifecycle Lifecycle; RuntimeObjectID string; SpecDigest,ObservedDigest string; Generation,ObservedGeneration uint64; RestartCount uint64; CreatedAt,UpdatedAt time.Time; DeletedAt *time.Time }
-func(w Workload)Validate()error{if !w.ID.Valid()||!w.TenantID.Valid()||strings.TrimSpace(w.Name)==""||(w.Tier!=TierTenantRootless&&w.Tier!=TierAdminRootful)||w.Generation==0{return ErrInvalid};if err:=w.Spec.Validate(w.Tier);err!=nil{return err};if !validLifecycle(w.DesiredLifecycle)||!validLifecycle(w.ObservedLifecycle){return ErrInvalid};return nil}
+type Workload struct{ ID,TenantID,ProjectID,SiteID ID; Name string; Tier RuntimeTier; Spec WorkloadSpec; DesiredLifecycle,ObservedLifecycle Lifecycle; ObservedHealth WorkloadHealth; RuntimeObjectID string; SpecDigest,ObservedDigest string; Generation,ObservedGeneration uint64; RestartCount uint64; CreatedAt,UpdatedAt time.Time; DeletedAt *time.Time }
+func(w Workload)Validate()error{if !w.ID.Valid()||!w.TenantID.Valid()||strings.TrimSpace(w.Name)==""||(w.Tier!=TierTenantRootless&&w.Tier!=TierAdminRootful)||w.Generation==0{return ErrInvalid};if err:=w.Spec.Validate(w.Tier);err!=nil{return err};if !validLifecycle(w.DesiredLifecycle)||!validLifecycle(w.ObservedLifecycle)||w.ObservedHealth!=""&&!validWorkloadHealth(w.ObservedHealth){return ErrInvalid};return nil}
 
 type ApplicationRecipe struct{ID ID;Name,Version,Digest,SigningKeyID,SignatureDigest,Signature string;Workloads []RecipeWorkload;Volumes []RecipeVolume;Networks []RecipeNetwork;HealthPolicy string;BackupPolicyID ID}
 type RecipeWorkload struct{Name string;Spec WorkloadSpec;DependsOn []string;RoutePortName string}
@@ -124,8 +133,9 @@ type ContainerApplication struct{ID,TenantID,SiteID,RecipeID ID;RecipeVersion st
 
 type ExecGrant struct{ID,TenantID,WorkloadID ID;Tier RuntimeTier;RuntimeUser RuntimeUser;CommandID ID;Arguments []string;AssuranceDigest string;ExpiresAt time.Time;ConsumedAt *time.Time}
 type LogCursor struct{WorkloadID ID;Stream string;Opaque string;At time.Time}
-type WorkloadObservation struct{WorkloadID ID;RuntimeObjectID,SpecDigest,ImageDigest,Health string;Lifecycle Lifecycle;RestartCount uint64;CPUUsageNanos,MemoryBytes,ReadBytes,WriteBytes,NetworkRXBytes,NetworkTXBytes uint64;ObservedAt time.Time}
+type WorkloadObservation struct{WorkloadID ID;RuntimeObjectID,SpecDigest,ImageDigest string;Health WorkloadHealth;Lifecycle Lifecycle;RestartCount uint64;CPUUsageNanos,MemoryBytes,ReadBytes,WriteBytes,NetworkRXBytes,NetworkTXBytes uint64;ObservedAt time.Time}
 
 func validLifecycle(value Lifecycle)bool{switch value{case LifecyclePending,LifecyclePulling,LifecycleCreating,LifecycleRunning,LifecycleStopped,LifecyclePaused,LifecycleUpdating,LifecycleDegraded,LifecycleDeleting,LifecycleDeleted:return true};return false}
+func validWorkloadHealth(value WorkloadHealth)bool{switch value{case HealthUnknown,HealthStarting,HealthHealthy,HealthUnhealthy,HealthUnavailable:return true};return false}
 func absoluteContainerPath(value string)bool{return strings.HasPrefix(value,"/")&&!strings.Contains(value,"//")&&!strings.Contains(value,"/../")&&!strings.HasSuffix(value,"/..")&&!strings.ContainsRune(value,0)}
 func canonicalEnvironment(values []EnvironmentValue)[]EnvironmentValue{out:=append([]EnvironmentValue(nil),values...);sort.Slice(out,func(i,j int)bool{return out[i].Name<out[j].Name});return out}
