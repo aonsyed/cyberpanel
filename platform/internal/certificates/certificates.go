@@ -33,6 +33,28 @@ func (r Repository) Begin(ctx context.Context, acme ACME, account Account, polic
 }
 func (r Repository) StoreGeneration(ctx context.Context, generation Generation) error { b, err := json.Marshal(generation); if err != nil { return err }; _, err = r.DB.ExecContext(ctx, `INSERT INTO certificate_generations (id, generation_json) VALUES (?, ?)`, generation.ID, b); return err }
 func (r Repository) Deploy(ctx context.Context, deployment Deployment) error { if r.DB == nil || deployment.ImmutablePath == "" { return errors.New("invalid immutable deployment") }; b, err := json.Marshal(deployment); if err != nil { return err }; _, err = r.DB.ExecContext(ctx, `INSERT INTO certificate_deployments (id, consumer, generation_id, deployment_json) VALUES (?, ?, ?, ?)`, deployment.ID, deployment.Consumer, deployment.Generation, b); return err }
+func (r Repository) CurrentDeployment(ctx context.Context, consumer string) (Deployment, error) {
+	if r.DB == nil || ctx == nil || consumer == "" { return Deployment{}, ErrInvalidCertificate }
+	var raw []byte
+	err := r.DB.QueryRowContext(ctx, `SELECT deployment_json FROM certificate_deployments WHERE consumer=? ORDER BY rowid DESC LIMIT 1`, consumer).Scan(&raw)
+	if err != nil { return Deployment{}, err }
+	var deployment Deployment
+	if json.Unmarshal(raw, &deployment) != nil || deployment.Consumer != consumer || deployment.ID == "" || deployment.Generation == "" || deployment.ImmutablePath == "" { return Deployment{}, ErrInvalidCertificate }
+	return deployment, nil
+}
+func (r Repository) ConsumersBoundTo(ctx context.Context, generation CertificateID, limit int) ([]string, bool, error) {
+	if r.DB == nil || ctx == nil || generation == "" { return nil, false, ErrInvalidCertificate }
+	if limit < 1 || limit > 128 { limit = 32 }
+	rows, err := r.DB.QueryContext(ctx, `SELECT current.consumer FROM certificate_deployments AS current WHERE current.generation_id=? AND current.rowid=(SELECT MAX(latest.rowid) FROM certificate_deployments AS latest WHERE latest.consumer=current.consumer) ORDER BY current.consumer LIMIT ?`, generation, limit+1)
+	if err != nil { return nil, false, err }
+	defer rows.Close()
+	consumers := make([]string, 0, limit+1)
+	for rows.Next() { var consumer string; if err=rows.Scan(&consumer);err!=nil{return nil,false,err};if consumer==""{return nil,false,ErrInvalidCertificate};consumers=append(consumers,consumer) }
+	if err=rows.Err();err!=nil{return nil,false,err}
+	more := len(consumers) > limit
+	if more { consumers = consumers[:limit] }
+	return consumers, more, nil
+}
 func PresentChallenge(ctx context.Context, challenge Challenge, http HTTP01Presenter, dns DNS01Presenter) error {
 	switch challenge.Kind { case HTTP01: if http == nil { return errors.New("http-01 presenter required") }; return http.PresentHTTP01(ctx, challenge); case DNS01: if dns == nil { return errors.New("dns-01 presenter required") }; return dns.PresentDNS01(ctx, challenge); default: return errors.New("unsupported acme challenge") }
 }

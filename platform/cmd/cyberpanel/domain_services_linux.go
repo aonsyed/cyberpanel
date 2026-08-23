@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/access"
@@ -85,6 +86,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	certificateRuntime,err:=certificates.NewLocalLinuxClientRuntimeForCurrentExecutable(nil,false,dnsAuthority);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize certificate runtime: %w",err)}
 	certificateIssuance:=certificateRuntime.Issuance(repositories.CertificateIssuance)
 	certificateDeployment:=certificateRuntime.Deployment(repositories.Certificates)
+	certificateRenewal:=&certificates.RenewalCoordinator{Store:repositories.CertificateIssuance,Deployments:repositories.Certificates,Issuance:certificateIssuance,Deployment:certificateDeployment,Now:runtimeClock{}.Now}
+	if err=certificateRenewal.Bootstrap(ctx);err!=nil{return apiserver.DomainServices{},fmt.Errorf("bootstrap certificate renewal: %w",err)}
 	certificateConsoleEdge,err:=newCertificateEdge(certificateRuntime,certificateIssuance,certificateDeployment);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize certificate console edge: %w",err)}
 	accessClient,err:=access.NewLocalAccessClient();if err!=nil{return apiserver.DomainServices{},fmt.Errorf("connect access executor: %w",err)}
 	fileService:=&access.FileService{Executor:accessClient,Store:repositories.Access,Now:runtimeClock{}.Now}
@@ -230,6 +233,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	migrationConsoleEdge,err:=newMigrationEdge(migrationRuntime,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration console edge: %w",err)}
 	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}
 	repositories.WebCatalog = catalog
+	go certificateRenewal.RunQueue(ctx,15*time.Minute,4)
 	return apiserver.DomainServices{
 		DashboardEdge:     dashboardConsoleEdge,
 		Hosting:          hostingCoordinator,
