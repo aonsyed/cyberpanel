@@ -20,6 +20,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/sqlrepo"
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
+	"github.com/aonsyed/cyberpanel/platform/internal/maildelivery"
 	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	webmanagement "github.com/aonsyed/cyberpanel/platform/internal/webengine/management"
@@ -43,6 +44,7 @@ type controlRepositories struct {
 	Mail                mail.Repository
 	MailControl         mail.SQLControlRepository
 	MailDeliveryPolicy  mail.DeliveryPolicyStore
+	MailDelivery        *maildelivery.SQLiteRepository
 	Webmail             *mail.WebmailStore
 	Marketing           mail.MarketingStore
 	Backup              backup.SQLRepository
@@ -89,6 +91,9 @@ func bootstrapControlRepositories(ctx context.Context, handle *sql.DB) (controlR
 	if repositories.Migrations, err = migration.NewSQLRepository(handle); err != nil {
 		return repositories, fmt.Errorf("open migration repository: %w", err)
 	}
+	if repositories.MailDelivery, err = maildelivery.NewSQLiteRepository(handle); err != nil {
+		return repositories, fmt.Errorf("open mail-delivery repository: %w", err)
+	}
 
 	repositories.DNS = dns.Repository{DB: handle}
 	repositories.DNSSEC = dns.DNSSECRepository{DB: handle}
@@ -124,6 +129,7 @@ func bootstrapControlRepositories(ctx context.Context, handle *sql.DB) (controlR
 		{"mail", repositories.Mail.Bootstrap},
 		{"mail control", repositories.MailControl.Bootstrap},
 		{"mail delivery policy", repositories.MailDeliveryPolicy.Bootstrap},
+		{"mail delivery", repositories.MailDelivery.Bootstrap},
 		{"webmail", repositories.Webmail.Bootstrap},
 		{"marketing", repositories.Marketing.Bootstrap},
 		{"backup resources", repositories.Backup.Bootstrap},

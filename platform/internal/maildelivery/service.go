@@ -91,6 +91,7 @@ type ServiceConfig struct {
 	Runtime RoutingRuntime
 	Relay PostfixRelayController
 	Webhook WebhookVerifier
+	ProviderConsumerReleaseDigest string
 	Now func() time.Time
 }
 
@@ -109,12 +110,28 @@ type Service struct {
 	runtime RoutingRuntime
 	relay PostfixRelayController
 	webhook WebhookVerifier
+	providerConsumerReleaseDigest string
 	now func() time.Time
+}
+
+func (service *Service) SupportsRouting() bool {
+	return service != nil && service.suppressions != nil && service.runtime != nil
+}
+
+func (service *Service) SupportsProviderEvents() bool {
+	return service != nil && service.providers != nil && service.webhook != nil
+}
+
+func (service *Service) SupportsLocalRelayControl() bool {
+	return service != nil && service.relay != nil
 }
 
 func NewService(configuration ServiceConfig) (*Service, error) {
 	if configuration.Repository == nil || configuration.Authorizer == nil || configuration.StepUp == nil ||
 		configuration.Consent == nil || configuration.Audit == nil {
+		return nil, ErrInvalid
+	}
+	if configuration.ProviderConsumerReleaseDigest != "" && !validDigest(configuration.ProviderConsumerReleaseDigest) {
 		return nil, ErrInvalid
 	}
 	if configuration.Now == nil {
@@ -124,7 +141,8 @@ func NewService(configuration ServiceConfig) (*Service, error) {
 		consent: configuration.Consent, audit: configuration.Audit, providers: configuration.Providers,
 		localDomainVerifier: configuration.LocalDomainVerifier, localCredentials: configuration.LocalCredentials,
 		localSMTP: configuration.LocalSMTP, localBindings: configuration.LocalBindings, suppressions: configuration.Suppressions,
-		runtime: configuration.Runtime, relay: configuration.Relay, webhook: configuration.Webhook, now: configuration.Now}, nil
+		runtime: configuration.Runtime, relay: configuration.Relay, webhook: configuration.Webhook,
+		providerConsumerReleaseDigest: configuration.ProviderConsumerReleaseDigest, now: configuration.Now}, nil
 }
 
 func (service *Service) Bootstrap(ctx context.Context) error {
@@ -153,6 +171,19 @@ func (service *Service) PutBinding(ctx context.Context, command PutBindingComman
 	}
 	if err := service.consent.VerifyMailDeliveryConsent(ctx, command.Consent); err != nil {
 		return ProviderBinding{}, errors.Join(ErrDenied, err)
+	}
+	if command.Binding.Adapter.Kind == LocalSMTPAdapterKind {
+		if service.localSMTP == nil || service.localDomainVerifier == nil {
+			return ProviderBinding{}, ErrUnavailable
+		}
+	} else {
+		if service.providers == nil {
+			return ProviderBinding{}, ErrUnavailable
+		}
+		provider, err := service.providers.ResolveMailDeliveryProvider(ctx, command.Binding.Adapter)
+		if err != nil || provider == nil || provider.Reference() != command.Binding.Adapter {
+			return ProviderBinding{}, errors.Join(ErrUnavailable, err)
+		}
 	}
 	if err := service.repository.PutBinding(ctx, command.Binding, command.ExpectedGeneration); err != nil {
 		return ProviderBinding{}, err
@@ -398,10 +429,20 @@ func (service *Service) RotateCredential(ctx context.Context, command RotateCred
 		}
 		return result, err
 	}
+	if current.Adapter == CyberMailProviderReferenceV1() && command.Desired.Credential.Version != current.Credential.Version+1 {
+		return result, ErrInvalid
+	}
 	rotating := command.Desired
 	rotating.Generation = command.ExpectedGeneration + 1
 	rotating.Lifecycle = BindingRotating
 	rotating.UpdatedAt = service.currentTime()
+	cyberMailRotation := current.Adapter == CyberMailProviderReferenceV1()
+	if cyberMailRotation {
+		// The new protected-material binding digest exists only after the
+		// provider password has been stored. Keep the durable rotating state
+		// on the last resolvable reference until activation returns that digest.
+		rotating.Credential = current.Credential
+	}
 	if rotating.Validate() != nil || current.Adapter.Kind == LocalSMTPAdapterKind && (command.RelaySpec.Validate() != nil ||
 		command.RelaySpec.BindingID != rotating.ID || command.RelaySpec.TenantID != rotating.TenantID ||
 		command.RelaySpec.Generation != rotating.Generation || command.RelaySpec.Credential != rotating.Credential) {
@@ -419,12 +460,12 @@ func (service *Service) RotateCredential(ctx context.Context, command RotateCred
 	}
 	result.Binding = rotating
 	prepared := CredentialRotation{ID: derivedID("rotation", string(rotating.ID), command.Operation.IntentDigest), BindingID: rotating.ID,
-		TenantID: rotating.TenantID, Sequence: rotating.Credential.Version*2 - 1, OldVersion: current.Credential.Version, NewVersion: rotating.Credential.Version,
+		TenantID: rotating.TenantID, Sequence: command.Desired.Credential.Version*2 - 1, OldVersion: current.Credential.Version, NewVersion: command.Desired.Credential.Version,
 		OverlapUntil: service.currentTime().Add(command.Overlap), State: RotationPrepared, OccurredAt: service.currentTime()}
 	rotation, err := lifecycle.RotateCredential(ctx, CredentialRotationRequest{Binding: current, Rotation: prepared})
 	if err != nil || rotation.Validate() != nil || rotation.BindingID != current.ID || rotation.TenantID != current.TenantID ||
 		rotation.ID != prepared.ID || rotation.Sequence != prepared.Sequence || rotation.OldVersion != current.Credential.Version ||
-		rotation.NewVersion != rotating.Credential.Version || rotation.OverlapUntil != prepared.OverlapUntil {
+		rotation.NewVersion != command.Desired.Credential.Version || rotation.OverlapUntil != prepared.OverlapUntil {
 		return result, errors.Join(ErrAmbiguous, err)
 	}
 	result.Rotation = rotation
@@ -460,6 +501,19 @@ func (service *Service) RotateCredential(ctx context.Context, command RotateCred
 		result.Rotation = reloaded
 	}
 	final := rotating
+	if cyberMailRotation {
+		resolver, ok := lifecycle.(interface {
+			ActivatedCyberMailCredentialReference(TenantID, BindingID, uint64) (EncryptedCredentialReference, error)
+		})
+		if !ok {
+			return result, errors.Join(ErrAmbiguous, ErrUnsupported)
+		}
+		activated, resolveErr := resolver.ActivatedCyberMailCredentialReference(final.TenantID, final.ID, command.Desired.Credential.Version)
+		if resolveErr != nil || activated.Reference != command.Desired.Credential.Reference || activated.Purpose != command.Desired.Credential.Purpose {
+			return result, errors.Join(ErrAmbiguous, resolveErr)
+		}
+		final.Credential = activated
+	}
 	final.Generation++
 	final.Lifecycle = command.Desired.Lifecycle
 	final.UpdatedAt = service.currentTime()
@@ -479,6 +533,197 @@ type ProviderStatus struct {
 	Events []NormalizedProviderEvent `json:"events,omitempty"`
 }
 
+type ProviderCapability struct {
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+type ProviderSecretProfile struct {
+	Purpose               string   `json:"purpose"`
+	ReferencePurpose      string   `json:"reference_purpose"`
+	AdapterID             string   `json:"adapter_id"`
+	AdapterVersion        string   `json:"adapter_version"`
+	Account               string   `json:"account"`
+	Origin                string   `json:"origin"`
+	ResourceKind          string   `json:"resource_kind"`
+	ResourceGeneration    uint64   `json:"resource_generation"`
+	Operations            []string `json:"operations"`
+	MaterialFields        []string `json:"material_fields"`
+	ConsumerReleaseDigest string   `json:"consumer_release_digest"`
+}
+
+type ProviderCapabilities struct {
+	Adapter      ProviderAdapterRef    `json:"adapter"`
+	APIEndpoint  string                `json:"api_endpoint"`
+	SMTPHost     string                `json:"smtp_host"`
+	SMTPPort     uint16                `json:"smtp_port"`
+	Secret       ProviderSecretProfile `json:"secret"`
+	Consent      ProviderConsentProfile `json:"consent"`
+	Capabilities []ProviderCapability  `json:"capabilities"`
+}
+
+type ProviderConsentProfile struct {
+	Purpose     string   `json:"purpose"`
+	Destination string   `json:"destination"`
+	DataClasses []string `json:"data_classes"`
+}
+
+func (service *Service) ProviderCapabilities(ctx context.Context, operation OperationContext, bindingID BindingID) (ProviderCapabilities, error) {
+	if service == nil || operation.Validate() != nil || !validID(string(bindingID)) {
+		return ProviderCapabilities{}, ErrInvalid
+	}
+	if service.providers == nil || service.providerConsumerReleaseDigest == "" {
+		return ProviderCapabilities{}, ErrUnavailable
+	}
+	if err := service.authorize(ctx, operation, bindingID, AuthorizeInspect, false); err != nil {
+		return ProviderCapabilities{}, err
+	}
+	provider, err := service.providers.ResolveMailDeliveryProvider(ctx, CyberMailProviderReferenceV1())
+	if err != nil || provider == nil || provider.Reference() != CyberMailProviderReferenceV1() {
+		return ProviderCapabilities{}, errors.Join(ErrUnavailable, err)
+	}
+	return ProviderCapabilities{
+		Adapter: CyberMailProviderReferenceV1(), APIEndpoint: CyberMailAPIBaseURL, SMTPHost: CyberMailSMTPHost, SMTPPort: CyberMailSMTPPort,
+		Secret: ProviderSecretProfile{Purpose: "mail_relay", ReferencePurpose: "maildelivery_provider",
+			AdapterID: CyberMailAdapterKind, AdapterVersion: CyberMailAdapterVersionV1, Account: CyberMailAdapterKind,
+			Origin: CyberMailAPIBaseURL, ResourceKind: "mail_relay", ResourceGeneration: 1,
+			Operations: []string{"authenticate", "rotate"},
+			MaterialFields: []string{"api_key", "email", "smtp_credential_id", "smtp_password", "smtp_username"},
+			ConsumerReleaseDigest: service.providerConsumerReleaseDigest},
+		Consent: ProviderConsentProfile{Purpose: "outbound_mail_delivery", Destination: CyberMailAPIBaseURL,
+			DataClasses: []string{"delivery_metadata", "mail_content", "recipient_address", "sender_address"}},
+		Capabilities: []ProviderCapability{
+			{Name: "account.health", Available: true},
+			{Name: "delivery.logs", Available: true},
+			{Name: "dns.plan", Available: false, Reason: "return_path_and_tracking_records_not_documented"},
+			{Name: "domain.enroll", Available: false, Reason: "complete_dns_plan_unavailable"},
+			{Name: "domain.list", Available: true},
+			{Name: "domain.remove", Available: true},
+			{Name: "domain.verify", Available: true},
+			{Name: "events.webhook", Available: false, Reason: "signature_and_event_schema_not_documented"},
+			{Name: "relay.query", Available: false, Reason: "idempotency_query_not_documented"},
+			{Name: "relay.submit", Available: true},
+			{Name: "smtp.list", Available: true},
+			{Name: "smtp.revoke", Available: true},
+			{Name: "smtp.rotate", Available: true},
+			{Name: "stats.account", Available: true},
+			{Name: "stats.domains", Available: true},
+		},
+	}, nil
+}
+
+func (service *Service) ProviderDomains(ctx context.Context, operation OperationContext, bindingID BindingID, page CyberMailPageRequest) (CyberMailDomainPage, uint64, error) {
+	binding, adapter, err := service.cyberMailProvider(ctx, operation, bindingID)
+	if err != nil {
+		return CyberMailDomainPage{}, 0, err
+	}
+	result, err := adapter.ListDomains(ctx, binding, page)
+	return result, binding.Generation, err
+}
+
+type ProviderAnalyticsKind string
+
+const (
+	ProviderAnalyticsAccountStatistics ProviderAnalyticsKind = "account_statistics"
+	ProviderAnalyticsDomainStatistics  ProviderAnalyticsKind = "domain_statistics"
+	ProviderAnalyticsDeliveryLogs      ProviderAnalyticsKind = "delivery_logs"
+	ProviderAnalyticsSMTPCredentials   ProviderAnalyticsKind = "smtp_credentials"
+)
+
+type ProviderAnalyticsRequest struct {
+	Kind     ProviderAnalyticsKind `json:"kind"`
+	DomainID DomainID              `json:"domain_id,omitempty"`
+	Page     uint32                `json:"page"`
+	PerPage  uint16                `json:"per_page"`
+	Status   string                `json:"status,omitempty"`
+	Days     uint8                 `json:"days,omitempty"`
+}
+
+type ProviderAnalytics struct {
+	Kind              ProviderAnalyticsKind           `json:"kind"`
+	BindingGeneration uint64                          `json:"binding_generation"`
+	Statistics        *CyberMailStatistics            `json:"statistics,omitempty"`
+	DomainStatistics  *CyberMailDomainStatisticsPage  `json:"domain_statistics,omitempty"`
+	DeliveryLogs      *CyberMailDeliveryLogPage       `json:"delivery_logs,omitempty"`
+	SMTPCredentials   *CyberMailSMTPCredentialPage    `json:"smtp_credentials,omitempty"`
+}
+
+func (service *Service) ProviderAnalytics(ctx context.Context, operation OperationContext, bindingID BindingID, request ProviderAnalyticsRequest) (ProviderAnalytics, error) {
+	binding, adapter, err := service.cyberMailProvider(ctx, operation, bindingID)
+	if err != nil {
+		return ProviderAnalytics{}, err
+	}
+	result := ProviderAnalytics{Kind: request.Kind, BindingGeneration: binding.Generation}
+	page := CyberMailPageRequest{Page: request.Page, PerPage: request.PerPage}
+	switch request.Kind {
+	case ProviderAnalyticsAccountStatistics:
+		value, fetchErr := adapter.Statistics(ctx, binding)
+		result.Statistics = &value
+		err = fetchErr
+	case ProviderAnalyticsDomainStatistics:
+		value, fetchErr := adapter.ListDomainStatistics(ctx, binding, page)
+		result.DomainStatistics = &value
+		err = fetchErr
+	case ProviderAnalyticsDeliveryLogs:
+		value, fetchErr := adapter.ListDeliveryLogs(ctx, binding, CyberMailDeliveryLogRequest{DomainID: request.DomainID,
+			Page: request.Page, PerPage: request.PerPage, Status: request.Status, Days: request.Days})
+		result.DeliveryLogs = &value
+		err = fetchErr
+	case ProviderAnalyticsSMTPCredentials:
+		value, fetchErr := adapter.ListSMTPCredentials(ctx, binding, page)
+		result.SMTPCredentials = &value
+		err = fetchErr
+	default:
+		return ProviderAnalytics{}, ErrInvalid
+	}
+	if err != nil {
+		return ProviderAnalytics{}, err
+	}
+	return result, nil
+}
+
+type SyncProviderHealthCommand struct {
+	Operation          OperationContext
+	BindingID          BindingID
+	ExpectedGeneration uint64
+}
+
+func (service *Service) SyncProviderHealth(ctx context.Context, command SyncProviderHealthCommand) (ProviderBinding, error) {
+	if service == nil || command.Operation.Validate() != nil || !validID(string(command.BindingID)) ||
+		command.ExpectedGeneration == 0 || command.ExpectedGeneration == ^uint64(0) || service.providers == nil {
+		return ProviderBinding{}, ErrInvalid
+	}
+	if err := service.authorize(ctx, command.Operation, command.BindingID, AuthorizeBindingWrite, false); err != nil {
+		return ProviderBinding{}, err
+	}
+	binding, err := service.repository.LoadBinding(ctx, command.Operation.TenantID, command.BindingID)
+	if err != nil {
+		return ProviderBinding{}, err
+	}
+	if binding.Generation != command.ExpectedGeneration {
+		return ProviderBinding{}, ErrStale
+	}
+	provider, err := service.providers.ResolveMailDeliveryProvider(ctx, binding.Adapter)
+	if err != nil || provider == nil || provider.Reference() != binding.Adapter {
+		return ProviderBinding{}, errors.Join(ErrUnavailable, err)
+	}
+	observation, err := provider.ObserveHealthAndLimits(ctx, binding)
+	if err != nil {
+		return ProviderBinding{}, err
+	}
+	binding.Observation = observation
+	binding.Generation++
+	binding.UpdatedAt = service.currentTime()
+	if err = service.repository.PutBinding(ctx, binding, command.ExpectedGeneration); err != nil {
+		return ProviderBinding{}, err
+	}
+	if err = service.record(ctx, command.Operation, binding.ID, AuthorizeBindingWrite, string(binding.ID), binding.Generation, "observed"); err != nil {
+		return binding, errors.Join(ErrAmbiguous, err)
+	}
+	return binding, nil
+}
+
 func (service *Service) Status(ctx context.Context, operation OperationContext, bindingID BindingID, eventLimit uint16, before time.Time) (ProviderStatus, error) {
 	var status ProviderStatus
 	if service == nil || operation.Validate() != nil || !validID(string(bindingID)) || eventLimit > 500 {
@@ -490,6 +735,9 @@ func (service *Service) Status(ctx context.Context, operation OperationContext, 
 	binding, err := service.repository.LoadBinding(ctx, operation.TenantID, bindingID)
 	if err != nil {
 		return status, err
+	}
+	if eventLimit > 0 && !service.SupportsProviderEvents() {
+		return status, ErrUnsupported
 	}
 	status.Binding = binding
 	for _, domain := range binding.Domains {
@@ -663,6 +911,31 @@ func (service *Service) credentialLifecycle(ctx context.Context, binding Provide
 	return adapter, nil
 }
 
+func (service *Service) cyberMailProvider(ctx context.Context, operation OperationContext, bindingID BindingID) (ProviderBinding, *CyberMailAdapterV1, error) {
+	if service == nil || service.providers == nil || operation.Validate() != nil || !validID(string(bindingID)) {
+		return ProviderBinding{}, nil, ErrInvalid
+	}
+	if err := service.authorize(ctx, operation, bindingID, AuthorizeInspect, false); err != nil {
+		return ProviderBinding{}, nil, err
+	}
+	binding, err := service.repository.LoadBinding(ctx, operation.TenantID, bindingID)
+	if err != nil {
+		return ProviderBinding{}, nil, err
+	}
+	if binding.Adapter != CyberMailProviderReferenceV1() {
+		return ProviderBinding{}, nil, ErrUnsupported
+	}
+	provider, err := service.providers.ResolveMailDeliveryProvider(ctx, binding.Adapter)
+	if err != nil {
+		return ProviderBinding{}, nil, errors.Join(ErrUnavailable, err)
+	}
+	adapter, ok := provider.(*CyberMailAdapterV1)
+	if !ok || adapter == nil || adapter.Reference() != binding.Adapter {
+		return ProviderBinding{}, nil, ErrIntegrity
+	}
+	return binding, adapter, nil
+}
+
 func (service *Service) authorize(ctx context.Context, operation OperationContext, bindingID BindingID, action AuthorizationAction, highRisk bool) error {
 	request := AuthorizationRequest{Actor: operation.Actor, TenantID: operation.TenantID, BindingID: bindingID, Action: action,
 		AuthorizationEpoch: operation.AuthorizationEpoch, HighRisk: highRisk, IntentDigest: operation.IntentDigest}
@@ -695,6 +968,82 @@ func (service *Service) record(ctx context.Context, operation OperationContext, 
 
 func (service *Service) currentTime() time.Time {
 	return service.now().UTC()
+}
+
+// ResolveCyberMailBinding keeps relay submission tenant/domain scoped and
+// rejects ambiguous bindings instead of choosing by insertion order.
+func (repository *SQLiteRepository) ResolveCyberMailBinding(ctx context.Context, tenantID TenantID, domainID DomainID) (ProviderBinding, error) {
+	if repository == nil || repository.db == nil || !validID(string(tenantID)) || !validID(string(domainID)) {
+		return ProviderBinding{}, ErrInvalid
+	}
+	rows, err := repository.db.QueryContext(ctx, `SELECT document FROM maildelivery_bindings_v1 WHERE tenant_id=? AND adapter_kind=? ORDER BY binding_id LIMIT 1001`, tenantID, CyberMailAdapterKind)
+	if err != nil {
+		return ProviderBinding{}, err
+	}
+	defer rows.Close()
+	var matched ProviderBinding
+	found := false
+	count := 0
+	for rows.Next() {
+		count++
+		var document []byte
+		var binding ProviderBinding
+		if count > 1000 || rows.Scan(&document) != nil || decodeStrict(document, &binding) != nil || validateCyberMailBinding(binding) != nil || binding.TenantID != tenantID {
+			return ProviderBinding{}, ErrConflict
+		}
+		if _, _, ok := bindingDomain(binding, domainID); !ok {
+			continue
+		}
+		if found {
+			return ProviderBinding{}, ErrConflict
+		}
+		matched, found = binding, true
+	}
+	if err = rows.Err(); err != nil {
+		return ProviderBinding{}, err
+	}
+	if !found {
+		return ProviderBinding{}, ErrNotFound
+	}
+	return matched, nil
+}
+
+// ResolveCyberMailCredentialBinding is intentionally exact and unique across
+// tenants because SMTPSecretResolver receives only the protected reference.
+func (repository *SQLiteRepository) ResolveCyberMailCredentialBinding(ctx context.Context, reference EncryptedCredentialReference) (ProviderBinding, error) {
+	if repository == nil || repository.db == nil || reference.Validate() != nil {
+		return ProviderBinding{}, ErrInvalid
+	}
+	rows, err := repository.db.QueryContext(ctx, `SELECT document FROM maildelivery_bindings_v1 WHERE adapter_kind=? AND credential_version=? ORDER BY binding_id LIMIT 1001`, CyberMailAdapterKind, reference.Version)
+	if err != nil {
+		return ProviderBinding{}, err
+	}
+	defer rows.Close()
+	var matched ProviderBinding
+	found := false
+	count := 0
+	for rows.Next() {
+		count++
+		var document []byte
+		var binding ProviderBinding
+		if count > 1000 || rows.Scan(&document) != nil || decodeStrict(document, &binding) != nil || validateCyberMailBinding(binding) != nil {
+			return ProviderBinding{}, ErrConflict
+		}
+		if binding.Credential != reference {
+			continue
+		}
+		if found {
+			return ProviderBinding{}, ErrConflict
+		}
+		matched, found = binding, true
+	}
+	if err = rows.Err(); err != nil {
+		return ProviderBinding{}, err
+	}
+	if !found {
+		return ProviderBinding{}, ErrNotFound
+	}
+	return matched, nil
 }
 
 func bindingDomain(binding ProviderBinding, domainID DomainID) (SendingDomain, int, bool) {

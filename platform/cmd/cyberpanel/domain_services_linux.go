@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
@@ -29,7 +30,9 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
+	"github.com/aonsyed/cyberpanel/platform/internal/maildelivery"
 	localmigration "github.com/aonsyed/cyberpanel/platform/internal/migration/localruntime"
+	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/accesspolicy"
 	webcatalog "github.com/aonsyed/cyberpanel/platform/internal/webengine/catalog"
@@ -48,7 +51,8 @@ import (
 // audience are established. An operation is never advertised by the gateway
 // merely because a schema exists.
 func assembleDomainServices(ctx context.Context, repositories controlRepositories, identityService *identity.Service, identityStore *identity.Store, auditService *audit.Service, mailHostname, panelRegistrableDomain, previewRegistrableDomain string) (apiserver.DomainServices, error) {
-	if ctx == nil || repositories.ControlDB == nil || identityService == nil || identityStore == nil {
+	if ctx == nil || repositories.ControlDB == nil || repositories.MailDelivery == nil || identityService == nil || identityStore == nil ||
+		auditService == nil || auditService.Writer == nil {
 		return apiserver.DomainServices{}, fmt.Errorf("domain service assembly requires control authority")
 	}
 	identityConsoleEdge,err:=newIdentityEdge(identityService,identityStore);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize identity console edge: %w",err)}
@@ -196,6 +200,11 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("connect secret management broker: %w", err)
 	}
+	mailDeliveryMaterial,err:=secrets.NewLocalMaterialClient();if err!=nil{return apiserver.DomainServices{},fmt.Errorf("connect mail-delivery material broker: %w",err)}
+	mailDeliveryConsumerDigest,err:=certificates.CurrentExecutableDigest();if err!=nil{return apiserver.DomainServices{},fmt.Errorf("digest mail-delivery consumer: %w",err)}
+	mailDeliveryRuntime,err:=maildelivery.NewCyberMailLocalRuntimeV1(maildelivery.CyberMailLocalRuntimeV1Options{Repository:repositories.MailDelivery,Material:mailDeliveryMaterial,Management:secretEnrollment.client,HelloName:mailHostname,ConsumerReleaseDigest:mailDeliveryConsumerDigest,Now:runtimeClock{}.Now});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize CyberMail adapter: %w",err)}
+	mailDeliveryAuthorizer,err:=identity.NewAuthorizer(identityStore);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize mail-delivery authorization: %w",err)}
+	mailDeliveryService,err:=maildelivery.NewService(maildelivery.ServiceConfig{Repository:repositories.MailDelivery,Authorizer:cyberMailAuthorization{authorizer:mailDeliveryAuthorizer,now:runtimeClock{}.Now},StepUp:cyberMailAuthorization{authorizer:mailDeliveryAuthorizer,now:runtimeClock{}.Now},Consent:cyberMailConsent{},Audit:cyberMailAudit{writer:auditService.Writer},Providers:mailDeliveryRuntime.Registry,ProviderConsumerReleaseDigest:mailDeliveryConsumerDigest,Now:runtimeClock{}.Now});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize mail-delivery service: %w",err)}
 	mailConsumerDigest,err:=webEngineExecutableDigest("/usr/local/libexec/cyberpanel/panel-execd");if err!=nil{return apiserver.DomainServices{},fmt.Errorf("digest OpenDKIM material consumer: %w",err)}
 	mailRotation,err:=mail.NewDKIMRotationService(repositories.MailControl,mailProjector,cyberpanelDKIMRuntime{client:mailClient},secretEnrollment.client,mail.SystemDKIMTXTObserver{},mailConsumerDigest,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize DKIM rotation: %w",err)}
 	mailCoordinator.DKIMRotation=mailRotation
@@ -269,6 +278,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		MailEdge:         mailConsoleEdge,
 		Webmail:          webmailService,
 		MailSessions:     mailSessions,
+		MailDelivery:     mailDeliveryService,
 		WebmailEdge:      webmailConsoleEdge,
 		DNSAuthority:     dnsAuthority,
 		DNSSEC:           dnssecCoordinator,
@@ -347,6 +357,96 @@ func(sink certificateMaterialAuditSink)RecordMaterialAudit(ctx context.Context,s
 var _ certificates.MaterialImportPolicyResolver = certificateMaterialPolicy{}
 var _ certificates.SelfSignedMaterialPolicyResolver = certificateMaterialPolicy{}
 var _ certificates.MaterialAuditSink = certificateMaterialAuditSink{}
+
+type cyberMailAuthorization struct {
+	authorizer *identity.Authorizer
+	now        func() time.Time
+}
+
+func (authority cyberMailAuthorization) AuthorizeMailDelivery(ctx context.Context, request maildelivery.AuthorizationRequest) error {
+	assurance := identity.AssurancePassword
+	if request.HighRisk {
+		assurance = identity.AssuranceMFA
+	}
+	return authority.authorize(ctx, request, assurance)
+}
+
+func (authority cyberMailAuthorization) VerifyMailDeliveryStepUp(ctx context.Context, request maildelivery.AuthorizationRequest, proofDigest string, operationAt time.Time) error {
+	if !request.HighRisk || len(proofDigest) != 64 || operationAt.IsZero() {
+		return identity.ErrAssuranceRequired
+	}
+	if _, err := hex.DecodeString(proofDigest); err != nil {
+		return identity.ErrAssuranceRequired
+	}
+	now := authority.now().UTC()
+	if operationAt.After(now.Add(time.Minute)) || now.Sub(operationAt) > 5*time.Minute {
+		return identity.ErrAssuranceRequired
+	}
+	return authority.authorize(ctx, request, identity.AssuranceMFA)
+}
+
+func (authority cyberMailAuthorization) authorize(ctx context.Context, request maildelivery.AuthorizationRequest, assurance identity.AssuranceLevel) error {
+	if authority.authorizer == nil || authority.now == nil || request.Validate() != nil {
+		return identity.ErrForbidden
+	}
+	principalID, err := identity.NewID(string(request.Actor))
+	if err != nil {
+		return identity.ErrForbidden
+	}
+	tenantID, err := identity.NewID(string(request.TenantID))
+	if err != nil {
+		return identity.ErrForbidden
+	}
+	decision, err := authority.authorizer.Decide(ctx, identity.AuthorizationRequest{PrincipalID: principalID,
+		Permission: identity.MustPermission("mail:manage"), Scope: identity.Scope{Kind: identity.ScopeTenant, TenantID: tenantID},
+		At: authority.now().UTC(), Assurance: assurance})
+	if err != nil || !decision.Allowed || decision.PrincipalEpoch != request.AuthorizationEpoch {
+		return identity.ErrForbidden
+	}
+	return nil
+}
+
+type cyberMailConsent struct{}
+
+func (cyberMailConsent) VerifyMailDeliveryConsent(_ context.Context, request maildelivery.ConsentRequest) error {
+	expected := []string{"delivery_metadata", "mail_content", "recipient_address", "sender_address"}
+	if request.Validate() != nil || request.Destination != maildelivery.CyberMailAPIBaseURL || len(request.DataClasses) != len(expected) {
+		return maildelivery.ErrDenied
+	}
+	for index := range expected {
+		if request.DataClasses[index] != expected[index] {
+			return maildelivery.ErrDenied
+		}
+	}
+	return nil
+}
+
+type cyberMailAudit struct {
+	writer *audit.Writer
+}
+
+func (sink cyberMailAudit) RecordMailDelivery(ctx context.Context, record maildelivery.AuditRecord) error {
+	if sink.writer == nil || record.Validate() != nil {
+		return audit.ErrInvalid
+	}
+	outcome := audit.OutcomeApplied
+	switch record.Outcome {
+	case "ambiguous":
+		outcome = audit.OutcomeAmbiguous
+	case "failed":
+		outcome = audit.OutcomeFailed
+	case "rejected":
+		outcome = audit.OutcomeRejected
+	}
+	event := audit.Event{ID: "maildelivery." + record.IntentDigest[:48], Class: audit.ClassMutation,
+		Action: "maildelivery." + string(record.Action), Actor: audit.Actor{PrincipalID: string(record.Actor), TenantID: string(record.TenantID),
+			AuthzEpoch: record.AuthorizationEpoch, Assurance: "gateway"},
+		Target: audit.Target{Kind: "maildelivery_binding", ID: string(record.BindingID), TenantID: string(record.TenantID),
+			Generation: strconv.FormatUint(record.Generation, 10)}, Outcome: outcome, RequestDigest: record.IntentDigest,
+		EffectID: record.ResourceID, Attributes: map[string]string{"boundary": "maildelivery"}, OccurredAt: record.OccurredAt}
+	_, err := sink.writer.Append(ctx, event)
+	return err
+}
 
 type cyberpanelDKIMRuntime struct{client *mail.MailDaemonClient}
 

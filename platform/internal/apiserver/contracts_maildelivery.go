@@ -59,6 +59,20 @@ type MailDeliveryRelayStatusPayload struct {
 	Generation maildelivery.PostfixRelayGeneration `json:"generation"`
 }
 
+type MailDeliveryProviderPagePayload struct {
+	Page    uint32 `json:"page"`
+	PerPage uint16 `json:"per_page"`
+}
+
+type MailDeliveryProviderAnalyticsPayload struct {
+	Kind     maildelivery.ProviderAnalyticsKind `json:"kind"`
+	DomainID maildelivery.DomainID              `json:"domain_id,omitempty"`
+	Page     uint32                             `json:"page,omitempty"`
+	PerPage  uint16                             `json:"per_page,omitempty"`
+	Status   string                             `json:"status,omitempty"`
+	Days     uint8                              `json:"days,omitempty"`
+}
+
 func registerMailDeliveryContracts(registry *Registry) error {
 	manage := identity.MustPermission("mail:manage")
 	definitions := []Operation{
@@ -78,6 +92,14 @@ func registerMailDeliveryContracts(registry *Registry) error {
 			NewPayload: func() any { return &MailDeliveryStatusPayload{} }, ValidatePayload: validateMailDeliveryStatus, ResolveScope: mailDeliveryReadScope},
 		{Name: "mail.delivery.relay.status", Permission: manage, Assurance: identity.AssurancePassword, Auth: AuthRequired,
 			NewPayload: func() any { return &MailDeliveryRelayStatusPayload{} }, ValidatePayload: validateMailDeliveryRelayStatus, ResolveScope: mailDeliveryReadScope},
+		{Name: "mail.delivery.provider.capabilities", Permission: manage, Assurance: identity.AssurancePassword, Auth: AuthRequired,
+			NewPayload: func() any { return &EmptyPayload{} }, ResolveScope: mailDeliveryReadScope},
+		{Name: "mail.delivery.provider.domains.list", Permission: manage, Assurance: identity.AssurancePassword, Auth: AuthRequired,
+			NewPayload: func() any { return &MailDeliveryProviderPagePayload{} }, ValidatePayload: validateMailDeliveryProviderPage, ResolveScope: mailDeliveryReadScope},
+		{Name: "mail.delivery.provider.analytics", Permission: manage, Assurance: identity.AssurancePassword, Auth: AuthRequired,
+			NewPayload: func() any { return &MailDeliveryProviderAnalyticsPayload{} }, ValidatePayload: validateMailDeliveryProviderAnalytics, ResolveScope: mailDeliveryReadScope},
+		{Name: "mail.delivery.provider.health.sync", Permission: manage, Assurance: identity.AssurancePassword, Auth: AuthRequired, Mutating: true,
+			NewPayload: func() any { return &EmptyPayload{} }, ResolveScope: mailDeliveryExistingScope},
 	}
 	for _, definition := range definitions {
 		if err := register(registry, definition); err != nil {
@@ -124,20 +146,22 @@ func bindMailDelivery(registry *Registry, services DomainServices) error {
 	}); err != nil {
 		return err
 	}
-	if err := registry.Bind("mail.delivery.route.evaluate", func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
-		payload := value.(*MailDeliveryRoutePayload)
-		decision, err := service.Route(ctx, maildelivery.RouteCommand{Operation: mailDeliveryOperation(invocation, ""),
-			BindingID: maildelivery.BindingID(invocation.Request.ResourceID), DomainID: payload.DomainID, MessageID: payload.MessageID,
-			Stream: payload.Stream, CampaignID: payload.CampaignID})
-		if err != nil && !errors.Is(err, maildelivery.ErrAmbiguous) {
-			return OperationResult{}, mapMailDeliveryError(err)
+	if service.SupportsRouting() {
+		if err := registry.Bind("mail.delivery.route.evaluate", func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
+			payload := value.(*MailDeliveryRoutePayload)
+			decision, err := service.Route(ctx, maildelivery.RouteCommand{Operation: mailDeliveryOperation(invocation, ""),
+				BindingID: maildelivery.BindingID(invocation.Request.ResourceID), DomainID: payload.DomainID, MessageID: payload.MessageID,
+				Stream: payload.Stream, CampaignID: payload.CampaignID})
+			if err != nil && !errors.Is(err, maildelivery.ErrAmbiguous) {
+				return OperationResult{}, mapMailDeliveryError(err)
+			}
+			result := MailDeliveryRouteResult{Target: decision.Target, BindingID: decision.BindingID, BindingGeneration: decision.BindingGeneration,
+				Rule: decision.Rule, Code: decision.Code, MustReconcile: decision.MustReconcile,
+				SuppressionGeneration: decision.SuppressionGeneration, CircuitGeneration: decision.CircuitGeneration}
+			return OperationResult{Status: http.StatusOK, Value: result}, nil
+		}); err != nil {
+			return err
 		}
-		result := MailDeliveryRouteResult{Target: decision.Target, BindingID: decision.BindingID, BindingGeneration: decision.BindingGeneration,
-			Rule: decision.Rule, Code: decision.Code, MustReconcile: decision.MustReconcile,
-			SuppressionGeneration: decision.SuppressionGeneration, CircuitGeneration: decision.CircuitGeneration}
-		return OperationResult{Status: http.StatusOK, Value: result}, nil
-	}); err != nil {
-		return err
 	}
 	if err := registry.Bind("mail.delivery.credential.rotate", func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
 		payload := value.(*MailDeliveryRotatePayload)
@@ -165,19 +189,65 @@ func bindMailDelivery(registry *Registry, services DomainServices) error {
 			return OperationResult{Status: http.StatusOK, Value: status, Generation: status.Binding.Generation}, nil
 		}
 	}
-	if err := registry.Bind("mail.delivery.events.list", statusHandler(true)); err != nil {
-		return err
+	if service.SupportsProviderEvents() {
+		if err := registry.Bind("mail.delivery.events.list", statusHandler(true)); err != nil {
+			return err
+		}
 	}
 	if err := registry.Bind("mail.delivery.status", statusHandler(false)); err != nil {
 		return err
 	}
-	return registry.Bind("mail.delivery.relay.status", func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
-		observation, err := service.ReconcileRelay(ctx, mailDeliveryOperation(invocation, ""), maildelivery.BindingID(invocation.Request.ResourceID),
-			value.(*MailDeliveryRelayStatusPayload).Generation)
+	if service.SupportsLocalRelayControl() {
+		if err := registry.Bind("mail.delivery.relay.status", func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
+			observation, err := service.ReconcileRelay(ctx, mailDeliveryOperation(invocation, ""), maildelivery.BindingID(invocation.Request.ResourceID),
+				value.(*MailDeliveryRelayStatusPayload).Generation)
+			if err != nil {
+				return OperationResult{}, mapMailDeliveryError(err)
+			}
+			return OperationResult{Status: http.StatusOK, Value: observation}, nil
+		}); err != nil {
+			return err
+		}
+	}
+	if err := registry.Bind("mail.delivery.provider.capabilities", func(ctx context.Context, invocation Invocation, _ any) (OperationResult, error) {
+		capabilities, err := service.ProviderCapabilities(ctx, mailDeliveryOperation(invocation, ""), maildelivery.BindingID(invocation.Request.ResourceID))
 		if err != nil {
 			return OperationResult{}, mapMailDeliveryError(err)
 		}
-		return OperationResult{Status: http.StatusOK, Value: observation}, nil
+		return OperationResult{Status: http.StatusOK, Value: capabilities}, nil
+	}); err != nil {
+		return err
+	}
+	if err := registry.Bind("mail.delivery.provider.domains.list", func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
+		payload := value.(*MailDeliveryProviderPagePayload)
+		page, generation, err := service.ProviderDomains(ctx, mailDeliveryOperation(invocation, ""),
+			maildelivery.BindingID(invocation.Request.ResourceID), maildelivery.CyberMailPageRequest{Page: payload.Page, PerPage: payload.PerPage})
+		if err != nil {
+			return OperationResult{}, mapMailDeliveryError(err)
+		}
+		return OperationResult{Status: http.StatusOK, Value: page, Generation: generation}, nil
+	}); err != nil {
+		return err
+	}
+	if err := registry.Bind("mail.delivery.provider.analytics", func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
+		payload := value.(*MailDeliveryProviderAnalyticsPayload)
+		result, err := service.ProviderAnalytics(ctx, mailDeliveryOperation(invocation, ""), maildelivery.BindingID(invocation.Request.ResourceID),
+			maildelivery.ProviderAnalyticsRequest{Kind: payload.Kind, DomainID: payload.DomainID, Page: payload.Page,
+				PerPage: payload.PerPage, Status: payload.Status, Days: payload.Days})
+		if err != nil {
+			return OperationResult{}, mapMailDeliveryError(err)
+		}
+		return OperationResult{Status: http.StatusOK, Value: result, Generation: result.BindingGeneration}, nil
+	}); err != nil {
+		return err
+	}
+	return registry.Bind("mail.delivery.provider.health.sync", func(ctx context.Context, invocation Invocation, _ any) (OperationResult, error) {
+		binding, err := service.SyncProviderHealth(ctx, maildelivery.SyncProviderHealthCommand{Operation: mailDeliveryOperation(invocation, ""),
+			BindingID: maildelivery.BindingID(invocation.Request.ResourceID), ExpectedGeneration: invocation.Request.ExpectedGeneration})
+		if err != nil {
+			return OperationResult{}, mapMailDeliveryError(err)
+		}
+		return OperationResult{Status: http.StatusOK, Value: binding.Observation, Generation: binding.Generation}, nil
 	})
 }
 
@@ -231,6 +301,36 @@ func validateMailDeliveryStatus(value any) error {
 func validateMailDeliveryRelayStatus(value any) error {
 	if value.(*MailDeliveryRelayStatusPayload).Generation.Validate() != nil {
 		return invalid("mail delivery relay generation")
+	}
+	return nil
+}
+
+func validateMailDeliveryProviderPage(value any) error {
+	payload := value.(*MailDeliveryProviderPagePayload)
+	if payload.Page == 0 || payload.PerPage == 0 || payload.PerPage > 100 {
+		return invalid("mail delivery provider page")
+	}
+	return nil
+}
+
+func validateMailDeliveryProviderAnalytics(value any) error {
+	payload := value.(*MailDeliveryProviderAnalyticsPayload)
+	switch payload.Kind {
+	case maildelivery.ProviderAnalyticsAccountStatistics:
+		if payload.DomainID != "" || payload.Page != 0 || payload.PerPage != 0 || payload.Status != "" || payload.Days != 0 {
+			return invalid("mail delivery account statistics")
+		}
+	case maildelivery.ProviderAnalyticsDomainStatistics, maildelivery.ProviderAnalyticsSMTPCredentials:
+		if payload.DomainID != "" || payload.Page == 0 || payload.PerPage == 0 || payload.PerPage > 100 || payload.Status != "" || payload.Days != 0 {
+			return invalid("mail delivery provider statistics")
+		}
+	case maildelivery.ProviderAnalyticsDeliveryLogs:
+		if !safeMailOpaque(string(payload.DomainID)) || payload.Page == 0 || payload.PerPage == 0 || payload.PerPage > 100 ||
+			payload.Days == 0 || payload.Days > 30 || payload.Status != "" && payload.Status != "delivered" && payload.Status != "bounced" && payload.Status != "failed" {
+			return invalid("mail delivery provider logs")
+		}
+	default:
+		return invalid("mail delivery provider analytics")
 	}
 	return nil
 }
@@ -298,7 +398,10 @@ func mapMailDeliveryError(err error) error {
 		return ErrConflict
 	case errors.Is(err, maildelivery.ErrBackpressure):
 		return ErrRateLimited
-	case errors.Is(err, maildelivery.ErrUnavailable), errors.Is(err, maildelivery.ErrAmbiguous), errors.Is(err, maildelivery.ErrWebhookRejected):
+	case errors.Is(err, maildelivery.ErrRateLimited):
+		return ErrRateLimited
+	case errors.Is(err, maildelivery.ErrUnavailable), errors.Is(err, maildelivery.ErrAmbiguous), errors.Is(err, maildelivery.ErrWebhookRejected),
+		errors.Is(err, maildelivery.ErrUnsupported), errors.Is(err, maildelivery.ErrIntegrity), errors.Is(err, maildelivery.ErrPartial):
 		return ErrUnavailable
 	default:
 		return err
