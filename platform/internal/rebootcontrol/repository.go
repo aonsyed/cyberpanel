@@ -218,7 +218,7 @@ func (repository *Repository) Transition(ctx context.Context, command Transition
 	if err := updateStateCAS(ctx, tx, next, state.Generation, state.Fence); err != nil {
 		return State{}, Receipt{}, err
 	}
-	if canonical.To == PhaseSucceeded {
+	if canonical.To == PhaseSucceeded || canonical.To == PhaseCancelled && state.Phase != PhaseRequested {
 		result, err := tx.ExecContext(ctx, `DELETE FROM reboot_node_locks WHERE node_id = ? AND plan_id = ? AND fence = ?`, plan.NodeID, plan.ID, state.Fence)
 		if err != nil {
 			return State{}, Receipt{}, err
@@ -325,6 +325,118 @@ func (repository *Repository) LoadState(ctx context.Context, planID string) (Sta
 		return State{}, ErrInvalid
 	}
 	return loadStateQuery(ctx, repository.db, planID)
+}
+
+// Cancel records a guarded pre-arm cancellation after the runtime has
+// durably released any drain and resumable-operation holds. It preserves the
+// coordinator as the only state writer and uses the same generation/fence CAS
+// as every execution step.
+func (coordinator *Coordinator) Cancel(ctx context.Context, command StepCommand, releaseEvidenceDigest string) (State, Receipt, error) {
+	if coordinator == nil || coordinator.repository == nil || command.Validate() != nil || !validDigest(releaseEvidenceDigest) {
+		return State{}, Receipt{}, ErrInvalid
+	}
+	plan, err := coordinator.repository.LoadPlan(ctx, command.PlanID)
+	if err != nil {
+		return State{}, Receipt{}, err
+	}
+	state, err := coordinator.repository.LoadState(ctx, command.PlanID)
+	if err != nil {
+		return State{}, Receipt{}, err
+	}
+	if state.NodeID != plan.NodeID {
+		return State{}, Receipt{}, ErrIntegrity
+	}
+	if state.Generation != command.ExpectedGeneration || state.Fence != command.Fence ||
+		state.ControllerID != command.ControllerID || command.At.Before(state.UpdatedAt) {
+		return State{}, Receipt{}, ErrConflict
+	}
+	switch state.Phase {
+	case PhaseRequested, PhaseAdmitted, PhaseDraining, PhaseCheckpointed:
+	default:
+		return State{}, Receipt{}, ErrConflict
+	}
+	return coordinator.advance(ctx, command, state, PhaseCancelled, releaseEvidenceDigest, "", OutcomeCancelled, nil)
+}
+
+// ResolveAmbiguousReboot completes a previously uncertain dispatch only after
+// a protected runtime has reconciled subsystems, cleared the exact recovery
+// marker, and returned a fresh boot identity. It never redispatches a reboot.
+func (coordinator *Coordinator) ResolveAmbiguousReboot(ctx context.Context, command StepCommand, actual BootIdentity, reconciliationEvidenceDigest string) (State, Receipt, error) {
+	if coordinator == nil || coordinator.repository == nil || command.Validate() != nil || actual.Validate() != nil || !validDigest(reconciliationEvidenceDigest) {
+		return State{}, Receipt{}, ErrInvalid
+	}
+	plan, state, err := coordinator.controlled(ctx, command, PhaseUncertain)
+	if err != nil {
+		return State{}, Receipt{}, err
+	}
+	if state.MarkerDigest == "" || state.CheckpointReceiptDigest == "" || actual.BootID == plan.SourceBoot.BootID || !matchesExpectedBoot(actual, plan.ExpectedBoot) {
+		return State{}, Receipt{}, ErrStaleBoot
+	}
+	switch state.Outcome {
+	case OutcomeDispatchUnconfirmed, OutcomeBootNotChanged, OutcomeStaleBootIdentity,
+		OutcomeReconciliationFailed, OutcomeMarkerClearFailed, OutcomeMarkerPartial:
+	default:
+		return State{}, Receipt{}, ErrConflict
+	}
+	evidence := digestStrings(actual.EvidenceDigest, reconciliationEvidenceDigest)
+	return coordinator.advance(ctx, command, state, PhaseSucceeded, evidence, state.MarkerDigest, OutcomeCompleted, nil)
+}
+
+type PlanState struct {
+	Plan  Plan  `json:"plan"`
+	State State `json:"state"`
+}
+
+type PlanStatePage struct {
+	Items      []PlanState `json:"items"`
+	NextCursor string      `json:"next_cursor,omitempty"`
+}
+
+// ListPlanStates exposes the node-local authority projection without
+// transferring write ownership. Callers still mutate through Coordinator,
+// which enforces generation, controller, and fencing checks.
+func (repository *Repository) ListPlanStates(ctx context.Context, nodeID string, limit int, cursor string) (PlanStatePage, error) {
+	if repository == nil || repository.db == nil || !identifierPattern.MatchString(nodeID) || limit < 1 || limit > MaxPageSize || cursor != "" && !identifierPattern.MatchString(cursor) {
+		return PlanStatePage{}, ErrInvalid
+	}
+	rows, err := repository.db.QueryContext(ctx, `SELECT p.id, p.plan_digest, p.storage_digest, p.plan_json,
+		s.phase, s.generation, s.fence, s.storage_digest, s.state_json
+		FROM reboot_plans p JOIN reboot_states s ON s.plan_id = p.id
+		WHERE p.node_id = ? AND p.id > ? ORDER BY p.id LIMIT ?`, nodeID, cursor, limit+1)
+	if err != nil {
+		return PlanStatePage{}, err
+	}
+	defer rows.Close()
+	page := PlanStatePage{Items: make([]PlanState, 0, limit)}
+	for rows.Next() {
+		var planID, planDigest, planStorageDigest, phase, stateStorageDigest string
+		var planRaw, stateRaw []byte
+		var generation, fence uint64
+		if err := rows.Scan(&planID, &planDigest, &planStorageDigest, &planRaw,
+			&phase, &generation, &fence, &stateStorageDigest, &stateRaw); err != nil {
+			return PlanStatePage{}, err
+		}
+		if !validDigest(planStorageDigest) || digestBytes(planRaw) != planStorageDigest || !validDigest(stateStorageDigest) || digestBytes(stateRaw) != stateStorageDigest {
+			return PlanStatePage{}, ErrIntegrity
+		}
+		var plan Plan
+		var state State
+		if json.Unmarshal(planRaw, &plan) != nil || json.Unmarshal(stateRaw, &state) != nil ||
+			plan.ID != planID || plan.NodeID != nodeID || plan.Digest != planDigest || plan.Validate() != nil ||
+			state.PlanID != planID || state.NodeID != nodeID || string(state.Phase) != phase ||
+			state.Generation != generation || state.Fence != fence || state.Validate() != nil {
+			return PlanStatePage{}, ErrIntegrity
+		}
+		if len(page.Items) == limit {
+			page.NextCursor = page.Items[len(page.Items)-1].Plan.ID
+			break
+		}
+		page.Items = append(page.Items, PlanState{Plan: plan, State: state})
+	}
+	if err := rows.Err(); err != nil {
+		return PlanStatePage{}, err
+	}
+	return page, nil
 }
 
 type ReceiptPage struct {
@@ -550,6 +662,9 @@ func canonicalTransition(command Transition) (Transition, string, error) {
 }
 
 func allowedTransition(from, to Phase) bool {
+	if from == PhaseUncertain {
+		return to == PhaseSucceeded
+	}
 	if from.Terminal() {
 		return false
 	}
@@ -558,13 +673,13 @@ func allowedTransition(from, to Phase) bool {
 	}
 	switch from {
 	case PhaseRequested:
-		return to == PhaseAdmitted
+		return to == PhaseAdmitted || to == PhaseCancelled
 	case PhaseAdmitted:
-		return to == PhaseDraining
+		return to == PhaseDraining || to == PhaseCancelled
 	case PhaseDraining:
-		return to == PhaseCheckpointed
+		return to == PhaseCheckpointed || to == PhaseCancelled
 	case PhaseCheckpointed:
-		return to == PhaseArmed
+		return to == PhaseArmed || to == PhaseCancelled
 	case PhaseArmed:
 		return to == PhaseRebootDispatched
 	case PhaseRebootDispatched:

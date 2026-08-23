@@ -353,6 +353,7 @@ const (
 	PhaseRebootDispatched Phase = "reboot_dispatched"
 	PhaseReconciling      Phase = "reconciling"
 	PhaseSucceeded        Phase = "succeeded"
+	PhaseCancelled        Phase = "cancelled"
 	PhaseFailed           Phase = "failed"
 	PhaseUncertain        Phase = "uncertain"
 )
@@ -360,20 +361,23 @@ const (
 func (phase Phase) Valid() bool {
 	switch phase {
 	case PhaseRequested, PhaseAdmitted, PhaseDraining, PhaseCheckpointed, PhaseArmed,
-		PhaseRebootDispatched, PhaseReconciling, PhaseSucceeded, PhaseFailed, PhaseUncertain:
+		PhaseRebootDispatched, PhaseReconciling, PhaseSucceeded, PhaseCancelled, PhaseFailed, PhaseUncertain:
 		return true
 	default:
 		return false
 	}
 }
 
-func (phase Phase) Terminal() bool { return phase == PhaseSucceeded || phase == PhaseFailed || phase == PhaseUncertain }
+func (phase Phase) Terminal() bool {
+	return phase == PhaseSucceeded || phase == PhaseCancelled || phase == PhaseFailed || phase == PhaseUncertain
+}
 
 type OutcomeReason string
 
 const (
 	OutcomeNone                 OutcomeReason = ""
 	OutcomeCompleted            OutcomeReason = "completed"
+	OutcomeCancelled            OutcomeReason = "cancelled_before_arm"
 	OutcomeStaleBootIdentity    OutcomeReason = "stale_boot_identity"
 	OutcomeMaintenanceClosed    OutcomeReason = "maintenance_closed"
 	OutcomeDrainIncomplete      OutcomeReason = "drain_incomplete"
@@ -388,7 +392,7 @@ const (
 
 func (reason OutcomeReason) Valid() bool {
 	switch reason {
-	case OutcomeNone, OutcomeCompleted, OutcomeStaleBootIdentity, OutcomeMaintenanceClosed,
+	case OutcomeNone, OutcomeCompleted, OutcomeCancelled, OutcomeStaleBootIdentity, OutcomeMaintenanceClosed,
 		OutcomeDrainIncomplete, OutcomeCheckpointIncomplete, OutcomeMarkerPartial,
 		OutcomeDispatchUnconfirmed, OutcomeBootNotChanged, OutcomeUnexpectedKernel,
 		OutcomeReconciliationFailed, OutcomeMarkerClearFailed:
@@ -453,7 +457,9 @@ func (state State) Validate() error {
 		}
 	}
 	if state.Phase.Terminal() {
-		if state.Outcome == OutcomeNone || state.Phase == PhaseSucceeded && state.Outcome != OutcomeCompleted || state.Phase != PhaseSucceeded && len(state.RecoverySteps) == 0 {
+		if state.Outcome == OutcomeNone || state.Phase == PhaseSucceeded && state.Outcome != OutcomeCompleted ||
+			state.Phase == PhaseCancelled && state.Outcome != OutcomeCancelled ||
+			state.Phase != PhaseSucceeded && state.Phase != PhaseCancelled && len(state.RecoverySteps) == 0 {
 			return ErrInvalid
 		}
 	} else if state.Outcome != OutcomeNone || len(state.RecoverySteps) != 0 {
@@ -498,7 +504,9 @@ func (receipt Receipt) Validate() error {
 		}
 	}
 	if receipt.To.Terminal() {
-		if receipt.Outcome == OutcomeNone || receipt.To == PhaseSucceeded && receipt.Outcome != OutcomeCompleted || receipt.To != PhaseSucceeded && len(receipt.RecoverySteps) == 0 {
+		if receipt.Outcome == OutcomeNone || receipt.To == PhaseSucceeded && receipt.Outcome != OutcomeCompleted ||
+			receipt.To == PhaseCancelled && receipt.Outcome != OutcomeCancelled ||
+			receipt.To != PhaseSucceeded && receipt.To != PhaseCancelled && len(receipt.RecoverySteps) == 0 {
 			return ErrInvalid
 		}
 	} else if receipt.Outcome != OutcomeNone || len(receipt.RecoverySteps) != 0 {
