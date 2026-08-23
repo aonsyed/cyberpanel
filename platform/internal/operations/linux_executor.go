@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +24,12 @@ import (
 )
 
 const DefaultOperationsStateRoot = "/var/lib/cyberpanel/operations"
+
+const (
+	managedRedisServerPath = "/usr/bin/redis-server"
+	managedRedisCLIPath = "/usr/bin/redis-cli"
+	managedRedisUnitTemplatePath = "/etc/systemd/system/redis-server@.service"
+)
 
 type FixedCommandRunner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
@@ -54,12 +62,335 @@ func allowedOperationsBinary(binary string) bool {
 	switch binary {
 	case "/usr/bin/systemctl", "/usr/bin/journalctl", "/usr/bin/loginctl", "/usr/bin/ss", "/usr/bin/findmnt", "/usr/bin/stat", "/usr/bin/chattr",
 		"/usr/sbin/nft", "/usr/bin/firewall-cmd", "/usr/sbin/sshd", "/usr/sbin/xfs_quota", "/usr/sbin/setquota", "/usr/sbin/quotacheck",
-		"/usr/bin/apt-get", "/usr/bin/dnf", "/usr/bin/rpm", "/usr/bin/dpkg-query", "/usr/bin/redis-cli", "/usr/bin/curl",
+		"/usr/bin/apt-get", "/usr/bin/dnf", "/usr/bin/rpm", "/usr/bin/dpkg-query", managedRedisServerPath, managedRedisCLIPath, "/usr/bin/curl",
 		"/usr/local/lsws/bin/openlitespeed", "/usr/local/lsws/bin/lshttpd", "/usr/local/lsws/bin/lswsctrl":
 		return true
 	default:
 		return false
 	}
+}
+
+type managedRedisExecutableIdentity struct {
+	Path string `json:"path"`
+	Device uint64 `json:"device"`
+	Inode uint64 `json:"inode"`
+	Size int64 `json:"size"`
+	Mode uint32 `json:"mode"`
+	ModifiedAt int64 `json:"modified_at"`
+}
+
+type managedRedisRuntime struct {
+	server string
+	cli string
+	version string
+	uid int
+	gid int
+	evidenceDigest string
+}
+
+type managedRedisPackageProfile struct {
+	manager PackageManager
+	serverPackage string
+	cliPackage string
+}
+
+func managedRedisUnavailable(reason string) error {
+	return fmt.Errorf("%w: managed Redis runtime %s", ErrInvalidEffect, reason)
+}
+
+func readManagedRedisRootFile(path string, maximum int64) ([]byte, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || maximum <= 0 {
+		return nil, managedRedisUnavailable("path is not trusted")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, managedRedisUnavailable("file is unavailable")
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, managedRedisUnavailable("file identity is not trusted")
+	}
+	metadata, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || metadata.Uid != 0 || info.Mode().Perm()&0o022 != 0 || info.Size() < 0 || info.Size() > maximum {
+		return nil, managedRedisUnavailable("file identity is not trusted")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil || int64(len(content)) != info.Size() {
+		return nil, managedRedisUnavailable("file changed while reading")
+	}
+	return content, nil
+}
+
+func managedRedisHostTuple() (string, string, error) {
+	content, err := readManagedRedisRootFile("/usr/lib/os-release", 64<<10)
+	if err != nil {
+		return "", "", err
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(string(content), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || (key != "ID" && key != "VERSION_ID") {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), "\"'")
+		if value == "" || len(value) > 64 || strings.ContainsAny(value, "\r\n\x00") {
+			return "", "", managedRedisUnavailable("operating system identity is invalid")
+		}
+		values[key] = value
+	}
+	family, version := values["ID"], values["VERSION_ID"]
+	if family == "almalinux" {
+		version, _, _ = strings.Cut(version, ".")
+	}
+	if family == "" || version == "" {
+		return "", "", managedRedisUnavailable("operating system identity is incomplete")
+	}
+	return family, version, nil
+}
+
+func managedRedisProfile(support RedisRuntimeSupport) (managedRedisPackageProfile, error) {
+	if validateRedisRuntimeSupport(support) != nil {
+		return managedRedisPackageProfile{}, managedRedisUnavailable("support tuple is not allowed")
+	}
+	switch support.OSFamily {
+	case "ubuntu":
+		return managedRedisPackageProfile{manager: PackageAPT, serverPackage: "redis-server", cliPackage: "redis-tools"}, nil
+	case "almalinux":
+		return managedRedisPackageProfile{manager: PackageDNF, serverPackage: "redis", cliPackage: "redis"}, nil
+	default:
+		return managedRedisPackageProfile{}, managedRedisUnavailable("distribution is not allowed")
+	}
+}
+
+func inspectManagedRedisExecutable(path string) (managedRedisExecutableIdentity, error) {
+	if path != managedRedisServerPath && path != managedRedisCLIPath {
+		return managedRedisExecutableIdentity{}, managedRedisUnavailable("executable path is not allowlisted")
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return managedRedisExecutableIdentity{}, managedRedisUnavailable("executable file is not trusted")
+	}
+	metadata, ok := before.Sys().(*syscall.Stat_t)
+	if !ok || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 || before.Mode().Perm()&0o022 != 0 || before.Mode().Perm()&0o111 == 0 || metadata.Uid != 0 {
+		return managedRedisExecutableIdentity{}, managedRedisUnavailable("executable file is not trusted")
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return managedRedisExecutableIdentity{}, managedRedisUnavailable("executable cannot be opened safely")
+	}
+	file := os.NewFile(uintptr(fd), path)
+	opened, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil || closeErr != nil || !os.SameFile(before, opened) {
+		return managedRedisExecutableIdentity{}, managedRedisUnavailable("executable changed while inspecting")
+	}
+	return managedRedisExecutableIdentity{Path: path, Device: uint64(metadata.Dev), Inode: metadata.Ino, Size: before.Size(), Mode: uint32(before.Mode()), ModifiedAt: before.ModTime().UnixNano()}, nil
+}
+
+func managedRedisDPKGOwner(ctx context.Context, runner FixedCommandRunner, packageName, path, architecture string) (string, error) {
+	ownerOutput, err := runner.Run(ctx, "/usr/bin/dpkg-query", "--search", path)
+	if err != nil {
+		return "", managedRedisUnavailable("package ownership is unavailable")
+	}
+	owners := make([]string, 0, 1)
+	for _, line := range strings.Split(strings.TrimSpace(string(ownerOutput)), "\n") {
+		owner, ownedPath, ok := strings.Cut(strings.TrimSpace(line), ": ")
+		if !ok || ownedPath != path {
+			continue
+		}
+		owner = strings.TrimSuffix(owner, ":"+architecture)
+		owners = append(owners, owner)
+	}
+	if len(owners) != 1 || owners[0] != packageName {
+		return "", managedRedisUnavailable("executable has an unexpected package owner")
+	}
+	statusOutput, err := runner.Run(ctx, "/usr/bin/dpkg-query", "--show", "--showformat=${db:Status-Abbrev}\t${Architecture}", packageName)
+	fields := strings.Fields(string(statusOutput))
+	if err != nil || len(fields) != 2 || fields[0] != "ii" || fields[1] != architecture {
+		return "", managedRedisUnavailable("package installation is not confirmed")
+	}
+	return digestBytes(bytes.Join([][]byte{ownerOutput, statusOutput}, []byte{0})), nil
+}
+
+func managedRedisRPMOwner(ctx context.Context, runner FixedCommandRunner, packageName, path, architecture string) (string, error) {
+	output, err := runner.Run(ctx, "/usr/bin/rpm", "--query", "--file", "--queryformat=%{NAME}\t%{ARCH}", path)
+	fields := strings.Fields(string(output))
+	if err != nil || len(fields) != 2 || fields[0] != packageName || fields[1] != architecture {
+		return "", managedRedisUnavailable("executable has an unexpected package owner")
+	}
+	return digestBytes(output), nil
+}
+
+func managedRedisPackageOwner(ctx context.Context, runner FixedCommandRunner, profile managedRedisPackageProfile, packageName, path, architecture string) (string, error) {
+	if profile.manager == PackageAPT {
+		return managedRedisDPKGOwner(ctx, runner, packageName, path, architecture)
+	}
+	if architecture == "amd64" {
+		architecture = "x86_64"
+	} else if architecture == "arm64" {
+		architecture = "aarch64"
+	}
+	return managedRedisRPMOwner(ctx, runner, packageName, path, architecture)
+}
+
+func managedRedisServerVersion(output []byte) (string, error) {
+	version := ""
+	for _, field := range strings.Fields(string(output)) {
+		if strings.HasPrefix(field, "v=") {
+			if version != "" {
+				return "", managedRedisUnavailable("server version output is ambiguous")
+			}
+			version = strings.TrimPrefix(field, "v=")
+		}
+	}
+	if !validateManagedRedisVersion(version) {
+		return "", managedRedisUnavailable("server version is unsupported")
+	}
+	return version, nil
+}
+
+func managedRedisCLIVersion(output []byte) (string, error) {
+	fields := strings.Fields(string(output))
+	if len(fields) != 2 || fields[0] != "redis-cli" || !validateManagedRedisVersion(fields[1]) {
+		return "", managedRedisUnavailable("CLI version is unsupported")
+	}
+	return fields[1], nil
+}
+
+func managedRedisAccount() (int, int, error) {
+	passwd, err := readManagedRedisRootFile("/etc/passwd", 1<<20)
+	if err != nil {
+		return 0, 0, err
+	}
+	uid, gid, matches := 0, 0, 0
+	for _, line := range strings.Split(string(passwd), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) != 7 || fields[0] != "redis" {
+			continue
+		}
+		parsedUID, uidErr := strconv.ParseUint(fields[2], 10, 31)
+		parsedGID, gidErr := strconv.ParseUint(fields[3], 10, 31)
+		if uidErr != nil || gidErr != nil || parsedUID == 0 || parsedGID == 0 {
+			return 0, 0, managedRedisUnavailable("service account is invalid")
+		}
+		uid, gid, matches = int(parsedUID), int(parsedGID), matches+1
+	}
+	groups, err := readManagedRedisRootFile("/etc/group", 1<<20)
+	if err != nil {
+		return 0, 0, err
+	}
+	groupMatches := 0
+	for _, line := range strings.Split(string(groups), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) != 4 || fields[0] != "redis" {
+			continue
+		}
+		parsedGID, parseErr := strconv.ParseUint(fields[2], 10, 31)
+		if parseErr != nil || int(parsedGID) != gid {
+			return 0, 0, managedRedisUnavailable("service group is invalid")
+		}
+		groupMatches++
+	}
+	if matches != 1 || groupMatches != 1 {
+		return 0, 0, managedRedisUnavailable("service identity is ambiguous")
+	}
+	return uid, gid, nil
+}
+
+func managedRedisUnitDigest(server string) (string, error) {
+	content, err := readManagedRedisRootFile(managedRedisUnitTemplatePath, 64<<10)
+	if err != nil {
+		return "", err
+	}
+	expected := map[string]string{
+		"ExecStart": server + " /etc/redis/%i.conf --supervised systemd --daemonize no",
+		"User": "redis",
+		"Group": "redis",
+	}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(content), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		expectedValue, tracked := expected[key]
+		if !ok || !tracked {
+			continue
+		}
+		if seen[key] || value != expectedValue {
+			return "", managedRedisUnavailable("unit executable identity is invalid")
+		}
+		seen[key] = true
+	}
+	if len(seen) != len(expected) {
+		return "", managedRedisUnavailable("unit executable identity is incomplete")
+	}
+	return digestBytes(content), nil
+}
+
+func resolveManagedRedisRuntime(ctx context.Context, runner FixedCommandRunner, support RedisRuntimeSupport) (managedRedisRuntime, error) {
+	// Package installation remains a separately authorized package transaction.
+	// Re-resolving here makes a later reconcile observe that transaction without
+	// caching a missing, replaced, or foreign Redis executable.
+	if runner == nil {
+		return managedRedisRuntime{}, managedRedisUnavailable("executor is unavailable")
+	}
+	profile, err := managedRedisProfile(support)
+	if err != nil {
+		return managedRedisRuntime{}, err
+	}
+	hostFamily, hostVersion, err := managedRedisHostTuple()
+	if err != nil || hostFamily != support.OSFamily || hostVersion != support.OSVersion || runtime.GOARCH != support.Architecture {
+		return managedRedisRuntime{}, managedRedisUnavailable("host tuple does not match qualified support")
+	}
+	serverIdentity, err := inspectManagedRedisExecutable(managedRedisServerPath)
+	if err != nil {
+		return managedRedisRuntime{}, err
+	}
+	cliIdentity, err := inspectManagedRedisExecutable(managedRedisCLIPath)
+	if err != nil {
+		return managedRedisRuntime{}, err
+	}
+	serverPackageEvidence, err := managedRedisPackageOwner(ctx, runner, profile, profile.serverPackage, managedRedisServerPath, support.Architecture)
+	if err != nil {
+		return managedRedisRuntime{}, err
+	}
+	cliPackageEvidence, err := managedRedisPackageOwner(ctx, runner, profile, profile.cliPackage, managedRedisCLIPath, support.Architecture)
+	if err != nil {
+		return managedRedisRuntime{}, err
+	}
+	serverOutput, serverErr := runner.Run(ctx, managedRedisServerPath, "--version")
+	cliOutput, cliErr := runner.Run(ctx, managedRedisCLIPath, "--version")
+	serverVersion, versionErr := managedRedisServerVersion(serverOutput)
+	cliVersion, cliVersionErr := managedRedisCLIVersion(cliOutput)
+	if serverErr != nil || cliErr != nil || versionErr != nil || cliVersionErr != nil || serverVersion != cliVersion || serverVersion != support.RedisVersion {
+		return managedRedisRuntime{}, managedRedisUnavailable("server and CLI versions do not match qualified support")
+	}
+	confirmedServer, serverIdentityErr := inspectManagedRedisExecutable(managedRedisServerPath)
+	confirmedCLI, cliIdentityErr := inspectManagedRedisExecutable(managedRedisCLIPath)
+	if serverIdentityErr != nil || cliIdentityErr != nil || confirmedServer != serverIdentity || confirmedCLI != cliIdentity {
+		return managedRedisRuntime{}, managedRedisUnavailable("executable changed during qualification")
+	}
+	uid, gid, err := managedRedisAccount()
+	if err != nil {
+		return managedRedisRuntime{}, err
+	}
+	unitDigest, err := managedRedisUnitDigest(managedRedisServerPath)
+	if err != nil {
+		return managedRedisRuntime{}, err
+	}
+	evidence, err := json.Marshal(struct {
+		Support RedisRuntimeSupport `json:"support"`
+		Server managedRedisExecutableIdentity `json:"server"`
+		CLI managedRedisExecutableIdentity `json:"cli"`
+		ServerPackage string `json:"server_package"`
+		CLIPackage string `json:"cli_package"`
+		Unit string `json:"unit"`
+		UID int `json:"uid"`
+		GID int `json:"gid"`
+	}{support, serverIdentity, cliIdentity, serverPackageEvidence, cliPackageEvidence, unitDigest, uid, gid})
+	if err != nil {
+		return managedRedisRuntime{}, managedRedisUnavailable("identity evidence cannot be encoded")
+	}
+	return managedRedisRuntime{server: managedRedisServerPath, cli: managedRedisCLIPath, version: serverVersion, uid: uid, gid: gid, evidenceDigest: digestBytes(evidence)}, nil
 }
 
 type OperationsVolume struct {
@@ -148,6 +479,7 @@ type linuxEffectResult struct {
 	Activation *ActivationEvidence
 	Snapshots []operationsFileSnapshot
 	MutationObserved bool
+	ExecutionEvidenceDigest string
 }
 
 func NewLinuxOperationsExecutor(config LinuxOperationsConfig) (*LinuxOperationsExecutor, error) {
@@ -354,7 +686,7 @@ func allowedManagedPath(path string) bool {
 	return false
 }
 
-func effectProof(request EffectRequest, result linuxEffectResult) string { encoded, _ := json.Marshal(struct { Request EffectRequest `json:"request"`; Result EffectResult `json:"result"`; Activation *ActivationEvidence `json:"activation,omitempty"` }{request, result.Result, result.Activation}); digest := sha256.Sum256(append([]byte("cyberpanel:operations:proof:v1\x00"), encoded...)); return hex.EncodeToString(digest[:]) }
+func effectProof(request EffectRequest, result linuxEffectResult) string { encoded, _ := json.Marshal(struct { Request EffectRequest `json:"request"`; Result EffectResult `json:"result"`; Activation *ActivationEvidence `json:"activation,omitempty"`; ExecutionEvidenceDigest string `json:"execution_evidence_digest,omitempty"` }{request, result.Result, result.Activation, result.ExecutionEvidenceDigest}); digest := sha256.Sum256(append([]byte("cyberpanel:operations:proof:v1\x00"), encoded...)); return hex.EncodeToString(digest[:]) }
 func snapshotProof(snapshots []operationsFileSnapshot) string { encoded, _ := json.Marshal(snapshots); digest := sha256.Sum256(append([]byte("cyberpanel:operations:compensation:v1\x00"), encoded...)); return hex.EncodeToString(digest[:]) }
 func newCompensationToken() (SecretRef, error) { var entropy [32]byte; if _, err := io.ReadFull(rand.Reader, entropy[:]); err != nil { return SecretRef{}, err }; return NewSecretRef("comp-"+hex.EncodeToString(entropy[:])) }
 func stableFailureCode(err error) string { switch { case errors.Is(err, context.DeadlineExceeded): return "deadline_exceeded"; case errors.Is(err, ErrInvalidEffect), errors.Is(err, ErrInvalidResource): return "invalid_effect"; case errors.Is(err, os.ErrPermission): return "permission_denied"; default: return "host_operation_failed" } }

@@ -401,6 +401,50 @@ type managedRedisOwner struct{uid,gid int;mode os.FileMode}
 func managedRedisPaths(service ManagedService)(string,string,string){id:=service.ID.String();return "/etc/redis/cyberpanel-"+id+".conf","/var/lib/redis/cyberpanel-"+id,"/run/redis/cyberpanel-"+id+".sock"}
 func syncManagedRedisDirectory(path string)error{directory,err:=os.Open(path);if err!=nil{return err};syncErr:=directory.Sync();closeErr:=directory.Close();return errors.Join(syncErr,closeErr)}
 
+func reconcileManagedRedisDirectory(path string,uid,gid int,mode os.FileMode,runtime managedRedisRuntime)error{
+	if !filepath.IsAbs(path)||filepath.Clean(path)!=path||uid<0||gid<0{return ErrInvalidEffect}
+	info,err:=os.Lstat(path)
+	if errors.Is(err,os.ErrNotExist){if err=os.Mkdir(path,mode);err!=nil{return err};info,err=os.Lstat(path)}
+	if err!=nil{return err};metadata,ok:=info.Sys().(*syscall.Stat_t)
+	if !ok||!info.IsDir()||info.Mode()&os.ModeSymlink!=0||(int(metadata.Uid)!=0&&int(metadata.Uid)!=runtime.uid)||(int(metadata.Gid)!=0&&int(metadata.Gid)!=runtime.gid){return ErrInvalidEffect}
+	if err=os.Chown(path,uid,gid);err!=nil{return err};if err=os.Chmod(path,mode);err!=nil{return err}
+	verified,err:=os.Lstat(path);if err!=nil{return err};metadata,ok=verified.Sys().(*syscall.Stat_t);if !ok||!verified.IsDir()||verified.Mode()&os.ModeSymlink!=0||int(metadata.Uid)!=uid||int(metadata.Gid)!=gid||verified.Mode().Perm()!=mode.Perm(){return ErrInvalidEffect};return syncManagedRedisDirectory(filepath.Dir(path))
+}
+
+func reconcileManagedRedisFile(path string,uid,gid int,mode os.FileMode)error{
+	info,err:=os.Lstat(path);if err!=nil{return err};metadata,ok:=info.Sys().(*syscall.Stat_t)
+	if !ok||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||metadata.Uid!=0||(metadata.Gid!=0&&int(metadata.Gid)!=gid)||info.Mode().Perm()&0o022!=0{return ErrInvalidEffect}
+	if err=os.Chown(path,uid,gid);err!=nil{return err};if err=os.Chmod(path,mode);err!=nil{return err}
+	verified,err:=os.Lstat(path);if err!=nil{return err};metadata,ok=verified.Sys().(*syscall.Stat_t);if !ok||!verified.Mode().IsRegular()||verified.Mode()&os.ModeSymlink!=0||int(metadata.Uid)!=uid||int(metadata.Gid)!=gid||verified.Mode().Perm()!=mode.Perm(){return ErrInvalidEffect};return syncManagedRedisDirectory(filepath.Dir(path))
+}
+
+func reconcileManagedRedisOwnership(service ManagedService,runtime managedRedisRuntime)error{
+	config,data,_:=managedRedisPaths(service)
+	if err:=reconcileManagedRedisDirectory(filepath.Dir(config),0,runtime.gid,0o750,runtime);err!=nil{return fmt.Errorf("managed Redis config root ownership: %w",err)}
+	if err:=reconcileManagedRedisDirectory(filepath.Dir(data),runtime.uid,runtime.gid,0o750,runtime);err!=nil{return fmt.Errorf("managed Redis data root ownership: %w",err)}
+	return nil
+}
+
+func managedRedisProcessStart(pid int64)(uint64,error){
+	content,err:=os.ReadFile(filepath.Join("/proc",strconv.FormatInt(pid,10),"stat"));if err!=nil||len(content)>64<<10{return 0,ErrInvalidEffect};closing:=bytes.LastIndexByte(content,')');if closing<0||closing+2>=len(content){return 0,ErrInvalidEffect};fields:=strings.Fields(string(content[closing+2:]));if len(fields)<=19{return 0,ErrInvalidEffect};start,err:=strconv.ParseUint(fields[19],10,64);if err!=nil||start==0{return 0,ErrInvalidEffect};return start,nil
+}
+
+func managedRedisProcessCredentials(pid int64,runtime managedRedisRuntime)error{
+	content,err:=os.ReadFile(filepath.Join("/proc",strconv.FormatInt(pid,10),"status"));if err!=nil||len(content)>1<<20{return ErrInvalidEffect};seenUID,seenGID:=false,false
+	for _,line:=range strings.Split(string(content),"\n"){fields:=strings.Fields(line);if len(fields)!=5{continue};expected:=-1;switch fields[0]{case"Uid:":expected=runtime.uid;seenUID=true;case"Gid:":expected=runtime.gid;seenGID=true;default:continue};for _,field:=range fields[1:]{value,parseErr:=strconv.ParseInt(field,10,32);if parseErr!=nil||int(value)!=expected{return ErrInvalidEffect}}}
+	if !seenUID||!seenGID{return ErrInvalidEffect};return nil
+}
+
+func (executor *LinuxOperationsExecutor)proveManagedRedisProcess(ctx context.Context,service ManagedService,runtime managedRedisRuntime,credential []byte)(string,error){
+	_,_,socket:=managedRedisPaths(service);if err:=probeManagedRedisSocket(ctx,socket,credential);err!=nil{return "",fmt.Errorf("managed Redis protocol proof: %w",err)}
+	unit:="redis-server@cyberpanel-"+service.ID.String()+".service";output,err:=executor.runner.Run(ctx,"/usr/bin/systemctl","show","--no-pager","--property=MainPID","--value",unit);if err!=nil{return "",fmt.Errorf("managed Redis process identity: %w",err)};pid,err:=strconv.ParseInt(strings.TrimSpace(string(output)),10,32);if err!=nil||pid<=1{return "",ErrInvalidEffect}
+	processExecutable:=filepath.Join("/proc",strconv.FormatInt(pid,10),"exe");target,err:=os.Readlink(processExecutable);if err!=nil||target!=runtime.server{return "",ErrInvalidEffect};trustedInfo,err:=os.Stat(runtime.server);if err!=nil{return "",err};processInfo,err:=os.Stat(processExecutable);if err!=nil||!os.SameFile(trustedInfo,processInfo){return "",ErrInvalidEffect}
+	start,err:=managedRedisProcessStart(pid);if err!=nil{return "",err};if err=managedRedisProcessCredentials(pid,runtime);err!=nil{return "",err}
+	socketInfo,err:=os.Lstat(socket);if err!=nil{return "",err};socketMetadata,ok:=socketInfo.Sys().(*syscall.Stat_t);if !ok||socketInfo.Mode()&os.ModeSocket==0||socketInfo.Mode()&os.ModeSymlink!=0||int(socketMetadata.Uid)!=runtime.uid||int(socketMetadata.Gid)!=runtime.gid||socketInfo.Mode().Perm()!=0o660{return "",ErrInvalidEffect}
+	bootID,err:=os.ReadFile("/proc/sys/kernel/random/boot_id");if err!=nil{return "",err};boot:=strings.TrimSpace(string(bootID));if boot==""||len(boot)>64{return "",ErrInvalidEffect};confirmedStart,err:=managedRedisProcessStart(pid);if err!=nil||confirmedStart!=start{return "",ErrInvalidEffect}
+	evidence,_:=json.Marshal(struct{Runtime string `json:"runtime"`;BootID string `json:"boot_id"`;PID int64 `json:"pid"`;Start uint64 `json:"start"`;SocketDevice uint64 `json:"socket_device"`;SocketInode uint64 `json:"socket_inode"`}{runtime.evidenceDigest,boot,pid,start,uint64(socketMetadata.Dev),socketMetadata.Ino});return digestBytes(evidence),nil
+}
+
 func ensureManagedRedisPrivateDirectory(path string)error{
 	if !filepath.IsAbs(path)||filepath.Clean(path)!=path{return ErrInvalidEffect};if err:=os.MkdirAll(path,0o700);err!=nil{return err}
 	info,err:=os.Lstat(path);if err!=nil{return err};stat,ok:=info.Sys().(*syscall.Stat_t);if !ok||!info.IsDir()||info.Mode()&os.ModeSymlink!=0||stat.Uid!=0||stat.Gid!=0||info.Mode().Perm()&0o077!=0{return ErrInvalidEffect};return nil
@@ -506,14 +550,15 @@ func (executor *LinuxOperationsExecutor)purgeManagedRedis(ctx context.Context,se
 }
 
 func (executor *LinuxOperationsExecutor)applyManagedRedisData(ctx context.Context,service ManagedService,data ManagedRedisDataEffect)(linuxEffectResult,error){
+	redisRuntime,err:=resolveManagedRedisRuntime(ctx,executor.runner,service.Redis.Runtime);if err!=nil{return linuxEffectResult{},err}
 	if err:=executor.requireGeneration(KindManagedService,service.ID,service.Generation);err!=nil{return linuxEffectResult{},err}
 	switch data.Action{
 	case ManagedRedisSnapshot:
-		if service.Desired!=ServiceRunning||executor.secrets==nil{return linuxEffectResult{},ErrInvalidEffect};credential,err:=executor.secrets.ManagedCredential(ctx,service.Redis.CredentialSecretRef,service);if err!=nil{return linuxEffectResult{},err};artifact,mutated,captureErr:=executor.captureManagedRedisArtifact(ctx,service,data.Artifact,credential);wipeOperationsBytes(credential);if captureErr!=nil{return linuxEffectResult{MutationObserved:mutated},captureErr};if err=executor.requireGeneration(KindManagedService,service.ID,service.Generation);err!=nil{if mutated{return linuxEffectResult{MutationObserved:true},ErrCompensationFailed};return linuxEffectResult{},err};encoded,_:=json.Marshal(artifact);result:=&ManagedRedisDataResult{Action:data.Action,Artifact:&artifact,EvidenceDigest:digestBytes(encoded)};return linuxEffectResult{MutationObserved:mutated,Result:EffectResult{ManagedRedisData:result}},nil
+		if service.Desired!=ServiceRunning||executor.secrets==nil{return linuxEffectResult{},ErrInvalidEffect};credential,err:=executor.secrets.ManagedCredential(ctx,service.Redis.CredentialSecretRef,service);if err!=nil{return linuxEffectResult{},err};beforeEvidence,proofErr:=executor.proveManagedRedisProcess(ctx,service,redisRuntime,credential);if proofErr!=nil{wipeOperationsBytes(credential);return linuxEffectResult{},proofErr};artifact,mutated,captureErr:=executor.captureManagedRedisArtifact(ctx,service,data.Artifact,credential);if captureErr!=nil{wipeOperationsBytes(credential);return linuxEffectResult{MutationObserved:mutated},captureErr};afterEvidence,proofErr:=executor.proveManagedRedisProcess(ctx,service,redisRuntime,credential);wipeOperationsBytes(credential);if proofErr!=nil{if mutated{return linuxEffectResult{MutationObserved:true},ErrCompensationFailed};return linuxEffectResult{},proofErr};if err=executor.requireGeneration(KindManagedService,service.ID,service.Generation);err!=nil{if mutated{return linuxEffectResult{MutationObserved:true},ErrCompensationFailed};return linuxEffectResult{},err};encoded,_:=json.Marshal(artifact);result:=&ManagedRedisDataResult{Action:data.Action,Artifact:&artifact,EvidenceDigest:digestBytes(encoded)};executionEvidence:=digestBytes([]byte(redisRuntime.evidenceDigest+"\x00"+beforeEvidence+"\x00"+afterEvidence));return linuxEffectResult{MutationObserved:mutated,Result:EffectResult{ManagedRedisData:result},ExecutionEvidenceDigest:executionEvidence},nil
 	case ManagedRedisRestore:
-		if executor.secrets==nil{return linuxEffectResult{},ErrInvalidEffect};credential,err:=executor.secrets.ManagedCredential(ctx,service.Redis.CredentialSecretRef,service);if err!=nil{return linuxEffectResult{},err};evidence,mutated,restoreErr:=executor.restoreManagedRedisArtifact(ctx,service,data,credential);wipeOperationsBytes(credential);if restoreErr!=nil{return linuxEffectResult{MutationObserved:mutated},restoreErr};return linuxEffectResult{MutationObserved:mutated,Result:EffectResult{ManagedRedisData:&ManagedRedisDataResult{Action:data.Action,EvidenceDigest:evidence}}},nil
+		if executor.secrets==nil{return linuxEffectResult{},ErrInvalidEffect};credential,err:=executor.secrets.ManagedCredential(ctx,service.Redis.CredentialSecretRef,service);if err!=nil{return linuxEffectResult{},err};beforeEvidence,proofErr:=executor.proveManagedRedisProcess(ctx,service,redisRuntime,credential);if proofErr!=nil{wipeOperationsBytes(credential);return linuxEffectResult{},proofErr};evidence,mutated,restoreErr:=executor.restoreManagedRedisArtifact(ctx,service,data,credential);if restoreErr!=nil{wipeOperationsBytes(credential);return linuxEffectResult{MutationObserved:mutated},restoreErr};afterEvidence,proofErr:=executor.proveManagedRedisProcess(ctx,service,redisRuntime,credential);wipeOperationsBytes(credential);if proofErr!=nil{return linuxEffectResult{MutationObserved:mutated},ErrCompensationFailed};executionEvidence:=digestBytes([]byte(redisRuntime.evidenceDigest+"\x00"+beforeEvidence+"\x00"+afterEvidence));return linuxEffectResult{MutationObserved:mutated,Result:EffectResult{ManagedRedisData:&ManagedRedisDataResult{Action:data.Action,EvidenceDigest:evidence}},ExecutionEvidenceDigest:executionEvidence},nil
 	case ManagedRedisPurge:
-		evidence,mutated,purgeErr:=executor.purgeManagedRedis(ctx,service,data);if purgeErr!=nil{return linuxEffectResult{MutationObserved:mutated},purgeErr};return linuxEffectResult{MutationObserved:mutated,Result:EffectResult{ManagedRedisData:&ManagedRedisDataResult{Action:data.Action,EvidenceDigest:evidence}}},nil
+		evidence,mutated,purgeErr:=executor.purgeManagedRedis(ctx,service,data);if purgeErr!=nil{return linuxEffectResult{MutationObserved:mutated},purgeErr};return linuxEffectResult{MutationObserved:mutated,Result:EffectResult{ManagedRedisData:&ManagedRedisDataResult{Action:data.Action,EvidenceDigest:evidence}},ExecutionEvidenceDigest:redisRuntime.evidenceDigest},nil
 	default:return linuxEffectResult{},ErrInvalidEffect
 	}
 }
@@ -525,8 +570,12 @@ func (executor *LinuxOperationsExecutor) applyManagedService(ctx context.Context
 	var path,unit string
 	var content []byte
 	var err error
+	var redisRuntime managedRedisRuntime
 	switch service.KindName{
-	case ManagedRedis:path="/etc/redis/cyberpanel-"+service.ID.String()+".conf";unit="redis-server@cyberpanel-"+service.ID.String()+".service";content,err=executor.renderRedis(ctx,service)
+	case ManagedRedis:
+		redisRuntime,err=resolveManagedRedisRuntime(ctx,executor.runner,service.Redis.Runtime);if err!=nil{return linuxEffectResult{},err}
+		if err=reconcileManagedRedisOwnership(service,redisRuntime);err!=nil{return linuxEffectResult{},err}
+		path="/etc/redis/cyberpanel-"+service.ID.String()+".conf";unit="redis-server@cyberpanel-"+service.ID.String()+".service";content,err=executor.renderRedis(ctx,service)
 	case ManagedElasticsearch:path="/etc/elasticsearch/cyberpanel-"+service.ID.String()+".yml";unit="elasticsearch@cyberpanel-"+service.ID.String()+".service";content,err=executor.renderElasticsearch(ctx,service)
 	default:return linuxEffectResult{},ErrInvalidEffect
 	}
@@ -536,17 +585,17 @@ func (executor *LinuxOperationsExecutor) applyManagedService(ctx context.Context
 	if service.KindName==ManagedElasticsearch{
 		heapPath:="/etc/elasticsearch/jvm.options.d/cyberpanel-"+service.ID.String()+".options";heapMiB:=service.Elasticsearch.HeapBytes/(1<<20);heap:=[]byte(fmt.Sprintf("-Xms%dm\n-Xmx%dm\n",heapMiB,heapMiB));heapSnapshot,heapErr:=executor.replaceManagedFile(heapPath,heap,0o600);if heapErr!=nil{return linuxEffectResult{Snapshots:snapshots,MutationObserved:true},heapErr};snapshots=append(snapshots,heapSnapshot);if storageErr:=executor.applyManagedStorage(ctx,service);storageErr!=nil{return linuxEffectResult{Snapshots:snapshots,MutationObserved:true},storageErr}
 	}
-	result:=linuxEffectResult{Snapshots:snapshots,MutationObserved:true}
+	result:=linuxEffectResult{Snapshots:snapshots,MutationObserved:true,ExecutionEvidenceDigest:redisRuntime.evidenceDigest}
 	if service.KindName==ManagedRedis{
 		dataPath:="/var/lib/redis/cyberpanel-"+service.ID.String()
-		if output,ownerErr:=executor.runner.Run(ctx,"/usr/bin/chown","root:redis",path);ownerErr!=nil{return result,fmt.Errorf("managed Redis config ownership: %w: %s",ownerErr,boundedText(output,2048))}
-		if output,directoryErr:=executor.runner.Run(ctx,"/usr/bin/install","--directory","--owner=redis","--group=redis","--mode=0750",dataPath);directoryErr!=nil{return result,fmt.Errorf("managed Redis data directory: %w: %s",directoryErr,boundedText(output,2048))}
-		if output,validationErr:=executor.runner.Run(ctx,"/usr/bin/redis-server",path,"--test-memory","1");validationErr!=nil{return result,fmt.Errorf("managed Redis config validation: %w: %s",validationErr,boundedText(output,2048))}
+		if ownerErr:=reconcileManagedRedisFile(path,0,redisRuntime.gid,0o640);ownerErr!=nil{return result,fmt.Errorf("managed Redis config ownership: %w",ownerErr)}
+		if directoryErr:=reconcileManagedRedisDirectory(dataPath,redisRuntime.uid,redisRuntime.gid,0o750,redisRuntime);directoryErr!=nil{return result,fmt.Errorf("managed Redis data directory: %w",directoryErr)}
+		if output,validationErr:=executor.runner.Run(ctx,redisRuntime.server,path,"--test-memory","1");validationErr!=nil{return result,fmt.Errorf("managed Redis config validation: %w: %s",validationErr,boundedText(output,2048))}
 	}
 	memoryMax:=uint64(0);if service.Redis!=nil{memoryMax=service.Redis.MemoryMaxBytes+service.Redis.MemoryMaxBytes/4}else{memoryMax=service.Elasticsearch.HeapBytes*2}
 	if output,propertyErr:=executor.runner.Run(ctx,"/usr/bin/systemctl","set-property","--runtime",unit,"MemoryMax="+strconv.FormatUint(memoryMax,10));propertyErr!=nil{return result,fmt.Errorf("managed service memory limit: %w: %s",propertyErr,boundedText(output,2048))}
 	action:="stop";if service.Desired==ServiceRunning{action="restart"};if output,runErr:=executor.runner.Run(ctx,"/usr/bin/systemctl",action,unit);runErr!=nil{return result,fmt.Errorf("managed service: %w: %s",runErr,boundedText(output,2048))}
-	if service.KindName==ManagedRedis&&service.Desired==ServiceRunning{credential,credentialErr:=executor.secrets.ManagedCredential(ctx,service.Redis.CredentialSecretRef,service);if credentialErr!=nil{return result,credentialErr};probeErr:=probeManagedRedisSocket(ctx,"/run/redis/cyberpanel-"+service.ID.String()+".sock",credential);wipeOperationsBytes(credential);if probeErr!=nil{return result,fmt.Errorf("managed Redis protocol proof: %w",probeErr)}}
+	if service.KindName==ManagedRedis&&service.Desired==ServiceRunning{credential,credentialErr:=executor.secrets.ManagedCredential(ctx,service.Redis.CredentialSecretRef,service);if credentialErr!=nil{return result,credentialErr};processEvidence,probeErr:=executor.proveManagedRedisProcess(ctx,service,redisRuntime,credential);wipeOperationsBytes(credential);if probeErr!=nil{return result,probeErr};result.ExecutionEvidenceDigest=digestBytes([]byte(redisRuntime.evidenceDigest+"\x00"+processEvidence))}
 	if err=executor.storeGeneration(KindManagedService,service.ID,service.Generation,mustActivationDigest(service));err!=nil{return result,err}
 	return result,nil
 }

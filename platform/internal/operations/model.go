@@ -629,6 +629,16 @@ type RedisSettings struct {
 	Persistence RedisPersistence `json:"persistence"`
 	TLS bool `json:"tls"`
 	CredentialSecretRef SecretRef `json:"credential_secret_ref"`
+	Runtime RedisRuntimeSupport `json:"runtime"`
+}
+
+type RedisRuntimeSupport struct {
+	OSFamily string `json:"os_family"`
+	OSVersion string `json:"os_version"`
+	Architecture string `json:"architecture"`
+	RedisVersion string `json:"redis_version"`
+	PackageChannel string `json:"package_channel"`
+	QualificationDigest string `json:"qualification_digest"`
 }
 
 type RedisEvictionPolicy string
@@ -882,8 +892,17 @@ func validateProbe(probe ServiceHealthProbe) error {
 func validateRedis(settings RedisSettings) error {
 	if settings.MemoryMaxBytes < 16<<20 || settings.MaxClients == 0 || settings.CredentialSecretRef.IsZero() ||
 		(settings.EvictionPolicy != RedisNoEviction && settings.EvictionPolicy != RedisAllKeysLRU && settings.EvictionPolicy != RedisVolatileLRU) ||
-		(settings.Persistence != RedisRDB && settings.Persistence != RedisAOF && settings.Persistence != RedisRDBAOF) { return ErrInvalidResource }
+		(settings.Persistence != RedisRDB && settings.Persistence != RedisAOF && settings.Persistence != RedisRDBAOF) || validateRedisRuntimeSupport(settings.Runtime) != nil { return ErrInvalidResource }
 	return nil
+}
+
+func validateRedisRuntimeSupport(support RedisRuntimeSupport) error {
+	major,_,_:=strings.Cut(support.RedisVersion,".")
+	if !validateManagedRedisVersion(support.RedisVersion) || (major!="7"&&major!="8") || support.PackageChannel != "stable" ||
+		(support.Architecture != "amd64" && support.Architecture != "arm64") || !validSHA256(support.QualificationDigest) { return ErrInvalidResource }
+	if support.OSFamily == "ubuntu" && (support.OSVersion == "22.04" || support.OSVersion == "24.04") { return nil }
+	if support.OSFamily == "almalinux" && (support.OSVersion == "8" || support.OSVersion == "9") { return nil }
+	return ErrInvalidResource
 }
 
 func validateElasticsearch(settings ElasticsearchSettings) error {

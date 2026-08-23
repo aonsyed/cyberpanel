@@ -122,7 +122,8 @@ func(edge *operationsEdge)managedRedis(ctx context.Context,spec redisservice.Ins
 	maxClients:=uint32(spec.ResourceProfile.FileLimit/4);if maxClients==0{maxClients=1}
 	desired:=operations.ServiceStopped;if spec.DesiredLifecycle==redisservice.LifecycleRunning{desired=operations.ServiceRunning}
 	status:=operations.ResourceStatus{Lifecycle:operations.LifecycleUpdating,Health:operations.HealthUnknown,Reconciliation:operations.ReconciliationPending}
-	service:=operations.ManagedService{Metadata:operations.Metadata{ID:id,NodeID:edge.node,TenantID:tenant,Generation:expected+1,Status:status},KindName:operations.ManagedRedis,Desired:desired,Redis:&operations.RedisSettings{MemoryMaxBytes:spec.MaxMemoryBytes,MaxClients:maxClients,EvictionPolicy:eviction,Persistence:persistence,TLS:false,CredentialSecretRef:credential},TenantDedicated:spec.Scope==redisservice.ScopeTenant}
+	runtime:=operations.RedisRuntimeSupport{OSFamily:spec.Support.OSFamily,OSVersion:spec.Support.OSVersion,Architecture:spec.Support.Architecture,RedisVersion:spec.Support.RedisVersion,PackageChannel:spec.Support.PackageChannel,QualificationDigest:strings.TrimPrefix(spec.Support.QualificationDigest,"sha256:")}
+	service:=operations.ManagedService{Metadata:operations.Metadata{ID:id,NodeID:edge.node,TenantID:tenant,Generation:expected+1,Status:status},KindName:operations.ManagedRedis,Desired:desired,Redis:&operations.RedisSettings{MemoryMaxBytes:spec.MaxMemoryBytes,MaxClients:maxClients,EvictionPolicy:eviction,Persistence:persistence,TLS:false,CredentialSecretRef:credential,Runtime:runtime},TenantDedicated:spec.Scope==redisservice.ScopeTenant}
 	return service,expected,nil
 }
 
@@ -137,9 +138,11 @@ func redisArtifactDescriptor(artifact operations.ManagedRedisArtifact)(redisserv
 
 func(edge *operationsEdge)currentManagedRedis(ctx context.Context,spec redisservice.InstanceSpec)(operations.ManagedService,error){candidate,expected,err:=edge.managedRedis(ctx,spec);if err!=nil{return operations.ManagedService{},err};if expected==0{return operations.ManagedService{},redisservice.ErrStale};envelope,err:=edge.repository.LoadResource(ctx,operations.KindManagedService,candidate.ID);if err!=nil{return operations.ManagedService{},err};resource,err:=operations.DecodeResource(envelope);current,ok:=resource.(*operations.ManagedService);if err!=nil||!ok||current.Generation!=expected||current.KindName!=operations.ManagedRedis||current.Desired!=candidate.Desired||current.TenantDedicated!=candidate.TenantDedicated||current.NodeID!=candidate.NodeID||current.TenantID.String()!=candidate.TenantID.String()||!reflect.DeepEqual(current.Redis,candidate.Redis){return operations.ManagedService{},redisservice.ErrStale};return *current,nil}
 
+func redisRuntimeError(err error)error{if errors.Is(err,operations.ErrInvalidEffect)||errors.Is(err,operations.ErrNotFound){return redisservice.ErrUnsupported};return err}
+
 func(edge *operationsEdge)executeManagedRedisData(ctx context.Context,call apiserver.EdgeCall,spec redisservice.InstanceSpec,suffix string,data operations.ManagedRedisDataEffect)(string,*operations.ManagedRedisDataResult,error){
 	service,err:=edge.currentManagedRedis(ctx,spec);if err!=nil{return "",nil,err};header,err:=edge.redisHeader(call,suffix,operations.ResourceID{},operations.CapabilityNodeOperations);if err!=nil{return "",nil,err};header.Deadline=header.RequestedAt.Add(15*time.Minute)
-	receipt,executionErr:=edge.commands.Handle(ctx,operations.OperateManagedRedisData{Header:header,Service:service,ExpectedGeneration:service.Generation,Data:data});operationID:=receipt.CommandID;if operationID==""{operationID=header.CommandID};if receipt.Status==operations.OperationAmbiguous{return operationID,nil,redisservice.ErrAmbiguous};if executionErr!=nil{return operationID,nil,executionErr};if receipt.Status!=operations.OperationApplied||receipt.Effect.Result.ManagedRedisData==nil||receipt.Effect.ProofDigest==""{return operationID,nil,redisservice.ErrAmbiguous};return operationID,receipt.Effect.Result.ManagedRedisData,nil
+	receipt,executionErr:=edge.commands.Handle(ctx,operations.OperateManagedRedisData{Header:header,Service:service,ExpectedGeneration:service.Generation,Data:data});operationID:=receipt.CommandID;if operationID==""{operationID=header.CommandID};if receipt.Status==operations.OperationAmbiguous{return operationID,nil,redisservice.ErrAmbiguous};if executionErr!=nil{return operationID,nil,redisRuntimeError(executionErr)};if receipt.Status!=operations.OperationApplied||receipt.Effect.Result.ManagedRedisData==nil||receipt.Effect.ProofDigest==""{return operationID,nil,redisservice.ErrAmbiguous};return operationID,receipt.Effect.Result.ManagedRedisData,nil
 }
 
 func(edge *operationsEdge)reconcileRedisHost(ctx context.Context,call apiserver.EdgeCall,spec redisservice.InstanceSpec,suffix string)(string,error){
@@ -147,7 +150,7 @@ func(edge *operationsEdge)reconcileRedisHost(ctx context.Context,call apiserver.
 	header,err:=edge.redisHeader(call,suffix,operations.ResourceID{},operations.CapabilityNodeOperations);if err!=nil{return "",err}
 	receipt,err:=edge.commands.Handle(ctx,operations.ReconcileManagedService{Header:header,Service:service,ExpectedGeneration:expected})
 	operationID:=receipt.CommandID;if operationID==""{operationID=header.CommandID}
-	if err!=nil{return operationID,err}
+	if err!=nil{return operationID,redisRuntimeError(err)}
 	if receipt.Status!=operations.OperationApplied||receipt.Effect.ProofDigest==""{return operationID,redisservice.ErrAmbiguous}
 	return operationID,nil
 }
@@ -156,7 +159,7 @@ func redisObservedLifecycle(desired redisservice.LifecycleState)redisservice.Lif
 
 func(edge *operationsEdge)recordRedisObservation(ctx context.Context,spec redisservice.InstanceSpec,executionErr error)error{
 	previous,err:=edge.redis.Observation(ctx,spec.ID);expected:=uint64(0);if err==nil{expected=previous.Generation}else if !errors.Is(err,redisservice.ErrNotFound){return err}
-	now:=edge.now().UTC();observation:=redisservice.InstanceObservation{InstanceID:spec.ID,NodeID:spec.NodeID,Generation:expected+1,ConfigGeneration:spec.ConfigGeneration,Lifecycle:redisObservedLifecycle(spec.DesiredLifecycle),Enabled:spec.DesiredLifecycle==redisservice.LifecycleRunning,Health:redisservice.HealthHealthy,Drift:redisservice.DriftNone,ObservedAt:now}
+	now:=edge.now().UTC();observation:=redisservice.InstanceObservation{InstanceID:spec.ID,NodeID:spec.NodeID,Generation:expected+1,ConfigGeneration:spec.ConfigGeneration,Lifecycle:redisObservedLifecycle(spec.DesiredLifecycle),Enabled:spec.DesiredLifecycle==redisservice.LifecycleRunning,Health:redisservice.HealthHealthy,Drift:redisservice.DriftNone,ActualVersion:spec.Support.RedisVersion,ObservedAt:now}
 	if executionErr!=nil{
 		if expected!=0{observation.Lifecycle=previous.Lifecycle;observation.Enabled=previous.Enabled;observation.ConfigGeneration=previous.ConfigGeneration;observation.ActualVersion=previous.ActualVersion;observation.ActualConfigDigest=previous.ActualConfigDigest;observation.DatasetBytes=previous.DatasetBytes;observation.ConnectedClients=previous.ConnectedClients;observation.LastSuccessfulSaveAt=previous.LastSuccessfulSaveAt}
 		observation.Health=redisservice.HealthDegraded;observation.Drift=redisservice.DriftPresent
