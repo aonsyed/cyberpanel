@@ -96,6 +96,28 @@ type LSAPISpec struct {
 	Generation    uint64
 	MaxConnections uint32
 	PHPBinary     string
+	ProcessProfile provisioning.SiteProcessResourceProfile
+}
+
+type observedProcessLimit struct {
+	Supported bool
+	Known     bool
+	Unlimited bool
+	Value     uint64
+	Device    string
+}
+
+type ProcessResourceObservation struct {
+	Generation  uint64
+	CPUQuota    observedProcessLimit
+	CPUWeight   observedProcessLimit
+	MemoryHigh  observedProcessLimit
+	MemoryMax   observedProcessLimit
+	TasksMax    observedProcessLimit
+	IOReadBPS   observedProcessLimit
+	IOWriteBPS  observedProcessLimit
+	IOReadIOPS  observedProcessLimit
+	IOWriteIOPS observedProcessLimit
 }
 
 func (spec LSAPISpec) UnitName() string { return "cyberpanel-lsapi-" + spec.SiteKey + "-g" + strconv.FormatUint(spec.Generation, 10) + ".service" }
@@ -115,7 +137,7 @@ func HealthDocumentRoot(siteKey string, generation uint64) (string, error) {
 }
 
 func (spec LSAPISpec) Validate() error {
-	if !spec.Edition.valid() || !validToken(spec.SiteKey, 3, 64) || spec.SiteKey[:2] != "s-" || spec.Username != deriveUsername(spec.SiteKey) || spec.UID < 1000 || spec.GID != spec.UID || spec.Generation == 0 || spec.MaxConnections == 0 || spec.MaxConnections > 10000 || !trustedPHPBinary(spec.PHPBinary) { return errors.New("invalid LSAPI service specification") }
+	if !spec.Edition.valid() || !validToken(spec.SiteKey, 3, 64) || spec.SiteKey[:2] != "s-" || spec.Username != deriveUsername(spec.SiteKey) || spec.UID < 1000 || spec.GID != spec.UID || spec.Generation == 0 || spec.MaxConnections == 0 || spec.MaxConnections > 10000 || !trustedPHPBinary(spec.PHPBinary) || spec.ProcessProfile.Generation != spec.Generation || spec.ProcessProfile.Validate() != nil { return errors.New("invalid LSAPI service specification") }
 	return nil
 }
 
@@ -147,8 +169,25 @@ func (spec LSAPISpec) RenderSystemdUnit() ([]byte, error) {
 	unit.WriteString("NoNewPrivileges=true\nPrivateTmp=true\nPrivateDevices=true\nProtectSystem=strict\nProtectHome=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectControlGroups=true\nProtectClock=true\nLockPersonality=true\nRestrictSUIDSGID=true\nRestrictRealtime=true\nRestrictNamespaces=true\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n")
 	unit.WriteString("ReadWritePaths="); unit.WriteString(SitesRootPath + "/" + spec.SiteKey); unit.WriteByte(' '); unit.WriteString(RuntimeRootPath + "/" + spec.SiteKey); unit.WriteByte('\n')
 	unit.WriteString("ReadOnlyPaths="); unit.WriteString(spec.PHPConfigDirectory()); unit.WriteByte('\n')
-	unit.WriteString("MemoryAccounting=true\nCPUAccounting=true\nIOAccounting=true\nMemoryHigh=1536M\nMemoryMax=2048M\nOOMPolicy=stop\nLimitAS=2147483648\nLimitNOFILE=4096\nLimitNPROC=512\nTasksMax="); unit.WriteString(strconv.FormatUint(uint64(spec.MaxConnections*16+32), 10)); unit.WriteString("\n\n[Install]\nWantedBy=multi-user.target\n")
+	profile := spec.ProcessProfile
+	unit.WriteString("CPUAccounting=true\nMemoryAccounting=true\nTasksAccounting=true\nIOAccounting=true\n")
+	unit.WriteString("CPUQuota="); unit.WriteString(formatCPUQuota(profile.CPUQuotaPerSecondUSec)); unit.WriteString("%\nCPUQuotaPeriodSec=1s\n")
+	unit.WriteString("CPUWeight="); unit.WriteString(decimal(profile.CPUWeight)); unit.WriteByte('\n')
+	unit.WriteString("MemoryHigh="); unit.WriteString(decimal(profile.MemoryHighBytes)); unit.WriteByte('\n')
+	unit.WriteString("MemoryMax="); unit.WriteString(decimal(profile.MemoryMaxBytes)); unit.WriteByte('\n')
+	unit.WriteString("TasksMax="); unit.WriteString(decimal(profile.TasksMax)); unit.WriteByte('\n')
+	if profile.IOReadBytesPerSecond != 0 { unit.WriteString("IOReadBandwidthMax="); unit.WriteString(spec.GenerationRoot()); unit.WriteByte(' '); unit.WriteString(decimal(profile.IOReadBytesPerSecond)); unit.WriteByte('\n') }
+	if profile.IOWriteBytesPerSecond != 0 { unit.WriteString("IOWriteBandwidthMax="); unit.WriteString(spec.GenerationRoot()); unit.WriteByte(' '); unit.WriteString(decimal(profile.IOWriteBytesPerSecond)); unit.WriteByte('\n') }
+	if profile.IOReadOperationsPerSec != 0 { unit.WriteString("IOReadIOPSMax="); unit.WriteString(spec.GenerationRoot()); unit.WriteByte(' '); unit.WriteString(decimal(profile.IOReadOperationsPerSec)); unit.WriteByte('\n') }
+	if profile.IOWriteOperationsPerSec != 0 { unit.WriteString("IOWriteIOPSMax="); unit.WriteString(spec.GenerationRoot()); unit.WriteByte(' '); unit.WriteString(decimal(profile.IOWriteOperationsPerSec)); unit.WriteByte('\n') }
+	unit.WriteString("OOMPolicy=stop\nLimitNOFILE=4096\n\n[Install]\nWantedBy=multi-user.target\n")
 	return []byte(unit.String()), nil
+}
+
+func formatCPUQuota(value uint64) string {
+	whole, fraction := value/10_000, value%10_000
+	if fraction == 0 { return decimal(whole) }
+	return decimal(whole) + "." + strings.TrimRight(fmt.Sprintf("%04d", fraction), "0")
 }
 
 func (spec LSAPISpec) RenderPHPINI() ([]byte, error) {
@@ -189,7 +228,9 @@ func trustedPHPBinary(value string) bool {
 }
 
 func poolSpec(binding RuntimeBinding, request Request, edition EngineEdition, binary string) LSAPISpec {
-	return LSAPISpec{Edition: edition, SiteKey: binding.SiteKey, Username: binding.Username, UID: binding.UID, GID: binding.GID, Generation: request.Generation, MaxConnections: 8, PHPBinary: binary}
+	profile := request.SiteProcessProfile
+	if profile.Generation == 0 { profile = provisioning.DefaultSiteProcessResourceProfile(request.Generation, 8) }
+	return LSAPISpec{Edition: edition, SiteKey: binding.SiteKey, Username: binding.Username, UID: binding.UID, GID: binding.GID, Generation: request.Generation, MaxConnections: 8, PHPBinary: binary, ProcessProfile: profile}
 }
 
 func evidence(parts ...string) string {

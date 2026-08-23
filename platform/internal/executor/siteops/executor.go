@@ -26,6 +26,7 @@ type Host interface {
 	StartLSAPI(context.Context, LSAPISpec) error
 	StopLSAPI(context.Context, LSAPISpec) error
 	RemoveLSAPI(context.Context, LSAPISpec) error
+	ProbeLSAPIResources(context.Context, LSAPISpec) (ProcessResourceObservation, error)
 	Quarantine(context.Context, UnixIdentity, uint64, string) error
 	Tombstone(context.Context, UnixIdentity, uint64, string, string) error
 	DeleteTombstone(context.Context, UnixIdentity, string) error
@@ -64,7 +65,11 @@ func (executor *Executor) Execute(ctx context.Context, request Request) (Respons
 	unlock := executor.locks.lock(string(request.RuntimeKey)); defer unlock()
 	lease, err := executor.registry.Begin(request, now)
 	if err != nil { return executor.failure(request, err), nil }
-	if lease.Cached { return executor.success(request, lease.Record.EvidenceDigest, now), nil }
+	if lease.Cached {
+		bindings, observeErr := executor.observeLimitBindings(ctx, request, lease.Binding)
+		if observeErr != nil { return executor.failure(request, observeErr), nil }
+		return executor.success(request, lease.Record.EvidenceDigest, bindings, now), nil
+	}
 	binding := lease.Binding
 	evidenceDigest, mutation, operationErr := executor.perform(ctx, request, binding)
 	if operationErr != nil {
@@ -72,8 +77,10 @@ func (executor *Executor) Execute(ctx context.Context, request Request) (Respons
 		return executor.failure(request, operationErr), nil
 	}
 	if !validDigest(evidenceDigest) { operationErr = ErrCorruptRegistry; _ = executor.registry.Fail(request, binding, errorCode(operationErr), executor.currentTime()); return executor.failure(request, operationErr), nil }
+	bindings, observeErr := executor.observeLimitBindings(ctx, request, mutation)
+	if observeErr != nil { _ = executor.registry.Fail(request, binding, errorCode(observeErr), executor.currentTime()); return executor.failure(request, observeErr), nil }
 	if err = executor.registry.Complete(request, mutation, evidenceDigest, executor.currentTime()); err != nil { return executor.failure(request, err), nil }
-	return executor.success(request, evidenceDigest, executor.currentTime()), nil
+	return executor.success(request, evidenceDigest, bindings, executor.currentTime()), nil
 }
 
 func (executor *Executor) perform(ctx context.Context, request Request, binding RuntimeBinding) (string, RuntimeBinding, error) {
@@ -115,7 +122,7 @@ func (executor *Executor) perform(ctx context.Context, request Request, binding 
 	case OperationSuspend:
 		if binding.State == BindingTombstoned || binding.State == BindingDeleted || binding.State == BindingQuarantined { return "", binding, ErrRegistryConflict }
 		if binding.PoolGeneration != 0 {
-			spec := poolSpec(binding, request, executor.edition, lifecyclePHPBinary); spec.Generation = binding.PoolGeneration
+			spec := poolSpec(binding, request, executor.edition, lifecyclePHPBinary); spec.Generation, spec.ProcessProfile.Generation = binding.PoolGeneration, binding.PoolGeneration
 			if err = executor.host.StopLSAPI(ctx, spec); err != nil { return "", binding, err }
 		}
 		if err = executor.host.DisableIdentity(ctx, identity); err != nil { return "", binding, err }
@@ -149,7 +156,7 @@ func (executor *Executor) stopGenerationPool(ctx context.Context, request Reques
 	if generation == 0 { return nil }
 	found := false; for _, installed := range binding.InstalledPools { if installed == generation { found = true; break } }; if !found { return nil }
 	spec := poolSpec(binding, request, executor.edition, lifecyclePHPBinary)
-	spec.Generation = generation
+	spec.Generation, spec.ProcessProfile.Generation = generation, generation
 	return executor.host.StopLSAPI(ctx, spec)
 }
 
@@ -157,7 +164,7 @@ func (executor *Executor) removeAllPools(ctx context.Context, request Request, b
 	if len(binding.InstalledPools) == 0 { return nil }
 	spec := poolSpec(binding, request, executor.edition, lifecyclePHPBinary)
 	var err error
-	for _, generation := range binding.InstalledPools { spec.Generation = generation; if err = executor.host.RemoveLSAPI(ctx, spec); err != nil { return err } }
+	for _, generation := range binding.InstalledPools { spec.Generation, spec.ProcessProfile.Generation = generation, generation; if err = executor.host.RemoveLSAPI(ctx, spec); err != nil { return err } }
 	return nil
 }
 
@@ -179,8 +186,8 @@ func (executor *Executor) CollectExpired(ctx context.Context, limit int) (int, e
 	return collected, nil
 }
 
-func (executor *Executor) success(request Request, evidence string, now time.Time) Response {
-	return Response{Version: ProtocolVersion, RequestID: request.RequestID, Operation: request.Operation, EffectKey: request.EffectKey, RuntimeKey: request.RuntimeKey, Generation: request.Generation, Succeeded: true, EvidenceDigest: evidence, AttestationDigest: request.AttestationDigest, LifecycleOperation: lifecycleOperation(request.Operation), CompletedAt: now.UTC()}
+func (executor *Executor) success(request Request, evidence string, bindings []provisioning.SiteProcessLimitBinding, now time.Time) Response {
+	return Response{Version: ProtocolVersion, RequestID: request.RequestID, Operation: request.Operation, EffectKey: request.EffectKey, RuntimeKey: request.RuntimeKey, Generation: request.Generation, Succeeded: true, EvidenceDigest: evidence, AttestationDigest: request.AttestationDigest, LifecycleOperation: lifecycleOperation(request.Operation), LimitBindings: bindings, CompletedAt: now.UTC()}
 }
 
 func (executor *Executor) failure(request Request, cause error) Response {
@@ -189,6 +196,43 @@ func (executor *Executor) failure(request Request, cause error) Response {
 
 func quarantineToken(binding RuntimeBinding, generation uint64) string { return binding.SiteKey + "-q-g" + decimal(generation) }
 func tombstoneToken(binding RuntimeBinding, generation uint64) string { return binding.SiteKey + "-t-g" + decimal(generation) + "-" + string(binding.RuntimeKey)[5:17] }
+
+func (executor *Executor) observeLimitBindings(ctx context.Context, request Request, binding RuntimeBinding) ([]provisioning.SiteProcessLimitBinding, error) {
+	if request.Operation != OperationEnsureLSAPIPool { return nil, nil }
+	if binding.Fence != request.Generation || binding.RootGeneration != request.Generation || binding.PoolGeneration != request.Generation { return nil, ErrFenced }
+	spec := poolSpec(binding, request, executor.edition, lifecyclePHPBinary)
+	observation, err := executor.host.ProbeLSAPIResources(ctx, spec); if err != nil { return nil, err }
+	if observation.Generation != request.Generation { return nil, ErrFenced }
+	profile, observedAt := request.SiteProcessProfile, executor.currentTime()
+	bindings := []provisioning.SiteProcessLimitBinding{
+		limitBinding(profile.Generation, provisioning.SiteProcessCPUQuota, profile.CPUQuotaPerSecondUSec, observation.CPUQuota, observedAt),
+		limitBinding(profile.Generation, provisioning.SiteProcessCPUWeight, profile.CPUWeight, observation.CPUWeight, observedAt),
+		limitBinding(profile.Generation, provisioning.SiteProcessMemoryHigh, profile.MemoryHighBytes, observation.MemoryHigh, observedAt),
+		limitBinding(profile.Generation, provisioning.SiteProcessMemoryMax, profile.MemoryMaxBytes, observation.MemoryMax, observedAt),
+		limitBinding(profile.Generation, provisioning.SiteProcessTasksMax, profile.TasksMax, observation.TasksMax, observedAt),
+		limitBinding(profile.Generation, provisioning.SiteProcessIOReadBPS, profile.IOReadBytesPerSecond, observation.IOReadBPS, observedAt),
+		limitBinding(profile.Generation, provisioning.SiteProcessIOWriteBPS, profile.IOWriteBytesPerSecond, observation.IOWriteBPS, observedAt),
+		limitBinding(profile.Generation, provisioning.SiteProcessIOReadIOPS, profile.IOReadOperationsPerSec, observation.IOReadIOPS, observedAt),
+		limitBinding(profile.Generation, provisioning.SiteProcessIOWriteIOPS, profile.IOWriteOperationsPerSec, observation.IOWriteIOPS, observedAt),
+	}
+	return bindings, nil
+}
+
+func limitBinding(generation uint64, dimension provisioning.SiteProcessLimitDimension, requested uint64, observed observedProcessLimit, observedAt time.Time) provisioning.SiteProcessLimitBinding {
+	binding := provisioning.SiteProcessLimitBinding{Generation:generation, Scope:"site_processes", Dimension:dimension, Adapter:"systemd_cgroup_v2", RequestedValue:requested, EffectiveValue:observed.Value, EffectiveKnown:observed.Known, EffectiveUnlimited:observed.Unlimited, Device:observed.Device, ObservedAt:observedAt}
+	switch {
+	case !observed.Supported || !observed.Known:
+		binding.State, binding.Observation, binding.EffectiveKnown, binding.EffectiveUnlimited, binding.EffectiveValue = provisioning.ResourceLimitUnsupported, "controller_or_device_unavailable", false, false, 0
+	case requested == 0:
+		binding.State = provisioning.ResourceLimitAccountedOnly
+		if observed.Unlimited { binding.Observation = "accounting_enabled_unlimited" } else { binding.Observation = "inherited_limit_observed" }
+	case !observed.Unlimited && observed.Value == requested:
+		binding.State, binding.Observation = provisioning.ResourceLimitEnforced, "exact_live_value"
+	default:
+		binding.State, binding.Observation = provisioning.ResourceLimitAccountedOnly, "live_value_mismatch"
+	}
+	return binding
+}
 
 func addGeneration(values []uint64, generation uint64) []uint64 {
 	set := make(map[uint64]struct{}, len(values)+1); for _, value := range values { if value != 0 { set[value] = struct{}{} } }; set[generation] = struct{}{}
@@ -212,7 +256,7 @@ func receiptFromResponse(request Request, response Response) (any, error) {
 	case OperationEnsureDirectories:
 		return provisioning.DirectoryReceipt{EffectKey: response.EffectKey, RuntimeKey: response.RuntimeKey, Generation: response.Generation, EvidenceDigest: response.EvidenceDigest}, nil
 	case OperationEnsureLSAPIPool:
-		return provisioning.LSAPIPoolReceipt{EffectKey: response.EffectKey, RuntimeKey: response.RuntimeKey, Generation: response.Generation, EvidenceDigest: response.EvidenceDigest}, nil
+		return provisioning.LSAPIPoolReceipt{EffectKey: response.EffectKey, RuntimeKey: response.RuntimeKey, Generation: response.Generation, EvidenceDigest: response.EvidenceDigest, LimitBindings: append([]provisioning.SiteProcessLimitBinding(nil), response.LimitBindings...)}, nil
 	case OperationWriteHealth:
 		return provisioning.HealthReceipt{EffectKey: response.EffectKey, RuntimeKey: response.RuntimeKey, Generation: response.Generation, AttestationDigest: response.AttestationDigest, EvidenceDigest: response.EvidenceDigest}, nil
 	case OperationSuspend, OperationQuarantine, OperationPurge:

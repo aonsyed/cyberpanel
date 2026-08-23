@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
@@ -76,6 +77,79 @@ func (spec RuntimeSpec) PHPProfile() site.PHPProfile       { return spec.phpProf
 func (RuntimeSpec) ResourceProfileRef() webengine.ResourceRef { return defaultResource }
 func (RuntimeSpec) LogPolicyRef() webengine.ResourceRef    { return defaultLogs }
 func (RuntimeSpec) MaxConnections() uint32                 { return defaultMaxConns }
+func (spec RuntimeSpec) SiteProcessProfile() SiteProcessResourceProfile {
+	return DefaultSiteProcessResourceProfile(spec.generation, defaultMaxConns)
+}
+
+type SiteProcessResourceProfile struct {
+	Generation              uint64 `json:"generation"`
+	CPUQuotaPerSecondUSec   uint64 `json:"cpu_quota_per_second_usec"`
+	CPUWeight               uint64 `json:"cpu_weight"`
+	MemoryHighBytes         uint64 `json:"memory_high_bytes"`
+	MemoryMaxBytes          uint64 `json:"memory_max_bytes"`
+	TasksMax                uint64 `json:"tasks_max"`
+	IOReadBytesPerSecond    uint64 `json:"io_read_bytes_per_second"`
+	IOWriteBytesPerSecond   uint64 `json:"io_write_bytes_per_second"`
+	IOReadOperationsPerSec  uint64 `json:"io_read_operations_per_second"`
+	IOWriteOperationsPerSec uint64 `json:"io_write_operations_per_second"`
+}
+
+func DefaultSiteProcessResourceProfile(generation uint64, maxConnections uint32) SiteProcessResourceProfile {
+	return SiteProcessResourceProfile{
+		Generation: generation, CPUQuotaPerSecondUSec: 1_000_000, CPUWeight: 100,
+		MemoryHighBytes: 1536 << 20, MemoryMaxBytes: 2048 << 20,
+		TasksMax: uint64(maxConnections)*16 + 32,
+		IOReadBytesPerSecond: 50 << 20, IOWriteBytesPerSecond: 25 << 20,
+		IOReadOperationsPerSec: 1000, IOWriteOperationsPerSec: 500,
+	}
+}
+
+func (profile SiteProcessResourceProfile) Validate() error {
+	if profile.Generation == 0 || profile.CPUQuotaPerSecondUSec < 1_000 || profile.CPUQuotaPerSecondUSec > 1024*1_000_000 || profile.CPUWeight < 1 || profile.CPUWeight > 10_000 || profile.MemoryHighBytes == 0 || profile.MemoryMaxBytes < profile.MemoryHighBytes || profile.MemoryMaxBytes > 1<<50 || profile.TasksMax == 0 || profile.TasksMax > 1<<20 {
+		return ErrInvalidRequest
+	}
+	for _, value := range []uint64{profile.IOReadBytesPerSecond, profile.IOWriteBytesPerSecond, profile.IOReadOperationsPerSec, profile.IOWriteOperationsPerSec} {
+		if value > 1<<50 { return ErrInvalidRequest }
+	}
+	return nil
+}
+
+type SiteProcessLimitDimension string
+
+const (
+	SiteProcessCPUQuota  SiteProcessLimitDimension = "cpu_quota"
+	SiteProcessCPUWeight SiteProcessLimitDimension = "cpu_weight"
+	SiteProcessMemoryHigh SiteProcessLimitDimension = "memory_high"
+	SiteProcessMemoryMax SiteProcessLimitDimension = "memory_max"
+	SiteProcessTasksMax SiteProcessLimitDimension = "tasks_max"
+	SiteProcessIOReadBPS SiteProcessLimitDimension = "io_read_bps"
+	SiteProcessIOWriteBPS SiteProcessLimitDimension = "io_write_bps"
+	SiteProcessIOReadIOPS SiteProcessLimitDimension = "io_read_iops"
+	SiteProcessIOWriteIOPS SiteProcessLimitDimension = "io_write_iops"
+)
+
+type ResourceLimitState string
+
+const (
+	ResourceLimitEnforced      ResourceLimitState = "enforced"
+	ResourceLimitAccountedOnly ResourceLimitState = "accounted_only"
+	ResourceLimitUnsupported   ResourceLimitState = "unsupported"
+)
+
+type SiteProcessLimitBinding struct {
+	Generation         uint64                    `json:"generation"`
+	Scope              string                    `json:"scope"`
+	Dimension          SiteProcessLimitDimension `json:"dimension"`
+	Adapter            string                    `json:"adapter"`
+	RequestedValue     uint64                    `json:"requested_value"`
+	EffectiveValue     uint64                    `json:"effective_value,omitempty"`
+	EffectiveKnown     bool                      `json:"effective_known"`
+	EffectiveUnlimited bool                      `json:"effective_unlimited"`
+	State              ResourceLimitState        `json:"state"`
+	Device             string                    `json:"device,omitempty"`
+	Observation        string                    `json:"observation"`
+	ObservedAt         time.Time                 `json:"observed_at"`
+}
 
 type IdentityReceipt struct {
 	EffectKey      EffectKey
@@ -96,6 +170,7 @@ type LSAPIPoolReceipt struct {
 	RuntimeKey     RuntimeKey
 	Generation     uint64
 	EvidenceDigest string
+	LimitBindings  []SiteProcessLimitBinding
 }
 
 type HealthReceipt struct {
@@ -589,6 +664,7 @@ func validateProvisioningReceipt(receipt ProvisioningReceipt, spec RuntimeSpec) 
 			return ErrInvalidReceipt
 		}
 	}
+	if receipt.Pool.EvidenceDigest != "" && !validSiteProcessLimitBindings(receipt.Pool.LimitBindings, spec.SiteProcessProfile()) { return ErrInvalidReceipt }
 	if receipt.Health.EvidenceDigest != "" && !validHealthReceipt(receipt.Health, spec, HealthAttestation{digest: receipt.Health.AttestationDigest}) {
 		return ErrInvalidReceipt
 	}
@@ -596,6 +672,26 @@ func validateProvisioningReceipt(receipt ProvisioningReceipt, spec RuntimeSpec) 
 		return ErrInvalidReceipt
 	}
 	return nil
+}
+
+func validSiteProcessLimitBindings(bindings []SiteProcessLimitBinding, profile SiteProcessResourceProfile) bool {
+	if len(bindings) != 9 || profile.Validate() != nil { return false }
+	requested := map[SiteProcessLimitDimension]uint64{
+		SiteProcessCPUQuota:profile.CPUQuotaPerSecondUSec, SiteProcessCPUWeight:profile.CPUWeight,
+		SiteProcessMemoryHigh:profile.MemoryHighBytes, SiteProcessMemoryMax:profile.MemoryMaxBytes,
+		SiteProcessTasksMax:profile.TasksMax, SiteProcessIOReadBPS:profile.IOReadBytesPerSecond,
+		SiteProcessIOWriteBPS:profile.IOWriteBytesPerSecond, SiteProcessIOReadIOPS:profile.IOReadOperationsPerSec,
+		SiteProcessIOWriteIOPS:profile.IOWriteOperationsPerSec,
+	}
+	seen := map[SiteProcessLimitDimension]struct{}{}
+	for _, binding := range bindings {
+		wanted, ok := requested[binding.Dimension]; if !ok || binding.Generation != profile.Generation || binding.Scope != "site_processes" || binding.Adapter != "systemd_cgroup_v2" || binding.RequestedValue != wanted || binding.ObservedAt.IsZero() || binding.Observation == "" { return false }
+		if _, duplicate := seen[binding.Dimension]; duplicate { return false }; seen[binding.Dimension] = struct{}{}
+		if binding.State != ResourceLimitEnforced && binding.State != ResourceLimitAccountedOnly && binding.State != ResourceLimitUnsupported { return false }
+		if binding.State == ResourceLimitEnforced && (!binding.EffectiveKnown || binding.EffectiveUnlimited || binding.EffectiveValue != wanted) { return false }
+		if binding.State == ResourceLimitUnsupported && binding.EffectiveKnown { return false }
+	}
+	return len(seen) == len(requested)
 }
 
 func validStep(effect EffectKey, key RuntimeKey, generation uint64, evidence string, spec RuntimeSpec) bool {

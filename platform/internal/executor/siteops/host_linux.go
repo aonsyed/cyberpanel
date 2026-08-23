@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -144,6 +145,77 @@ func (host *LinuxHost) RemoveLSAPI(ctx context.Context, spec LSAPISpec) error {
 	if err := unlinkAt(host.unitFD, spec.UnitName(), 0); err != nil && !errors.Is(err, syscall.ENOENT) { return err }
 	if err := syscall.Fsync(host.unitFD); err != nil { return err }
 	return runAdministrative(ctx, processDaemonReload, UnixIdentity{}, spec)
+}
+
+func (host *LinuxHost) ProbeLSAPIResources(ctx context.Context, spec LSAPISpec) (ProcessResourceObservation, error) {
+	if err := ctx.Err(); err != nil { return ProcessResourceObservation{}, err }
+	if err := spec.Validate(); err != nil { return ProcessResourceObservation{}, err }
+	observation := ProcessResourceObservation{Generation: spec.Generation}
+	controlGroup, ok := liveControlGroup(ctx, spec.UnitName())
+	if !ok { return observation, nil }
+	root := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(controlGroup, "/"))
+	observation.CPUQuota = readCPUQuota(filepath.Join(root, "cpu.max"))
+	observation.CPUWeight = readScalarLimit(filepath.Join(root, "cpu.weight"))
+	observation.MemoryHigh = readScalarLimit(filepath.Join(root, "memory.high"))
+	observation.MemoryMax = readScalarLimit(filepath.Join(root, "memory.max"))
+	observation.TasksMax = readScalarLimit(filepath.Join(root, "pids.max"))
+	device, deviceOK := generationDevice(spec.GenerationRoot())
+	if deviceOK {
+		observation.IOReadBPS, observation.IOWriteBPS, observation.IOReadIOPS, observation.IOWriteIOPS = readIOMax(filepath.Join(root, "io.max"), device)
+	}
+	return observation, nil
+}
+
+func liveControlGroup(ctx context.Context, unit string) (string, bool) {
+	command := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", unit, "--property=ControlGroup", "--value", "--no-pager")
+	command.Stdin = nil; output := &boundedOutput{limit: 4096}; command.Stdout, command.Stderr = output, output
+	if command.Run() != nil { return "", false }
+	value := strings.TrimSpace(output.String())
+	if value == "" || len(value) > 1024 || value[0] != '/' || strings.Contains(value, "..") { return "", false }
+	for index := range value { character := value[index]; if !alphaNumeric(character) && character != '/' && character != '-' && character != '_' && character != '.' { return "", false } }
+	return value, true
+}
+
+func readCPUQuota(path string) observedProcessLimit {
+	content, err := os.ReadFile(path); if err != nil { return observedProcessLimit{} }
+	fields := strings.Fields(string(content)); if len(fields) != 2 { return observedProcessLimit{} }
+	period, err := strconv.ParseUint(fields[1], 10, 64); if err != nil || period == 0 { return observedProcessLimit{} }
+	if fields[0] == "max" { return observedProcessLimit{Supported:true, Known:true, Unlimited:true} }
+	quota, err := strconv.ParseUint(fields[0], 10, 64); if err != nil || quota == 0 || quota/period > ^uint64(0)/1_000_000 { return observedProcessLimit{} }
+	value := quota/period*1_000_000 + quota%period*1_000_000/period
+	return observedProcessLimit{Supported:true, Known:true, Value:value}
+}
+
+func readScalarLimit(path string) observedProcessLimit {
+	content, err := os.ReadFile(path); if err != nil { return observedProcessLimit{} }
+	value := strings.TrimSpace(string(content)); if value == "max" { return observedProcessLimit{Supported:true, Known:true, Unlimited:true} }
+	parsed, err := strconv.ParseUint(value, 10, 64); if err != nil { return observedProcessLimit{} }
+	return observedProcessLimit{Supported:true, Known:true, Value:parsed}
+}
+
+func generationDevice(path string) (string, bool) {
+	info, err := os.Stat(path); if err != nil { return "", false }
+	metadata, ok := info.Sys().(*syscall.Stat_t); if !ok { return "", false }
+	device := uint64(metadata.Dev); major := device>>8&0xfff | device>>32&^uint64(0xfff); minor := device&0xff | device>>12&^uint64(0xff)
+	if major == 0 { return "", false }
+	return strconv.FormatUint(major, 10)+":"+strconv.FormatUint(minor, 10), true
+}
+
+func readIOMax(path, device string) (observedProcessLimit, observedProcessLimit, observedProcessLimit, observedProcessLimit) {
+	content, err := os.ReadFile(path); if err != nil { return observedProcessLimit{}, observedProcessLimit{}, observedProcessLimit{}, observedProcessLimit{} }
+	readBPS := observedProcessLimit{Supported:true, Known:true, Unlimited:true, Device:device}
+	writeBPS, readIOPS, writeIOPS := readBPS, readBPS, readBPS
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line); if len(fields) == 0 || fields[0] != device { continue }
+		for _, field := range fields[1:] {
+			name, value, found := strings.Cut(field, "="); if !found { continue }
+			limit := observedProcessLimit{Supported:true, Known:true, Device:device}
+			if value == "max" { limit.Unlimited = true } else { parsed, parseErr := strconv.ParseUint(value, 10, 64); if parseErr != nil { continue }; limit.Value = parsed }
+			switch name { case "rbps": readBPS = limit; case "wbps": writeBPS = limit; case "riops": readIOPS = limit; case "wiops": writeIOPS = limit }
+		}
+		break
+	}
+	return readBPS, writeBPS, readIOPS, writeIOPS
 }
 
 func (host *LinuxHost) Quarantine(ctx context.Context, identity UnixIdentity, generation uint64, token string) error {

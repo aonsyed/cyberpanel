@@ -93,6 +93,7 @@ type Request struct {
 	Generation          uint64                  `json:"generation"`
 	Lifecycle           site.Lifecycle          `json:"lifecycle"`
 	PHPProfile          site.PHPProfile         `json:"php_profile"`
+	SiteProcessProfile  provisioning.SiteProcessResourceProfile `json:"site_process_profile,omitempty"`
 	Withdraw            bool                    `json:"withdraw"`
 	AttestationDigest   string                  `json:"attestation_digest,omitempty"`
 	IssuedAt            time.Time               `json:"issued_at"`
@@ -101,12 +102,14 @@ type Request struct {
 
 func requestFromSpec(operation Operation, requestID string, spec provisioning.RuntimeSpec, attestation string, now, deadline time.Time) Request {
 	scope := spec.Identity().Scope()
-	return Request{
+	request := Request{
 		Version: ProtocolVersion, RequestID: requestID, Operation: operation,
 		EffectKey: spec.EffectKey(), RuntimeKey: spec.Identity().Key(), TenantID: scope.TenantID.String(), SiteID: scope.SiteID.String(),
 		ProjectionDigest: spec.ProjectionDigest(), Generation: spec.Generation(), Lifecycle: spec.Lifecycle(), PHPProfile: spec.PHPProfile(), Withdraw: spec.Withdraw(),
 		AttestationDigest: attestation, IssuedAt: now.UTC(), Deadline: deadline.UTC(),
 	}
+	if operation == OperationEnsureLSAPIPool { request.SiteProcessProfile = spec.SiteProcessProfile() }
+	return request
 }
 
 func (request Request) Validate(now time.Time) error {
@@ -126,6 +129,11 @@ func (request Request) Validate(now time.Time) error {
 	if request.Operation == OperationWriteHealth {
 		if !validDigest(request.AttestationDigest) { return ErrInvalidRequest }
 	} else if request.AttestationDigest != "" {
+		return ErrInvalidRequest
+	}
+	if request.Operation == OperationEnsureLSAPIPool {
+		if request.SiteProcessProfile.Generation != request.Generation || request.SiteProcessProfile.Validate() != nil { return ErrInvalidRequest }
+	} else if request.SiteProcessProfile != (provisioning.SiteProcessResourceProfile{}) {
 		return ErrInvalidRequest
 	}
 	if request.Operation == OperationPurge && !request.Withdraw { return ErrInvalidRequest }
@@ -156,6 +164,7 @@ type Response struct {
 	EvidenceDigest      string                  `json:"evidence_digest,omitempty"`
 	AttestationDigest   string                  `json:"attestation_digest,omitempty"`
 	LifecycleOperation  provisioning.LifecycleOperation `json:"lifecycle_operation,omitempty"`
+	LimitBindings       []provisioning.SiteProcessLimitBinding `json:"limit_bindings,omitempty"`
 	ErrorCode           string                  `json:"error_code,omitempty"`
 	CompletedAt         time.Time               `json:"completed_at"`
 }
@@ -172,11 +181,41 @@ func (response Response) Validate(request Request, now time.Time) error {
 	if request.Operation == OperationWriteHealth && response.Succeeded {
 		if response.AttestationDigest != request.AttestationDigest { return ErrInvalidResponse }
 	} else if response.AttestationDigest != "" { return ErrInvalidResponse }
+	if request.Operation == OperationEnsureLSAPIPool && response.Succeeded {
+		if !validLimitBindings(response.LimitBindings, request.SiteProcessProfile) { return ErrInvalidResponse }
+	} else if len(response.LimitBindings) != 0 { return ErrInvalidResponse }
 	wantedLifecycle := lifecycleOperation(request.Operation)
 	if response.Succeeded && wantedLifecycle != "" {
 		if response.LifecycleOperation != wantedLifecycle { return ErrInvalidResponse }
 	} else if response.LifecycleOperation != "" { return ErrInvalidResponse }
 	return nil
+}
+
+func validLimitBindings(bindings []provisioning.SiteProcessLimitBinding, profile provisioning.SiteProcessResourceProfile) bool {
+	if len(bindings) != 9 || profile.Validate() != nil { return false }
+	requested := map[provisioning.SiteProcessLimitDimension]uint64{
+		provisioning.SiteProcessCPUQuota: profile.CPUQuotaPerSecondUSec,
+		provisioning.SiteProcessCPUWeight: profile.CPUWeight,
+		provisioning.SiteProcessMemoryHigh: profile.MemoryHighBytes,
+		provisioning.SiteProcessMemoryMax: profile.MemoryMaxBytes,
+		provisioning.SiteProcessTasksMax: profile.TasksMax,
+		provisioning.SiteProcessIOReadBPS: profile.IOReadBytesPerSecond,
+		provisioning.SiteProcessIOWriteBPS: profile.IOWriteBytesPerSecond,
+		provisioning.SiteProcessIOReadIOPS: profile.IOReadOperationsPerSec,
+		provisioning.SiteProcessIOWriteIOPS: profile.IOWriteOperationsPerSec,
+	}
+	seen := make(map[provisioning.SiteProcessLimitDimension]struct{}, len(bindings))
+	for _, binding := range bindings {
+		wanted, exists := requested[binding.Dimension]
+		if !exists || binding.Generation != profile.Generation || binding.Scope != "site_processes" || binding.Adapter != "systemd_cgroup_v2" || binding.RequestedValue != wanted || binding.ObservedAt.IsZero() || len(binding.Observation) == 0 || len(binding.Observation) > 128 { return false }
+		if _, duplicate := seen[binding.Dimension]; duplicate { return false }; seen[binding.Dimension] = struct{}{}
+		if binding.State != provisioning.ResourceLimitEnforced && binding.State != provisioning.ResourceLimitAccountedOnly && binding.State != provisioning.ResourceLimitUnsupported { return false }
+		if binding.State == provisioning.ResourceLimitEnforced && (!binding.EffectiveKnown || binding.EffectiveUnlimited || binding.EffectiveValue != wanted) { return false }
+		if binding.State == provisioning.ResourceLimitUnsupported && binding.EffectiveKnown { return false }
+		isIO := binding.Dimension == provisioning.SiteProcessIOReadBPS || binding.Dimension == provisioning.SiteProcessIOWriteBPS || binding.Dimension == provisioning.SiteProcessIOReadIOPS || binding.Dimension == provisioning.SiteProcessIOWriteIOPS
+		if isIO != (binding.Device != "") && binding.EffectiveKnown { return false }
+	}
+	return len(seen) == len(requested)
 }
 
 func lifecycleOperation(operation Operation) provisioning.LifecycleOperation {
