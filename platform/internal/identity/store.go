@@ -190,6 +190,71 @@ CREATE TABLE IF NOT EXISTS identity_plans (
  quota_json TEXT NOT NULL, generation BIGINT NOT NULL, created_at TIMESTAMP NOT NULL,
  updated_at TIMESTAMP NOT NULL, UNIQUE(owner_tenant_id, name)
 );
+CREATE TABLE IF NOT EXISTS identity_hosting_plan_catalog (
+ plan_id TEXT PRIMARY KEY, owner_tenant_id TEXT NOT NULL, state TEXT NOT NULL,
+ current_version BIGINT NOT NULL, revision BIGINT NOT NULL,
+ cloned_from_plan_id TEXT NOT NULL, created_by_id TEXT NOT NULL,
+ created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
+ retired_at TIMESTAMP, deleted_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS identity_hosting_plan_catalog_owner ON identity_hosting_plan_catalog(owner_tenant_id,plan_id);
+CREATE TABLE IF NOT EXISTS identity_hosting_plan_versions (
+ plan_id TEXT NOT NULL, version BIGINT NOT NULL, name TEXT NOT NULL,
+ entitlements_json TEXT NOT NULL, bindings_json TEXT NOT NULL,
+ digest TEXT NOT NULL, changed_by_id TEXT NOT NULL, created_at TIMESTAMP NOT NULL,
+ PRIMARY KEY(plan_id,version)
+);
+CREATE TABLE IF NOT EXISTS identity_plan_assignments (
+ tenant_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, desired_version BIGINT NOT NULL,
+ applied_version BIGINT NOT NULL, previous_applied_version BIGINT NOT NULL,
+ state TEXT NOT NULL, revision BIGINT NOT NULL, last_error TEXT NOT NULL,
+ assigned_by_id TEXT NOT NULL, assigned_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_plan_assignments_plan ON identity_plan_assignments(plan_id,tenant_id);
+CREATE TABLE IF NOT EXISTS identity_enforcement_capabilities (
+ dimension TEXT NOT NULL, scope TEXT NOT NULL, owner TEXT NOT NULL,
+ adapter TEXT NOT NULL, status TEXT NOT NULL, observed_at TIMESTAMP NOT NULL,
+ uncertainty TEXT NOT NULL, revision BIGINT NOT NULL,
+ PRIMARY KEY(dimension,scope,owner)
+);
+CREATE TABLE IF NOT EXISTS identity_quota_ledgers (
+ tenant_id TEXT NOT NULL, dimension TEXT NOT NULL, limit_value BIGINT NOT NULL,
+ unlimited INTEGER NOT NULL, consumed BIGINT NOT NULL, reserved BIGINT NOT NULL,
+ pending_release BIGINT NOT NULL, measured_at TIMESTAMP,
+ uncertainty TEXT NOT NULL, warning_threshold_bps INTEGER NOT NULL,
+ rejection_count BIGINT NOT NULL, reset_period TEXT NOT NULL,
+ last_reset_at TIMESTAMP, next_reset_at TIMESTAMP, revision BIGINT NOT NULL,
+ PRIMARY KEY(tenant_id,dimension)
+);
+CREATE TABLE IF NOT EXISTS identity_quota_reservations (
+ id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, dimension TEXT NOT NULL,
+ amount BIGINT NOT NULL, resource_kind TEXT NOT NULL, resource_id TEXT NOT NULL,
+ state TEXT NOT NULL, expires_at TIMESTAMP NOT NULL, revision BIGINT NOT NULL,
+ created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_quota_reservations_tenant ON identity_quota_reservations(tenant_id,state,id);
+CREATE TABLE IF NOT EXISTS identity_quota_events (
+ id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, dimension TEXT NOT NULL,
+ kind TEXT NOT NULL, amount BIGINT NOT NULL, before_value BIGINT NOT NULL,
+ after_value BIGINT NOT NULL, reason TEXT NOT NULL, actor_id TEXT NOT NULL,
+ created_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_quota_events_tenant ON identity_quota_events(tenant_id,created_at,id);
+CREATE TABLE IF NOT EXISTS identity_ownership_transfers (
+ id TEXT PRIMARY KEY, source_tenant_id TEXT NOT NULL, destination_tenant_id TEXT NOT NULL,
+ state TEXT NOT NULL, frontier TEXT NOT NULL, revision BIGINT NOT NULL,
+ actor_id TEXT NOT NULL, request_digest TEXT NOT NULL, last_error TEXT NOT NULL,
+ created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL, completed_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS identity_ownership_transfer_steps (
+ transfer_id TEXT NOT NULL, ordinal INTEGER NOT NULL, resource_kind TEXT NOT NULL,
+ resource_id TEXT NOT NULL, state TEXT NOT NULL, phase TEXT NOT NULL,
+ request_json TEXT NOT NULL, authorization_receipt_json TEXT NOT NULL,
+ accounting_receipt_json TEXT NOT NULL, compensation_receipt_json TEXT NOT NULL,
+ frontier_reached INTEGER NOT NULL, attempt BIGINT NOT NULL,
+ last_error TEXT NOT NULL, updated_at TIMESTAMP NOT NULL,
+ PRIMARY KEY(transfer_id,ordinal), UNIQUE(transfer_id,resource_kind,resource_id)
+);
 CREATE TABLE IF NOT EXISTS identity_credentials (
  id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL, label TEXT NOT NULL,
  verifier_ref TEXT NOT NULL, public_data BLOB NOT NULL, scopes_json TEXT NOT NULL,

@@ -76,6 +76,7 @@ type Service struct {
 	authorizer *Authorizer
 	verifier   AuthVerifier
 	audit      AuditSink
+	transfers  *OwnershipTransferCoordinator
 	clock      func() time.Time
 }
 
@@ -84,6 +85,12 @@ func NewService(store *Store, verifier AuthVerifier, audit AuditSink) (*Service,
 	authorizer, err := NewAuthorizer(store)
 	if err != nil { return nil, err }
 	return &Service{store:store,authorizer:authorizer,verifier:verifier,audit:audit,clock:time.Now},nil
+}
+
+func (s *Service) ConfigureOwnershipTransferCoordinator(coordinator *OwnershipTransferCoordinator) error {
+	if s == nil || coordinator == nil || coordinator.service != s { return ErrInvalid }
+	s.transfers = coordinator
+	return nil
 }
 
 type InstallationClaim struct {
