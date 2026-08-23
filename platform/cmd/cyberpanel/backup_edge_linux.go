@@ -17,12 +17,12 @@ import (
 
 type backupEdge struct {
 	catalog  backup.BackupCatalog
-	restores backup.RestoreStore
+	restores *backup.RestoreCoordinator
 	now      func() time.Time
 }
 
-func newBackupEdge(catalog backup.BackupCatalog, restores backup.RestoreStore, now func() time.Time) (*backupEdge, error) {
-	if catalog.DB == nil || restores.DB == nil || now == nil { return nil, backup.ErrInvalidBackup }
+func newBackupEdge(catalog backup.BackupCatalog, restores *backup.RestoreCoordinator, now func() time.Time) (*backupEdge, error) {
+	if catalog.DB == nil || restores == nil || restores.Store.DB == nil || restores.Capacity == nil || restores.Source == nil || now == nil { return nil, backup.ErrInvalidBackup }
 	return &backupEdge{catalog: catalog, restores: restores, now: now}, nil
 }
 
@@ -68,12 +68,12 @@ func (edge *backupEdge) PlanRestore(ctx context.Context, call apiserver.EdgeCall
 		required += artifact.Bytes
 	}
 	if required == 0 { return apiserver.EdgeMutation[apiserver.BackupRestorePlanProjection]{}, backup.ErrInvalidBackup }
-	plan := backup.RestorePlanSpec{ID:backup.RestoreID(backupEdgeID("restore",call.TenantID,call.CommandID)),IdempotencyKey:call.IdempotencyKey,TenantID:call.TenantID,RecoveryPointID:manifest.RecoveryPointID,SourceScope:manifest.Scope,TargetScope:payload.TargetScope,ComponentMapping:mapping,CollisionPolicy:backup.CollisionReplaceBlueGreen,SecretPolicy:backup.SecretRotate,DomainMapping:cloneDomainMapping(payload.DomainMapping),RequiredFreeBytes:required,Generation:1}
+	plan := backup.RestorePlanSpec{ID:backup.RestoreID(backupEdgeID("restore",call.TenantID,call.CommandID)),IdempotencyKey:call.IdempotencyKey,TenantID:call.TenantID,RecoveryPointID:manifest.RecoveryPointID,SourceScope:manifest.Scope,TargetScope:payload.TargetScope,ComponentMapping:mapping,CollisionPolicy:backup.CollisionReplaceBlueGreen,SecretPolicy:backup.SecretResetRequired,DomainMapping:cloneDomainMapping(payload.DomainMapping),RequiredFreeBytes:required,Generation:1}
 	if plan.IdempotencyKey == "" { plan.IdempotencyKey = call.CommandID }
-	receipt, _, err := edge.restores.Admit(ctx, plan)
+	receipt, err := edge.restores.Plan(ctx, plan)
 	if err != nil { return apiserver.EdgeMutation[apiserver.BackupRestorePlanProjection]{}, err }
-	projection := apiserver.BackupRestorePlanProjection{ID:string(plan.ID),RecoveryPointID:string(plan.RecoveryPointID),TargetScope:plan.TargetScope,DomainMapping:cloneDomainMapping(plan.DomainMapping),RequiredBytes:plan.RequiredFreeBytes,PlanDigest:backupPlanDigest(plan),Generation:plan.Generation}
-	return apiserver.EdgeMutation[apiserver.BackupRestorePlanProjection]{OperationID:call.CommandID,State:string(receipt.Phase),Generation:plan.Generation,Resource:projection},nil
+	projection := apiserver.BackupRestorePlanProjection{ID:string(plan.ID),RecoveryPointID:string(plan.RecoveryPointID),TargetScope:plan.TargetScope,DomainMapping:cloneDomainMapping(plan.DomainMapping),RequiredBytes:plan.RequiredFreeBytes,PlanDigest:receipt.PlanDigest,Generation:receipt.Generation}
+	return apiserver.EdgeMutation[apiserver.BackupRestorePlanProjection]{OperationID:call.CommandID,State:string(receipt.Phase),Generation:receipt.Generation,Resource:projection},nil
 }
 
 func backupRetention(raw string) (backup.RetentionPolicy,string,error) {
@@ -99,6 +99,5 @@ func backupComponents(scope string) []backup.ComponentKind {
 }
 
 func backupEdgeID(prefix string, values ...string) string { sum:=sha256.Sum256([]byte(strings.Join(values,"\x00")));return prefix+"_"+hex.EncodeToString(sum[:])[:48] }
-func backupPlanDigest(plan backup.RestorePlanSpec) string { raw,_:=json.Marshal(plan);sum:=sha256.Sum256(raw);return hex.EncodeToString(sum[:]) }
 func cloneDomainMapping(source map[string]string) map[string]string { if source==nil{return nil};target:=make(map[string]string,len(source));for key,value:=range source{target[key]=value};return target }
 func equalBackupPolicy(left,right backup.BackupPolicySpec) bool { a,_:=json.Marshal(left);b,_:=json.Marshal(right);return string(a)==string(b) }

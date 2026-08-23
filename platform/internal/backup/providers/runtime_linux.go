@@ -3,9 +3,14 @@
 package providers
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/backup"
 )
 
 const (
@@ -53,6 +58,42 @@ func NewLocalRuntimeWithSource(database *sql.DB, source ObjectSource, now func()
 	}
 	runtime := NewRuntime(database, ProviderSet{Local: local})
 	return &LocalRuntime{Runtime: runtime, Local: local}, nil
+}
+
+// ValidateLocalRepositories opens every cataloged local repository through the
+// descriptor-safe registry before the API begins accepting backup or restore
+// work. Repository roots are provisioned by the root installer/operator; the
+// unprivileged control process only validates and uses that fixed layout.
+func (runtime *LocalRuntime) ValidateLocalRepositories(ctx context.Context) error {
+	if runtime == nil || runtime.DB == nil || runtime.Local == nil || runtime.Local.Registry == nil || ctx == nil {
+		return errors.New("local backup repository runtime required")
+	}
+	rows, err := runtime.DB.QueryContext(ctx, `SELECT id,tenant_id,repository_json FROM backup_repositories_v2 ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, tenantID string
+		var raw []byte
+		if err = rows.Scan(&id, &tenantID, &raw); err != nil {
+			return err
+		}
+		var spec backup.RepositorySpec
+		if err = json.Unmarshal(raw, &spec); err != nil {
+			return fmt.Errorf("decode backup repository %q: %w", id, err)
+		}
+		if string(spec.Repository.ID) != id || spec.TenantID != tenantID {
+			return fmt.Errorf("backup repository %q catalog scope mismatch: %w", id, ErrInvalid)
+		}
+		if spec.Repository.Kind != backup.Local {
+			continue
+		}
+		if _, err = runtime.Local.repository(spec); err != nil {
+			return fmt.Errorf("open local backup repository %q: %w", id, err)
+		}
+	}
+	return rows.Err()
 }
 
 func (runtime *LocalRuntime) Close() error {

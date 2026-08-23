@@ -218,10 +218,14 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		_ = backupRuntime.Close()
 		return apiserver.DomainServices{}, fmt.Errorf("bootstrap backup provider runtime: %w", err)
 	}
+	if err = backupRuntime.ValidateLocalRepositories(ctx); err != nil {
+		_ = backupRuntime.Close()
+		return apiserver.DomainServices{}, fmt.Errorf("validate local backup repositories: %w", err)
+	}
 	backupRetention := backupRuntime.RetentionCoordinator(nil)
 	backupWorkflow:=backupRuntime.BackupCoordinator(backupClient,backupClient)
 	restoreWorkflow:=backup.RestoreCoordinator{Store:backupRuntime.Restores,Capacity:backupClient,Source:backupRuntime.RestoreSource(),Scanner:backup.IntegrityRestoreScanner{},Target:backupClient,Safety:backupClient,Now:runtimeClock{}.Now}
-	backupConsoleEdge,err:=newBackupEdge(backupRuntime.Catalog,backupRuntime.Restores,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize backup console edge: %w",err)}
+	backupConsoleEdge,err:=newBackupEdge(backupRuntime.Catalog,&restoreWorkflow,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize backup console edge: %w",err)}
 	migrationRuntime,err:=localmigration.New(ctx,repositories.ControlDB,repositories.Migrations);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration runtime: %w",err)}
 	migrationConsoleEdge,err:=newMigrationEdge(migrationRuntime,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration console edge: %w",err)}
 	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}

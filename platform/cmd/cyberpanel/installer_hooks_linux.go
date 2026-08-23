@@ -100,11 +100,13 @@ func provisionApplicationCatalog(releaseID string)([]string,error){
 }
 
 func initializeAuthority()([]string,error){
-	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};paths:=[]string{"/var/lib/cyberpanel/control","/var/lib/cyberpanel/control/runtime","/var/lib/cyberpanel/control/trust","/var/lib/cyberpanel/control/recovery","/var/lib/cyberpanel/audit","/var/lib/cyberpanel/audit/segments","/var/lib/cyberpanel/audit/emergency","/var/lib/cyberpanel/backup-spool","/var/lib/cyberpanel/migration","/var/lib/cyberpanel/migration/chunks","/var/backups/cyberpanel/repositories"}
-	if err=ensureOwnedDirectory("/var/backups/cyberpanel",0750,0,gid);err!=nil{return nil,err}
+	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};paths:=[]string{"/var/lib/cyberpanel/control","/var/lib/cyberpanel/control/runtime","/var/lib/cyberpanel/control/trust","/var/lib/cyberpanel/control/recovery","/var/lib/cyberpanel/audit","/var/lib/cyberpanel/audit/segments","/var/lib/cyberpanel/audit/emergency","/var/lib/cyberpanel/backup-spool","/var/lib/cyberpanel/migration","/var/lib/cyberpanel/migration/chunks"}
+	backupRoot,repositoryRoot:="/var/backups/cyberpanel","/var/backups/cyberpanel/repositories"
+	if err=ensureOwnedDirectory(backupRoot,0750,0,gid);err!=nil{return nil,err}
+	if err=ensureOwnedDirectory(repositoryRoot,0750,0,gid);err!=nil{return nil,err}
 	for _,path:=range paths{if err=ensureOwnedDirectory(path,0700,uid,gid);err!=nil{return nil,err}}
 	databasePath:="/var/lib/cyberpanel/control/control.db";created,err:=ensureOwnedFile(databasePath,0600,uid,gid,nil);if err!=nil{return nil,err}
-	changed:=append([]string{"/var/backups/cyberpanel"},paths...);if created{changed=append(changed,databasePath)}
+	changed:=append([]string{backupRoot,repositoryRoot},paths...);if created{changed=append(changed,databasePath)}
 	claimPath:="/var/lib/cyberpanel/control/recovery/claim.token";if _,statErr:=os.Lstat(claimPath);errors.Is(statErr,os.ErrNotExist){token:=make([]byte,32);if _,err=io.ReadFull(rand.Reader,token);err!=nil{return nil,err};encoded:=[]byte(base64.RawURLEncoding.EncodeToString(token)+"\n");wipeBytes(token);if _,err=ensureOwnedFile(claimPath,0600,uid,gid,encoded);err!=nil{return nil,err};changed=append(changed,claimPath)}else if statErr!=nil{return nil,statErr}
 	return changed,nil
 }
