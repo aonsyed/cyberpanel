@@ -340,6 +340,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	migrationConsoleEdge,err:=newMigrationEdge(migrationRuntime,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration console edge: %w",err)}
 	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}
 	federationConsoleEdge,err:=newFederationEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize federation console edge: %w",err)}
+	productUpdateEdge,err:=assembleProductUpdateEdge(ctx,repositories.ControlDB,auditService,runtimeClock{});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize product-update catalog: %w",err)}
 	repositories.WebCatalog = catalog
 	go certificateRenewal.RunQueue(ctx,15*time.Minute,4)
 	if mailTelemetryReady{go mailConsoleEdge.RunMailTelemetry(ctx,15*time.Second)}
@@ -356,6 +357,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		DatabaseEdge:     databaseConsoleEdge,
 		Operations:       operationsCoordinator,
 		OperationsEdge:   operationsConsoleEdge,
+		ProductUpdates:   productUpdateEdge,
 		MailControl:      mailCoordinator,
 		MailQueue:        mailClient,
 		MailEdge:         mailConsoleEdge,

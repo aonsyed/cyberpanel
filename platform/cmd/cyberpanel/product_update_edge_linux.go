@@ -42,6 +42,7 @@ type productUpdateLinuxEdge struct {
 	inventory      productupdate.InventorySource
 	releases       productUpdateReleaseSource
 	authorizations productUpdateAuthorizationSource
+	capabilities   apiserver.ProductUpdateEdgeCapabilities
 	nodeID         string
 	controllerID   string
 	now            func() time.Time
@@ -58,11 +59,13 @@ func newProductUpdateLinuxEdge(coordinator *productupdate.Coordinator, repositor
 	}
 	if now == nil { now = time.Now }
 	return &productUpdateLinuxEdge{coordinator:coordinator, repository:repository, inventory:inventory, releases:releases,
-		authorizations:authorizations, nodeID:nodeID, controllerID:controllerID, now:now}, nil
+		authorizations:authorizations, capabilities:apiserver.ProductUpdateEdgeCapabilities{List:true, Check:true, Plan:true, Apply:true},
+		nodeID:nodeID, controllerID:controllerID, now:now}, nil
 }
 
-func (*productUpdateLinuxEdge) ProductUpdateCapabilities() apiserver.ProductUpdateEdgeCapabilities {
-	return apiserver.ProductUpdateEdgeCapabilities{List:true, Check:true, Plan:true, Apply:true}
+func (edge *productUpdateLinuxEdge) ProductUpdateCapabilities() apiserver.ProductUpdateEdgeCapabilities {
+	if edge == nil { return apiserver.ProductUpdateEdgeCapabilities{} }
+	return edge.capabilities
 }
 
 func (edge *productUpdateLinuxEdge) ListProductUpdates(ctx context.Context, call apiserver.EdgeCall, payload apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.ProductUpdateProjection], error) {
