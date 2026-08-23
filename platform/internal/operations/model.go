@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -475,6 +476,7 @@ type WAFPolicy struct {
 	Metadata
 	Engine WAFEngine `json:"engine"`
 	Mode WAFMode `json:"mode"`
+	Hostnames []site.Hostname `json:"hostnames,omitempty"`
 	CRS *WAFPack `json:"crs,omitempty"`
 	ProviderPacks []WAFPack `json:"provider_packs,omitempty"`
 	CustomRules []WAFRule `json:"custom_rules,omitempty"`
@@ -488,7 +490,13 @@ func (resource WAFPolicy) Meta() Metadata { return resource.Metadata }
 func (resource WAFPolicy) Validate() error {
 	if validateMetadata(resource.Metadata) != nil || resource.Engine != WAFModSecurity ||
 		(resource.Mode != WAFDisabled && resource.Mode != WAFDetectionOnly && resource.Mode != WAFBlocking) || resource.RequestBodyLimitBytes > 1<<30 ||
-		resource.AuditSamplingBasisPoints > 10000 || len(resource.ProviderPacks) > 32 || len(resource.CustomRules) > 4096 || len(resource.Exclusions) > 1024 { return ErrInvalidResource }
+		(resource.AuditSamplingBasisPoints != 0 && resource.AuditSamplingBasisPoints != 10000) || len(resource.Hostnames) > 64 || len(resource.ProviderPacks) > 32 || len(resource.CustomRules) > 4096 || len(resource.Exclusions) > 1024 { return ErrInvalidResource }
+	scoped := resource.TenantID.String() != "" || resource.SiteID.String() != ""
+	if scoped {
+		if resource.TenantID.String() == "" || resource.SiteID.String() == "" || len(resource.Hostnames) == 0 || resource.CRS != nil || len(resource.ProviderPacks) != 0 || len(resource.CustomRules) != 0 || len(resource.Exclusions) == 0 || resource.Mode != WAFDisabled || resource.RequestBodyLimitBytes != 0 || resource.AuditSamplingBasisPoints != 0 { return ErrInvalidResource }
+	} else if len(resource.Hostnames) != 0 || resource.RequestBodyLimitBytes == 0 { return ErrInvalidResource }
+	hostnames := make(map[string]struct{}, len(resource.Hostnames))
+	for _, hostname := range resource.Hostnames { if hostname.String() == "" { return ErrInvalidResource }; if _, exists := hostnames[hostname.String()]; exists { return ErrInvalidResource }; hostnames[hostname.String()] = struct{}{} }
 	if resource.CRS != nil && validateWAFPack(*resource.CRS) != nil { return ErrInvalidResource }
 	packs := make(map[string]struct{}, len(resource.ProviderPacks))
 	for _, pack := range resource.ProviderPacks { if validateWAFPack(pack) != nil { return ErrInvalidResource }; key := pack.Provider.String()+"\x00"+pack.Name.String(); if _, exists := packs[key]; exists { return ErrInvalidResource }; packs[key] = struct{}{} }
@@ -833,8 +841,11 @@ func validateWAFPack(pack WAFPack) error {
 
 func validateWAFRule(rule WAFRule) error {
 	if rule.ID == 0 || rule.Phase < 1 || rule.Phase > 5 || (rule.Target != WAFTargetURI && rule.Target != WAFTargetArgs && rule.Target != WAFTargetHeaders && rule.Target != WAFTargetBody) ||
-		(rule.Operator != WAFOperatorRegex && rule.Operator != WAFOperatorContains && rule.Operator != WAFOperatorEquals) || len(rule.Pattern) == 0 || len(rule.Pattern) > 8192 || strings.ContainsRune(rule.Pattern, '\x00') || len(rule.Actions) == 0 || len(rule.Actions) > 4 || rule.Severity > 7 { return ErrInvalidResource }
-	for _, action := range rule.Actions { if action != WAFActionDeny && action != WAFActionLog && action != WAFActionPass { return ErrInvalidResource } }
+		(rule.Operator != WAFOperatorRegex && rule.Operator != WAFOperatorContains && rule.Operator != WAFOperatorEquals) || len(rule.Pattern) == 0 || len(rule.Pattern) > 8192 || strings.ContainsAny(rule.Pattern, "\r\n\x00") || len(rule.Actions) == 0 || len(rule.Actions) > 3 || rule.Severity > 7 || rule.ID >= 990000000 { return ErrInvalidResource }
+	seen := map[WAFAction]struct{}{}; disruptive := 0
+	for _, action := range rule.Actions { if action != WAFActionDeny && action != WAFActionLog && action != WAFActionPass { return ErrInvalidResource }; if _, exists := seen[action]; exists { return ErrInvalidResource }; seen[action] = struct{}{}; if action == WAFActionDeny || action == WAFActionPass { disruptive++ } }
+	if disruptive != 1 { return ErrInvalidResource }
+	if rule.Operator == WAFOperatorRegex { if _, err := regexp.Compile(rule.Pattern); err != nil { return ErrInvalidResource } }
 	return nil
 }
 

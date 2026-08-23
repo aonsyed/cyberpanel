@@ -324,7 +324,7 @@ func (executor *LinuxOperationsExecutor) rollbackExternal(ctx context.Context, r
 	case EffectSSHPolicy:
 		return executor.rollbackSecurityLease(ctx, request.EffectID)
 	case EffectWAFPolicy:
-		if _, err := executor.validateWebConfiguration(ctx); err != nil { return err }; _, err := executor.runner.Run(ctx, "/usr/local/lsws/bin/lswsctrl", "reload"); return err
+		return executor.rollbackWAFLease(ctx, request.EffectID)
 	case EffectResourceProfile:
 		profile, ok := previousResourceProfile(snapshots); if !ok { return errors.New("resource profile has no rollback generation") }
 		unit := "cyberpanel-"+profile.Cgroup.Binding.ScopeID.String()+".slice"; limits:=profile.Cgroup

@@ -153,6 +153,10 @@ func ensureOperationsStateRoot(root string) error {
 		filepath.Join(root, "security", "firewall", "generations"),
 		filepath.Join(root, "security", "ssh"),
 		filepath.Join(root, "security", "ssh", "generations"),
+		filepath.Join(root, "waf"),
+		filepath.Join(root, "waf", "policies"),
+		filepath.Join(root, "waf", "generations"),
+		filepath.Join(root, "waf", "leases"),
 	} {
 		if err := os.MkdirAll(directory, 0o700); err != nil { return err }
 		info, err := os.Lstat(directory); if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 { return errors.New("unsafe operations state directory") }
@@ -234,7 +238,7 @@ func (executor *LinuxOperationsExecutor) apply(ctx context.Context, request Effe
 	case EffectSSHPolicy: return executor.applySSHPolicy(ctx, request, *request.SSHPolicy)
 	case EffectPutSSHKey: return executor.putSSHKey(*request.PutSSHKey)
 	case EffectDeleteSSHKey: return executor.deleteSSHKey(*request.DeleteSSHKey)
-	case EffectWAFPolicy: return executor.applyWAF(ctx, *request.WAFPolicy)
+	case EffectWAFPolicy: return executor.applyWAF(ctx, request, *request.WAFPolicy)
 	case EffectServicePolicy: return executor.applyServicePolicy(ctx, *request.ServicePolicy)
 	case EffectServiceControl: return executor.controlService(ctx, *request.ServiceControl)
 	case EffectServiceDiagnose: return executor.diagnoseService(ctx, *request.ServiceDiagnose)

@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -442,42 +443,270 @@ func renderSSHKey(key SSHKey) []byte {
 func managedSSHPrincipal(value string)bool{return strings.HasPrefix(value,"cp_")&&len(value)<=32}
 func managedSSHGroup(value string)bool{return managedSSHPrincipal(value)||value=="cyberpanel-users"}
 
-func (executor *LinuxOperationsExecutor) applyWAF(ctx context.Context, effect WAFPolicyEffect) (linuxEffectResult, error) {
+func (executor *LinuxOperationsExecutor) applyWAF(ctx context.Context, request EffectRequest, effect WAFPolicyEffect) (linuxEffectResult, error) {
+	if replay, done, err := executor.replayWAFEffect(ctx, request); done || err != nil {
+		return replay, err
+	}
 	policy := effect.Policy
-	if err := executor.guardGeneration(KindWAFPolicy, policy.ID, policy.Generation, policy); err != nil { return linuxEffectResult{}, err }
-	content, err := executor.renderWAF(policy); if err != nil { return linuxEffectResult{}, err }
-	candidateDigest, _ := activationDigest(policy); path := "/usr/local/lsws/conf/modsec/cyberpanel.conf"
-	snapshot, err := executor.replaceManagedFile(path, content, 0o600); if err != nil { return linuxEffectResult{}, err }
+	if policy.Validate() != nil {
+		return linuxEffectResult{}, ErrInvalidEffect
+	}
+	now := executor.clock.Now().UTC()
+	for _, exclusion := range policy.Exclusions {
+		if !exclusion.ExpiresAt.After(now) || exclusion.ExpiresAt.After(now.AddDate(1, 0, 0)) {
+			return linuxEffectResult{}, ErrInvalidEffect
+		}
+	}
+	pointer, err := executor.stageWAFPolicy(policy)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	currentIndex, err := executor.loadWAFActiveIndex()
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	candidateIndex, same, err := executor.wafIndexCAS(currentIndex, pointer)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	if same {
+		return linuxEffectResult{MutationObserved: true}, ErrCompensationFailed
+	}
+	policies, err := executor.loadWAFPolicies(candidateIndex)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	content, sources, exclusions, err := executor.renderWAFGeneration(policies, now)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	candidateGeneration, err := executor.stageWAFGeneration(candidateIndex, content, sources, exclusions)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	previousGeneration, err := executor.loadCurrentWAFGeneration()
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	path := "/usr/local/lsws/conf/modsec/cyberpanel.conf"
+	snapshot, err := executor.snapshotFile(path)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	if len(currentIndex.Policies) == 0 {
+		if previousGeneration != nil || snapshot.Existed {
+			return linuxEffectResult{}, ErrConflict
+		}
+	} else {
+		if previousGeneration == nil || !snapshot.Existed || digestBytes(snapshot.Content) != previousGeneration.Digest || !wafPolicyPointersEqual(previousGeneration.Policies, currentIndex.Policies) {
+			return linuxEffectResult{}, ErrConflict
+		}
+	}
+	policyDigest, _ := activationDigest(policy)
+	scope, _ := wafPolicyScope(policy)
+	lease, err := executor.armWAFLease(request, policyDigest, scope, currentIndex, candidateIndex, previousGeneration, candidateGeneration, snapshot)
+	if err != nil {
+		return linuxEffectResult{}, err
+	}
+	if _, err = executor.replaceManagedFile(path, content, 0o600); err != nil {
+		return linuxEffectResult{Snapshots: []operationsFileSnapshot{snapshot}, MutationObserved: true}, err
+	}
 	result := linuxEffectResult{Snapshots: []operationsFileSnapshot{snapshot}, MutationObserved: true}
-	validateOutput, err := executor.validateWebConfiguration(ctx); if err != nil { return result, err }
-	reloadOutput, err := executor.runner.Run(ctx, "/usr/local/lsws/bin/lswsctrl", "reload"); if err != nil { return result, err }
-	probeOutput,err:=executor.runner.Run(ctx,"/usr/bin/systemctl","is-active","lsws.service");if err!=nil||strings.TrimSpace(string(probeOutput))!="active"{return result,errors.New("web engine failed post-WAF activation probe")}
-	if err = executor.storeGeneration(KindWAFPolicy, policy.ID, policy.Generation, candidateDigest); err != nil { return result, err }
-	result.Activation = &ActivationEvidence{Strategy:ActivationCompileProbeSwap,CandidateDigest:candidateDigest,PreviousDigest:snapshotDigest(snapshot),StageReceiptDigest:digestBytes(validateOutput),ProbeReceiptDigest:digestBytes(probeOutput),CommitReceiptDigest:digestBytes(reloadOutput)}
+	validateOutput, err := executor.validateWebConfiguration(ctx)
+	if err != nil {
+		return result, fmt.Errorf("validate LiteSpeed WAF generation: %w: %s", err, boundedText(validateOutput, 2048))
+	}
+	reloadOutput, err := executor.runner.Run(ctx, "/usr/local/lsws/bin/lswsctrl", "reload")
+	if err != nil {
+		return result, fmt.Errorf("activate LiteSpeed WAF generation: %w: %s", err, boundedText(reloadOutput, 2048))
+	}
+	probeOutput, err := executor.proveWAFRuntime(ctx)
+	if err != nil {
+		return result, err
+	}
+	liveDigest, err := fileDigest(path, 64<<20)
+	if err != nil || liveDigest != candidateGeneration.Digest {
+		return result, ErrCompensationFailed
+	}
+	activation := &ActivationEvidence{
+		Strategy: ActivationCompileProbeSwap, CandidateDigest: policyDigest,
+		PreviousDigest: snapshotDigest(snapshot), StageReceiptDigest: candidateGeneration.Digest,
+		ProbeReceiptDigest: digestBytes(probeOutput),
+		CommitReceiptDigest: digestBytes(append(append(validateOutput, reloadOutput...), []byte(liveDigest)...)),
+	}
+	if err = executor.storeGeneration(KindWAFPolicy, policy.ID, policy.Generation, policyDigest); err != nil {
+		return result, err
+	}
+	if err = executor.confirmWAFLease(request.EffectID, lease.ConfirmationNonce, activation); err != nil {
+		return result, errors.Join(ErrCompensationFailed, err)
+	}
+	result.Activation = activation
 	return result, nil
 }
 
-func (executor *LinuxOperationsExecutor) renderWAF(policy WAFPolicy) ([]byte, error) {
-	var buffer bytes.Buffer
-	mode := map[WAFMode]string{WAFDisabled: "Off", WAFDetectionOnly: "DetectionOnly", WAFBlocking: "On"}[policy.Mode]
-	auditMode:="RelevantOnly";if policy.AuditSamplingBasisPoints==0{auditMode="Off"}else if policy.AuditSamplingBasisPoints==10000{auditMode="On"}
-	fmt.Fprintf(&buffer, "# CyberPanel WAF generation %d\n# Audit sampling basis points: %d\nSecRuleEngine %s\nSecRequestBodyLimit %d\nSecAuditEngine %s\n", policy.Generation,policy.AuditSamplingBasisPoints, mode, policy.RequestBodyLimitBytes,auditMode)
-	packs := append([]WAFPack(nil), policy.ProviderPacks...); if policy.CRS != nil { packs = append([]WAFPack{*policy.CRS}, packs...) }
-	for _, pack := range packs { path, ok := executor.wafPacks[pack.Provider.String()+":"+pack.Name.String()]; if !ok || !allowedWAFPackPath(path) { return nil, ErrInvalidEffect }; digest, err := fileDigest(path, 64<<20); if err != nil || digest != pack.ContentDigest { return nil, ErrInvalidEffect }; fmt.Fprintf(&buffer, "Include %s\n", path) }
-	usedRuleIDs:=make(map[uint32]struct{},len(policy.CustomRules)+len(policy.Exclusions))
-	for _, rule := range policy.CustomRules { usedRuleIDs[rule.ID]=struct{}{}; if strings.ContainsAny(rule.Pattern, "\r\n\"") { return nil, ErrInvalidEffect }; target := map[WAFTarget]string{WAFTargetURI:"REQUEST_URI", WAFTargetArgs:"ARGS", WAFTargetHeaders:"REQUEST_HEADERS", WAFTargetBody:"REQUEST_BODY"}[rule.Target]; operator := map[WAFOperator]string{WAFOperatorRegex:"@rx", WAFOperatorContains:"@contains", WAFOperatorEquals:"@streq"}[rule.Operator]; actions := make([]string, 0, len(rule.Actions)+3); actions = append(actions, fmt.Sprintf("id:%d", rule.ID), fmt.Sprintf("phase:%d", rule.Phase), fmt.Sprintf("severity:%d", rule.Severity)); for _, action := range rule.Actions { actions = append(actions, string(action)) }; fmt.Fprintf(&buffer, "SecRule %s \"%s %s\" \"%s\"\n", target, operator, rule.Pattern, strings.Join(actions, ",")) }
-	for exclusionIndex, exclusion := range policy.Exclusions {
-		if !exclusion.ExpiresAt.After(time.Now().UTC()) { return nil,ErrInvalidEffect }
-		if exclusion.RequestPathPrefix != "" {
-			if strings.ContainsAny(exclusion.RequestPathPrefix,"\"") { return nil,ErrInvalidEffect }
-			syntheticID:=uint32(990000000+exclusionIndex);for { if _,exists:=usedRuleIDs[syntheticID];!exists{break};syntheticID++ };usedRuleIDs[syntheticID]=struct{}{}
-			actions:=[]string{fmt.Sprintf("id:%d",syntheticID),"phase:1","pass","nolog"}
-			for _,ruleID:=range exclusion.RuleIDs { if len(exclusion.ArgumentNames)==0 { actions=append(actions,fmt.Sprintf("ctl:ruleRemoveById=%d",ruleID)) } else { for _,name:=range exclusion.ArgumentNames { actions=append(actions,fmt.Sprintf("ctl:ruleRemoveTargetById=%d;ARGS:%s",ruleID,name)) } } }
-			fmt.Fprintf(&buffer,"SecRule REQUEST_URI \"@beginsWith %s\" \"%s\"\n",exclusion.RequestPathPrefix,strings.Join(actions,",")); continue
-		}
-		for _, ruleID := range exclusion.RuleIDs { if len(exclusion.ArgumentNames) == 0 { fmt.Fprintf(&buffer, "SecRuleRemoveById %d\n", ruleID); continue }; for _, name := range exclusion.ArgumentNames { fmt.Fprintf(&buffer, "SecRuleUpdateTargetById %d !ARGS:%s\n", ruleID, name) } }
+func (executor *LinuxOperationsExecutor) renderWAFGeneration(policies []WAFPolicy, now time.Time) ([]byte, []wafSourceEvidence, []wafExclusionEvidence, error) {
+	if len(policies) == 0 {
+		return nil, nil, nil, ErrInvalidEffect
 	}
-	return buffer.Bytes(), nil
+	var node *WAFPolicy
+	for index := range policies {
+		if policies[index].TenantID.String() == "" {
+			if node != nil {
+				return nil, nil, nil, ErrConflict
+			}
+			node = &policies[index]
+		}
+	}
+	if node == nil {
+		return nil, nil, nil, ErrConflict
+	}
+	var buffer bytes.Buffer
+	mode := map[WAFMode]string{WAFDisabled: "Off", WAFDetectionOnly: "DetectionOnly", WAFBlocking: "On"}[node.Mode]
+	auditMode := "Off"
+	if node.AuditSamplingBasisPoints == 10000 {
+		auditMode = "RelevantOnly"
+	}
+	fmt.Fprintf(&buffer, "# CyberPanel complete WAF policy generation\n# Node policy %s generation %d\nSecRuleEngine %s\nSecRequestBodyAccess On\nSecRequestBodyLimit %d\nSecAuditEngine %s\n", node.ID.String(), node.Generation, mode, node.RequestBodyLimitBytes, auditMode)
+	packs := append([]WAFPack(nil), node.ProviderPacks...)
+	if node.CRS != nil {
+		packs = append([]WAFPack{*node.CRS}, packs...)
+	}
+	sources := make([]wafSourceEvidence, 0, len(packs))
+	for _, pack := range packs {
+		if !pack.SecretRef.IsZero() {
+			return nil, nil, nil, ErrInvalidEffect
+		}
+		path, ok := executor.wafPacks[pack.Provider.String()+":"+pack.Name.String()]
+		if !ok || !allowedWAFPackPath(path) {
+			return nil, nil, nil, ErrInvalidEffect
+		}
+		digest, err := fileDigest(path, 64<<20)
+		if err != nil || digest != pack.ContentDigest {
+			return nil, nil, nil, ErrInvalidEffect
+		}
+		fmt.Fprintf(&buffer, "Include %s\n", path)
+		sources = append(sources, wafSourceEvidence{Provider: pack.Provider, Name: pack.Name, Version: pack.Version, Digest: digest, Path: path})
+	}
+	usedRuleIDs := make(map[uint32]struct{}, len(node.CustomRules)+len(policies)*8)
+	for _, rule := range node.CustomRules {
+		if validateWAFRule(rule) != nil {
+			return nil, nil, nil, ErrInvalidEffect
+		}
+		usedRuleIDs[rule.ID] = struct{}{}
+		target := map[WAFTarget]string{WAFTargetURI: "REQUEST_URI", WAFTargetArgs: "ARGS", WAFTargetHeaders: "REQUEST_HEADERS", WAFTargetBody: "REQUEST_BODY"}[rule.Target]
+		operator := map[WAFOperator]string{WAFOperatorRegex: "@rx", WAFOperatorContains: "@contains", WAFOperatorEquals: "@streq"}[rule.Operator]
+		actions := []string{fmt.Sprintf("id:%d", rule.ID), fmt.Sprintf("phase:%d", rule.Phase), fmt.Sprintf("severity:%d", rule.Severity)}
+		for _, action := range rule.Actions {
+			actions = append(actions, string(action))
+		}
+		fmt.Fprintf(&buffer, "SecRule %s \"%s %s\" \"%s\"\n", target, operator, wafQuoted(rule.Pattern), strings.Join(actions, ","))
+	}
+	evidence := make([]wafExclusionEvidence, 0)
+	for _, scopedPolicy := range policies {
+		scope, _ := wafPolicyScope(scopedPolicy)
+		for exclusionIndex, exclusion := range scopedPolicy.Exclusions {
+			if !exclusion.ExpiresAt.After(now) {
+				continue
+			}
+			if exclusion.ExpiresAt.After(now.AddDate(1, 0, 0)) {
+				return nil, nil, nil, ErrInvalidEffect
+			}
+			identifier := nextWAFExclusionRuleID(scope, scopedPolicy.Generation, exclusionIndex, usedRuleIDs)
+			usedRuleIDs[identifier] = struct{}{}
+			if err := renderScopedWAFExclusion(&buffer, scopedPolicy, exclusion, identifier); err != nil {
+				return nil, nil, nil, err
+			}
+			digest, _ := activationDigest(struct { Scope string `json:"scope"`; Policy ResourceID `json:"policy"`; Generation uint64 `json:"generation"`; Ordinal int `json:"ordinal"`; Exclusion WAFExclusion `json:"exclusion"` }{scope, scopedPolicy.ID, scopedPolicy.Generation, exclusionIndex, exclusion})
+			evidence = append(evidence, wafExclusionEvidence{ScopeKey: scope, PolicyID: scopedPolicy.ID, PolicyGeneration: scopedPolicy.Generation, Ordinal: uint32(exclusionIndex), ReasonCode: exclusion.ReasonCode, ExpiresAt: exclusion.ExpiresAt.UTC(), Digest: digest})
+	}
+	}
+	return buffer.Bytes(), sources, evidence, nil
+}
+
+func renderScopedWAFExclusion(buffer *bytes.Buffer, policy WAFPolicy, exclusion WAFExclusion, identifier uint32) error {
+	if exclusion.RequestPathPrefix != "" && (!strings.HasPrefix(exclusion.RequestPathPrefix, "/") || strings.ContainsAny(exclusion.RequestPathPrefix, "\r\n\x00\"")) {
+		return ErrInvalidEffect
+	}
+	controls := make([]string, 0, len(exclusion.RuleIDs)*maxInt(1, len(exclusion.ArgumentNames)))
+	for _, ruleID := range exclusion.RuleIDs {
+		if len(exclusion.ArgumentNames) == 0 {
+			controls = append(controls, fmt.Sprintf("ctl:ruleRemoveById=%d", ruleID))
+			continue
+		}
+		for _, name := range exclusion.ArgumentNames {
+			if _, err := safeOpaque(name, 128); err != nil {
+				return ErrInvalidEffect
+			}
+			controls = append(controls, fmt.Sprintf("ctl:ruleRemoveTargetById=%d;ARGS:%s", ruleID, name))
+		}
+	}
+	pathOperator := "@rx ^/"
+	if exclusion.RequestPathPrefix != "" {
+		pathOperator = "@beginsWith " + wafQuoted(exclusion.RequestPathPrefix)
+	}
+	starter := []string{fmt.Sprintf("id:%d", identifier), "phase:1", "pass", "nolog", "chain"}
+	if policy.TenantID.String() != "" {
+		hosts := make([]string, len(policy.Hostnames))
+		for index, hostname := range policy.Hostnames {
+			hosts[index] = regexp.QuoteMeta(hostname.String())
+		}
+		sort.Strings(hosts)
+		fmt.Fprintf(buffer, "# Tenant %s site %s exclusion %s expires %s\n", policy.TenantID.String(), policy.SiteID.String(), exclusion.ReasonCode.String(), exclusion.ExpiresAt.UTC().Format(time.RFC3339))
+		fmt.Fprintf(buffer, "SecRule REQUEST_HEADERS:Host \"@rx (?i)^(?:%s)(?::[0-9]{1,5})?$\" \"%s\"\n", strings.Join(hosts, "|"), strings.Join(starter, ","))
+		buffer.WriteString(" SecRule TIME_EPOCH \"@lt ")
+		buffer.WriteString(strconv.FormatInt(exclusion.ExpiresAt.Unix(), 10))
+		buffer.WriteString("\" \"chain\"\n")
+	} else {
+		fmt.Fprintf(buffer, "# Node exclusion %s expires %s\n", exclusion.ReasonCode.String(), exclusion.ExpiresAt.UTC().Format(time.RFC3339))
+		fmt.Fprintf(buffer, "SecRule TIME_EPOCH \"@lt %d\" \"%s\"\n", exclusion.ExpiresAt.Unix(), strings.Join(starter, ","))
+	}
+	fmt.Fprintf(buffer, " SecRule REQUEST_URI \"%s\" \"%s\"\n", pathOperator, strings.Join(controls, ","))
+	return nil
+}
+
+func nextWAFExclusionRuleID(scope string, generation uint64, ordinal int, used map[uint32]struct{}) uint32 {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("cyberpanel:waf-exclusion:v1\x00%s\x00%d\x00%d", scope, generation, ordinal)))
+	identifier := uint32(990000000) + binary.BigEndian.Uint32(digest[:4])%9999999
+	for {
+		if _, exists := used[identifier]; !exists {
+			return identifier
+		}
+		identifier++
+		if identifier >= 1000000000 {
+			identifier = 990000000
+		}
+	}
+}
+
+func wafQuoted(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	return strings.ReplaceAll(value, "\"", "\\\"")
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func wafPolicyPointersEqual(left, right []wafPolicyPointer) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
+func (executor *LinuxOperationsExecutor) proveWAFRuntime(ctx context.Context) ([]byte, error) {
+	output, err := executor.runner.Run(ctx, "/usr/bin/systemctl", "show", "lsws.service", "--property=ActiveState", "--property=SubState", "--property=MainPID")
+	if err != nil {
+		return output, err
+	}
+	values := parseKeyValues(output)
+	pid, parseErr := strconv.ParseUint(values["MainPID"], 10, 32)
+	if parseErr != nil || pid <= 1 || values["ActiveState"] != "active" || values["SubState"] != "running" {
+		return output, ErrCompensationFailed
+	}
+	return output, nil
 }
 
 func (executor *LinuxOperationsExecutor) validateWebConfiguration(ctx context.Context) ([]byte, error) {

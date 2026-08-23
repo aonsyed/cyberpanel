@@ -71,6 +71,7 @@ func main() {
 	operationsConfig := operations.DefaultLinuxOperationsConfig(); operationsConfig.Secrets = operationsSecrets
 	operationsExecutor, err := operations.NewLinuxOperationsExecutor(operationsConfig); if err != nil { log.Fatalf("initialize operations executor: %v", err) }
 	if err = operationsExecutor.ResumeSecurityWatchdogs(context.Background()); err != nil { log.Fatalf("recover unconfirmed firewall/SSH transaction: %v", err) }
+	if err = operationsExecutor.ResumeWAFTransactions(context.Background()); err != nil { log.Fatalf("recover unconfirmed WAF transaction: %v", err) }
 	operationsPolicy, err := operations.NewOperationsBrokerPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize operations peer policy: %v", err) }
 	operationsListener, err := operations.ListenOperationsBroker(controlGID); if err != nil { log.Fatalf("listen on operations broker socket: %v", err) }; defer operationsListener.Close()
 	operationsServer := &operations.OperationsBrokerServer{Authorizer:operationsPolicy,Handler:operationsExecutor,MaximumConcurrent:64}
