@@ -62,7 +62,41 @@ type SSHSessionQueryEffect struct { IncludeClosedSince time.Time `json:"include_
 type ProcessInvestigateEffect struct { Process ProcessIdentity `json:"process"`; IncludeFileDescriptors bool `json:"include_file_descriptors"`; IncludeNetworkSockets bool `json:"include_network_sockets"` }
 type ProcessTerminateEffect struct { Process ProcessIdentity `json:"process"`; Signal TerminationSignal `json:"signal"`; InvestigationProofDigest string `json:"investigation_proof_digest"`; ReasonCode ResourceID `json:"reason_code"` }
 type PackageTransactionEffect struct { Transaction PackageTransaction `json:"transaction"` }
-type ManagedServiceEffect struct { Service ManagedService `json:"service"` }
+type ManagedRedisDataAction string
+
+const (
+	ManagedRedisSnapshot ManagedRedisDataAction = "snapshot"
+	ManagedRedisRestore  ManagedRedisDataAction = "restore"
+	ManagedRedisPurge    ManagedRedisDataAction = "purge"
+)
+
+const managedRedisMaximumArtifactBytes = int64(64 << 30)
+
+type ManagedRedisArtifact struct {
+	ID               string    `json:"id"`
+	GroupID          string    `json:"group_id"`
+	InstanceID       ResourceID `json:"instance_id"`
+	Kind             string    `json:"kind"`
+	RedisVersion     string    `json:"redis_version"`
+	ConfigGeneration uint64    `json:"config_generation"`
+	SizeBytes        int64     `json:"size_bytes,omitempty"`
+	SHA256           string    `json:"sha256,omitempty"`
+	CreatedAt        time.Time `json:"created_at,omitempty"`
+}
+
+type ManagedRedisDataEffect struct {
+	Action                     ManagedRedisDataAction `json:"action"`
+	ExpectedSpecGeneration     uint64                 `json:"expected_spec_generation"`
+	ExpectedConfigGeneration   uint64                 `json:"expected_config_generation"`
+	ExpectedConsumerGeneration uint64                 `json:"expected_consumer_generation,omitempty"`
+	Artifact                   ManagedRedisArtifact   `json:"artifact,omitempty"`
+	RecoveryArtifact           ManagedRedisArtifact   `json:"recovery_artifact,omitempty"`
+}
+
+type ManagedServiceEffect struct {
+	Service   ManagedService          `json:"service"`
+	RedisData *ManagedRedisDataEffect `json:"redis_data,omitempty"`
+}
 
 type EffectRequest struct {
 	EffectID string `json:"effect_id"`
@@ -175,6 +209,13 @@ type EffectResult struct {
 	Process *ProcessReport `json:"process,omitempty"`
 	Diagnostics *ServiceDiagnostics `json:"diagnostics,omitempty"`
 	Packages *PackageTransactionResult `json:"packages,omitempty"`
+	ManagedRedisData *ManagedRedisDataResult `json:"managed_redis_data,omitempty"`
+}
+
+type ManagedRedisDataResult struct {
+	Action         ManagedRedisDataAction `json:"action"`
+	Artifact       *ManagedRedisArtifact  `json:"artifact,omitempty"`
+	EvidenceDigest string                 `json:"evidence_digest"`
 }
 
 type EffectReceipt struct {
@@ -294,7 +335,7 @@ func validateEffectShape(request EffectRequest) error {
 	case EffectPackageTransaction:
 		if request.PackageTransaction == nil || request.PackageTransaction.Transaction.Validate() != nil { return ErrInvalidCommand }
 	case EffectManagedService:
-		if request.ManagedService == nil || request.ManagedService.Service.Validate() != nil { return ErrInvalidCommand }
+		if request.ManagedService == nil || request.ManagedService.Service.Validate() != nil || validateManagedRedisData(request.ManagedService.Service, request.ManagedService.RedisData) != nil { return ErrInvalidCommand }
 	default:
 		return ErrInvalidCommand
 	}
@@ -356,7 +397,7 @@ func activationCandidateDigest(request EffectRequest) (string, bool) {
 }
 
 func emptyEffectResult(result EffectResult) bool {
-	return result.Metrics == nil && result.Logs == nil && result.SSHLogins == nil && result.SSHSessions == nil && result.Process == nil && result.Diagnostics == nil && result.Packages == nil
+	return result.Metrics == nil && result.Logs == nil && result.SSHLogins == nil && result.SSHSessions == nil && result.Process == nil && result.Diagnostics == nil && result.Packages == nil && result.ManagedRedisData == nil
 }
 
 func compensationReceiptMatches(request CompensationRequest, receipt CompensationReceipt) bool {
@@ -373,6 +414,7 @@ func validateEffectResult(request EffectRequest, result EffectResult) error {
 	if result.Process != nil { count++ }
 	if result.Diagnostics != nil { count++ }
 	if result.Packages != nil { count++ }
+	if result.ManagedRedisData != nil { count++ }
 	expected := false
 	switch request.Kind {
 	case EffectMetricsQuery: expected = result.Metrics != nil
@@ -382,6 +424,8 @@ func validateEffectResult(request EffectRequest, result EffectResult) error {
 	case EffectProcessInvestigate: expected = result.Process != nil
 	case EffectServiceDiagnose: expected = result.Diagnostics != nil
 	case EffectPackageTransaction: expected = result.Packages != nil || count == 0
+	case EffectManagedService:
+		expected = request.ManagedService != nil && request.ManagedService.RedisData != nil && result.ManagedRedisData != nil || request.ManagedService != nil && request.ManagedService.RedisData == nil && count == 0
 	default: expected = count == 0
 	}
 	if !expected || count > 1 { return ErrInvalidEffect }
@@ -421,6 +465,52 @@ func validateEffectResult(request EffectRequest, result EffectResult) error {
 		if request.PackageTransaction == nil || len(result.Packages.Changes) > len(request.PackageTransaction.Transaction.Selections) || len(result.Packages.ServicesRestarted) > 64 { return ErrInvalidEffect }
 		for _, change := range result.Packages.Changes { if change.Name.IsZero() || change.Architecture.IsZero() || (change.Action != PackageInstall && change.Action != PackageRemove && change.Action != PackageUpgrade) || len(change.FromVersion) > 128 || len(change.ToVersion) > 128 { return ErrInvalidEffect } }
 		for _, service := range result.Packages.ServicesRestarted { if !validService(service) { return ErrInvalidEffect } }
+	}
+	if result.ManagedRedisData != nil {
+		if request.ManagedService == nil || request.ManagedService.RedisData == nil || result.ManagedRedisData.Action != request.ManagedService.RedisData.Action || !validSHA256(result.ManagedRedisData.EvidenceDigest) { return ErrInvalidEffect }
+		if result.ManagedRedisData.Action == ManagedRedisSnapshot {
+			if result.ManagedRedisData.Artifact == nil || validateManagedRedisArtifact(*result.ManagedRedisData.Artifact, true) != nil || !sameManagedRedisArtifactTarget(*result.ManagedRedisData.Artifact, request.ManagedService.RedisData.Artifact) { return ErrInvalidEffect }
+		} else if result.ManagedRedisData.Artifact != nil { return ErrInvalidEffect }
+	}
+	return nil
+}
+
+func validateManagedRedisVersion(value string) bool {
+	parts := strings.Split(value, ".")
+	if len(parts) != 3 || len(value) > 24 { return false }
+	for _, part := range parts {
+		if part == "" || len(part) > 5 { return false }
+		for index := range part { if part[index] < '0' || part[index] > '9' { return false } }
+	}
+	return true
+}
+
+func validateManagedRedisArtifact(artifact ManagedRedisArtifact, complete bool) error {
+	if _, err := safeOpaque(artifact.ID, 128); err != nil { return ErrInvalidCommand }
+	if _, err := safeOpaque(artifact.GroupID, 128); err != nil { return ErrInvalidCommand }
+	if artifact.InstanceID.IsZero() || artifact.Kind != "rdb" || !validateManagedRedisVersion(artifact.RedisVersion) || artifact.ConfigGeneration == 0 || artifact.ConfigGeneration > uint64(1<<63-1) { return ErrInvalidCommand }
+	if complete {
+		if artifact.SizeBytes <= 0 || artifact.SizeBytes > managedRedisMaximumArtifactBytes || !validSHA256(artifact.SHA256) || artifact.CreatedAt.IsZero() { return ErrInvalidCommand }
+	} else if artifact.SizeBytes != 0 || artifact.SHA256 != "" || !artifact.CreatedAt.IsZero() { return ErrInvalidCommand }
+	return nil
+}
+
+func sameManagedRedisArtifactTarget(artifact, target ManagedRedisArtifact) bool {
+	return artifact.ID == target.ID && artifact.GroupID == target.GroupID && artifact.InstanceID == target.InstanceID && artifact.Kind == target.Kind && artifact.RedisVersion == target.RedisVersion && artifact.ConfigGeneration == target.ConfigGeneration
+}
+
+func validateManagedRedisData(service ManagedService, data *ManagedRedisDataEffect) error {
+	if data == nil { return nil }
+	if service.KindName != ManagedRedis || service.Redis == nil || data.ExpectedSpecGeneration == 0 || data.ExpectedSpecGeneration > uint64(1<<63-1) || data.ExpectedConfigGeneration == 0 || data.ExpectedConfigGeneration > uint64(1<<63-1) { return ErrInvalidCommand }
+	switch data.Action {
+	case ManagedRedisSnapshot:
+		if service.Desired != ServiceRunning || data.ExpectedConsumerGeneration != 0 || validateManagedRedisArtifact(data.Artifact, false) != nil || data.Artifact.InstanceID != service.ID || data.Artifact.ConfigGeneration != data.ExpectedConfigGeneration || data.RecoveryArtifact.ID != "" { return ErrInvalidCommand }
+	case ManagedRedisRestore:
+		if service.Desired != ServiceRunning || data.ExpectedConsumerGeneration == 0 || validateManagedRedisArtifact(data.Artifact, true) != nil || validateManagedRedisArtifact(data.RecoveryArtifact, true) != nil || data.Artifact.InstanceID != service.ID || data.RecoveryArtifact.InstanceID != service.ID || data.Artifact.ID == data.RecoveryArtifact.ID || data.Artifact.RedisVersion != data.RecoveryArtifact.RedisVersion || data.RecoveryArtifact.ConfigGeneration != data.ExpectedConfigGeneration { return ErrInvalidCommand }
+	case ManagedRedisPurge:
+		if service.Desired != ServiceStopped || data.ExpectedConsumerGeneration == 0 || data.Artifact.ID != "" || validateManagedRedisArtifact(data.RecoveryArtifact, true) != nil || data.RecoveryArtifact.InstanceID != service.ID || data.RecoveryArtifact.ConfigGeneration != data.ExpectedConfigGeneration { return ErrInvalidCommand }
+	default:
+		return ErrInvalidCommand
 	}
 	return nil
 }

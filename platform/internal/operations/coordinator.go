@@ -168,6 +168,15 @@ func (coordinator Coordinator) plan(ctx context.Context, command Command) (opera
 		transaction := value.Transaction; transaction.Status = pendingStatus(LifecycleUpdating); proposed, expected = transaction, 0; request.PackageTransaction = &PackageTransactionEffect{Transaction: transaction}
 	case ReconcileManagedService:
 		service := value.Service; service.Status = pendingStatus(LifecycleUpdating); proposed, expected = service, value.ExpectedGeneration; request.ManagedService = &ManagedServiceEffect{Service: service}
+	case OperateManagedRedisData:
+		envelope, err := coordinator.repository.LoadResource(ctx, KindManagedService, value.Service.ID)
+		if err != nil { return operationPlan{}, err }
+		resource, err := DecodeResource(envelope)
+		if err != nil { return operationPlan{}, err }
+		current, ok := resource.(*ManagedService)
+		if !ok || current.Generation != value.ExpectedGeneration || !reflect.DeepEqual(*current, value.Service) { return operationPlan{}, ErrConflict }
+		data := value.Data
+		request.ManagedService = &ManagedServiceEffect{Service: *current, RedisData: &data}
 	default:
 		return operationPlan{}, ErrInvalidCommand
 	}

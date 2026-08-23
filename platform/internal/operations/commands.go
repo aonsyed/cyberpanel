@@ -269,6 +269,20 @@ func (command ReconcileManagedService) commandScope() OperationScope { return re
 func (ReconcileManagedService) commandKind() EffectKind { return EffectManagedService }
 func (ReconcileManagedService) sealCommand() {}
 
+// OperateManagedRedisData carries a generation-bound data action without
+// rewriting the canonical managed-service resource. The closed artifact
+// descriptors are identities and integrity claims, never caller paths.
+type OperateManagedRedisData struct {
+	Header             CommandHeader         `json:"header"`
+	Service            ManagedService        `json:"service"`
+	ExpectedGeneration uint64                `json:"expected_generation"`
+	Data               ManagedRedisDataEffect `json:"data"`
+}
+func (command OperateManagedRedisData) commandHeader() CommandHeader { return command.Header }
+func (command OperateManagedRedisData) commandScope() OperationScope { return resourceScope(command.Header, command.Service.Kind(), command.Service.ID) }
+func (OperateManagedRedisData) commandKind() EffectKind { return EffectManagedService }
+func (OperateManagedRedisData) sealCommand() {}
+
 func resourceScope(header CommandHeader, kind ResourceKind, id ResourceID) OperationScope {
 	return OperationScope{NodeID: header.NodeID, TenantID: header.TenantID, Kind: kind, ID: id}
 }
@@ -339,6 +353,9 @@ func validateCommandBody(command Command) error {
 		if validateProposed(value.Transaction, value.Header, 0) != nil { return ErrInvalidCommand }
 	case ReconcileManagedService:
 		return validateProposed(value.Service, value.Header, value.ExpectedGeneration)
+	case OperateManagedRedisData:
+		metadata := value.Service.Meta()
+		if value.Service.Validate() != nil || value.ExpectedGeneration == 0 || metadata.Generation != value.ExpectedGeneration || metadata.NodeID != value.Header.NodeID || metadata.TenantID.String() != value.Header.TenantID.String() || metadata.SiteID.String() != value.Header.SiteID.String() || validateManagedRedisData(value.Service, &value.Data) != nil { return ErrInvalidCommand }
 	default:
 		return ErrInvalidCommand
 	}
@@ -363,6 +380,8 @@ func authorizeCommand(command Command) error {
 		if !nodeScoped || !header.Actor.Has(CapabilityNodeOperations) { return ErrUnauthorized }
 	case ReconcileManagedService:
 		if !header.Actor.Has(CapabilityNodeOperations) { return ErrUnauthorized }
+	case OperateManagedRedisData:
+		if !header.Actor.Has(CapabilityNodeOperations) || header.Actor.MFAProofRef.IsZero() { return ErrUnauthorized }
 	case RequestPackageTransaction:
 		if !nodeScoped || !header.Actor.Has(CapabilityNodePackages) || header.Actor.MFAProofRef.IsZero() || header.ApprovalRef.IsZero() { return ErrUnauthorized }
 	case TerminateProcess:
