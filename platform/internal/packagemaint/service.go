@@ -68,6 +68,19 @@ type MaintenanceGate interface {
 	AdmitPackageMaintenance(context.Context, MaintenanceAdmissionRequest) error
 }
 
+type RebootRequirementPublication struct {
+	RequirementID string
+	EvidenceDigest string
+}
+
+// RebootRequirementPublisher is deliberately passive: it observes the current
+// boot identity and idempotently persists evidence, but cannot schedule or
+// execute a reboot.
+type RebootRequirementPublisher interface {
+	CurrentBootIdentity(context.Context, string) (RebootBootIdentity, error)
+	PublishRebootRequirement(context.Context, RebootRequirement) (RebootRequirementPublication, error)
+}
+
 type AdmissionRequest struct {
 	OperationID            string
 	PlanID                 string
@@ -81,6 +94,7 @@ type Service struct {
 	Authorizer Authorizer
 	Executor   MaintenanceExecutor
 	Maintenance MaintenanceGate
+	RebootRequirements RebootRequirementPublisher
 	Now        func() time.Time
 }
 
@@ -176,6 +190,10 @@ func (service Service) Apply(ctx context.Context, operationID, actorID string) (
 	if inventory.Generation != operation.InventoryGeneration || inventory.ContentDigest != operation.InventoryDigest {
 		return MaintenanceOperation{}, ErrStaleInventory
 	}
+	rebootBoot, err := service.rebootBootIdentity(ctx, plan)
+	if err != nil {
+		return operation, err
+	}
 	maintenanceErr := service.AdmitMaintenance(ctx, MaintenanceAdmissionRequest{RequestID: "pkgmw_" + digestStrings("apply", operation.ID, plan.MaintenanceOccurrenceID)[:32],
 		OccurrenceID: plan.MaintenanceOccurrenceID, NodeID: plan.NodeID, Manager: plan.Manager,
 		ExpectedDuration: MaintenanceExecutionDuration, At: now})
@@ -249,6 +267,14 @@ func (service Service) Apply(ctx context.Context, operationID, actorID string) (
 		return MaintenanceOperation{}, err
 	}
 	target := operationStateForOutcome(receipt.Outcome)
+	if executionErr != nil && target == OperationSucceeded {
+		return operation, ErrAmbiguous
+	}
+	if target == OperationSucceeded {
+		if err = service.publishRebootRequirement(ctx, plan, receipt, rebootBoot); err != nil {
+			return operation, err
+		}
+	}
 	operation, err = service.Store.Transition(ctx, operation.ID, operation.Generation, OperationVerifying, target, AuthorizationEvidence{}, receipt, makeAudit(operation.ID, operation.Generation+1, actorID, "complete", string(receipt.Outcome), plan.Digest, receipt.EvidenceDigest, service.now()))
 	if err != nil {
 		return MaintenanceOperation{}, err
@@ -260,6 +286,41 @@ func (service Service) Apply(ctx context.Context, operationID, actorID string) (
 		return operation, ErrRecoveryRequired
 	}
 	return operation, nil
+}
+
+func (service Service) rebootBootIdentity(ctx context.Context, plan MaintenancePlan) (RebootBootIdentity, error) {
+	if plan.Reboot != RebootRequired {
+		return RebootBootIdentity{}, nil
+	}
+	if service.RebootRequirements == nil {
+		return RebootBootIdentity{}, ErrUnsupported
+	}
+	identity, err := service.RebootRequirements.CurrentBootIdentity(ctx, plan.NodeID)
+	if err != nil || identity.Validate() != nil {
+		return RebootBootIdentity{}, ErrUnsupported
+	}
+	return identity, nil
+}
+
+func (service Service) publishRebootRequirement(ctx context.Context, plan MaintenancePlan, receipt ExecutionReceipt,
+	boot RebootBootIdentity) error {
+	if plan.Reboot != RebootRequired || receipt.Outcome != OutcomeConfirmed {
+		return nil
+	}
+	requirement, err := CanonicalRebootRequirement(RebootRequirement{ID: receipt.EffectID, NodeID: plan.NodeID,
+		PackageOperationID: receipt.EffectID, PackagePlanID: plan.ID, PackagePlanDigest: plan.Digest,
+		PackageReceiptDigest: receipt.EvidenceDigest, MaintenanceOccurrenceID: plan.MaintenanceOccurrenceID,
+		Reboot: plan.Reboot, CurrentBoot: RebootBootEvidence{RebootBootIdentity: boot, ObservedAt: receipt.ObservedAt,
+			EvidenceDigest: digestStrings("package-maintenance-boot", boot.BootID, boot.KernelRelease, boot.KernelDigest)},
+		AffectedServices: plan.Services, AffectedPackages: plan.Changes, ObservedAt: receipt.ObservedAt})
+	if err != nil {
+		return err
+	}
+	publication, err := service.RebootRequirements.PublishRebootRequirement(ctx, requirement)
+	if err != nil || publication.RequirementID != requirement.ID || publication.EvidenceDigest != requirement.Digest {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (service Service) currentInputs(ctx context.Context, planID string, now time.Time) (MaintenancePlan, InventorySnapshot, error) {

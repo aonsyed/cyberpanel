@@ -380,6 +380,106 @@ type ExecutionReceipt struct {
 	ObservedAt           time.Time             `json:"observed_at"`
 }
 
+// RebootBootIdentity is the stable host identity a composed publisher must
+// observe before a package effect that can require reboot. The requirement
+// envelope assigns the receipt timestamp and a deterministic evidence digest
+// so an uncertain publication can be replayed byte-for-byte.
+type RebootBootIdentity struct {
+	BootID        string `json:"boot_id"`
+	KernelRelease string `json:"kernel_release"`
+	KernelDigest  string `json:"kernel_digest"`
+}
+
+func (identity RebootBootIdentity) Validate() error {
+	if !safeID.MatchString(identity.BootID) || !safeID.MatchString(identity.KernelRelease) || !validDigest(identity.KernelDigest) {
+		return ErrInvalid
+	}
+	return nil
+}
+
+type RebootBootEvidence struct {
+	RebootBootIdentity
+	ObservedAt     time.Time `json:"observed_at"`
+	EvidenceDigest string    `json:"evidence_digest"`
+}
+
+func (evidence RebootBootEvidence) Validate() error {
+	if evidence.RebootBootIdentity.Validate() != nil || evidence.ObservedAt.IsZero() || evidence.ObservedAt.Location() != time.UTC ||
+		evidence.EvidenceDigest != digestStrings("package-maintenance-boot", evidence.BootID, evidence.KernelRelease, evidence.KernelDigest) {
+		return ErrInvalid
+	}
+	return nil
+}
+
+// RebootRequirement is passive, immutable package evidence. It authorizes no
+// reboot and contains no schedule; a reboot-control adapter may only persist
+// its digest under the same package operation ID.
+type RebootRequirement struct {
+	ID                      string             `json:"id"`
+	NodeID                  string             `json:"node_id"`
+	PackageOperationID      string             `json:"package_operation_id"`
+	PackagePlanID           string             `json:"package_plan_id"`
+	PackagePlanDigest       string             `json:"package_plan_digest"`
+	PackageReceiptDigest    string             `json:"package_receipt_digest"`
+	MaintenanceOccurrenceID string             `json:"maintenance_occurrence_id"`
+	Reboot                  RebootEstimate     `json:"reboot"`
+	CurrentBoot             RebootBootEvidence `json:"current_boot"`
+	AffectedServices        []ServiceImpact    `json:"affected_services"`
+	AffectedPackages        []PackageChange    `json:"affected_packages"`
+	ObservedAt              time.Time          `json:"observed_at"`
+	Digest                  string             `json:"digest"`
+}
+
+func CanonicalRebootRequirement(requirement RebootRequirement) (RebootRequirement, error) {
+	requirement.CurrentBoot.ObservedAt = requirement.CurrentBoot.ObservedAt.UTC()
+	requirement.ObservedAt = requirement.ObservedAt.UTC()
+	requirement.AffectedServices = append([]ServiceImpact(nil), requirement.AffectedServices...)
+	sort.Slice(requirement.AffectedServices, func(left, right int) bool {
+		return requirement.AffectedServices[left].ServiceID+"\x00"+requirement.AffectedServices[left].ProbeID <
+			requirement.AffectedServices[right].ServiceID+"\x00"+requirement.AffectedServices[right].ProbeID
+	})
+	requirement.AffectedPackages = append([]PackageChange(nil), requirement.AffectedPackages...)
+	sort.Slice(requirement.AffectedPackages, func(left, right int) bool {
+		return packageChangeKey(requirement.AffectedPackages[left]) < packageChangeKey(requirement.AffectedPackages[right])
+	})
+	provided := requirement.Digest
+	requirement.Digest = ""
+	if err := validateRebootRequirement(requirement); err != nil {
+		return RebootRequirement{}, err
+	}
+	digest, err := canonicalDigest(requirement)
+	if err != nil {
+		return RebootRequirement{}, err
+	}
+	requirement.Digest = digest
+	if provided != "" && provided != digest {
+		return RebootRequirement{}, ErrConflict
+	}
+	return requirement, nil
+}
+
+func validateRebootRequirement(requirement RebootRequirement) error {
+	if !safeID.MatchString(requirement.ID) || requirement.ID != requirement.PackageOperationID || !safeID.MatchString(requirement.NodeID) ||
+		!safeID.MatchString(requirement.PackagePlanID) || !validDigest(requirement.PackagePlanDigest) || !validDigest(requirement.PackageReceiptDigest) ||
+		!safeID.MatchString(requirement.MaintenanceOccurrenceID) || requirement.Reboot != RebootRequired || requirement.CurrentBoot.Validate() != nil ||
+		len(requirement.AffectedServices) > MaximumServiceImpacts || len(requirement.AffectedPackages) == 0 || len(requirement.AffectedPackages) > MaximumChanges ||
+		requirement.ObservedAt.IsZero() || requirement.ObservedAt.Location() != time.UTC || !requirement.ObservedAt.Equal(requirement.CurrentBoot.ObservedAt) {
+		return ErrInvalid
+	}
+	for index, service := range requirement.AffectedServices {
+		if !safeID.MatchString(service.ServiceID) || !safeID.MatchString(service.ProbeID) || !validServiceAction(service.Action) ||
+			index > 0 && requirement.AffectedServices[index-1].ServiceID+"\x00"+requirement.AffectedServices[index-1].ProbeID >= service.ServiceID+"\x00"+service.ProbeID {
+			return ErrInvalid
+		}
+	}
+	for index, change := range requirement.AffectedPackages {
+		if validateChange(change) != nil || index > 0 && packageChangeKey(requirement.AffectedPackages[index-1]) >= packageChangeKey(change) {
+			return ErrInvalid
+		}
+	}
+	return nil
+}
+
 type AuditRecord struct {
 	ID           string    `json:"id"`
 	OperationID  string    `json:"operation_id"`

@@ -1739,6 +1739,10 @@ func (service Service) ReconcileRestart(ctx context.Context, operationID string)
 	if err != nil {
 		return operation, err
 	}
+	rebootBoot, err := service.rebootBootIdentity(ctx, plan)
+	if err != nil {
+		return operation, err
+	}
 	actorID := operation.CommitAuthorization.ActorID
 	if operation.State == OperationAuthorized {
 		now := service.now()
@@ -1792,6 +1796,11 @@ func (service Service) ReconcileRestart(ctx context.Context, operationID string)
 			return operation, ErrAmbiguous
 		}
 		target := operationStateForOutcome(operation.Receipt.Outcome)
+		if target == OperationSucceeded {
+			if err = service.publishRebootRequirement(ctx, plan, operation.Receipt, rebootBoot); err != nil {
+				return operation, err
+			}
+		}
 		operation, err = service.Store.Transition(ctx, operation.ID, operation.Generation, OperationVerifying, target,
 			AuthorizationEvidence{}, operation.Receipt, makeAudit(operation.ID, operation.Generation+1, actorID, "restart-complete",
 			string(operation.Receipt.Outcome), plan.Digest, operation.Receipt.EvidenceDigest, service.now()))
