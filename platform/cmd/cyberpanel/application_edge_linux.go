@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +25,8 @@ type applicationEdge struct {
 	service   *apps.ApplicationService
 	lifecycle *apps.LifecycleCoordinator
 	wordpress *apps.WordPressManager
+	autologin *apps.AutologinService
+	bridge    *apps.AutologinBridgeManager
 	store     apps.SQLRepository
 	hosting   *sqlrepo.Repository
 	client    *apps.LinuxApplicationClient
@@ -34,11 +38,11 @@ type applicationEdge struct {
 	now       func() time.Time
 }
 
-func newApplicationEdge(service *apps.ApplicationService,lifecycle *apps.LifecycleCoordinator,wordpress *apps.WordPressManager,store apps.SQLRepository,hosting *sqlrepo.Repository,client *apps.LinuxApplicationClient,catalog *apps.PinnedCatalog,authority *apps.LinuxRecipeCatalogAuthority,secrets *apps.ApplicationSecretIssuer,edition siteops.EngineEdition,now func()time.Time)(*applicationEdge,error){
-	if service==nil||lifecycle==nil||wordpress==nil||store.DB==nil||hosting==nil||client==nil||catalog==nil||authority==nil||secrets==nil{return nil,apps.ErrInvalid};if now==nil{now=time.Now};target,err:=applicationCatalogTarget(edition);if err!=nil{return nil,err};scanner:=apps.ScanCoordinator{Store:store,Snapshots:client,Providers:map[string]apps.ScannerProvider{client.ID():client},Now:now};return &applicationEdge{service,lifecycle,wordpress,store,hosting,client,catalog,authority,secrets,target,scanner,now},nil
+func newApplicationEdge(service *apps.ApplicationService,lifecycle *apps.LifecycleCoordinator,wordpress *apps.WordPressManager,autologin *apps.AutologinService,bridge *apps.AutologinBridgeManager,store apps.SQLRepository,hosting *sqlrepo.Repository,client *apps.LinuxApplicationClient,catalog *apps.PinnedCatalog,authority *apps.LinuxRecipeCatalogAuthority,secrets *apps.ApplicationSecretIssuer,edition siteops.EngineEdition,now func()time.Time)(*applicationEdge,error){
+	if service==nil||lifecycle==nil||wordpress==nil||autologin==nil||bridge==nil||store.DB==nil||hosting==nil||client==nil||catalog==nil||authority==nil||secrets==nil{return nil,apps.ErrInvalid};if now==nil{now=time.Now};target,err:=applicationCatalogTarget(edition);if err!=nil{return nil,err};scanner:=apps.ScanCoordinator{Store:store,Snapshots:client,Providers:map[string]apps.ScannerProvider{client.ID():client},Now:now};return &applicationEdge{service,lifecycle,wordpress,autologin,bridge,store,hosting,client,catalog,authority,secrets,target,scanner,now},nil
 }
 
-func(edge *applicationEdge)ApplicationCapabilities()apiserver.ApplicationEdgeCapabilities{return apiserver.ApplicationEdgeCapabilities{List:true,Discover:true,Adopt:true,Install:true,Update:true,Remove:true,Scan:true,Autologin:false,CachePurge:true}}
+func(edge *applicationEdge)ApplicationCapabilities()apiserver.ApplicationEdgeCapabilities{return apiserver.ApplicationEdgeCapabilities{List:true,Discover:true,Adopt:true,Install:true,Update:true,Remove:true,Scan:true,Autologin:edge!=nil&&edge.autologin!=nil&&edge.bridge!=nil,CachePurge:true}}
 
 func(edge *applicationEdge)ListApplications(ctx context.Context,call apiserver.EdgeCall,page apiserver.EdgePagePayload)(apiserver.EdgePage[apiserver.ApplicationProjection],error){if call.TenantID==""{return apiserver.EdgePage[apiserver.ApplicationProjection]{},apps.ErrPolicyDenied};items,next,err:=edge.store.ListInstallations(ctx,apps.TenantID(call.TenantID),"",page.Limit,page.Cursor);if err!=nil{return apiserver.EdgePage[apiserver.ApplicationProjection]{},err};result:=make([]apiserver.ApplicationProjection,0,len(items));for _,item:=range items{projection,projectErr:=edge.projection(ctx,item);if projectErr!=nil{return apiserver.EdgePage[apiserver.ApplicationProjection]{},projectErr};result=append(result,projection)};return apiserver.EdgePage[apiserver.ApplicationProjection]{Items:result,NextCursor:next},nil}
 
@@ -54,7 +58,19 @@ func(edge *applicationEdge)RemoveApplication(ctx context.Context,call apiserver.
 
 func(edge *applicationEdge)ScanApplication(ctx context.Context,call apiserver.EdgeCall,payload apiserver.ApplicationScanPayload)(apiserver.EdgeMutation[apiserver.ApplicationProjection],error){installation,err:=edge.installation(ctx,call);if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err};provider:=payload.ProviderID;if provider==""{provider=edge.client.ID()};if provider!=edge.client.ID(){return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},apps.ErrUnsupported};mode:=apps.ScanQuick;duration:=15*time.Minute;files:=uint64(200000);bytes:=uint64(64<<30);switch payload.Mode{case "","quick":case "full","deep":mode=apps.ScanFull;duration=time.Hour;files=1000000;bytes=256<<30;case "integrity","integrity_comparison":mode=apps.ScanIntegrity;duration=time.Hour;files=1000000;bytes=256<<30;default:return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},apps.ErrInvalid};scope,err:=edge.client.ResolveExecutionScope(ctx,installation);if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err};now:=edge.now().UTC();identity:=applicationEdgeID("scan",call.CommandID,string(installation.ID));run:=apps.ScanRun{ID:apps.ScanRunID(identity),CommandID:apps.CommandID(call.CommandID),TenantID:installation.TenantID,SiteID:installation.SiteID,InstallationID:installation.ID,Mode:mode,ProviderID:provider,ProviderKind:edge.client.Kind(),RulesVersion:"cyberpanel-local-2026.08.1",EngineVersion:"archive-stream-v1",Budget:apps.ScanBudget{MaximumDuration:duration,MaximumFiles:files,MaximumBytes:bytes,MaximumExpandedBytes:bytes*2,MaximumArchiveDepth:8,MaximumMemoryBytes:256<<20,MaximumCPUPercent:50,MaximumIOBytesPerSecond:128<<20},State:apps.ScanAdmitted,CreatedAt:now,UpdatedAt:now};scanContext,cancel:=context.WithTimeout(ctx,duration);result,err:=edge.scanner.Run(scanContext,run,scope,nil);cancel();if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err};projection,err:=edge.projection(ctx,installation);if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err};return apiserver.EdgeMutation[apiserver.ApplicationProjection]{OperationID:string(result.RunID),State:string(apps.ScanCompleted),Generation:installation.Generation,Resource:projection},nil}
 
-func(edge *applicationEdge)IssueWordPressAutologin(context.Context,apiserver.EdgeCall,apiserver.ApplicationAutologinPayload)(apiserver.ApplicationGrant,error){return apiserver.ApplicationGrant{},apps.ErrUnsupported}
+func(edge *applicationEdge)IssueWordPressAutologin(ctx context.Context,call apiserver.EdgeCall,payload apiserver.ApplicationAutologinPayload)(apiserver.ApplicationGrant,error){
+	installation,err:=edge.installation(ctx,call);if err!=nil{return apiserver.ApplicationGrant{},err}
+	if installation.Kind!=apps.ApplicationWordPress||call.ExpectedGeneration==0||call.ExpectedGeneration!=installation.Generation||call.SessionID==""||!strings.HasPrefix(call.Origin,"https://")||len(call.CSRFBinding)!=sha256.Size*2||payload.WordPressUserID==0||payload.TTLSeconds<30||payload.TTLSeconds>120{return apiserver.ApplicationGrant{},apps.ErrPolicyDenied}
+	projection,err:=edge.projection(ctx,installation);if err!=nil{return apiserver.ApplicationGrant{},err};if projection.Hostname==""{return apiserver.ApplicationGrant{},apps.ErrConflict}
+	scope,err:=edge.client.ResolveExecutionScope(ctx,installation);if err!=nil{return apiserver.ApplicationGrant{},err}
+	bridgeRequest:=apps.AutologinBridgeRequest{Scope:scope,InstallationID:installation.ID,BridgeDigest:payload.BridgeDigest,BridgeSignature:payload.BridgeSignature,SigningKeyID:payload.SigningKeyID,Endpoint:edge.autologin.Endpoint}
+	bridgeCommand:=apps.CommandID(applicationEdgeID("autologin-bridge",call.CommandID,string(installation.ID),payload.BridgeDigest));if err=edge.bridge.Install(ctx,bridgeCommand,bridgeRequest);err!=nil{return apiserver.ApplicationGrant{},err}
+	audience:="https://"+projection.Hostname
+	grant,credential,err:=edge.autologin.Issue(ctx,apps.LoginGrantRequest{ID:apps.LoginGrantID(applicationEdgeID("login-grant",call.CommandID,string(installation.ID))),TenantID:installation.TenantID,SiteID:installation.SiteID,InstallationID:installation.ID,WordPressUserID:payload.WordPressUserID,Audience:audience,Origin:call.Origin,CSRFBinding:call.CSRFBinding,TTL:time.Duration(payload.TTLSeconds)*time.Second});if err!=nil{return apiserver.ApplicationGrant{},err}
+	values:=url.Values{"grant_id":[]string{string(credential.GrantID)},"secret":[]string{credential.Secret},"audience":[]string{grant.Audience},"origin":[]string{grant.Origin},"csrf_binding":[]string{call.CSRFBinding},"site_id":[]string{string(grant.SiteID)},"installation_id":[]string{string(grant.InstallationID)},"wordpress_user_id":[]string{strconv.FormatUint(grant.WordPressUserID,10)}}
+	target:=url.URL{Scheme:"https",Host:projection.Hostname,Path:"/wp-json/cyberpanel/v1/autologin",Fragment:values.Encode()};credential.Secret=""
+	return apiserver.ApplicationGrant{URL:target.String(),ExpiresAt:grant.ExpiresAt},nil
+}
 
 func(edge *applicationEdge)PurgeWordPressCache(ctx context.Context,call apiserver.EdgeCall,payload apiserver.ApplicationCachePurgePayload)(apiserver.EdgeMutation[apiserver.ApplicationProjection],error){installation,err:=edge.installation(ctx,call);if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err};scope,err:=edge.client.ResolveSiteBinding(ctx,installation.TenantID,installation.SiteID);if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err};purge:=apps.CachePurgeScope(payload.Scope);if purge==""{purge=apps.PurgeAll};if err=edge.wordpress.PurgeLSCache(ctx,apps.LSCachePurgeRequest{CommandID:apps.CommandID(call.CommandID),InstallationID:installation.ID,PurgeScope:purge,Values:append([]string(nil),payload.Values...),SiteGeneration:scope.ResourceGeneration,IsolationProfile:scope.IsolationProfile});err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err};projection,err:=edge.projection(ctx,installation);if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err};return apiserver.EdgeMutation[apiserver.ApplicationProjection]{OperationID:call.CommandID,State:"completed",Generation:installation.Generation,Resource:projection},nil}
 

@@ -2,7 +2,9 @@ package apiserver
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -33,6 +35,8 @@ type EdgeCall struct {
 	CredentialID       string                  `json:"credential_id"`
 	AuthzEpoch         uint64                  `json:"authz_epoch"`
 	Assurance          identity.AssuranceLevel `json:"assurance"`
+	Origin             string                  `json:"origin,omitempty"`
+	CSRFBinding        string                  `json:"csrf_binding,omitempty"`
 }
 
 type EdgePagePayload struct {
@@ -254,6 +258,9 @@ type ApplicationScanPayload struct {
 type ApplicationAutologinPayload struct {
 	WordPressUserID uint64 `json:"wordpress_user_id,omitempty"`
 	TTLSeconds      uint32 `json:"ttl_seconds,omitempty"`
+	BridgeDigest    string `json:"bridge_digest"`
+	BridgeSignature string `json:"bridge_signature"`
+	SigningKeyID    string `json:"signing_key_id"`
 }
 
 type ApplicationCachePurgePayload struct {
@@ -1094,7 +1101,8 @@ func validateApplicationScan(value any) error {
 func validateApplicationAutologin(value any) error {
 	payload := value.(*ApplicationAutologinPayload)
 	if payload.TTLSeconds == 0 { payload.TTLSeconds = 90 }
-	if payload.TTLSeconds < 30 || payload.TTLSeconds > 120 { return invalid("autologin lifetime") }
+	if payload.WordPressUserID == 0 || payload.TTLSeconds < 30 || payload.TTLSeconds > 120 || !validDigestReference(payload.BridgeDigest) || len(payload.BridgeSignature) != 128 || !validEdgeID(payload.SigningKeyID) { return invalid("autologin grant") }
+	if _, err := hex.DecodeString(payload.BridgeSignature); err != nil { return invalid("autologin bridge signature") }
 	return nil
 }
 
@@ -1481,7 +1489,9 @@ func validIntegrationProvider(value string) bool {
 }
 
 func edgeCall(inv Invocation) EdgeCall {
-	return EdgeCall{CommandID:commandID(inv), IdempotencyKey:inv.IdempotencyKey, TenantID:inv.Request.TenantID, ResourceID:inv.Request.ResourceID, ExpectedGeneration:inv.Request.ExpectedGeneration, PrincipalID:inv.Actor.PrincipalID.String(),SessionID:inv.Actor.SessionID.String(),CredentialID:inv.Actor.CredentialID.String(),AuthzEpoch:inv.Actor.AuthzEpoch,Assurance:inv.Actor.Assurance}
+	csrfBinding:=""
+	if inv.Meta.Origin!=""&&inv.Actor.SessionID.String()!="" { sum:=sha256.Sum256([]byte(inv.Meta.Origin+"\x00"+inv.Meta.UserAgentDigest+"\x00"+inv.Actor.SessionID.String()+"\x00"+inv.Actor.CredentialID.String()));csrfBinding=hex.EncodeToString(sum[:]) }
+	return EdgeCall{CommandID:commandID(inv), IdempotencyKey:inv.IdempotencyKey, TenantID:inv.Request.TenantID, ResourceID:inv.Request.ResourceID, ExpectedGeneration:inv.Request.ExpectedGeneration, PrincipalID:inv.Actor.PrincipalID.String(),SessionID:inv.Actor.SessionID.String(),CredentialID:inv.Actor.CredentialID.String(),AuthzEpoch:inv.Actor.AuthzEpoch,Assurance:inv.Actor.Assurance,Origin:inv.Meta.Origin,CSRFBinding:csrfBinding}
 }
 
 func edgeOperationResult[T any](status int, result EdgeMutation[T]) OperationResult {
