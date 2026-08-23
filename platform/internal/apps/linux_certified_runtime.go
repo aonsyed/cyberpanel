@@ -30,7 +30,6 @@ import (
 
 const (
 	linuxApplicationRuntimeStateRoot = "/var/lib/cyberpanel/application-runtime"
-	linuxApplicationArtifactRoot     = DefaultApplicationCatalogRoot + "/artifacts"
 	linuxApplicationManifestVersion  = 1
 )
 
@@ -301,13 +300,16 @@ func (runtime *LinuxApplicationRuntime) php(ctx context.Context, scope linuxAppl
 
 func pinnedApplicationArtifactPath(reference ArtifactReference) (string, error) {
 	if err := reference.Validate(); err != nil { return "", err }
-	value := filepath.Join(linuxApplicationArtifactRoot, reference.Digest+".tar.gz")
-	if !strings.HasPrefix(value, linuxApplicationArtifactRoot+string(os.PathSeparator)) { return "", ErrPolicyDenied }
+	root, manifest, err := linuxApplicationCatalogSnapshot(DefaultApplicationCatalogRoot, time.Now().UTC())
+	if err != nil { return "", fmt.Errorf("%w: pinned application catalog", ErrRecipeUnavailable) }
+	artifact, found := catalogManifestArtifact(manifest, reference.Digest)
+	if !found || artifact.Size != reference.Size { return "", ErrRecipeUntrusted }
+	artifactRoot := filepath.Join(root, "artifacts")
+	value := filepath.Join(artifactRoot, reference.Digest+".tar.gz")
+	if !strings.HasPrefix(value, artifactRoot+string(os.PathSeparator)) { return "", ErrPolicyDenied }
 	info, err := os.Lstat(value)
 	if err != nil { return "", fmt.Errorf("%w: pinned application artifact", ErrRecipeUnavailable) }
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 || info.Size() != reference.Size { return "", ErrRecipeUntrusted }
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != 0 { return "", ErrRecipeUntrusted }
+	if validateRootCatalogFileInfo(info, reference.Size, true) != nil { return "", ErrRecipeUntrusted }
 	digest, err := digestLinuxApplicationFile(value, uint64(reference.Size))
 	if err != nil || digest != reference.Digest { return "", ErrRecipeUntrusted }
 	if err := validatePinnedApplicationArchive(value); err != nil { return "", err }

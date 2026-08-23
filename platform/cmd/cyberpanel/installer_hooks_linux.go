@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
+	"github.com/aonsyed/cyberpanel/platform/internal/apps"
 )
 
 const hookRoot = "/var/lib/cyberpanel/installer-hooks"
@@ -56,7 +58,7 @@ func runInstallerHook(arguments []string) error {
 	if err=syscall.Flock(int(lock.Fd()),syscall.LOCK_EX);err!=nil{return err};defer syscall.Flock(int(lock.Fd()),syscall.LOCK_UN)
 	if invocation.Verb=="rollback" { return rollbackInstallerHook(invocation) }
 	indexPath:=filepath.Join(hookRoot,"by-hook",invocation.Verb+"-"+invocation.Release+"-"+invocation.Component+".json")
-	if existing,loadErr:=readHookJournal(indexPath);loadErr==nil { _,err=io.WriteString(os.Stdout,existing.Response);return err } else if !errors.Is(loadErr,os.ErrNotExist){return loadErr}
+	if existing,loadErr:=readHookJournal(indexPath);loadErr==nil { if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority"{manifest,validateErr:=apps.ValidateLinuxApplicationCatalog(context.Background(),"",time.Now().UTC());if validateErr!=nil||manifest.ReleaseID!=invocation.Release{return errors.Join(errors.New("application catalog no longer matches installer receipt"),validateErr)}};_,err=io.WriteString(os.Stdout,existing.Response);return err } else if !errors.Is(loadErr,os.ErrNotExist){return loadErr}
 	changed,err:=applyHook(invocation);if err!=nil{return err}
 	responseValue:=struct{Version uint32 `json:"version"`;Hook,Release,Component,State string}{1,invocation.Verb,invocation.Release,invocation.Component,"applied"}
 	response,err:=json.Marshal(responseValue);if err!=nil{return err};response=append(response,'\n');sum:=sha256.Sum256(response);receiptDigest:=hex.EncodeToString(sum[:])
@@ -78,8 +80,8 @@ func parseHookInvocation(arguments []string)(hookInvocation,error){
 
 func applyHook(invocation hookInvocation)([]string,error){
 	switch invocation.Verb {
-	case "initialize-authority":return initializeAuthority()
-	case "migrate-authority":return migrateAuthority()
+	case "initialize-authority":changed,err:=initializeAuthority();if err!=nil{return nil,err};catalog,err:=provisionApplicationCatalog(invocation.Release);return append(changed,catalog...),err
+	case "migrate-authority":changed,err:=migrateAuthority();if err!=nil{return nil,err};catalog,err:=provisionApplicationCatalog(invocation.Release);return append(changed,catalog...),err
 	case "bootstrap-secrets":return bootstrapSecrets()
 	case "bootstrap-authn":return bootstrapAuthn()
 	case "bootstrap-database":return bootstrapDatabaseAuthority()
@@ -88,6 +90,13 @@ func applyHook(invocation hookInvocation)([]string,error){
 	case "reconcile-services":return reconcileServiceAuthority()
 	default:return nil,errors.New("unsupported installer hook")
 	}
+}
+
+func provisionApplicationCatalog(releaseID string)([]string,error){
+	executable,err:=os.Executable();if err!=nil{return nil,err};executable,err=filepath.EvalSymlinks(executable);if err!=nil{return nil,err}
+	source:=filepath.Join(filepath.Dir(executable),"application-catalog")
+	receipt,err:=apps.ProvisionLinuxApplicationCatalog(context.Background(),apps.LinuxApplicationCatalogProvisionRequest{SourceRoot:source,DestinationRoot:apps.DefaultApplicationCatalogRoot,ReleaseID:releaseID});if err!=nil{return nil,err}
+	return []string{receipt.CandidateGeneration,receipt.RollbackManifest,apps.DefaultApplicationCatalogRoot},nil
 }
 
 func initializeAuthority()([]string,error){
@@ -165,7 +174,7 @@ func reconcileServiceAuthority()([]string,error){return ensureAuthorityMarker("s
 func ensureAuthorityMarker(name,value string)([]string,error){uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};root:="/var/lib/cyberpanel/control/bootstrap";if err=ensureOwnedDirectory(root,0700,uid,gid);err!=nil{return nil,err};path:=filepath.Join(root,name+".json");payload,_:=json.Marshal(struct{Version uint32 `json:"version"`;Kind,Contract string;CreatedAt time.Time `json:"created_at"`}{1,name,value,time.Now().UTC()});if _,err=ensureOwnedFile(path,0600,uid,gid,payload);err!=nil{return nil,err};return []string{path},nil}
 
 func rollbackInstallerHook(invocation hookInvocation)error{
-	path:=filepath.Join(hookRoot,"receipts",invocation.ReceiptDigest+".json");journal,err:=readHookJournal(path);if err!=nil{return err};if journal.Verb!=strings.ReplaceAll(invocation.Hook,"_","-")&&journal.Verb!=invocation.Hook{return errors.New("rollback hook receipt mismatch")};if journal.Release!=invocation.Release{return errors.New("rollback release mismatch")};if journal.State=="rolled_back"{_,err=io.WriteString(os.Stdout,"{\"version\":1,\"state\":\"rolled_back\"}\n");return err};journal.State="rolled_back";journal.UpdatedAt=time.Now().UTC();if err=writeHookJournal(path,journal);err!=nil{return err};_,err=io.WriteString(os.Stdout,"{\"version\":1,\"state\":\"rolled_back\"}\n");return err
+	path:=filepath.Join(hookRoot,"receipts",invocation.ReceiptDigest+".json");journal,err:=readHookJournal(path);if err!=nil{return err};if journal.Verb!=strings.ReplaceAll(invocation.Hook,"_","-")&&journal.Verb!=invocation.Hook{return errors.New("rollback hook receipt mismatch")};if journal.Release!=invocation.Release{return errors.New("rollback release mismatch")};if journal.State=="rolled_back"{_,err=io.WriteString(os.Stdout,"{\"version\":1,\"state\":\"rolled_back\"}\n");return err};if journal.Verb=="initialize-authority"||journal.Verb=="migrate-authority"{if err=apps.RollbackLinuxApplicationCatalog(context.Background(),"",journal.Release,time.Now().UTC());err!=nil{return err}};journal.State="rolled_back";journal.UpdatedAt=time.Now().UTC();if err=writeHookJournal(path,journal);err!=nil{return err};_,err=io.WriteString(os.Stdout,"{\"version\":1,\"state\":\"rolled_back\"}\n");return err
 }
 
 func ensureHookDirectory()error{for _,path:=range []string{hookRoot,filepath.Join(hookRoot,"receipts"),filepath.Join(hookRoot,"by-hook")}{if err:=ensureOwnedDirectory(path,0700,0,0);err!=nil{return err}};return nil}
