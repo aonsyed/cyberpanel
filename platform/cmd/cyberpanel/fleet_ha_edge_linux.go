@@ -62,6 +62,115 @@ func (edge *fleetHAEdge) GetNode(ctx context.Context, call apiserver.EdgeCall) (
 	return fleetNodeProjection(node), nil
 }
 
+func (edge *fleetHAEdge) TopologyStatus(ctx context.Context, call apiserver.EdgeCall) (apiserver.HATopologyStatusProjection, error) {
+	if edge == nil || edge.repository == nil || ctx == nil || call.TenantID != "" || call.ResourceID == "" {
+		return apiserver.HATopologyStatusProjection{}, ha.ErrInvalid
+	}
+	selected, err := edge.repository.LoadNode(ctx, ha.NodeID(call.ResourceID))
+	if err != nil {
+		return apiserver.HATopologyStatusProjection{}, err
+	}
+	group, err := edge.repository.LoadNodeGroup(ctx, selected.GroupID)
+	if err != nil {
+		return apiserver.HATopologyStatusProjection{}, err
+	}
+	if err = group.Validate(); err != nil {
+		return apiserver.HATopologyStatusProjection{}, err
+	}
+	nodes, err := edge.repository.ListNodes(ctx, group.ID)
+	if err != nil {
+		return apiserver.HATopologyStatusProjection{}, err
+	}
+	nodeProjections := make([]apiserver.FleetNodeProjection, 0, len(nodes))
+	for _, node := range nodes {
+		if err = node.Validate(); err != nil {
+			return apiserver.HATopologyStatusProjection{}, err
+		}
+		nodeProjections = append(nodeProjections, fleetNodeProjection(node))
+	}
+	leases, err := edge.repository.ListActiveWriterLeases(ctx, group.ID)
+	if err != nil {
+		return apiserver.HATopologyStatusProjection{}, err
+	}
+	now := edge.now().UTC()
+	authorities := make([]apiserver.HAWriterAuthorityProjection, 0, len(leases))
+	for _, lease := range leases {
+		paths := append([]string(nil), lease.EnforcedWritePaths...)
+		sort.Strings(paths)
+		authorities = append(authorities, apiserver.HAWriterAuthorityProjection{
+			LeaseID:string(lease.ID), ResourceID:lease.ResourceID, HolderNodeID:string(lease.HolderNodeID), State:string(lease.State),
+			EnforcedWritePaths:paths, Generation:lease.Generation, ExpiresAt:lease.ExpiresAt, Current:now.Before(lease.ExpiresAt),
+		})
+	}
+	fenceClasses := make([]string, len(group.RequiredFenceClasses))
+	for index, class := range group.RequiredFenceClasses {
+		fenceClasses[index] = string(class)
+	}
+	sort.Strings(fenceClasses)
+	return apiserver.HATopologyStatusProjection{
+		ID:string(group.ID), SelectedNodeID:string(selected.ID), Name:group.Name, State:group.State, CoordinatorID:group.CoordinatorID,
+		MinimumManagers:group.MinimumManagers, AutomaticFailoverConfigured:group.AutomaticFailover, RequiredFenceClasses:fenceClasses,
+		Nodes:nodeProjections, WriterAuthorities:authorities, Generation:group.Generation, UpdatedAt:group.UpdatedAt,
+	}, nil
+}
+
+func (edge *fleetHAEdge) NodeHealth(ctx context.Context, call apiserver.EdgeCall) (apiserver.HANodeHealthProjection, error) {
+	if edge == nil || edge.repository == nil || ctx == nil || call.TenantID != "" || call.ResourceID == "" {
+		return apiserver.HANodeHealthProjection{}, ha.ErrInvalid
+	}
+	node, err := edge.repository.LoadNode(ctx, ha.NodeID(call.ResourceID))
+	if err != nil {
+		return apiserver.HANodeHealthProjection{}, err
+	}
+	observed, err := edge.repository.ListHealthObservations(ctx, node.ID)
+	if err != nil {
+		return apiserver.HANodeHealthProjection{}, err
+	}
+	now := edge.now().UTC()
+	status := string(ha.HealthUnknown)
+	firstFreshState, firstFreshBootID, firstFreshCapability := "", "", ""
+	asymmetric := false
+	var fresh, stale uint64
+	observations := make([]apiserver.HAHealthObservationProjection, 0, len(observed))
+	for _, observation := range observed {
+		observer, loadErr := edge.repository.LoadNode(ctx, observation.ObserverNodeID)
+		if loadErr != nil || observer.GroupID != node.GroupID {
+			return apiserver.HANodeHealthProjection{}, ha.ErrInvalid
+		}
+		isFresh := now.Before(observation.ValidUntil)
+		if isFresh {
+			fresh++
+			if firstFreshState == "" {
+				firstFreshState = string(observation.State)
+				firstFreshBootID = observation.BootID
+				firstFreshCapability = observation.CapabilityDigest
+			} else if firstFreshState != string(observation.State) || firstFreshBootID != observation.BootID || firstFreshCapability != observation.CapabilityDigest {
+				asymmetric = true
+			}
+		} else {
+			stale++
+		}
+		checks := make(map[string]bool, len(observation.Checks))
+		for key, value := range observation.Checks {
+			checks[key] = value
+		}
+		observations = append(observations, apiserver.HAHealthObservationProjection{
+			ObserverNodeID:string(observation.ObserverNodeID), State:string(observation.State), Checks:checks, Latency:observation.Latency,
+			BootID:observation.BootID, CapabilityDigest:observation.CapabilityDigest, ObservedAt:observation.ObservedAt,
+			ValidUntil:observation.ValidUntil, Sequence:observation.Sequence, Fresh:isFresh,
+		})
+	}
+	if asymmetric {
+		status = "asymmetric"
+	} else if firstFreshState != "" {
+		status = firstFreshState
+	}
+	return apiserver.HANodeHealthProjection{
+		ID:string(node.ID), NodeState:string(node.State), Status:status, Asymmetric:asymmetric,
+		FreshObservations:fresh, StaleObservations:stale, Observations:observations, Generation:node.Generation,
+	}, nil
+}
+
 func (edge *fleetHAEdge) EnrollNode(ctx context.Context, call apiserver.EdgeCall, payload apiserver.FleetEnrollPayload, token []byte) (apiserver.EdgeMutation[apiserver.FleetNodeProjection], error) {
 	defer wipeFleetToken(token)
 	if edge == nil || edge.repository == nil || ctx == nil || call.TenantID != "" || call.ResourceID != "" || call.CommandID == "" || len(token) == 0 || strings.TrimSpace(payload.CentralFingerprint) == "" {
@@ -107,8 +216,16 @@ func (edge *fleetHAEdge) PlanPromotion(ctx context.Context, call apiserver.EdgeC
 	if edge == nil || edge.repository == nil || ctx == nil || call.TenantID != "" || call.ResourceID == "" || call.CommandID == "" || call.ExpectedGeneration == 0 {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrInvalid
 	}
+	resourceID := call.ResourceID
+	expectedLeaseGeneration := call.ExpectedGeneration
+	selectedWriter := ha.NodeID("")
+	if payload.ProtectedResourceID != "" {
+		resourceID = payload.ProtectedResourceID
+		expectedLeaseGeneration = payload.WriterLeaseGeneration
+		selectedWriter = ha.NodeID(call.ResourceID)
+	}
 	if existing, err := edge.repository.PromotionByCommand(ctx, ha.CommandID(call.CommandID)); err == nil {
-		if existing.ResourceID != call.ResourceID || existing.Candidate != ha.NodeID(payload.CandidateNodeID) || existing.MaximumDataLoss != payload.MaximumDataLoss || existing.ExpectedGeneration != call.ExpectedGeneration {
+		if existing.ResourceID != resourceID || selectedWriter != "" && existing.PreviousWriter != selectedWriter || existing.Candidate != ha.NodeID(payload.CandidateNodeID) || existing.MaximumDataLoss != payload.MaximumDataLoss || existing.ExpectedGeneration != expectedLeaseGeneration {
 			return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrConflict
 		}
 		return promotionMutation(existing, promotionPlanDigest(existing)), nil
@@ -116,6 +233,17 @@ func (edge *fleetHAEdge) PlanPromotion(ctx context.Context, call apiserver.EdgeC
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
 	}
 	now := edge.now().UTC()
+	var writer ha.NodeMember
+	if selectedWriter != "" {
+		var err error
+		writer, err = edge.repository.LoadNode(ctx, selectedWriter)
+		if err != nil {
+			return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
+		}
+		if writer.Generation != call.ExpectedGeneration {
+			return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrStaleGeneration
+		}
+	}
 	candidate, err := edge.repository.LoadNode(ctx, ha.NodeID(payload.CandidateNodeID))
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
@@ -123,17 +251,17 @@ func (edge *fleetHAEdge) PlanPromotion(ctx context.Context, call apiserver.EdgeC
 	if candidate.State != ha.NodeReady {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrUnsafePromotion
 	}
-	lease, err := edge.repository.ActiveWriterLeaseByResource(ctx, call.ResourceID)
+	lease, err := edge.repository.ActiveWriterLeaseByResource(ctx, resourceID)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
 	}
-	if lease.Generation != call.ExpectedGeneration || lease.GroupID != candidate.GroupID || lease.HolderNodeID == candidate.ID {
+	if lease.Generation != expectedLeaseGeneration || lease.GroupID != candidate.GroupID || selectedWriter != "" && (lease.HolderNodeID != selectedWriter || writer.GroupID != lease.GroupID) || lease.HolderNodeID == candidate.ID {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrStaleGeneration
 	}
 	if err = lease.Validate(now); err != nil {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
 	}
-	channel, err := edge.repository.ChannelForResourceTarget(ctx, candidate.GroupID, call.ResourceID, lease.HolderNodeID, candidate.ID)
+	channel, err := edge.repository.ChannelForResourceTarget(ctx, candidate.GroupID, resourceID, lease.HolderNodeID, candidate.ID)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
 	}
@@ -144,7 +272,7 @@ func (edge *fleetHAEdge) PlanPromotion(ctx context.Context, call apiserver.EdgeC
 	if err = checkpoint.Validate(); err != nil || checkpoint.SourceGeneration == 0 {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrCheckpointStale
 	}
-	traffic, err := edge.repository.TrafficPolicyByResource(ctx, candidate.GroupID, call.ResourceID)
+	traffic, err := edge.repository.TrafficPolicyByResource(ctx, candidate.GroupID, resourceID)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
 	}
@@ -154,8 +282,8 @@ func (edge *fleetHAEdge) PlanPromotion(ctx context.Context, call apiserver.EdgeC
 	potentialLoss := checkpoint.LagDuration > 0 || checkpoint.LagBytes > 0
 	blocked := checkpoint.LagDuration > payload.MaximumDataLoss || payload.MaximumDataLoss == 0 && checkpoint.LagBytes > 0
 	promotion := ha.Promotion{
-		ID:ha.PromotionID(fleetEffectID("promotion", call.CommandID, call.ResourceID)), CommandID:ha.CommandID(call.CommandID), GroupID:candidate.GroupID,
-		ResourceID:call.ResourceID, PreviousWriter:lease.HolderNodeID, Candidate:candidate.ID, ExpectedGeneration:call.ExpectedGeneration,
+		ID:ha.PromotionID(fleetEffectID("promotion", call.CommandID, resourceID)), CommandID:ha.CommandID(call.CommandID), GroupID:candidate.GroupID,
+		ResourceID:resourceID, PreviousWriter:lease.HolderNodeID, Candidate:candidate.ID, ExpectedGeneration:expectedLeaseGeneration,
 		CheckpointID:checkpoint.ID, CheckpointFrontier:checkpoint.WriteFrontier, MaximumDataLoss:payload.MaximumDataLoss, LeaseID:lease.ID,
 		TrafficPolicyID:traffic.ID, Automatic:false, PotentialDataLoss:potentialLoss, State:ha.PromotionPlanned,
 		WriteFrontier:checkpoint.WriteFrontier, Generation:1, CreatedAt:now, UpdatedAt:now,
@@ -166,7 +294,7 @@ func (edge *fleetHAEdge) PlanPromotion(ctx context.Context, call apiserver.EdgeC
 	}
 	if err = edge.repository.CreatePromotion(ctx, promotion); err != nil {
 		existing, loadErr := edge.repository.PromotionByCommand(ctx, promotion.CommandID)
-		if loadErr != nil || existing.ID != promotion.ID || existing.ResourceID != promotion.ResourceID || existing.Candidate != promotion.Candidate {
+		if loadErr != nil || existing.ID != promotion.ID || existing.ResourceID != promotion.ResourceID || existing.PreviousWriter != promotion.PreviousWriter || existing.Candidate != promotion.Candidate || existing.ExpectedGeneration != promotion.ExpectedGeneration || existing.MaximumDataLoss != promotion.MaximumDataLoss {
 			return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
 		}
 		promotion = existing
@@ -198,7 +326,11 @@ func promotionMutation(promotion ha.Promotion, digest string) apiserver.EdgeMuta
 	} else if promotion.PotentialDataLoss {
 		state = "requires_approval"
 	}
-	projection := apiserver.HAPromotionProjection{ID:string(promotion.ID), ResourceID:promotion.ResourceID, CandidateNodeID:string(promotion.Candidate), MaximumDataLoss:promotion.MaximumDataLoss, PlanDigest:digest, State:state, Generation:promotion.Generation}
+	projection := apiserver.HAPromotionProjection{
+		ID:string(promotion.ID), ResourceID:promotion.ResourceID, PreviousWriterNodeID:string(promotion.PreviousWriter), CandidateNodeID:string(promotion.Candidate),
+		WriterLeaseGeneration:promotion.ExpectedGeneration, MaximumDataLoss:promotion.MaximumDataLoss, PotentialDataLoss:promotion.PotentialDataLoss,
+		PlanDigest:digest, State:state, Failure:promotion.Failure, Generation:promotion.Generation,
+	}
 	return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{OperationID:string(promotion.CommandID), State:state, Generation:promotion.Generation, Resource:projection}
 }
 

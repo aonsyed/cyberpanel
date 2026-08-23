@@ -26,6 +26,7 @@ const availableCreate = computed(() => props.definition.createAction && api.avai
 const availableGlobalActions = computed(() => (props.definition.globalActions || []).filter((action) => api.available(action.operation)));
 const availableRowActions = computed(() => (props.definition.rowActions || []).filter((action) => api.available(action.operation)));
 const listAvailable = computed(() => api.available(props.definition.listOperation));
+const tenantID = computed(() => props.definition.scope === "installation" ? undefined : sessionStore.state.tenantId || undefined);
 const visibleRows = computed(() => {
   const term = search.value.trim().toLocaleLowerCase();
   const filtered = term ? rows.value.filter((row) => Object.values(row).some((value) => primitiveText(value).toLocaleLowerCase().includes(term))) : rows.value.slice();
@@ -49,7 +50,7 @@ async function load(): Promise<void> {
   }
   try {
     const response = await api.invoke<unknown>(props.definition.listOperation, {
-      tenantId: sessionStore.state.tenantId || undefined,
+      tenantId: tenantID.value,
       payload: { cursor: cursor.value || undefined, limit: 100 }
     });
     const normalized = normalizeCollection(response.result);
@@ -123,7 +124,7 @@ function isRecord(value: unknown): value is Record<string, unknown> { return Boo
       <footer v-if="nextCursor || previousCursors.length" class="pagination"><button class="button button-small" type="button" :disabled="!previousCursors.length" @click="previousPage">Previous</button><span class="mono">CURSOR PAGE {{ previousCursors.length + 1 }}</span><button class="button button-small" type="button" :disabled="!nextCursor" @click="nextPage">Next</button></footer>
     </template>
 
-    <ActionDrawer v-if="activeAction" :action="activeAction" :tenant-id="sessionStore.state.tenantId" :resource="activeResource" :expected-generation="Number(activeResource?.generation || 0)" @close="activeAction=null;activeResource=null" @complete="complete"/>
+    <ActionDrawer v-if="activeAction" :action="activeAction" :tenant-id="tenantID" :resource="activeResource" :expected-generation="Number(activeResource?.generation || 0)" @close="activeAction=null;activeResource=null" @complete="complete"/>
   </main>
 </template>
 

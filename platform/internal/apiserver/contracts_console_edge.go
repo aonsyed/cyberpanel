@@ -17,6 +17,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
 	"github.com/aonsyed/cyberpanel/platform/internal/database"
 	"github.com/aonsyed/cyberpanel/platform/internal/federation"
+	"github.com/aonsyed/cyberpanel/platform/internal/ha"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
@@ -651,6 +652,56 @@ type FleetNodeProjection struct {
 	Generation          uint64    `json:"generation"`
 }
 
+type HAWriterAuthorityProjection struct {
+	LeaseID            string    `json:"lease_id"`
+	ResourceID         string    `json:"resource_id"`
+	HolderNodeID       string    `json:"holder_node_id"`
+	State              string    `json:"state"`
+	EnforcedWritePaths []string  `json:"enforced_write_paths"`
+	Generation         uint64    `json:"generation"`
+	ExpiresAt          time.Time `json:"expires_at"`
+	Current            bool      `json:"current"`
+}
+
+type HATopologyStatusProjection struct {
+	ID                   string                        `json:"id"`
+	SelectedNodeID       string                        `json:"selected_node_id"`
+	Name                 string                        `json:"name"`
+	State                string                        `json:"state"`
+	CoordinatorID        string                        `json:"coordinator_id"`
+	MinimumManagers      uint8                         `json:"minimum_managers"`
+	AutomaticFailoverConfigured bool                    `json:"automatic_failover_configured"`
+	RequiredFenceClasses []string                      `json:"required_fence_classes"`
+	Nodes                []FleetNodeProjection         `json:"nodes"`
+	WriterAuthorities    []HAWriterAuthorityProjection `json:"writer_authorities"`
+	Generation           uint64                        `json:"generation"`
+	UpdatedAt            time.Time                     `json:"updated_at"`
+}
+
+type HAHealthObservationProjection struct {
+	ObserverNodeID   string          `json:"observer_node_id"`
+	State            string          `json:"state"`
+	Checks           map[string]bool `json:"checks"`
+	Latency          time.Duration   `json:"latency"`
+	BootID           string          `json:"boot_id"`
+	CapabilityDigest string         `json:"capability_digest"`
+	ObservedAt       time.Time       `json:"observed_at"`
+	ValidUntil       time.Time       `json:"valid_until"`
+	Sequence         uint64          `json:"sequence"`
+	Fresh            bool            `json:"fresh"`
+}
+
+type HANodeHealthProjection struct {
+	ID                string                          `json:"id"`
+	NodeState         string                          `json:"node_state"`
+	Status            string                          `json:"status"`
+	Asymmetric        bool                            `json:"asymmetric"`
+	FreshObservations uint64                          `json:"fresh_observations"`
+	StaleObservations uint64                          `json:"stale_observations"`
+	Observations      []HAHealthObservationProjection `json:"observations"`
+	Generation        uint64                          `json:"generation"`
+}
+
 type FleetEnrollPayload struct {
 	PeerID              string `json:"peer_id"`
 	CentralEndpoint     string `json:"central_endpoint"`
@@ -664,18 +715,24 @@ type HANodeDrainPayload struct {
 }
 
 type HAPromotionPlanPayload struct {
-	CandidateNodeID string        `json:"candidate_node_id"`
-	MaximumDataLoss time.Duration `json:"maximum_data_loss"`
+	ProtectedResourceID   string        `json:"protected_resource_id,omitempty"`
+	WriterLeaseGeneration uint64       `json:"writer_lease_generation,omitempty"`
+	CandidateNodeID        string        `json:"candidate_node_id"`
+	MaximumDataLoss        time.Duration `json:"maximum_data_loss"`
 }
 
 type HAPromotionProjection struct {
-	ID                string        `json:"id"`
-	ResourceID        string        `json:"resource_id"`
-	CandidateNodeID   string        `json:"candidate_node_id"`
-	MaximumDataLoss   time.Duration `json:"maximum_data_loss"`
-	PlanDigest        string        `json:"plan_digest"`
-	State             string        `json:"state"`
-	Generation        uint64        `json:"generation"`
+	ID                    string        `json:"id"`
+	ResourceID            string        `json:"resource_id"`
+	PreviousWriterNodeID  string        `json:"previous_writer_node_id"`
+	CandidateNodeID       string        `json:"candidate_node_id"`
+	WriterLeaseGeneration uint64       `json:"writer_lease_generation"`
+	MaximumDataLoss       time.Duration `json:"maximum_data_loss"`
+	PotentialDataLoss     bool          `json:"potential_data_loss"`
+	PlanDigest            string        `json:"plan_digest"`
+	State                 string        `json:"state"`
+	Failure               string        `json:"failure,omitempty"`
+	Generation            uint64        `json:"generation"`
 }
 
 type MigrationProjection struct {
@@ -989,6 +1046,8 @@ type FleetEdgeService interface {
 }
 
 type HAEdgeService interface {
+	TopologyStatus(context.Context, EdgeCall) (HATopologyStatusProjection, error)
+	NodeHealth(context.Context, EdgeCall) (HANodeHealthProjection, error)
 	DrainNode(context.Context, EdgeCall, HANodeDrainPayload) (EdgeMutation[FleetNodeProjection], error)
 	PlanPromotion(context.Context, EdgeCall, HAPromotionPlanPayload) (EdgeMutation[HAPromotionProjection], error)
 }
@@ -1145,6 +1204,8 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("fleet.node.get", "fleet:observe", password, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
 		consoleOperation("fleet.node.enroll", "fleet:manage", mfa, true, func() any { return &FleetEnrollPayload{} }, validateFleetEnroll, edgeInstallationCreateScope),
 		consoleOperation("fleet.node.revoke", "fleet:manage", phishingResistant, true, func() any { return &EmptyPayload{} }, nil, edgeInstallationExistingMutationScope),
+		consoleOperation("ha.topology.status", "fleet:observe", password, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
+		consoleOperation("ha.node.health", "fleet:observe", password, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
 		consoleOperation("ha.node.drain", "ha:manage", mfa, true, func() any { return &HANodeDrainPayload{} }, validateHANodeDrain, edgeInstallationExistingMutationScope),
 		consoleOperation("ha.promotion.plan", "ha:manage", phishingResistant, true, func() any { return &HAPromotionPlanPayload{} }, validateHAPromotionPlan, edgeInstallationExistingMutationScope),
 
@@ -1593,8 +1654,22 @@ func validateHANodeDrain(value any) error {
 
 func validateHAPromotionPlan(value any) error {
 	payload := value.(*HAPromotionPlanPayload)
-	if !validEdgeID(payload.CandidateNodeID) || payload.MaximumDataLoss < 0 || payload.MaximumDataLoss > 24*time.Hour { return invalid("promotion plan") }
+	explicitWriterContext := payload.ProtectedResourceID != "" || payload.WriterLeaseGeneration != 0
+	if !validEdgeID(payload.CandidateNodeID) || payload.MaximumDataLoss < 0 || payload.MaximumDataLoss > 24*time.Hour || explicitWriterContext && (!validEdgeID(payload.ProtectedResourceID) || payload.WriterLeaseGeneration == 0) { return invalid("promotion plan") }
 	return nil
+}
+
+func mapHAEdgeError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ha.ErrLeaseLost), errors.Is(err, ha.ErrCheckpointStale):
+		return ErrConflict
+	case errors.Is(err, ha.ErrFenceFailed), errors.Is(err, ha.ErrSplitBrainRisk), errors.Is(err, ha.ErrDataLossApproval), errors.Is(err, ha.ErrIrreversibleFrontier):
+		return ErrUnavailable
+	default:
+		return mapDomainError(err)
+	}
 }
 
 func validateMigrationCreate(value any) error {
@@ -2310,12 +2385,20 @@ func bindConsoleEdgeContractsThree(registry *Registry, services DomainServices) 
 		}); err != nil { return err }
 	}
 	if services.HAEdge != nil {
+		if err := registry.Bind("ha.topology.status", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.HAEdge.TopologyStatus(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapHAEdgeError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result, Generation:result.Generation}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("ha.node.health", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.HAEdge.NodeHealth(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapHAEdgeError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result, Generation:result.Generation}, nil
+		}); err != nil { return err }
 		if err := registry.Bind("ha.node.drain", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
-			result, err := services.HAEdge.DrainNode(ctx, edgeCall(inv), *value.(*HANodeDrainPayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			result, err := services.HAEdge.DrainNode(ctx, edgeCall(inv), *value.(*HANodeDrainPayload)); if err != nil { return OperationResult{}, mapHAEdgeError(err) }
 			return edgeOperationResult(http.StatusAccepted, result), nil
 		}); err != nil { return err }
 		if err := registry.Bind("ha.promotion.plan", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
-			result, err := services.HAEdge.PlanPromotion(ctx, edgeCall(inv), *value.(*HAPromotionPlanPayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			result, err := services.HAEdge.PlanPromotion(ctx, edgeCall(inv), *value.(*HAPromotionPlanPayload)); if err != nil { return OperationResult{}, mapHAEdgeError(err) }
 			return edgeOperationResult(http.StatusCreated, result), nil
 		}); err != nil { return err }
 	}
