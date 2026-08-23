@@ -18,6 +18,8 @@ var (
 	ErrConflict = errors.New("mail resource generation conflict")
 	ErrRateLimited = errors.New("mail delivery admission limit reached")
 	ErrSuppressed = errors.New("mail recipient is currently suppressed")
+	ErrCampaignPaused = fmt.Errorf("%w: campaign is paused", ErrConflict)
+	ErrCampaignStopped = fmt.Errorf("%w: campaign is no longer sendable", ErrConflict)
 	ErrNotFound = errors.New("mail resource not found")
 	ErrAmbiguous = errors.New("mail effect outcome is ambiguous")
 	ErrInvalidReceipt = errors.New("invalid mail effect receipt")

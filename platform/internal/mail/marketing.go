@@ -44,11 +44,59 @@ func (s MarketingStore)Attempts(ctx context.Context,tenant string,campaign Campa
 func (s MarketingStore)ConsentEvents(ctx context.Context,tenant string,state ConsentState,limit int,cursor string)([]ConsentEvent,string,error){if s.DB==nil{return nil,"",errors.New("marketing database required")};if state!=Consented&&state!=Suppressed{return nil,"",ErrInvalidCommand};if limit<1||limit>500{limit=100};after,err:=decodeCursor(cursor);if err!=nil{return nil,"",err};rows,err:=s.DB.QueryContext(ctx,`SELECT id,event_json FROM marketing_consent_events_v2 WHERE tenant_id=? AND state=? AND id>? ORDER BY id LIMIT ?`,tenant,state,after,limit+1);if err!=nil{return nil,"",err};defer rows.Close();items:=make([]ConsentEvent,0,limit+1);ids:=make([]string,0,limit+1);for rows.Next(){var id string;var raw []byte;if err=rows.Scan(&id,&raw);err!=nil{return nil,"",err};var item ConsentEvent;if err=strictJSON(raw,&item);err!=nil{return nil,"",err};items=append(items,item);ids=append(ids,id)};if err=rows.Err();err!=nil{return nil,"",err};next:="";if len(items)>limit{next=base64.RawURLEncoding.EncodeToString([]byte(ids[limit-1]));items=items[:limit]};return items,next,nil}
 
 type CampaignCoordinator struct { Store MarketingStore; Sender MarketingSender; Now func()time.Time }
-func (c CampaignCoordinator)SendOne(ctx context.Context,tenant string,campaign Campaign,recipient CampaignRecipient,attempt CampaignAttempt)(CampaignAttempt,error){if c.Sender==nil{return CampaignAttempt{},errors.New("marketing sender required")};if campaign.State!="running"||campaign.SnapshotRef==""||attempt.TenantID!=tenant||recipient.ContactID!=attempt.ContactID||recipient.Address!=attempt.Address||validateCampaignRecipient(recipient)!=nil{return CampaignAttempt{},ErrConflict};reserved,claimed,err:=c.Store.ReserveAttempt(ctx,attempt);if err!=nil{return CampaignAttempt{},err};if !claimed{return reserved,nil};consent,found,err:=c.Store.CurrentConsent(ctx,tenant,recipient.Address);if err!=nil{return CampaignAttempt{},err};if !found||consent.State!=Consented||consent.ContactID!=recipient.ContactID{reserved.State="suppressed";reserved.Detail="no current affirmative consent";if found&&consent.State==Suppressed{reserved.Detail="suppressed: "+string(consent.SuppressionReason)};return reserved,c.completeAttempt(ctx,reserved)};queueID,err:=c.Sender.SubmitCampaign(ctx,tenant,campaign,recipient,reserved.IdempotencyKey);switch{case errors.Is(err,ErrSuppressed):reserved.State="suppressed";reserved.Detail="suppressed before queue submission";case errors.Is(err,ErrRateLimited):reserved.State="deferred";reserved.Detail="campaign delivery capacity unavailable";reserved.NextAttempt=c.now().Add(campaignRetryDelay(reserved.Attempts));case errors.Is(err,ErrInvalidCommand),errors.Is(err,ErrUnauthorized),errors.Is(err,ErrConflict),errors.Is(err,ErrNotFound):reserved.State="failed";reserved.Detail=err.Error();case err!=nil:reserved.State="ambiguous";reserved.Detail=err.Error();default:reserved.State="queued";reserved.QueueID=queueID;reserved.Detail=""};return reserved,c.completeAttempt(ctx,reserved)}
+func (c CampaignCoordinator)SendOne(ctx context.Context,tenant string,campaign Campaign,recipient CampaignRecipient,attempt CampaignAttempt)(CampaignAttempt,error){
+	if c.Sender==nil{return CampaignAttempt{},errors.New("marketing sender required")}
+	if campaign.State!="running"||campaign.SnapshotRef==""||attempt.TenantID!=tenant||recipient.ContactID!=attempt.ContactID||recipient.Address!=attempt.Address||validateCampaignRecipient(recipient)!=nil{return CampaignAttempt{},ErrConflict}
+	reserved,claimed,err:=c.Store.ReserveAttempt(ctx,attempt)
+	if err!=nil{return CampaignAttempt{},err}
+	if !claimed{return reserved,nil}
+	consent,found,err:=c.Store.CurrentConsent(ctx,tenant,recipient.Address)
+	if err!=nil{
+		reserved.State="deferred"
+		reserved.Detail="consent authority temporarily unavailable"
+		reserved.NextAttempt=c.now().Add(campaignRetryDelay(reserved.Attempts))
+		if completeErr:=c.completeAttempt(ctx,reserved);completeErr!=nil{return reserved,errors.Join(err,completeErr)}
+		return reserved,err
+	}
+	if !found||consent.State!=Consented||consent.ContactID!=recipient.ContactID{
+		reserved.State="suppressed"
+		reserved.Detail="no current affirmative consent"
+		if found&&consent.State==Suppressed{reserved.Detail="suppressed: "+string(consent.SuppressionReason)}
+		return reserved,c.completeAttempt(ctx,reserved)
+	}
+	queueID,err:=c.Sender.SubmitCampaign(ctx,tenant,campaign,recipient,reserved.IdempotencyKey)
+	switch{
+	case errors.Is(err,ErrCampaignPaused):
+		reserved.State="deferred"
+		reserved.Detail="campaign paused before queue submission"
+		reserved.NextAttempt=c.now().Add(campaignRetryDelay(reserved.Attempts))
+	case errors.Is(err,ErrCampaignStopped):
+		reserved.State="cancelled"
+		reserved.Detail="campaign stopped before queue submission"
+	case errors.Is(err,ErrSuppressed):
+		reserved.State="suppressed"
+		reserved.Detail="suppressed before queue submission"
+	case errors.Is(err,ErrRateLimited):
+		reserved.State="deferred"
+		reserved.Detail="campaign delivery capacity unavailable"
+		reserved.NextAttempt=c.now().Add(campaignRetryDelay(reserved.Attempts))
+	case errors.Is(err,ErrInvalidCommand),errors.Is(err,ErrUnauthorized),errors.Is(err,ErrConflict),errors.Is(err,ErrNotFound):
+		reserved.State="failed"
+		reserved.Detail=err.Error()
+	case err!=nil:
+		reserved.State="ambiguous"
+		reserved.Detail=err.Error()
+	default:
+		reserved.State="queued"
+		reserved.QueueID=queueID
+		reserved.Detail=""
+	}
+	return reserved,c.completeAttempt(ctx,reserved)
+}
 func (c CampaignCoordinator)completeAttempt(ctx context.Context,attempt CampaignAttempt)error{if attempt.State!="deferred"{attempt.NextAttempt=time.Time{}};return c.Store.CompleteAttempt(ctx,attempt)}
 func (c CampaignCoordinator)now()time.Time{if c.Now!=nil{return c.Now().UTC()};return time.Now().UTC()}
 func campaignRetryDelay(attempt uint32)time.Duration{delay:=30*time.Second;for index:=uint32(1);index<attempt&&delay<30*time.Minute;index++{delay*=2};if delay>30*time.Minute{return 30*time.Minute};return delay}
-func validCampaignAttemptState(state string)bool{switch state{case"reserved","deferred","queued","suppressed","failed","ambiguous":return true};return false}
+func validCampaignAttemptState(state string)bool{switch state{case"reserved","deferred","queued","suppressed","cancelled","failed","ambiguous":return true};return false}
 func nextAttemptValue(value time.Time)any{if value.IsZero(){return nil};return value.UTC()}
 
 type UnsubscribeSigner struct { KeyID string; Key []byte; BaseURL string }

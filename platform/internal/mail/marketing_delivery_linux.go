@@ -63,13 +63,8 @@ func (sender *LocalCampaignSender) SubmitCampaign(ctx context.Context, tenant st
 	if sender == nil || sender.Client == nil || ctx == nil || !validOpaque(tenant) || validateCampaignRecord(tenant, campaign) != nil || campaign.State != "running" || validateCampaignRecipient(contact) != nil || !validOpaque(idempotencyKey) {
 		return "", ErrInvalidCommand
 	}
-	template, found, err := sender.Store.ApprovedTemplateVersion(ctx, tenant, campaign.TemplateRef)
-	if err != nil {
-		return "", err
-	}
-	if !found {
-		return "", ErrNotFound
-	}
+	template, err := sender.currentCampaignTemplate(ctx, tenant, campaign)
+	if err != nil { return "", err }
 	binding, domain, err := sender.resolveSender(ctx, tenant, campaign.FromMailbox)
 	if err != nil {
 		return "", err
@@ -104,8 +99,26 @@ func (sender *LocalCampaignSender) SubmitCampaign(ctx context.Context, tenant st
 	if !consentFound || consent.State != Consented || consent.ContactID != contact.ContactID {
 		return "", ErrSuppressed
 	}
+	// Re-read both mutable stop signals immediately beside submission. A pause,
+	// cancellation, campaign generation change, or template archive wins the
+	// race without sending another message.
+	if _, err = sender.currentCampaignTemplate(ctx, tenant, campaign); err != nil { return "", err }
 	submission := CampaignSubmission{CampaignID:campaign.ID, Sender:binding, Recipient:contact.Address, ReplyTo:campaign.ReplyTo, Subject:campaign.Subject, Text:text, SanitizedHTML:htmlBody, UnsubscribeURL:unsubscribeURL, IdempotencyKey:idempotencyKey}
 	return sender.Client.SubmitCampaign(ctx, submission)
+}
+
+func (sender *LocalCampaignSender) currentCampaignTemplate(ctx context.Context, tenant string, expected Campaign) (CampaignTemplate, error) {
+	current, found, err := sender.Store.Campaign(ctx, tenant, expected.ID)
+	if err != nil { return CampaignTemplate{}, err }
+	if !found { return CampaignTemplate{}, ErrCampaignStopped }
+	if current.State == "paused" { return CampaignTemplate{}, ErrCampaignPaused }
+	if current.State != "running" || current.Generation != expected.Generation || current.SnapshotRef != expected.SnapshotRef || current.TemplateRef != expected.TemplateRef {
+		return CampaignTemplate{}, ErrCampaignStopped
+	}
+	template, found, err := sender.Store.ApprovedTemplateVersion(ctx, tenant, current.TemplateRef)
+	if errors.Is(err, ErrConflict) || err == nil && !found { return CampaignTemplate{}, ErrCampaignStopped }
+	if err != nil { return CampaignTemplate{}, err }
+	return template, nil
 }
 
 func (sender *LocalCampaignSender) resolveSender(ctx context.Context, tenant string, mailboxID MailboxID) (WebmailBinding, Domain, error) {

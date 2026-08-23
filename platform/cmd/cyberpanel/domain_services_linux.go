@@ -77,7 +77,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	repositories.MailDeliveryPolicy.ResolveLimit=mail.ControlDeliveryLimitResolver(repositories.MailControl,mail.DeliveryLimit{HourlyMessages:500,MonthlyMessages:100000,HourlyRecipients:500,MonthlyRecipients:100000,MaxMessageBytes:16<<20,MaxRecipientsPerMessage:1})
 	unsubscribeKey,err:=mail.LoadCampaignUnsubscribeCredential(mail.CampaignUnsubscribeCredentialPath);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("load campaign unsubscribe authority: %w",err)};defer func(){for index:=range unsubscribeKey{unsubscribeKey[index]=0}}()
 	campaignSender,err:=mail.NewLocalCampaignSender(repositories.Marketing,repositories.MailControl,repositories.MailDeliveryPolicy,mailHostname,unsubscribeKey,"https://"+panelRegistrableDomain+"/unsubscribe");if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize campaign delivery runtime: %w",err)}
-	campaignCoordinator:=&mail.CampaignCoordinator{Store:repositories.Marketing,Sender:campaignSender}
+	campaignCoordinator:=&mail.CampaignCoordinator{Store:repositories.Marketing,Sender:campaignSender,Now:runtimeClock{}.Now}
 	unsubscribeService:=&mail.UnsubscribeService{Store:repositories.Marketing,Signer:campaignSender.Signer,Now:runtimeClock{}.Now}
 	dnsAuthority := dns.NewLocalPowerDNSControlClient()
 	dnssecCoordinator:=&dns.DNSSECCoordinator{Store:repositories.DNSSEC,Executor:dnsAuthority,Observer:dnsAuthority,Now:runtimeClock{}.Now}

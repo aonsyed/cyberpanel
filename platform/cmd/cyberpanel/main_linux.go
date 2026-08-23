@@ -114,6 +114,7 @@ func runCore(configuration coreConfiguration) error {
 		GatewayUIDs:[]uint32{gatewayUID},EnableRecovery:true,ShutdownTimeout:30*time.Second,
 	}}
 	if domainServices.HostingPreviews != nil { go domainServices.HostingPreviews.RunJanitor(ctx, 30*time.Second) }
+	if domainServices.Campaigns != nil { go domainServices.Campaigns.RunDispatchQueue(ctx, time.Second, 4) }
 	return process.Run(ctx)
 }
 
