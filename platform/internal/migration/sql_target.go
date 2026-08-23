@@ -439,6 +439,14 @@ func (authority *SQLCanonicalTargetAuthority) apply(ctx context.Context, intent 
 		return ambiguousImportEffect(intent, "TARGET_TRANSACTION_UNAVAILABLE", authority.clock().UTC()), err
 	}
 	defer tx.Rollback()
+	var runState string
+	if err = tx.QueryRowContext(ctx, `SELECT state FROM panel_migration_import_runs WHERE migration_id=?`, intent.MigrationID.String()).Scan(&runState); errors.Is(err, sql.ErrNoRows) {
+		return rejectedImportEffect(intent, "IMPORT_RUN_NOT_PREPARED", authority.clock().UTC()), ErrBlocked
+	} else if err != nil {
+		return ambiguousImportEffect(intent, "IMPORT_RUN_OBSERVATION_FAILED", authority.clock().UTC()), err
+	} else if runState != "prepared" {
+		return rejectedImportEffect(intent, "IMPORT_RUN_NOT_WRITABLE", authority.clock().UTC()), ErrBlocked
+	}
 	if err = authority.requireSecrets(ctx, tx, intent.MigrationID, intent.SecretIDs, shape.secretPurposes); err != nil {
 		return rejectedImportEffect(intent, "SECRET_NOT_READY", authority.clock().UTC()), errors.Join(ErrBlocked, err)
 	}
@@ -597,12 +605,31 @@ func (authority *SQLCanonicalTargetAuthority) compensate(ctx context.Context, in
 		return ambiguousImportEffect(intent, "COMPENSATION_OBSERVATION_FAILED", authority.clock().UTC()), err
 	}
 	if !found {
-		return rejectedImportEffect(intent, "COMPENSATION_TARGET_MISSING", authority.clock().UTC()), ErrNotFound
+		now := authority.clock().UTC()
+		evidence, digestErr := canonicalTargetDigest("canonical-resource-compensation-absence-v1", struct {
+			MigrationID       ID
+			Kind              ImportResourceKind
+			SourceID, TargetID ID
+			EffectID           string
+			InputDigest        string
+			SourceGeneration   uint64
+			Fence              uint64
+		}{intent.MigrationID, intent.Kind, intent.SourceID, intent.TargetID, intent.EffectID, intent.InputDigest, intent.SourceGeneration, intent.Fence})
+		if digestErr != nil {
+			return ImportEffect{}, digestErr
+		}
+		return ImportEffect{EffectID: intent.EffectID, InputDigest: intent.InputDigest, Status: ImportEffectCompensated, EvidenceDigest: evidence, AppliedAt: now, ErrorCode: "COMPENSATION_TARGET_ABSENT"}, nil
 	}
 	if stored.effectID != intent.EffectID || stored.inputDigest != intent.InputDigest || stored.targetID != intent.TargetID {
 		return rejectedImportEffect(intent, "COMPENSATION_EFFECT_CONFLICT", authority.clock().UTC()), ErrConflict
 	}
 	if stored.state == "compensated" {
+		if _, err = tx.ExecContext(ctx, `UPDATE panel_migration_target_resources SET payload_json=?,chunks_json=?,secret_ids_json=? WHERE migration_id=? AND resource_kind=? AND source_id=? AND effect_id=? AND state='compensated'`, []byte("null"), []byte("[]"), []byte("[]"), intent.MigrationID.String(), string(intent.Kind), intent.SourceID.String(), intent.EffectID); err != nil {
+			return ambiguousImportEffect(intent, "COMPENSATION_SCRUB_AMBIGUOUS", authority.clock().UTC()), err
+		}
+		if err = tx.Commit(); err != nil {
+			return ambiguousImportEffect(intent, "COMPENSATION_SCRUB_COMMIT_AMBIGUOUS", authority.clock().UTC()), err
+		}
 		return stored.effect, nil
 	}
 	if stored.state != "dark" {
@@ -625,7 +652,7 @@ func (authority *SQLCanonicalTargetAuthority) compensate(ctx context.Context, in
 	if err != nil {
 		return ImportEffect{}, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_target_resources SET state='compensated',effect_json=?,evidence_digest=?,updated_at=? WHERE migration_id=? AND resource_kind=? AND source_id=? AND effect_id=? AND state='dark'`, raw, compensationEvidence, encodeTime(now), intent.MigrationID.String(), string(intent.Kind), intent.SourceID.String(), intent.EffectID)
+	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_target_resources SET state='compensated',effect_json=?,payload_json=?,chunks_json=?,secret_ids_json=?,evidence_digest=?,updated_at=? WHERE migration_id=? AND resource_kind=? AND source_id=? AND effect_id=? AND state='dark'`, raw, []byte("null"), []byte("[]"), []byte("[]"), compensationEvidence, encodeTime(now), intent.MigrationID.String(), string(intent.Kind), intent.SourceID.String(), intent.EffectID)
 	if err == nil {
 		var rows int64
 		rows, err = result.RowsAffected()
@@ -776,8 +803,18 @@ func (authority *SQLCanonicalTargetAuthority) RevokeMigrationSecrets(ctx context
 	authority.mu.Lock()
 	defer authority.mu.Unlock()
 	now := authority.clock().UTC()
-	_, err := authority.db.ExecContext(ctx, `UPDATE panel_migration_target_secrets SET state='revoked',updated_at=?,revoked_at=? WHERE migration_id=? AND state IN ('sealed','superseded')`, encodeTime(now), encodeTime(now), migrationID.String())
-	return err
+	tx, err := authority.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE panel_migration_target_secrets SET state='revoked',updated_at=?,revoked_at=? WHERE migration_id=? AND state IN ('sealed','superseded')`, encodeTime(now), encodeTime(now), migrationID.String()); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE panel_migration_target_secrets SET envelope_json=? WHERE migration_id=? AND state='revoked'`, []byte{}, migrationID.String()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (authority *SQLCanonicalTargetAuthority) requireSecrets(ctx context.Context, query interface {

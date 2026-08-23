@@ -384,12 +384,23 @@ func validPhase(value Phase) bool {
 }
 
 func transitionAllowed(from, to Phase) bool {
-	if to == PhasePausedRetryable || to == PhaseBlockedPolicy || to == PhaseFailedTerminal {
+	if to == PhaseFailedTerminal {
+		return from != PhaseRolledBack && from != PhaseCanceled
+	}
+	if to == PhasePausedRetryable || to == PhaseBlockedPolicy {
 		return from != PhaseCommitted && from != PhaseCleanup && from != PhaseRolledBack && from != PhaseFailedTerminal && from != PhaseCanceled
+	}
+	if to == PhaseRollingBack {
+		switch from {
+		case PhaseCreated, PhaseDiscovering, PhaseInventoried, PhasePlanned, PhaseReady, PhaseBaseSync, PhaseQuiescing, PhasePausedRetryable, PhaseBlockedPolicy, PhaseVerifying:
+			return true
+		default:
+			return false
+		}
 	}
 	if to == PhaseCanceled {
 		switch from {
-		case PhaseCreated, PhaseDiscovering, PhaseInventoried, PhasePlanned, PhaseReady, PhaseBaseSync, PhaseQuiescing, PhasePausedRetryable, PhaseBlockedPolicy:
+		case PhaseCreated, PhaseDiscovering, PhaseInventoried, PhasePlanned, PhaseReady, PhaseBaseSync, PhaseQuiescing, PhasePausedRetryable, PhaseBlockedPolicy, PhaseRollingBack:
 			return true
 		default:
 			return false

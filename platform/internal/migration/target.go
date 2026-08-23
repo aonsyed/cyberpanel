@@ -69,6 +69,17 @@ type ImportEffect struct {
 	ErrorCode      string
 }
 
+type CleanupReceipt struct {
+	MigrationID          ID
+	PlanDigest           string
+	ResourcesChecked     uint64
+	ResourcesCompensated uint64
+	ResourcesAbsent      uint64
+	SecretsRevoked       bool
+	EvidenceDigest       string
+	CleanedAt            time.Time
+}
+
 type ImportCommandGateway interface {
 	ApplyCanonicalImport(context.Context, ImportIntent) (ImportEffect, error)
 	ObserveCanonicalImport(context.Context, ImportIntent) (ImportEffect, error)
@@ -95,8 +106,10 @@ type TargetActivationController interface {
 
 type ImportLedger interface {
 	Prepare(context.Context, Migration, Plan) error
+	BeginCancellation(context.Context, ID) error
 	LoadEffect(context.Context, ID, string) (ImportEffect, bool, error)
 	PutEffect(context.Context, ID, ImportIntent, ImportEffect) error
+	MarkCanceled(context.Context, ID) error
 	MarkFinalized(context.Context, ID, string) error
 }
 
@@ -259,6 +272,104 @@ func (target *CanonicalTargetImporter) Finalize(ctx context.Context, migration M
 		return err
 	}
 	return target.ledger.MarkFinalized(ctx, migration.ID, migration.LastCheckpoint)
+}
+
+func (target *CanonicalTargetImporter) Cleanup(ctx context.Context, migration Migration, plan Plan, manifest Manifest) (CleanupReceipt, error) {
+	if target == nil || ctx == nil || migration.Phase != PhaseRollingBack || validateMigration(migration) != nil || validatePlan(plan) != nil || manifest.Validate() != nil || plan.MigrationID != migration.ID || manifest.MigrationID != migration.ID || plan.ManifestRoot != manifest.MerkleRoot || plan.DryRunDigest != migration.PlanDigest {
+		return CleanupReceipt{}, ErrInvalid
+	}
+	if err := target.ledger.BeginCancellation(ctx, migration.ID); err != nil {
+		return CleanupReceipt{}, err
+	}
+	mappings := append([]Mapping(nil), plan.Mappings...)
+	sort.Slice(mappings, func(i, j int) bool {
+		if mappings[i].SourceKind == mappings[j].SourceKind {
+			return mappings[i].SourceID < mappings[j].SourceID
+		}
+		return mappings[i].SourceKind < mappings[j].SourceKind
+	})
+	entries := make([]cleanupEvidenceEntry, 0, len(mappings))
+	for _, mapping := range mappings {
+		if mapping.Disposition == DispositionSkip || mapping.Disposition == DispositionBlock {
+			continue
+		}
+		resource, err := locateManifestResource(manifest, ImportResourceKind(mapping.SourceKind), mapping.SourceID)
+		if err != nil {
+			return CleanupReceipt{}, err
+		}
+		intent, err := buildImportIntent(migration, mapping, resource, true)
+		if err != nil {
+			return CleanupReceipt{}, err
+		}
+		effect, err := target.cleanupEffect(ctx, intent)
+		if err != nil {
+			return CleanupReceipt{}, err
+		}
+		entries = append(entries, cleanupEvidenceEntry{Kind: intent.Kind, SourceID: intent.SourceID, TargetID: intent.TargetID, EffectID: intent.EffectID, InputDigest: intent.InputDigest, OutputDigest: effect.OutputDigest, TargetGeneration: effect.TargetGeneration, EvidenceDigest: effect.EvidenceDigest})
+	}
+	if err := target.secrets.RevokeMigrationSecrets(ctx, migration.ID); err != nil {
+		return CleanupReceipt{}, errors.Join(ErrAmbiguous, err)
+	}
+	if err := target.ledger.MarkCanceled(ctx, migration.ID); err != nil {
+		return CleanupReceipt{}, err
+	}
+	now := target.clock().UTC()
+	receipt := CleanupReceipt{MigrationID: migration.ID, PlanDigest: plan.DryRunDigest, ResourcesChecked: uint64(len(entries)), SecretsRevoked: true, CleanedAt: now}
+	for _, entry := range entries {
+		if entry.TargetGeneration == 0 {
+			receipt.ResourcesAbsent++
+		} else {
+			receipt.ResourcesCompensated++
+		}
+	}
+	receipt.EvidenceDigest = digestJSON(struct {
+		Domain         string
+		Migration      ID
+		Plan           string
+		Entries        []cleanupEvidenceEntry
+		SecretsRevoked bool
+		CleanedAt      time.Time
+	}{"migration-cancel-cleanup-v1", migration.ID, plan.DryRunDigest, entries, true, now})
+	return receipt, nil
+}
+
+type cleanupEvidenceEntry struct {
+	Kind             ImportResourceKind
+	SourceID         ID
+	TargetID         ID
+	EffectID         string
+	InputDigest      string
+	OutputDigest     string
+	TargetGeneration uint64
+	EvidenceDigest   string
+}
+
+func (target *CanonicalTargetImporter) cleanupEffect(ctx context.Context, intent ImportIntent) (ImportEffect, error) {
+	effect, found, err := target.ledger.LoadEffect(ctx, intent.MigrationID, intent.EffectID)
+	if err != nil {
+		return ImportEffect{}, err
+	}
+	if found {
+		if !effectMatches(effect, intent) {
+			return effect, ErrConflict
+		}
+		if effect.Status == ImportEffectCompensated {
+			return effect, nil
+		}
+	} else {
+		effect = ambiguousImportEffect(intent, "CLEANUP_OBSERVATION_REQUIRED", target.clock().UTC())
+	}
+	compensated, compensateErr := target.gateway.CompensateCanonicalImport(ctx, intent, effect)
+	if compensateErr != nil || compensated.Status == ImportEffectAmbiguous {
+		return compensated, errors.Join(ErrAmbiguous, compensateErr)
+	}
+	if !effectMatches(compensated, intent) || compensated.Status != ImportEffectCompensated || !isDigest(compensated.EvidenceDigest) {
+		return compensated, errors.Join(ErrAmbiguous, ErrInvalid)
+	}
+	if err := target.ledger.PutEffect(ctx, intent.MigrationID, intent, compensated); err != nil {
+		return compensated, errors.Join(ErrAmbiguous, err)
+	}
+	return compensated, nil
 }
 
 func (target *CanonicalTargetImporter) importSecrets(ctx context.Context, migrationID ID, identifiers []string, catalog []SecretEnvelope) error {
@@ -495,10 +606,31 @@ func (ledger *SQLImportLedger) LoadEffect(ctx context.Context, migrationID ID, e
 	return effect, true, nil
 }
 
+func (ledger *SQLImportLedger) BeginCancellation(ctx context.Context, migrationID ID) error {
+	if ledger == nil || ledger.db == nil || ctx == nil || !migrationID.Valid() { return ErrInvalid }
+	ledger.mu.Lock(); defer ledger.mu.Unlock()
+	tx, err := ledger.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil { return err }
+	defer tx.Rollback()
+	var state string
+	err = tx.QueryRowContext(ctx, `SELECT state FROM panel_migration_import_runs WHERE migration_id=?`, migrationID.String()).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) { return nil }
+	if err != nil { return err }
+	if state == "canceling" || state == "canceled" { return nil }
+	if state != "prepared" { return ErrWriteFrontier }
+	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_import_runs SET state='canceling' WHERE migration_id=? AND state='prepared'`, migrationID.String())
+	if err != nil { return err }
+	rows, err := result.RowsAffected(); if err != nil { return err }; if rows != 1 { return ErrConflict }
+	return tx.Commit()
+}
+
 func (ledger *SQLImportLedger) PutEffect(ctx context.Context, migrationID ID, intent ImportIntent, effect ImportEffect) error {
 	if ledger == nil || ledger.db == nil || ctx == nil || !migrationID.Valid() || migrationID != intent.MigrationID || !effectMatches(effect, intent) { return ErrInvalid }
 	intentRaw, err := canonicalJSON(intent, 8<<20); if err != nil { return err }
 	effectRaw, err := canonicalJSON(effect, 1<<20); if err != nil { return err }
+	redactedIntent := []byte("{}")
+	storedIntentRaw := intentRaw
+	if effect.Status == ImportEffectCompensated { storedIntentRaw = redactedIntent }
 	ledger.mu.Lock(); defer ledger.mu.Unlock()
 	tx, err := ledger.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil { return err }
@@ -507,15 +639,35 @@ func (ledger *SQLImportLedger) PutEffect(ctx context.Context, migrationID ID, in
 	var storedIntent, storedEffect []byte
 	err = tx.QueryRowContext(ctx, `SELECT input_digest,intent_json,effect_json,status FROM panel_migration_import_effects WHERE migration_id=? AND effect_id=?`, migrationID.String(), intent.EffectID).Scan(&storedInput, &storedIntent, &storedEffect, &storedStatus)
 	if errors.Is(err, sql.ErrNoRows) {
-		_, err = tx.ExecContext(ctx, `INSERT INTO panel_migration_import_effects(migration_id,effect_id,input_digest,intent_json,effect_json,status,updated_at) VALUES(?,?,?,?,?,?,?)`, migrationID.String(), intent.EffectID, intent.InputDigest, intentRaw, effectRaw, string(effect.Status), encodeTime(ledger.clock().UTC()))
+		_, err = tx.ExecContext(ctx, `INSERT INTO panel_migration_import_effects(migration_id,effect_id,input_digest,intent_json,effect_json,status,updated_at) VALUES(?,?,?,?,?,?,?)`, migrationID.String(), intent.EffectID, intent.InputDigest, storedIntentRaw, effectRaw, string(effect.Status), encodeTime(ledger.clock().UTC()))
 		if err != nil { return err }
 		return tx.Commit()
 	}
 	if err != nil { return err }
-	if storedInput != intent.InputDigest || !bytes.Equal(storedIntent, intentRaw) { return ErrConflict }
+	if storedInput != intent.InputDigest { return ErrConflict }
+	if ImportEffectStatus(storedStatus) == ImportEffectCompensated && effect.Status == ImportEffectCompensated && bytes.Equal(storedEffect, effectRaw) { return nil }
+	if !bytes.Equal(storedIntent, intentRaw) { return ErrConflict }
 	if bytes.Equal(storedEffect, effectRaw) && storedStatus == string(effect.Status) { return nil }
-	if ImportEffectStatus(storedStatus) != ImportEffectAmbiguous { return ErrConflict }
-	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_import_effects SET effect_json=?,status=?,updated_at=? WHERE migration_id=? AND effect_id=? AND input_digest=? AND status='ambiguous'`, effectRaw, string(effect.Status), encodeTime(ledger.clock().UTC()), migrationID.String(), intent.EffectID, intent.InputDigest)
+	if effect.Status != ImportEffectCompensated && ImportEffectStatus(storedStatus) != ImportEffectAmbiguous { return ErrConflict }
+	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_import_effects SET intent_json=?,effect_json=?,status=?,updated_at=? WHERE migration_id=? AND effect_id=? AND input_digest=? AND status=?`, storedIntentRaw, effectRaw, string(effect.Status), encodeTime(ledger.clock().UTC()), migrationID.String(), intent.EffectID, intent.InputDigest, storedStatus)
+	if err != nil { return err }
+	rows, err := result.RowsAffected(); if err != nil { return err }; if rows != 1 { return ErrConflict }
+	return tx.Commit()
+}
+
+func (ledger *SQLImportLedger) MarkCanceled(ctx context.Context, migrationID ID) error {
+	if ledger == nil || ledger.db == nil || ctx == nil || !migrationID.Valid() { return ErrInvalid }
+	ledger.mu.Lock(); defer ledger.mu.Unlock()
+	tx, err := ledger.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil { return err }
+	defer tx.Rollback()
+	var state string
+	err = tx.QueryRowContext(ctx, `SELECT state FROM panel_migration_import_runs WHERE migration_id=?`, migrationID.String()).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) { return nil }
+	if err != nil { return err }
+	if state == "canceled" { return nil }
+	if state != "canceling" { return ErrWriteFrontier }
+	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_import_runs SET state='canceled',finalized_at=? WHERE migration_id=? AND state='canceling'`, encodeTime(ledger.clock().UTC()), migrationID.String())
 	if err != nil { return err }
 	rows, err := result.RowsAffected(); if err != nil { return err }; if rows != 1 { return ErrConflict }
 	return tx.Commit()

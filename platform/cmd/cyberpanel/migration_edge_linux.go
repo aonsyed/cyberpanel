@@ -124,20 +124,14 @@ func (edge *migrationEdge) CancelMigration(ctx context.Context, call apiserver.E
 	if value.Phase == migration.PhaseCanceled {
 		return migrationMutation(call.CommandID, value, scope, edge.projection(ctx, value, scope)), nil
 	}
-	if !edge.migrationCancelable(ctx, value) {
-		switch value.Phase {
-		case migration.PhaseQuiescing, migration.PhaseFinalSync, migration.PhaseCutoverReady, migration.PhaseCutoverCommitting, migration.PhaseVerifying, migration.PhaseCommitted, migration.PhaseCleanup, migration.PhasePausedRetryable, migration.PhaseRollingBack:
-			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrWriteFrontier
-		default:
-			return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, migration.ErrConflict
-		}
+	if value.Phase == migration.PhaseFailedTerminal && value.ErrorCode == migration.CancelReconciliationRequiredCode {
+		return migrationMutation(call.CommandID, value, scope, edge.projection(ctx, value, scope)), nil
 	}
-	from := value.Phase
 	scope, err = edge.runtime.Scopes.Claim(ctx, call.TenantID, value.ID, call.ExpectedGeneration, call.CommandID)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
 	}
-	value, err = edge.runtime.Repository.Transition(ctx, value.ID, from, migration.PhaseCanceled, "canceled:"+string(from), value.SourceGeneration)
+	value, err = edge.runtime.Orchestrator.Cancel(ctx, value.ID)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.MigrationProjection]{}, err
 	}
@@ -450,6 +444,8 @@ func saturatingMigrationTotal(total, value uint64) uint64 {
 
 func redactedMigrationError(value migration.Migration, state string) (string, string) {
 	switch value.ErrorCode {
+	case migration.CancelReconciliationRequiredCode:
+		return "MIGRATION_ROLLBACK_REQUIRED", "Cancellation crossed the guarded migration frontier. Imported target resources were preserved and require explicit reconciliation or rollback."
 	case "DISCOVERY_FAILED", "SOURCE_QUIESCE_FAILED", "SOURCE_COMMIT_FAILED":
 		return "MIGRATION_SOURCE_UNAVAILABLE", "The approved source agent could not complete the requested stage. Sensitive connection details are retained only in local audit evidence."
 	case "SOURCE_GENERATION_MOVED":
@@ -502,6 +498,9 @@ func validateMigrationEndpoint(endpoint string) error {
 }
 
 func migrationState(value migration.Migration) string {
+	if value.ErrorCode == migration.CancelReconciliationRequiredCode {
+		return "rollback_required"
+	}
 	switch value.Phase {
 	case migration.PhaseCreated, migration.PhaseDiscovering, migration.PhaseInventoried, migration.PhasePlanned, migration.PhaseReady:
 		return "pending"
