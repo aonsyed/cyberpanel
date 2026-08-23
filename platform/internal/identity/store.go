@@ -38,6 +38,19 @@ CREATE TABLE IF NOT EXISTS identity_invitations (
 );
 CREATE INDEX IF NOT EXISTS identity_invitations_tenant ON identity_invitations(tenant_id,id);
 CREATE UNIQUE INDEX IF NOT EXISTS identity_invitations_token ON identity_invitations(token_digest) WHERE token_digest <> '';
+CREATE TABLE IF NOT EXISTS identity_support_grants (
+ id TEXT PRIMARY KEY, issuer_id TEXT NOT NULL, target_tenant_id TEXT NOT NULL,
+ scope_kind TEXT NOT NULL, resource_id TEXT NOT NULL, permissions_json TEXT NOT NULL,
+ reason TEXT NOT NULL, state TEXT NOT NULL, generation BIGINT NOT NULL,
+ secret_epoch BIGINT NOT NULL, secret_digest TEXT NOT NULL,
+ issued_at TIMESTAMP NOT NULL, expires_at TIMESTAMP NOT NULL, consumed_at TIMESTAMP,
+ consumed_by_principal_id TEXT NOT NULL, consumed_by_session_id TEXT NOT NULL,
+ context_id TEXT NOT NULL, expired_at TIMESTAMP, revoked_at TIMESTAMP,
+ revoked_by_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_support_grants_tenant ON identity_support_grants(target_tenant_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS identity_support_grants_secret ON identity_support_grants(secret_digest) WHERE secret_digest <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS identity_support_grants_context ON identity_support_grants(context_id) WHERE context_id <> '';
 CREATE TABLE IF NOT EXISTS identity_roles (
  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL,
  permissions_json TEXT NOT NULL, builtin INTEGER NOT NULL, generation BIGINT NOT NULL,

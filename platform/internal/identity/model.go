@@ -585,6 +585,162 @@ type SessionMetadata struct {
 	RevokedAt         *time.Time
 }
 
+type SupportGrantState string
+
+const (
+	SupportGrantPending  SupportGrantState = "pending"
+	SupportGrantConsumed SupportGrantState = "consumed"
+	SupportGrantExpired  SupportGrantState = "expired"
+	SupportGrantRevoked  SupportGrantState = "revoked"
+)
+
+type SupportGrantReasonCode string
+
+const (
+	SupportGrantReasonInvalidRequest       SupportGrantReasonCode = "invalid_request"
+	SupportGrantReasonSessionRequired      SupportGrantReasonCode = "session_required"
+	SupportGrantReasonAssuranceRequired    SupportGrantReasonCode = "phishing_resistant_assurance_required"
+	SupportGrantReasonAssuranceStale       SupportGrantReasonCode = "phishing_resistant_assurance_stale"
+	SupportGrantReasonAuthorizationDenied  SupportGrantReasonCode = "authorization_denied"
+	SupportGrantReasonCeilingExceeded      SupportGrantReasonCode = "permission_ceiling_exceeded"
+	SupportGrantReasonTenantNotFound       SupportGrantReasonCode = "target_tenant_not_found"
+	SupportGrantReasonTenantInactive       SupportGrantReasonCode = "target_tenant_inactive"
+	SupportGrantReasonNotFound             SupportGrantReasonCode = "grant_not_found"
+	SupportGrantReasonSecretInvalid        SupportGrantReasonCode = "secret_invalid"
+	SupportGrantReasonExpired              SupportGrantReasonCode = "grant_expired"
+	SupportGrantReasonStateConflict        SupportGrantReasonCode = "state_conflict"
+	SupportGrantReasonStaleGeneration      SupportGrantReasonCode = "stale_generation"
+	SupportGrantReasonStorageFailure       SupportGrantReasonCode = "storage_failure"
+	SupportGrantReasonIssued               SupportGrantReasonCode = "issued"
+	SupportGrantReasonAccepted             SupportGrantReasonCode = "accepted"
+	SupportGrantReasonRevoked              SupportGrantReasonCode = "revoked"
+)
+
+type SupportGrantFailure struct {
+	Code SupportGrantReasonCode
+	Err  error
+}
+
+func (f SupportGrantFailure) Error() string { return "identity: support grant: " + string(f.Code) }
+func (f SupportGrantFailure) Unwrap() error { return f.Err }
+
+func SupportGrantFailureReason(err error) (SupportGrantReasonCode, bool) {
+	var failure SupportGrantFailure
+	if !errors.As(err, &failure) { return "", false }
+	return failure.Code, true
+}
+
+type SupportContextGrant struct {
+	ID                    ID
+	IssuerID              ID
+	TargetTenantID        ID
+	Scope                 Scope
+	Permissions           []Permission
+	Reason                string
+	State                 SupportGrantState
+	Generation            uint64
+	IssuedAt              time.Time
+	ExpiresAt             time.Time
+	ConsumedAt            *time.Time
+	ConsumedByPrincipalID ID
+	ConsumedBySessionID   ID
+	ContextID             ID
+	ExpiredAt             *time.Time
+	RevokedAt             *time.Time
+	RevokedByID           ID
+	secretEpoch           uint64
+	secretDigest          string
+}
+
+func (g SupportContextGrant) Validate() error {
+	if !g.ID.Valid() || !g.IssuerID.Valid() || !g.TargetTenantID.Valid() || g.Generation == 0 || g.secretEpoch == 0 {
+		return fmt.Errorf("%w: support grant identity", ErrInvalid)
+	}
+	if err := g.Scope.Validate(); err != nil || g.Scope.TenantID != g.TargetTenantID || (g.Scope.Kind != ScopeProject && g.Scope.Kind != ScopeSite) {
+		return fmt.Errorf("%w: support grant scope", ErrInvalid)
+	}
+	if len(g.Permissions) == 0 || len(g.Permissions) > 16 {
+		return fmt.Errorf("%w: support grant permissions", ErrInvalid)
+	}
+	canonical := CanonicalPermissions(g.Permissions)
+	if len(canonical) != len(g.Permissions) { return fmt.Errorf("%w: support grant permissions", ErrInvalid) }
+	for index, permission := range canonical {
+		if permission == "*:*" || permission != g.Permissions[index] { return fmt.Errorf("%w: support grant permissions", ErrInvalid) }
+		if _, err := NewPermission(string(permission)); err != nil { return fmt.Errorf("%w: support grant permissions", ErrInvalid) }
+	}
+	if g.Reason != strings.TrimSpace(g.Reason) || len(g.Reason) < 8 || len(g.Reason) > 512 || strings.ContainsAny(g.Reason, "\x00\r\n") {
+		return fmt.Errorf("%w: support grant reason", ErrInvalid)
+	}
+	if g.IssuedAt.IsZero() || !g.ExpiresAt.After(g.IssuedAt) || g.ExpiresAt.After(g.IssuedAt.Add(time.Hour)) {
+		return fmt.Errorf("%w: support grant lifetime", ErrInvalid)
+	}
+	if g.ConsumedAt != nil && (g.ConsumedAt.Before(g.IssuedAt) || !g.ConsumedAt.Before(g.ExpiresAt)) { return fmt.Errorf("%w: support grant consumption time", ErrInvalid) }
+	if g.ExpiredAt != nil && g.ExpiredAt.Before(g.ExpiresAt) { return fmt.Errorf("%w: support grant expiration time", ErrInvalid) }
+	if g.RevokedAt != nil && g.RevokedAt.Before(g.IssuedAt) { return fmt.Errorf("%w: support grant revocation time", ErrInvalid) }
+	consumed := g.ConsumedAt != nil || g.ConsumedByPrincipalID != "" || g.ConsumedBySessionID != "" || g.ContextID != ""
+	switch g.State {
+	case SupportGrantPending:
+		if !validSupportGrantDigest(g.secretDigest) || consumed || g.ExpiredAt != nil || g.RevokedAt != nil || g.RevokedByID != "" { return fmt.Errorf("%w: pending support grant", ErrInvalid) }
+	case SupportGrantConsumed:
+		if g.secretDigest != "" || g.ConsumedAt == nil || !g.ConsumedByPrincipalID.Valid() || !g.ConsumedBySessionID.Valid() || !g.ContextID.Valid() || g.ExpiredAt != nil || g.RevokedAt != nil || g.RevokedByID != "" { return fmt.Errorf("%w: consumed support grant", ErrInvalid) }
+	case SupportGrantExpired:
+		if g.secretDigest != "" || consumed || g.ExpiredAt == nil || g.RevokedAt != nil || g.RevokedByID != "" { return fmt.Errorf("%w: expired support grant", ErrInvalid) }
+	case SupportGrantRevoked:
+		if g.secretDigest != "" || g.ExpiredAt != nil || g.RevokedAt == nil || !g.RevokedByID.Valid() { return fmt.Errorf("%w: revoked support grant", ErrInvalid) }
+		if consumed && (g.ConsumedAt == nil || !g.ConsumedByPrincipalID.Valid() || !g.ConsumedBySessionID.Valid() || !g.ContextID.Valid()) { return fmt.Errorf("%w: revoked support context", ErrInvalid) }
+	default:
+		return fmt.Errorf("%w: support grant state", ErrInvalid)
+	}
+	return nil
+}
+
+type SupportGrantView struct {
+	ID                    ID
+	IssuerID              ID
+	TargetTenantID        ID
+	Scope                 Scope
+	Permissions           []Permission
+	Reason                string
+	State                 SupportGrantState
+	Generation            uint64
+	IssuedAt              time.Time
+	ExpiresAt             time.Time
+	ConsumedAt            *time.Time
+	ConsumedByPrincipalID ID
+	ConsumedBySessionID   ID
+	ContextID             ID
+	ExpiredAt             *time.Time
+	RevokedAt             *time.Time
+	RevokedByID           ID
+}
+
+type IssuedSupportGrant struct {
+	Grant  SupportGrantView
+	Secret []byte
+}
+
+type SupportContext struct {
+	ID                 ID
+	GrantID            ID
+	SupportPrincipalID ID
+	SupportSessionID   ID
+	TargetTenantID     ID
+	Scope              Scope
+	Permissions        []Permission
+	Reason             string
+	AcceptedAt         time.Time
+	ExpiresAt          time.Time
+}
+
+func (c SupportContext) Validate() error {
+	if !c.ID.Valid() || !c.GrantID.Valid() || !c.SupportPrincipalID.Valid() || !c.SupportSessionID.Valid() || !c.TargetTenantID.Valid() || c.AcceptedAt.IsZero() || !c.ExpiresAt.After(c.AcceptedAt) {
+		return fmt.Errorf("%w: support context identity", ErrInvalid)
+	}
+	if err := c.Scope.Validate(); err != nil || c.Scope.TenantID != c.TargetTenantID || (c.Scope.Kind != ScopeProject && c.Scope.Kind != ScopeSite) { return fmt.Errorf("%w: support context scope", ErrInvalid) }
+	if len(c.Permissions) == 0 || len(c.Permissions) > 16 { return fmt.Errorf("%w: support context permissions", ErrInvalid) }
+	return nil
+}
+
 type Usage struct {
 	TenantID        ID
 	Sites           uint64
