@@ -216,7 +216,13 @@ func RunSourceAgent(ctx context.Context, config SourceAgentConfig, collector Col
 		if controllerErr != nil {
 			return fmt.Errorf("initialize cutover helper: %w", controllerErr)
 		}
-		cutover, err = NewCutover(plans, verifier, controller, extractor)
+		generationRoot, rootErr := openPrivateRoot(config.SessionDirectory)
+		if rootErr != nil {
+			return fmt.Errorf("open cutover generation receipts: %w", rootErr)
+		}
+		defer joinSourceAgentClose(&err, generationRoot.Close)
+		generationController := &generationFenceController{controller: controller, extractor: extractor, plans: plans, verifier: verifier, root: generationRoot, clock: time.Now}
+		cutover, err = NewCutover(plans, verifier, generationController, extractor)
 		if err != nil {
 			return fmt.Errorf("initialize cutover coordinator: %w", err)
 		}
@@ -478,6 +484,101 @@ func joinSourceAgentClose(result *error, close func() error) {
 	}
 	*result = errors.Join(*result, close())
 }
+
+// CutoverGenerationReceipt is written by the unprivileged source agent just
+// before it asks the root helper to fence a locally approved migration. The
+// helper trusts the peer UID for the observation, but re-verifies the signed
+// plan, site scope, and approval digest independently.
+type CutoverGenerationReceipt struct {
+	Version uint32 `json:"version"`
+	MigrationID migration.ID `json:"migration_id"`
+	SourceInstallationID string `json:"source_installation_id"`
+	SiteSourceIDs []string `json:"site_source_ids"`
+	ApprovedPlanDigest string `json:"approved_plan_digest"`
+	SourceGeneration uint64 `json:"source_generation"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
+func ApprovedSourcePlanDigest(approved ApprovedPlan) (string, error) { return approvedPlanDigest(approved) }
+
+type generationFenceController struct {
+	controller FenceController
+	extractor *Extractor
+	plans PlanStore
+	verifier PlanVerifier
+	root *os.Root
+	clock func() time.Time
+}
+
+func (c *generationFenceController) BeginQuiesce(ctx context.Context, request QuiesceRequest) (QuiesceObservation, error) {
+	if c == nil || c.controller == nil || c.extractor == nil || c.plans == nil || c.verifier == nil || c.root == nil || ctx == nil {
+		return QuiesceObservation{}, ErrInvalid
+	}
+	approved, err := c.plans.ApprovedPlan(ctx, request.MigrationID)
+	if err != nil {
+		return QuiesceObservation{}, err
+	}
+	now := c.clock().UTC()
+	if err = c.verifier.VerifyApprovedPlan(ctx, approved, now); err != nil {
+		return QuiesceObservation{}, err
+	}
+	digest, err := approvedPlanDigest(approved)
+	if err != nil || approved.Plan.SourceInstallationID != request.SourceInstallationID || !sameStringSequence(approved.Plan.SiteSourceIDs, request.SiteSourceIDs) || digest != request.ApprovalDigest {
+		return QuiesceObservation{}, errors.Join(err, ErrDenied)
+	}
+	generation, err := c.extractor.Generation(ctx, request.MigrationID)
+	if err != nil || generation == 0 {
+		return QuiesceObservation{}, errors.Join(err, ErrChanged)
+	}
+	receipt := CutoverGenerationReceipt{Version: 1, MigrationID: request.MigrationID, SourceInstallationID: request.SourceInstallationID, SiteSourceIDs: append([]string(nil), request.SiteSourceIDs...), ApprovedPlanDigest: digest, SourceGeneration: generation, ObservedAt: c.clock().UTC()}
+	if err = writeCutoverGenerationReceipt(c.root, request.MigrationID.String()+".generation.json", receipt); err != nil {
+		return QuiesceObservation{}, err
+	}
+	return c.controller.BeginQuiesce(ctx, request)
+}
+
+func (c *generationFenceController) BindFence(ctx context.Context, handle string, fence migration.SourceFence) error { return c.controller.BindFence(ctx, handle, fence) }
+func (c *generationFenceController) AbortUnbound(ctx context.Context, handle string) error { return c.controller.AbortUnbound(ctx, handle) }
+func (c *generationFenceController) AssertQuiesced(ctx context.Context, command FenceCommand) error { return c.controller.AssertQuiesced(ctx, command) }
+func (c *generationFenceController) Unquiesce(ctx context.Context, command FenceCommand) error { return c.controller.Unquiesce(ctx, command) }
+func (c *generationFenceController) Commit(ctx context.Context, command FenceCommand) error { return c.controller.Commit(ctx, command) }
+func (c *generationFenceController) Rollback(ctx context.Context, command FenceCommand) error { return c.controller.Rollback(ctx, command) }
+
+func writeCutoverGenerationReceipt(root *os.Root, name string, receipt CutoverGenerationReceipt) error {
+	encoded, err := json.Marshal(receipt)
+	if err != nil || len(encoded) == 0 || len(encoded) > 1<<20 {
+		return errors.Join(err, ErrInvalid)
+	}
+	nonce := make([]byte, 12)
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return err
+	}
+	temporary := ".generation-" + hex.EncodeToString(nonce)
+	file, err := root.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(encoded)
+	syncErr := file.Sync()
+	chmodErr := file.Chmod(0o400)
+	closeErr := file.Close()
+	if err = errors.Join(writeErr, syncErr, chmodErr, closeErr); err != nil {
+		_ = root.Remove(temporary)
+		return err
+	}
+	if err = root.Rename(temporary, name); err != nil {
+		_ = root.Remove(temporary)
+		return err
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	err = directory.Sync()
+	return errors.Join(err, directory.Close())
+}
+
+var _ FenceController = (*generationFenceController)(nil)
 
 type UnixFenceController struct {
 	socketPath string
