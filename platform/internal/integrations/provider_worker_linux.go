@@ -166,10 +166,12 @@ func (server *ProviderWorkerServer) serve(connection *net.UnixConn) {
 	case ProviderWorkerRevoke:
 		err=provider.RevokeCredential(ctx,request.Binding)
 	default:
-		err=ErrUnsupported
+		cloudflare,ok:=provider.(CloudflareProvider)
+		if !providerWorkerCloudflareAction(request.Action)||!ok{err=ErrUnsupported}else{response.Cloudflare,err=dispatchProviderWorkerCloudflare(ctx,cloudflare,request)}
 	}
-	if err==nil{response.Succeeded=true}else{response.Failure,response.FailureCode=classifyProviderWorkerError(err)}
+	if err==nil{response.Succeeded=true;if response.ValidateFor(request)!=nil{response.Succeeded=false;response.Capabilities=nil;response.Health=nil;response.Cloudflare=nil;err=ErrIntegrity}}
+	if err!=nil{response.Failure,response.FailureCode=classifyProviderWorkerError(err)}
 	_ = writeProviderWorkerFrame(connection,response)
 }
 
-func classifyProviderWorkerError(err error)(ErrorClass,string){var providerError *ProviderError;if errors.As(err,&providerError){return providerError.Class,providerError.Code};switch{case errors.Is(err,ErrUnauthorized):return ErrorUnauthorized,"credential_rejected";case errors.Is(err,ErrRateLimited):return ErrorRateLimited,"rate_limited";case errors.Is(err,ErrConflict):return ErrorConflict,"conflict";case errors.Is(err,ErrPartial):return ErrorPartial,"partial";case errors.Is(err,ErrAmbiguous):return ErrorAmbiguous,"ambiguous";case errors.Is(err,ErrInvalid),errors.Is(err,ErrPolicyDenied):return ErrorInvalid,"invalid_request";default:return ErrorUnavailable,"provider_unavailable"}}
+func classifyProviderWorkerError(err error)(ErrorClass,string){var providerError *ProviderError;if errors.As(err,&providerError){return providerError.Class,providerError.Code};switch{case errors.Is(err,ErrUnsupported):return ErrorPermanent,"unsupported";case errors.Is(err,ErrUnauthorized):return ErrorUnauthorized,"credential_rejected";case errors.Is(err,ErrRateLimited):return ErrorRateLimited,"rate_limited";case errors.Is(err,ErrConflict):return ErrorConflict,"conflict";case errors.Is(err,ErrPartial):return ErrorPartial,"partial";case errors.Is(err,ErrAmbiguous):return ErrorAmbiguous,"ambiguous";case errors.Is(err,ErrInvalid),errors.Is(err,ErrPolicyDenied):return ErrorInvalid,"invalid_request";default:return ErrorUnavailable,"provider_unavailable"}}

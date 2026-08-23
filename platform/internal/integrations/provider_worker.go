@@ -33,6 +33,7 @@ type ProviderWorkerRequest struct {
 	Action    ProviderWorkerAction `json:"action"`
 	Binding   ProviderBinding      `json:"binding"`
 	Deadline  time.Time            `json:"deadline"`
+	Cloudflare *ProviderWorkerCloudflareRequest `json:"cloudflare,omitempty"`
 }
 
 func (request ProviderWorkerRequest) Validate(now time.Time) error {
@@ -41,9 +42,18 @@ func (request ProviderWorkerRequest) Validate(now time.Time) error {
 	}
 	switch request.Action {
 	case ProviderWorkerDiscover, ProviderWorkerHealth, ProviderWorkerValidate, ProviderWorkerRevoke:
+		if request.Cloudflare != nil {
+			return ErrInvalid
+		}
 		return nil
 	default:
-		return ErrUnsupported
+		if !providerWorkerCloudflareAction(request.Action) {
+			return ErrUnsupported
+		}
+		if request.Binding.Kind != ProviderCloudflare || request.Binding.Purpose != PurposeDNS || request.Binding.State != BindingActive || request.Cloudflare == nil {
+			return ErrPolicyDenied
+		}
+		return request.Cloudflare.Validate(request.Action, request.Binding, now)
 	}
 }
 
@@ -53,6 +63,7 @@ type ProviderWorkerResponse struct {
 	Action       ProviderWorkerAction `json:"action"`
 	Capabilities *CapabilitySet `json:"capabilities,omitempty"`
 	Health       *ProviderHealth `json:"health,omitempty"`
+	Cloudflare   *ProviderWorkerCloudflareResponse `json:"cloudflare,omitempty"`
 	Succeeded    bool           `json:"succeeded"`
 	Failure      ErrorClass     `json:"failure,omitempty"`
 	FailureCode  string         `json:"failure_code,omitempty"`
@@ -69,6 +80,10 @@ type ProviderWorkerClient struct {
 }
 
 func (client *ProviderWorkerClient) request(ctx context.Context, action ProviderWorkerAction, binding ProviderBinding) (ProviderWorkerResponse, error) {
+	return client.requestCloudflare(ctx, action, binding, nil)
+}
+
+func (client *ProviderWorkerClient) requestCloudflare(ctx context.Context, action ProviderWorkerAction, binding ProviderBinding, payload *ProviderWorkerCloudflareRequest) (ProviderWorkerResponse, error) {
 	if client == nil || client.Transport == nil || ctx == nil || binding.Kind != client.Kind {
 		return ProviderWorkerResponse{}, ErrInvalid
 	}
@@ -81,12 +96,15 @@ func (client *ProviderWorkerClient) request(ctx context.Context, action Provider
 		deadline = value.UTC()
 	}
 	sum := sha256.Sum256([]byte(string(action)+"\x00"+string(binding.ID)+"\x00"+hex.EncodeToString([]byte(now.Format(time.RFC3339Nano)))))
-	request := ProviderWorkerRequest{Version:ProviderWorkerProtocolVersion,RequestID:"provider_"+hex.EncodeToString(sum[:])[:48],Action:action,Binding:binding,Deadline:deadline}
+	request := ProviderWorkerRequest{Version:ProviderWorkerProtocolVersion,RequestID:"provider_"+hex.EncodeToString(sum[:])[:48],Action:action,Binding:binding,Deadline:deadline,Cloudflare:payload}
+	if err := request.Validate(now); err != nil {
+		return ProviderWorkerResponse{}, err
+	}
 	response, err := client.Transport.RoundTrip(ctx, request)
 	if err != nil {
 		return ProviderWorkerResponse{}, err
 	}
-	if response.Version != request.Version || response.RequestID != request.RequestID || response.Action != action {
+	if response.ValidateFor(request) != nil {
 		return ProviderWorkerResponse{}, ErrIntegrity
 	}
 	if !response.Succeeded {
@@ -131,7 +149,11 @@ func providerWorkerFailure(action ProviderWorkerAction, response ProviderWorkerR
 	if response.Failure == "" || response.FailureCode == "" {
 		return ErrIntegrity
 	}
-	return &ProviderError{Class:response.Failure,Operation:string(action),Code:response.FailureCode}
+	providerError := &ProviderError{Class:response.Failure,Operation:string(action),Code:response.FailureCode}
+	if response.FailureCode == "unsupported" {
+		return errors.Join(ErrUnsupported, providerError)
+	}
+	return providerError
 }
 
 func writeProviderWorkerFrame(writer io.Writer, value any) error {
@@ -193,6 +215,9 @@ func (transport FramedProviderWorkerTransport) RoundTrip(ctx context.Context, re
 	if transport.Dialer == nil || ctx == nil {
 		return ProviderWorkerResponse{}, ErrInvalid
 	}
+	if err := request.Validate(time.Now().UTC()); err != nil {
+		return ProviderWorkerResponse{}, err
+	}
 	connection, err := transport.Dialer.DialContext(ctx)
 	if err != nil {
 		return ProviderWorkerResponse{}, err
@@ -209,6 +234,9 @@ func (transport FramedProviderWorkerTransport) RoundTrip(ctx context.Context, re
 	var response ProviderWorkerResponse
 	if err = readProviderWorkerFrame(connection, &response); err != nil {
 		return ProviderWorkerResponse{}, err
+	}
+	if err = response.ValidateFor(request); err != nil {
+		return ProviderWorkerResponse{}, ErrIntegrity
 	}
 	return response, nil
 }
