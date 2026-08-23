@@ -161,7 +161,9 @@ type federationEdge struct {
 	store       *federation.Store
 	enrollments *federationEnrollmentRepository
 	preparer    *federation.EnrollmentPreparer
+	materials   *federationEnrollmentMaterials
 	authority   *federation.LocalAuthority
+	buildDigest string
 	now         func() time.Time
 }
 
@@ -191,7 +193,11 @@ func newFederationEdge(ctx context.Context, db *sql.DB, now func() time.Time) (*
 	if err != nil {
 		return nil, err
 	}
-	return &federationEdge{store: store, enrollments: enrollments, preparer: preparer, authority: authority, now: now}, nil
+	materials, buildDigest, err := newFederationEnrollmentMaterials(ctx, db, now)
+	if err != nil {
+		return nil, err
+	}
+	return &federationEdge{store: store, enrollments: enrollments, preparer: preparer, materials: materials, authority: authority, buildDigest: buildDigest, now: now}, nil
 }
 
 func (edge *federationEdge) ListNodes(ctx context.Context, call apiserver.EdgeCall, page apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.FleetNodeProjection], error) {
@@ -226,10 +232,11 @@ func (edge *federationEdge) GetNode(ctx context.Context, call apiserver.EdgeCall
 }
 
 func (edge *federationEdge) EnrollNode(ctx context.Context, call apiserver.EdgeCall, payload apiserver.FleetEnrollPayload, token []byte) (apiserver.EdgeMutation[apiserver.FleetNodeProjection], error) {
+	defer wipeFederationEnrollmentBytes(token)
 	if err := edge.validateCall(ctx, call, identity.AssuranceMFA, true); err != nil || call.ResourceID != "" || call.ExpectedGeneration != 0 || len(token) < 32 {
 		return apiserver.EdgeMutation[apiserver.FleetNodeProjection]{}, federationAPIError(firstFederationError(err, federation.ErrInvalid))
 	}
-	node, _, activePeer, err := edge.store.State(ctx)
+	node, authorityEpoch, activePeer, err := edge.store.State(ctx)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.FleetNodeProjection]{}, federationAPIError(err)
 	}
@@ -253,9 +260,35 @@ func (edge *federationEdge) EnrollNode(ctx context.Context, call apiserver.EdgeC
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.FleetNodeProjection]{}, apiserver.ErrInvalidRequest
 	}
-	if _, err = edge.preparer.Prepare(ctx, tokenID, peer, node, token, payload.CentralFingerprint, endpoint, federationEnrollmentTTL); err != nil {
+	if err = edge.materials.begin(node, payload.CentralFingerprint); err != nil {
 		return apiserver.EdgeMutation[apiserver.FleetNodeProjection]{}, federationAPIError(err)
 	}
+	preparationToken := append([]byte(nil), token...)
+	if _, err = edge.preparer.Prepare(ctx, tokenID, peer, node, preparationToken, payload.CentralFingerprint, endpoint, federationEnrollmentTTL); err != nil {
+		cleanupErr := edge.materials.cleanup(ctx, node)
+		return apiserver.EdgeMutation[apiserver.FleetNodeProjection]{}, federationAPIError(errors.Join(err, cleanupErr))
+	}
+	exchange, err := newFederationEnrollmentHTTPExchange(endpoint, peer, payload.CentralFingerprint, edge.now)
+	if err != nil {
+		cleanupErr := edge.materials.cleanup(ctx, node)
+		return apiserver.EdgeMutation[apiserver.FleetNodeProjection]{}, federationAPIError(errors.Join(err, cleanupErr))
+	}
+	enrollment, err := federation.NewEnrollmentService(edge.enrollments, edge.materials, edge.materials, exchange, edge.store)
+	if err != nil {
+		cleanupErr := edge.materials.cleanup(ctx, node)
+		return apiserver.EdgeMutation[apiserver.FleetNodeProjection]{}, federationAPIError(errors.Join(err, cleanupErr))
+	}
+	capabilities := federation.CapabilitySet{
+		NodeID: node, ProtocolVersion: federationEnrollmentProtocolVersion, BuildDigest: edge.buildDigest,
+		OS: runtime.GOOS, Architecture: runtime.GOARCH, AuthorityEpoch: authorityEpoch,
+		Capabilities: []federation.Capability{}, GeneratedAt: edge.now().UTC(),
+	}
+	capabilities.Digest = capabilities.CanonicalDigest()
+	if _, err = enrollment.Enroll(ctx, tokenID, token, capabilities); err != nil {
+		cleanupErr := edge.materials.cleanup(ctx, node)
+		return apiserver.EdgeMutation[apiserver.FleetNodeProjection]{}, federationAPIError(errors.Join(err, cleanupErr))
+	}
+	edge.materials.finish(node)
 	projection, err := edge.projection(ctx)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.FleetNodeProjection]{}, federationAPIError(err)
@@ -288,7 +321,7 @@ func (edge *federationEdge) RevokeNode(ctx context.Context, call apiserver.EdgeC
 }
 
 func (edge *federationEdge) validateCall(ctx context.Context, call apiserver.EdgeCall, minimum identity.AssuranceLevel, mutating bool) error {
-	if edge == nil || edge.store == nil || edge.enrollments == nil || edge.preparer == nil || edge.authority == nil || ctx == nil || call.TenantID != "" || call.CommandID == "" || call.PrincipalID == "" || call.CredentialID == "" || call.AuthzEpoch == 0 || call.Assurance < minimum {
+	if edge == nil || edge.store == nil || edge.enrollments == nil || edge.preparer == nil || edge.materials == nil || edge.authority == nil || ctx == nil || call.TenantID != "" || call.CommandID == "" || call.PrincipalID == "" || call.CredentialID == "" || call.AuthzEpoch == 0 || call.Assurance < minimum {
 		return federation.ErrForbidden
 	}
 	if !mutating && call.ExpectedGeneration != 0 {
