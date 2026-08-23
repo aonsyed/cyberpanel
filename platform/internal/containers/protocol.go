@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -138,13 +139,14 @@ func (response BrokerWireResponse) Validate(request BrokerWireRequest, now time.
 	case BrokerApplyWorkload, BrokerObserveWorkload, BrokerSetLifecycle, BrokerRestartWorkload, BrokerDeleteWorkload: if response.Runtime == nil || validateWorkloadRuntimeReceipt(request,*response.Runtime,response.ErrorCode)!=nil { return ErrContainerBrokerProtocol }
 	case BrokerResolveImage: if response.Image == nil { return ErrContainerBrokerProtocol }
 	case BrokerPullImage, BrokerDeleteImage: if response.Pull == nil { return ErrContainerBrokerProtocol }
-	case BrokerEnsureVolume, BrokerDeleteVolume: if response.Volume == nil { return ErrContainerBrokerProtocol }
-	case BrokerEnsureNetwork, BrokerDeleteNetwork: if response.Network == nil { return ErrContainerBrokerProtocol }
-	case BrokerApplyExposure, BrokerDeleteExposure: if response.Exposure == nil { return ErrContainerBrokerProtocol }
+	case BrokerEnsureVolume, BrokerDeleteVolume: if response.Volume == nil || validateVolumeReceipt(request,*response.Volume,response.ErrorCode)!=nil { return ErrContainerBrokerProtocol }
+	case BrokerEnsureNetwork, BrokerDeleteNetwork: if response.Network == nil || validateNetworkReceipt(request,*response.Network,response.ErrorCode)!=nil { return ErrContainerBrokerProtocol }
+	case BrokerApplyExposure, BrokerDeleteExposure: if response.Exposure == nil || validateExposureReceipt(request,*response.Exposure,response.ErrorCode)!=nil { return ErrContainerBrokerProtocol }
 	case BrokerExec: if response.Exec == nil { return ErrContainerBrokerProtocol }
 	case BrokerReadLogs: if response.Log == nil || uint64(len(response.Log.Data)) > request.Logs.MaxBytes { return ErrContainerBrokerProtocol }
 	case BrokerStats: if response.Observation == nil { return ErrContainerBrokerProtocol }
-	case BrokerSnapshotVolumes,BrokerRestoreVolumes:if response.VolumeSnapshot==nil{return ErrContainerBrokerProtocol}
+	case BrokerSnapshotVolumes:if response.VolumeSnapshot==nil||validateVolumeSnapshotReceipt(request,*response.VolumeSnapshot,response.ErrorCode)!=nil{return ErrContainerBrokerProtocol}
+	case BrokerRestoreVolumes:if response.VolumeSnapshot==nil{return ErrContainerBrokerProtocol}
 	default: return ErrContainerBrokerProtocol
 	}
 	return nil
@@ -152,6 +154,12 @@ func (response BrokerWireResponse) Validate(request BrokerWireRequest, now time.
 
 func validBrokerErrorCode(value string) bool { switch value { case "", "invalid_request", "unauthorized", "not_found", "conflict", "stale", "policy_rejected", "in_use", "ambiguous", "unavailable": return true }; return false }
 func validBrokerRequestID(value string) bool { if len(value)!=36 || value[:4]!="req-" { return false }; _,err:=hex.DecodeString(value[4:]);return err==nil }
+func validEffectOutcome(effect,expected EffectID,outcome,errorCode string)bool{if effect!=expected{return false};if errorCode==""{return outcome=="confirmed"};return outcome=="rejected"||outcome=="ambiguous"}
+func validateVolumeReceipt(request BrokerWireRequest,receipt VolumeReceipt,errorCode string)error{value:=request.VolumeMutation;if value==nil||receipt.VolumeID!=value.VolumeID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||!validEffectOutcome(receipt.EffectID,value.EffectID,receipt.Outcome,errorCode){return ErrContainerBrokerProtocol};if errorCode==""&&(receipt.RuntimeObjectID==""||len(receipt.ConfigurationDigest)!=64||receipt.Generation!=value.ExpectedGeneration+1||receipt.QuotaBytes==0||receipt.InodeLimit==0){return ErrContainerBrokerProtocol};return nil}
+func validateNetworkReceipt(request BrokerWireRequest,receipt NetworkReceipt,errorCode string)error{value:=request.NetworkMutation;if value==nil||receipt.NetworkID!=value.NetworkID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||!validEffectOutcome(receipt.EffectID,value.EffectID,receipt.Outcome,errorCode){return ErrContainerBrokerProtocol};if errorCode==""&&(receipt.RuntimeObjectID==""||len(receipt.ConfigurationDigest)!=64||receipt.Generation!=value.ExpectedGeneration+1||!receipt.Internal){return ErrContainerBrokerProtocol};return nil}
+func validateExposureReceipt(request BrokerWireRequest,receipt ExposureReceipt,errorCode string)error{value:=request.ExposureMutation;if value==nil||receipt.ExposureID!=value.Exposure.ID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||!validEffectOutcome(receipt.EffectID,value.EffectID,receipt.Outcome,errorCode){return ErrContainerBrokerProtocol};expected:=value.ExpectedGeneration+1;if request.Method==BrokerDeleteExposure&&strings.HasSuffix(string(value.EffectID),"-compensate"){expected++};if errorCode==""&&(len(receipt.ConfigurationDigest)!=64||receipt.Generation!=expected||receipt.BoundAddress!="127.0.0.1"||receipt.BoundPort==0||receipt.Public!=value.Exposure.Public){return ErrContainerBrokerProtocol};return nil}
+func validateVolumeSnapshotReceipt(request BrokerWireRequest,receipt VolumeSnapshotReceipt,errorCode string)error{value:=request.VolumeSnapshot;if value==nil||receipt.SnapshotID!=value.SnapshotID||receipt.ApplicationID!=value.ApplicationID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||receipt.CompletedAt.IsZero()||receipt.EffectID!=value.EffectID{return ErrContainerBrokerProtocol};if errorCode==""&&(receipt.Outcome!="confirmed"||len(receipt.ManifestDigest)!=64||receipt.Bytes==0||!sameProtocolIDs(receipt.VolumeIDs,value.VolumeIDs)){return ErrContainerBrokerProtocol};return nil}
+func sameProtocolIDs(left,right []ID)bool{if len(left)!=len(right){return false};for index:=range left{if left[index]!=right[index]{return false}};return true}
 func validateWorkloadRuntimeReceipt(request BrokerWireRequest,receipt RuntimeReceipt,errorCode string)error{if !receipt.ResourceID.Valid()||receipt.ObservedAt.IsZero()||receipt.Outcome!="confirmed"&&receipt.Outcome!="rejected"&&receipt.Outcome!="ambiguous"||errorCode==""&&receipt.Outcome!="confirmed"||errorCode!=""&&receipt.Outcome=="confirmed"{return ErrContainerBrokerProtocol};var effect EffectID;var expected uint64;switch request.Method{case BrokerApplyWorkload,BrokerDeleteWorkload:effect=request.WorkloadMutation.EffectID;expected=request.WorkloadMutation.ExpectedGeneration;case BrokerSetLifecycle:effect=request.WorkloadLifecycle.EffectID;expected=request.WorkloadLifecycle.ExpectedGeneration;case BrokerRestartWorkload:effect=request.WorkloadRestart.EffectID;expected=request.WorkloadRestart.ExpectedGeneration;case BrokerObserveWorkload:if receipt.EffectID!=""||receipt.ResourceID!=request.WorkloadObservation.WorkloadID{return ErrContainerBrokerProtocol};expected=request.WorkloadObservation.ExpectedGeneration;default:return ErrContainerBrokerProtocol};if request.Method!=BrokerObserveWorkload&&receipt.EffectID!=effect{return ErrContainerBrokerProtocol};if receipt.Outcome=="confirmed"{if receipt.Generation!=expected+1&&request.Method!=BrokerObserveWorkload||request.Method==BrokerObserveWorkload&&receipt.Generation!=expected||receipt.RuntimeObjectID==""||!validLifecycle(receipt.Lifecycle)||!validWorkloadHealth(receipt.Health){return ErrContainerBrokerProtocol}};return nil}
 
 type ContainerBrokerTransport interface { RoundTrip(context.Context,BrokerWireRequest)(BrokerWireResponse,error) }

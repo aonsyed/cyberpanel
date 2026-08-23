@@ -12,11 +12,11 @@ type Grant struct{TenantID ID;ResourceID ID;Operation string;AuthzEpoch uint64;E
 type ImagePolicyReceipt struct{ImageDigest,SBOMDigest,SignatureDigest,VulnerabilityDigest string;Verdict PolicyVerdict;PolicyVersion string}
 type RuntimeReceipt struct{EffectID EffectID;ResourceID ID;RuntimeObjectID,SpecDigest,ObservedDigest string;Lifecycle Lifecycle;Health WorkloadHealth;Generation uint64;Fence FenceToken;Outcome string;ObservedAt time.Time;ErrorCode string}
 type PullReceipt struct{EffectID EffectID;ImageDigest string;Bytes uint64;Policy ImagePolicyReceipt;Outcome string;ObservedAt time.Time}
-type VolumeReceipt struct{EffectID EffectID;VolumeID ID;RuntimeObjectID string;QuotaBytes,InodeLimit uint64;Outcome string}
-type NetworkReceipt struct{EffectID EffectID;NetworkID ID;RuntimeObjectID string;Outcome string}
-type ExposureReceipt struct{EffectID EffectID;ExposureID ID;FirewallGeneration,RouteGeneration uint64;Outcome string}
+type VolumeReceipt struct{EffectID EffectID;VolumeID ID;RuntimeObjectID,ConfigurationDigest string;QuotaBytes,InodeLimit,Generation uint64;Fence FenceToken;Outcome string;ObservedAt time.Time}
+type NetworkReceipt struct{EffectID EffectID;NetworkID ID;RuntimeObjectID,ConfigurationDigest string;Generation uint64;Fence FenceToken;Internal bool;Outcome string;ObservedAt time.Time}
+type ExposureReceipt struct{EffectID EffectID;ExposureID ID;ConfigurationDigest,BoundAddress string;BoundPort uint16;Generation,FirewallGeneration,RouteGeneration uint64;Fence FenceToken;Public bool;Outcome string;ObservedAt time.Time}
 type ExecReceipt struct{EffectID EffectID;GrantID ID;ExitCode int;OutputDigest string;StartedAt,CompletedAt time.Time;Outcome string}
-type VolumeSnapshotReceipt struct{EffectID EffectID;SnapshotID ID;ApplicationID ID;VolumeIDs []ID;ManifestDigest string;Bytes uint64;Outcome string;CompletedAt time.Time}
+type VolumeSnapshotReceipt struct{EffectID EffectID;SnapshotID ID;ApplicationID ID;VolumeIDs []ID;ManifestDigest string;Bytes uint64;Fence FenceToken;Outcome string;ObservedAt,CompletedAt time.Time}
 type StreamChunk struct{Cursor LogCursor;Data []byte;EOF bool;Truncated bool}
 
 type Broker interface{
