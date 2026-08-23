@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -42,6 +43,10 @@ type AddressProtector interface {
 	ProtectMailAddress(context.Context, TenantID, string) (string, error)
 }
 
+type SourceProtector interface {
+	ProtectMailSource(context.Context, TenantID, netip.Addr) (string, error)
+}
+
 type Pseudonymizer struct{ key []byte }
 
 func NewPseudonymizer(key []byte) (*Pseudonymizer, error) {
@@ -62,6 +67,19 @@ func (pseudonymizer *Pseudonymizer) Address(tenant TenantID, address string) (Ad
 	mac.Write([]byte{0})
 	mac.Write([]byte(address))
 	return AddressIdentity{Kind: IdentityPseudonym, Value: hex.EncodeToString(mac.Sum(nil))}, nil
+}
+
+func (pseudonymizer *Pseudonymizer) Source(tenant TenantID, source netip.Addr) (RemoteIdentity, error) {
+	if pseudonymizer == nil || len(pseudonymizer.key) < 32 || !validID(string(tenant)) || !source.IsValid() || source.IsUnspecified() || source.IsMulticast() {
+		return RemoteIdentity{}, ErrInvalid
+	}
+	source = source.Unmap()
+	mac := hmac.New(sha256.New, pseudonymizer.key)
+	mac.Write([]byte("mail-source-v1\x00"))
+	mac.Write([]byte(tenant))
+	mac.Write([]byte{0})
+	mac.Write([]byte(source.String()))
+	return RemoteIdentity{Pseudonym: hex.EncodeToString(mac.Sum(nil))}, nil
 }
 
 type InputRecord struct {
@@ -89,13 +107,14 @@ type Normalizer struct {
 	policies   PolicyResolver
 	pseudonyms *Pseudonymizer
 	protector  AddressProtector
+	sourceProtector SourceProtector
 }
 
-func NewNormalizer(correlator Correlator, policies PolicyResolver, pseudonyms *Pseudonymizer, protector AddressProtector) (*Normalizer, error) {
+func NewNormalizer(correlator Correlator, policies PolicyResolver, pseudonyms *Pseudonymizer, protector AddressProtector, sourceProtector SourceProtector) (*Normalizer, error) {
 	if correlator == nil || policies == nil || pseudonyms == nil {
 		return nil, ErrInvalid
 	}
-	return &Normalizer{correlator: correlator, policies: policies, pseudonyms: pseudonyms, protector: protector}, nil
+	return &Normalizer{correlator: correlator, policies: policies, pseudonyms: pseudonyms, protector: protector, sourceProtector: sourceProtector}, nil
 }
 
 type parsedRecord struct {
@@ -135,7 +154,26 @@ var (
 	dkimResult    = regexp.MustCompile(`^(?:opendkim|rspamd)(?:\[[0-9]{1,10}\])?: .*?(?:queue[_ -]?id[=: ]+<?([A-F0-9]{5,32})>?.*?)?\b(DKIM-Signature field added|signature ok|verification successful|bad signature|verification failed)\b(?:.*?\bkey[=: ]+([A-Za-z0-9._-]{1,128}))?`)
 	policyResult  = regexp.MustCompile(`^policy(?:-server)?(?:\[[0-9]{1,10}\])?: action=(permit|reject|defer|dunno) sender=<([^>]*)> recipient=<([^>]*)>(?: queue_id=([A-F0-9]{5,32}))?`)
 	deliveryResult = regexp.MustCompile(`^delivery(?:\[[0-9]{1,10}\])?: provider=([A-Za-z0-9._-]{1,128}) receipt=([A-Za-z0-9._:@-]{1,256}) queue_id=([A-F0-9]{5,32}) recipient=<([^>]*)> result=(delivered|deferred|bounced|rejected)(?: signature=([A-Za-z0-9+/=_-]{1,1024}) key_id=([A-Za-z0-9._:@-]{1,128}))?$`)
+	postfixRemote = regexp.MustCompile(`\[([0-9A-Fa-f:.]{2,64})\]`)
+	dovecotRemote = regexp.MustCompile(`\brip=([0-9A-Fa-f:.]{2,64})\b`)
+	rspamdRemote = regexp.MustCompile(`\bip[:= ]+([0-9A-Fa-f:.]{2,64})\b`)
 )
+
+func parseRemote(source SourceKind, message string) (netip.Addr, bool) {
+	var matches []string
+	switch source {
+	case SourcePostfix, SourcePolicy, SourceDelivery:
+		matches = postfixRemote.FindStringSubmatch(message)
+	case SourceDovecot, SourceAuthentication:
+		matches = dovecotRemote.FindStringSubmatch(message)
+	case SourceRspamd, SourceClamAV:
+		matches = rspamdRemote.FindStringSubmatch(message)
+	}
+	if len(matches) != 2 { return netip.Addr{}, false }
+	address, err := netip.ParseAddr(matches[1])
+	if err != nil || address.IsUnspecified() || address.IsMulticast() { return netip.Addr{}, false }
+	return address.Unmap(), true
+}
 
 func parseLine(source SourceKind, message string) (parsedRecord, bool) {
 	switch source {
@@ -355,12 +393,23 @@ func (normalizer *Normalizer) Normalize(ctx context.Context, record InputRecord)
 	providerReceiptDigest, signatureDigest := "", ""
 	if parsed.providerReceipt != "" { providerReceiptDigest = digestParts("provider-receipt-v1", string(correlation.TenantID), parsed.providerReceipt) }
 	if parsed.signature != "" { signatureDigest = digestParts("provider-signature-v1", parsed.signature) }
+	var remoteSource *RemoteIdentity
+	if remoteAddress, present := parseRemote(record.Source, string(record.Message)); present {
+		remote, remoteErr := normalizer.pseudonyms.Source(correlation.TenantID, remoteAddress)
+		if remoteErr != nil { return NormalizedRecord{}, remoteErr }
+		if normalizer.sourceProtector != nil {
+			reference, protectErr := normalizer.sourceProtector.ProtectMailSource(ctx, correlation.TenantID, remoteAddress)
+			if protectErr != nil || !validProtectedSourceRef(reference) { return NormalizedRecord{}, ErrProtected }
+			remote.ProtectedRef = reference
+		}
+		remoteSource = &remote
+	}
 	event := Event{
 		ID: EventID("event-" + digestParts(string(record.SourceID), strconv.FormatUint(record.SourceGeneration, 10), record.Cursor, recordDigest)[:24]),
 		TenantID: correlation.TenantID, DomainID: correlation.DomainID, MailboxID: correlation.MailboxID,
 		Source: record.Source, SourceID: record.SourceID, SourceGeneration: record.SourceGeneration, SourceCursor: record.Cursor,
 		OccurredAt: record.OccurredAt.UTC(), ObservedAt: record.ObservedAt.UTC(), Direction: correlation.Direction,
-		Category: parsed.category, Result: parsed.result, Evidence: evidence, Sender: sender, Recipient: recipient,
+		Category: parsed.category, Result: parsed.result, Evidence: evidence, Sender: sender, Recipient: recipient, RemoteSource: remoteSource,
 		DiagnosticCode: diagnostic, DurationMicros: durationMicros, Bytes: bytesValue, Metadata: metadata,
 		Provenance: Provenance{Parser: string(record.Source) + "-strict", ParserVersion: 1, Provider: parsed.provider, ProviderReceiptDigest: providerReceiptDigest, SignatureDigest: signatureDigest, SignatureKeyID: parsed.signatureKeyID, RecordDigest: recordDigest},
 	}
@@ -389,5 +438,10 @@ func (normalizer *Normalizer) Normalize(ctx context.Context, record InputRecord)
 		return NormalizedRecord{}, ErrIntegrity
 	}
 	retain := mandatory || policy.permits(event.Category, DataResult)
-	return NormalizedRecord{Event: &event, Retain: retain}, nil
+	var sourceGap *ParseGap
+	if event.RemoteSource == nil && (event.Category == CategoryAuth || event.Category == CategoryRejection) && (event.Direction == DirectionInbound || event.Direction == DirectionUnknown) {
+		gap := ParseGap{ID: "gap-"+digestParts("remote-source", string(record.SourceID), record.Cursor, recordDigest)[:24], TenantID: correlation.TenantID, SourceID: record.SourceID, SourceGeneration: record.SourceGeneration, SourceCursor: record.Cursor, Code: GapCorrelation, Count: 1, FirstAt: record.OccurredAt.UTC(), LastAt: record.OccurredAt.UTC(), EvidenceDigest: recordDigest}
+		sourceGap = &gap
+	}
+	return NormalizedRecord{Event: &event, Gap: sourceGap, Retain: retain}, nil
 }

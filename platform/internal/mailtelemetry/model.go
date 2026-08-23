@@ -201,6 +201,19 @@ type AddressIdentity struct {
 	Value string       `json:"value"`
 }
 
+type RemoteIdentity struct {
+	Pseudonym   string `json:"pseudonym"`
+	ProtectedRef string `json:"protected_ref,omitempty"`
+}
+
+func validProtectedSourceRef(value string) bool {
+	return strings.HasPrefix(value, "source-ref-") && validDigest(strings.TrimPrefix(value, "source-ref-"))
+}
+
+func (identity RemoteIdentity) valid() bool {
+	return validDigest(identity.Pseudonym) && (identity.ProtectedRef == "" || validProtectedSourceRef(identity.ProtectedRef))
+}
+
 func (identity AddressIdentity) valid() bool {
 	return (identity.Kind == IdentityPseudonym && validDigest(identity.Value)) || (identity.Kind == IdentityProtectedRef && validID(identity.Value))
 }
@@ -250,6 +263,7 @@ type Event struct {
 	MessageIdentity  string            `json:"message_identity,omitempty"`
 	Sender           *AddressIdentity  `json:"sender,omitempty"`
 	Recipient        *AddressIdentity  `json:"recipient,omitempty"`
+	RemoteSource     *RemoteIdentity   `json:"remote_source,omitempty"`
 	DiagnosticCode   string            `json:"diagnostic_code,omitempty"`
 	DurationMicros   uint64            `json:"duration_micros,omitempty"`
 	Bytes            uint64            `json:"bytes,omitempty"`
@@ -261,7 +275,7 @@ func (event Event) Validate() error {
 	if !validID(string(event.ID)) || !validID(string(event.TenantID)) || event.DomainID != "" && !validID(string(event.DomainID)) || event.MailboxID != "" && !validID(string(event.MailboxID)) || !event.Source.Valid() || !validID(string(event.SourceID)) || event.SourceGeneration == 0 || event.SourceGeneration > MaximumRevision || event.SourceCursor == "" || len(event.SourceCursor) > MaximumCursorBytes || event.OccurredAt.IsZero() || event.ObservedAt.Before(event.OccurredAt.Add(-time.Minute)) || !event.Direction.Valid() || !event.Category.Valid() || !event.Result.Valid() || !event.Evidence.Valid() || len(event.Metadata) > MaximumMetadataItems || len(event.DiagnosticCode) > 128 || !event.Provenance.valid() {
 		return ErrInvalid
 	}
-	if event.QueueIdentity != "" && !validDigest(event.QueueIdentity) || event.MessageIdentity != "" && !validDigest(event.MessageIdentity) || event.Sender != nil && !event.Sender.valid() || event.Recipient != nil && !event.Recipient.valid() {
+	if event.QueueIdentity != "" && !validDigest(event.QueueIdentity) || event.MessageIdentity != "" && !validDigest(event.MessageIdentity) || event.Sender != nil && !event.Sender.valid() || event.Recipient != nil && !event.Recipient.valid() || event.RemoteSource != nil && !event.RemoteSource.valid() {
 		return ErrInvalid
 	}
 	if (event.PolicyID == "") != (event.PolicyRevision == 0) || event.PolicyID != "" && !validID(string(event.PolicyID)) || event.PolicyRevision > MaximumRevision || !event.RetainUntil.IsZero() && !event.RetainUntil.After(event.OccurredAt) {

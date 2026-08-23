@@ -93,6 +93,31 @@ func (repository *SQLiteRepository) Bootstrap(ctx context.Context) error {
 			action TEXT NOT NULL, request_digest TEXT NOT NULL, document BLOB NOT NULL, occurred_at TEXT NOT NULL) STRICT`,
 		`CREATE TRIGGER IF NOT EXISTS mail_telemetry_policy_audit_no_update_v1 BEFORE UPDATE ON mail_telemetry_policy_audit_v1 BEGIN SELECT RAISE(ABORT, 'policy audit is immutable'); END`,
 		`CREATE TRIGGER IF NOT EXISTS mail_telemetry_policy_audit_no_delete_v1 BEFORE DELETE ON mail_telemetry_policy_audit_v1 BEGIN SELECT RAISE(ABORT, 'policy audit is immutable'); END`,
+		`CREATE TABLE IF NOT EXISTS mail_abuse_findings_v1 (
+			finding_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, source_pseudonym TEXT NOT NULL, pattern TEXT NOT NULL,
+			detected_at TEXT NOT NULL, document BLOB NOT NULL) STRICT`,
+		`CREATE INDEX IF NOT EXISTS mail_abuse_findings_scope_v1 ON mail_abuse_findings_v1(tenant_id, detected_at, finding_id)`,
+		`CREATE TRIGGER IF NOT EXISTS mail_abuse_findings_no_update_v1 BEFORE UPDATE ON mail_abuse_findings_v1 BEGIN SELECT RAISE(ABORT, 'mail abuse findings are immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS mail_abuse_findings_no_delete_v1 BEFORE DELETE ON mail_abuse_findings_v1 BEGIN SELECT RAISE(ABORT, 'mail abuse findings are immutable'); END`,
+		`CREATE TABLE IF NOT EXISTS mail_abuse_intents_v1 (
+			intent_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
+			state TEXT NOT NULL CHECK(state IN ('proposed','submitting','applied','failed','rejected','expired')),
+			expires_at TEXT NOT NULL, document BLOB NOT NULL) STRICT`,
+		`CREATE INDEX IF NOT EXISTS mail_abuse_intents_scope_v1 ON mail_abuse_intents_v1(tenant_id, state, expires_at, intent_id)`,
+		`CREATE TABLE IF NOT EXISTS mail_abuse_authority_receipts_v1 (
+			intent_id TEXT PRIMARY KEY, owner_receipt_id TEXT NOT NULL UNIQUE, evidence_digest TEXT NOT NULL,
+			document BLOB NOT NULL, completed_at TEXT NOT NULL,
+			FOREIGN KEY(intent_id) REFERENCES mail_abuse_intents_v1(intent_id)) STRICT`,
+		`CREATE TRIGGER IF NOT EXISTS mail_abuse_authority_receipts_no_update_v1 BEFORE UPDATE ON mail_abuse_authority_receipts_v1 BEGIN SELECT RAISE(ABORT, 'mail abuse receipts are immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS mail_abuse_authority_receipts_no_delete_v1 BEFORE DELETE ON mail_abuse_authority_receipts_v1 BEGIN SELECT RAISE(ABORT, 'mail abuse receipts are immutable'); END`,
+		`CREATE TABLE IF NOT EXISTS mail_abuse_recoveries_v1 (
+			recovery_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, original_intent_id TEXT NOT NULL, recovery_intent_id TEXT NOT NULL UNIQUE,
+			reason_digest TEXT NOT NULL, document BLOB NOT NULL, created_at TEXT NOT NULL,
+			FOREIGN KEY(original_intent_id) REFERENCES mail_abuse_intents_v1(intent_id),
+			FOREIGN KEY(recovery_intent_id) REFERENCES mail_abuse_intents_v1(intent_id)) STRICT`,
+		`CREATE INDEX IF NOT EXISTS mail_abuse_recoveries_scope_v1 ON mail_abuse_recoveries_v1(tenant_id, created_at, recovery_id)`,
+		`CREATE TRIGGER IF NOT EXISTS mail_abuse_recoveries_no_update_v1 BEFORE UPDATE ON mail_abuse_recoveries_v1 BEGIN SELECT RAISE(ABORT, 'mail abuse recovery evidence is immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS mail_abuse_recoveries_no_delete_v1 BEFORE DELETE ON mail_abuse_recoveries_v1 BEGIN SELECT RAISE(ABORT, 'mail abuse recovery evidence is immutable'); END`,
 	}
 	repository.writer.Lock()
 	defer repository.writer.Unlock()
