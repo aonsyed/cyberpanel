@@ -11,6 +11,16 @@ production functionality remains unimplemented. Existing tests stay parked.
 After the complete production implementation exists, run the full QEMU-only
 test, review, hardening, and qualification program on Ubuntu and AlmaLinux.
 
+## Worker lane scope rule
+
+Every delegated coding lane is a bounded slice, not a subsystem rewrite. The
+default hard limits are five changed files, 1,100 added lines in total, and 800
+added lines in any one file. Reaching 70% of either line limit before the
+requested production path is assembled triggers immediate narrowing; reaching
+a hard limit triggers correctness-only cleanup and commit. A larger lane needs
+an explicit exception from the coordinator before it grows, and splitting code
+into fewer files does not bypass the line limits.
+
 ## Current position
 
 - Implemented production core: tenant/site/domain lifecycle, durable command
