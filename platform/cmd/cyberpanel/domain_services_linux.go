@@ -71,6 +71,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	}
 	identityConsoleEdge,err:=newIdentityEdge(identityService,identityStore);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize identity console edge: %w",err)}
 	dashboardConsoleEdge,err:=newDashboardEdge(repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize dashboard console edge: %w",err)}
+	malwareService,err:=newMalwareOperationalService(ctx,repositories.ControlDB,identityStore,auditService);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize malware operations: %w",err)}
 	databaseExecutor, err := database.NewLocalMariaDBClient()
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("connect database executor: %w", err)
@@ -337,6 +338,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		ApplicationAutologinBridge: applicationAutologinBridge,
 		ApplicationEdge:    applicationConsoleEdge,
 		SecurityEdge:     securityConsoleEdge,
+		Malware:          malwareService,
 		Containers:       containerService,
 		ContainerApplications: containerApplications,
 		ContainerEdge:    containerConsoleEdge,
