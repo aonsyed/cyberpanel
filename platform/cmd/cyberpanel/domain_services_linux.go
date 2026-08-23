@@ -183,6 +183,9 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("connect secret management broker: %w", err)
 	}
+	mailConsumerDigest,err:=webEngineExecutableDigest("/usr/local/libexec/cyberpanel/panel-execd");if err!=nil{return apiserver.DomainServices{},fmt.Errorf("digest OpenDKIM material consumer: %w",err)}
+	mailRotation,err:=mail.NewDKIMRotationService(repositories.MailControl,mailProjector,cyberpanelDKIMRuntime{client:mailClient},secretEnrollment.client,mail.SystemDKIMTXTObserver{},mailConsumerDigest,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize DKIM rotation: %w",err)}
+	mailCoordinator.DKIMRotation=mailRotation
 	providerDigest,err:=integrations.ProviderWorkerReleaseDigest("");if err!=nil{return apiserver.DomainServices{},fmt.Errorf("digest provider worker: %w",err)}
 	providerClients:=map[integrations.ProviderKind]integrations.Provider{};for _,kind:=range []integrations.ProviderKind{integrations.ProviderCloudflare,integrations.ProviderAWSS3,integrations.ProviderWasabi,integrations.ProviderBackblaze}{client,clientErr:=integrations.NewLocalProviderWorkerClient(kind);if clientErr!=nil{return apiserver.DomainServices{},fmt.Errorf("connect %s provider worker: %w",kind,clientErr)};providerClients[kind]=client}
 	providerRegistrations,err:=integrations.DefaultProviderWorkerRegistrations(providerDigest,providerClients);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("register provider workers: %w",err)}
@@ -300,3 +303,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		SecretEnrollment:  secretEnrollment,
 	}, nil
 }
+
+type cyberpanelDKIMRuntime struct{client *mail.MailDaemonClient}
+
+func(runtime cyberpanelDKIMRuntime)ApplyDKIMGeneration(ctx context.Context,effect mail.EffectRequest,generation mail.ConfigGeneration)(mail.DKIMRuntimeReceipt,error){receipt:=mail.DKIMRuntimeReceipt{};if runtime.client==nil{return receipt,mail.ErrInvalidCommand};applied,activation,err:=runtime.client.ApplyGeneration(ctx,effect,generation);receipt.Effect=applied;receipt.GenerationDigest=activation.GenerationDigest;receipt.RolledBack=activation.RolledBack;if err!=nil{return receipt,err};reload,reloadErr:=runtime.client.ControlService(ctx,mail.ServiceOpenDKIM,mail.ServiceReload);receipt.OpenDKIMReloadDigest=reload.EvidenceDigest;probe,probeErr:=runtime.client.ControlService(ctx,mail.ServiceOpenDKIM,mail.ServiceProbe);receipt.OpenDKIMProbeDigest=probe.EvidenceDigest;receipt.OpenDKIMActive=probe.Active;if reloadErr!=nil{return receipt,reloadErr};if probeErr!=nil{return receipt,probeErr};if !probe.Active{return receipt,mail.ErrInvalidReceipt};return receipt,nil}

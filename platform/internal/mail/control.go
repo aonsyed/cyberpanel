@@ -162,7 +162,7 @@ type QueueRuntime interface {
 	ListQueue(context.Context, uint32) ([]MailQueueRecord, string, error)
 }
 
-type Coordinator struct { Store ControlRepository; Executor HostExecutor; Now func() time.Time }
+type Coordinator struct { Store ControlRepository; Executor HostExecutor; DKIMRotation *DKIMRotationService; Now func() time.Time }
 
 func (c Coordinator) Handle(ctx context.Context, command Command) (OperationReceipt, error) {
 	if ctx == nil || c.Store == nil || c.Executor == nil { return OperationReceipt{}, ErrInvalidCommand }
