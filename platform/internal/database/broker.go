@@ -17,6 +17,7 @@ import (
 const (
 	DatabaseBrokerProtocolVersion uint32 = 1
 	DatabaseBrokerMaximumFrame          = 1 << 20
+	databaseBrokerMaximumResponseFrame  = 66 << 20
 )
 
 type BrokerOperation string
@@ -24,7 +25,14 @@ type BrokerOperation string
 const (
 	BrokerObserveOrApply BrokerOperation = "observe_or_apply"
 	BrokerCompensate     BrokerOperation = "compensate"
+	BrokerWorkspaceMetadata BrokerOperation = "workspace_metadata"
+	BrokerWorkspaceQuery    BrokerOperation = "workspace_query"
 )
+
+type WorkspaceBrokerRequest struct {
+	Access    WorkspaceAccess `json:"access"`
+	Statement string          `json:"statement,omitempty"`
+}
 
 type BrokerRequest struct {
 	Version      uint32               `json:"version"`
@@ -33,6 +41,7 @@ type BrokerRequest struct {
 	Deadline     time.Time            `json:"deadline"`
 	Effect       *EffectRequest       `json:"effect,omitempty"`
 	Compensation *CompensationRequest `json:"compensation,omitempty"`
+	Workspace    *WorkspaceBrokerRequest `json:"workspace,omitempty"`
 }
 
 type BrokerResponse struct {
@@ -41,6 +50,8 @@ type BrokerResponse struct {
 	Operation    BrokerOperation       `json:"operation"`
 	Effect       *EffectReceipt        `json:"effect,omitempty"`
 	Compensation *CompensationReceipt  `json:"compensation,omitempty"`
+	Metadata     *WorkspaceMetadataResult `json:"metadata,omitempty"`
+	Query        *WorkspaceQueryResult `json:"query,omitempty"`
 	FailureCode  string                `json:"failure_code,omitempty"`
 }
 
@@ -50,11 +61,22 @@ func (request BrokerRequest) validate(now time.Time) error {
 	}
 	switch request.Operation {
 	case BrokerObserveOrApply:
-		if request.Effect == nil || request.Compensation != nil || validateEffectRequest(*request.Effect) != nil {
+		if request.Effect == nil || request.Compensation != nil || request.Workspace != nil || validateEffectRequest(*request.Effect) != nil {
 			return ErrInvalidCommand
 		}
 	case BrokerCompensate:
-		if request.Effect != nil || request.Compensation == nil || !validCompensationRequest(*request.Compensation) {
+		if request.Effect != nil || request.Compensation == nil || request.Workspace != nil || !validCompensationRequest(*request.Compensation) {
+			return ErrInvalidCommand
+		}
+	case BrokerWorkspaceMetadata:
+		if request.Effect != nil || request.Compensation != nil || request.Workspace == nil || request.Workspace.Statement != "" || request.Workspace.Access.validate(now) != nil {
+			return ErrInvalidCommand
+		}
+	case BrokerWorkspaceQuery:
+		if request.Effect != nil || request.Compensation != nil || request.Workspace == nil || request.Workspace.Access.validate(now) != nil {
+			return ErrInvalidCommand
+		}
+		if normalized, _, err := ParseWorkspaceStatement(request.Workspace.Statement); err != nil || normalized != request.Workspace.Statement {
 			return ErrInvalidCommand
 		}
 	default:
@@ -68,16 +90,30 @@ func (response BrokerResponse) validate(request BrokerRequest) error {
 		return ErrInvalidReceipt
 	}
 	if response.FailureCode != "" {
-		if response.Effect != nil || response.Compensation != nil || !validBrokerFailure(response.FailureCode) {
+		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query != nil || !validBrokerFailure(response.FailureCode) {
 			return ErrInvalidReceipt
 		}
 		return nil
 	}
 	switch request.Operation {
 	case BrokerObserveOrApply:
+		if response.Metadata != nil || response.Query != nil { return ErrInvalidReceipt }
 		return validateBrokerEffectResponse(request, response)
 	case BrokerCompensate:
+		if response.Metadata != nil || response.Query != nil { return ErrInvalidReceipt }
 		return validateBrokerCompensationResponse(request, response)
+	case BrokerWorkspaceMetadata:
+		if response.Effect != nil || response.Compensation != nil || response.Metadata == nil || response.Query != nil || request.Workspace == nil {
+			return ErrInvalidReceipt
+		}
+		return validateWorkspaceMetadata(*response.Metadata, request.Workspace.Access)
+	case BrokerWorkspaceQuery:
+		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query == nil || request.Workspace == nil {
+			return ErrInvalidReceipt
+		}
+		_, kind, err := ParseWorkspaceStatement(request.Workspace.Statement)
+		if err != nil || response.Query.Kind != kind { return ErrInvalidReceipt }
+		return validateWorkspaceResult(*response.Query, request.Workspace.Access)
 	default:
 		return ErrInvalidReceipt
 	}
@@ -109,7 +145,7 @@ func validBrokerRequestID(value string) bool {
 
 func validBrokerFailure(value string) bool {
 	switch value {
-	case "invalid_request", "unauthorized", "deadline", "unavailable", "internal", "ambiguous":
+	case "invalid_request", "unauthorized", "not_found", "conflict", "deadline", "unavailable", "internal", "ambiguous":
 		return true
 	default:
 		return false
@@ -156,12 +192,52 @@ func (client *BrokerClient) Compensate(ctx context.Context, compensation Compens
 	return *response.Compensation, nil
 }
 
+func (client *BrokerClient) BrowseWorkspaceMetadata(ctx context.Context, access WorkspaceAccess) (WorkspaceMetadataResult, error) {
+	if client == nil || client.transport == nil || ctx == nil || access.validate(client.now().UTC()) != nil {
+		return WorkspaceMetadataResult{}, ErrInvalidCommand
+	}
+	bounded, cancel := workspaceContext(ctx, access, client.now().UTC())
+	defer cancel()
+	request, err := client.requestWithMaximum(bounded, BrokerWorkspaceMetadata, 2*time.Minute)
+	if err != nil { return WorkspaceMetadataResult{}, err }
+	request.Workspace = &WorkspaceBrokerRequest{Access: access}
+	if err = request.validate(client.now().UTC()); err != nil { return WorkspaceMetadataResult{}, err }
+	response, err := client.transport.RoundTrip(bounded, request)
+	if err != nil { return WorkspaceMetadataResult{}, err }
+	if err = response.validate(request); err != nil { return WorkspaceMetadataResult{}, err }
+	if response.FailureCode != "" { return WorkspaceMetadataResult{}, brokerFailure(response.FailureCode) }
+	return *response.Metadata, nil
+}
+
+func (client *BrokerClient) ExecuteWorkspaceStatement(ctx context.Context, access WorkspaceAccess, statement string) (WorkspaceQueryResult, error) {
+	if client == nil || client.transport == nil || ctx == nil || access.validate(client.now().UTC()) != nil {
+		return WorkspaceQueryResult{}, ErrInvalidCommand
+	}
+	normalized, _, err := ParseWorkspaceStatement(statement)
+	if err != nil || normalized != statement { return WorkspaceQueryResult{}, ErrInvalidCommand }
+	bounded, cancel := workspaceContext(ctx, access, client.now().UTC())
+	defer cancel()
+	request, err := client.requestWithMaximum(bounded, BrokerWorkspaceQuery, 2*time.Minute)
+	if err != nil { return WorkspaceQueryResult{}, err }
+	request.Workspace = &WorkspaceBrokerRequest{Access: access, Statement: statement}
+	if err = request.validate(client.now().UTC()); err != nil { return WorkspaceQueryResult{}, err }
+	response, err := client.transport.RoundTrip(bounded, request)
+	if err != nil { return WorkspaceQueryResult{}, err }
+	if err = response.validate(request); err != nil { return WorkspaceQueryResult{}, err }
+	if response.FailureCode != "" { return WorkspaceQueryResult{}, brokerFailure(response.FailureCode) }
+	return *response.Query, nil
+}
+
 func (client *BrokerClient) request(ctx context.Context, operation BrokerOperation) (BrokerRequest, error) {
+	return client.requestWithMaximum(ctx, operation, 30*time.Second)
+}
+
+func (client *BrokerClient) requestWithMaximum(ctx context.Context, operation BrokerOperation, maximum time.Duration) (BrokerRequest, error) {
 	if client == nil || client.transport == nil || ctx == nil { return BrokerRequest{}, ErrInvalidCommand }
 	identifier := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, identifier); err != nil { return BrokerRequest{}, err }
 	now := client.now().UTC()
-	deadline := now.Add(30 * time.Second)
+	deadline := now.Add(maximum)
 	if value, ok := ctx.Deadline(); ok && value.Before(deadline) { deadline = value.UTC() }
 	return BrokerRequest{Version: DatabaseBrokerProtocolVersion, RequestID: "req-" + hex.EncodeToString(identifier), Operation: operation, Deadline: deadline}, nil
 }
@@ -184,7 +260,7 @@ func (transport FramedDatabaseBrokerTransport) RoundTrip(ctx context.Context, re
 	if err = connection.SetDeadline(deadline); err != nil { return BrokerResponse{}, err }
 	if err = writeDatabaseBrokerFrame(connection, request); err != nil { return BrokerResponse{}, err }
 	var response BrokerResponse
-	if err = readDatabaseBrokerFrame(connection, &response); err != nil { return BrokerResponse{}, err }
+	if err = readDatabaseBrokerFrameLimit(connection, &response, databaseBrokerMaximumResponseFrame); err != nil { return BrokerResponse{}, err }
 	return response, nil
 }
 
@@ -232,6 +308,11 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 	_ = connection.SetDeadline(request.Deadline)
 	ctx, cancel := context.WithDeadline(context.Background(), request.Deadline)
 	defer cancel()
+	go func() {
+		var probe [1]byte
+		_, _ = connection.Read(probe[:])
+		cancel()
+	}()
 	response := BrokerResponse{Version: DatabaseBrokerProtocolVersion, RequestID: request.RequestID, Operation: request.Operation}
 	var err error
 	switch request.Operation {
@@ -243,16 +324,32 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		var receipt CompensationReceipt
 		receipt, err = server.Executor.Compensate(ctx, *request.Compensation)
 		if compensationReceiptMatches(*request.Compensation, receipt) { response.Compensation = &receipt }
+	case BrokerWorkspaceMetadata:
+		workspace, ok := server.Executor.(WorkspaceExecutor)
+		if !ok { err = ErrInvalidCommand; break }
+		var result WorkspaceMetadataResult
+		result, err = workspace.BrowseWorkspaceMetadata(ctx, request.Workspace.Access)
+		if err == nil && validateWorkspaceMetadata(result, request.Workspace.Access) == nil { response.Metadata = &result }
+	case BrokerWorkspaceQuery:
+		workspace, ok := server.Executor.(WorkspaceExecutor)
+		if !ok { err = ErrInvalidCommand; break }
+		var result WorkspaceQueryResult
+		result, err = workspace.ExecuteWorkspaceStatement(ctx, request.Workspace.Access, request.Workspace.Statement)
+		if err == nil && validateWorkspaceResult(result, request.Workspace.Access) == nil { response.Query = &result }
 	}
-	if response.Effect == nil && response.Compensation == nil {
+	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil {
 		response.FailureCode = classifyBrokerFailure(err)
 	}
-	_ = writeDatabaseBrokerFrame(connection, response)
+	_ = writeDatabaseBrokerFrameLimit(connection, response, databaseBrokerMaximumResponseFrame)
 }
 
 func writeDatabaseBrokerFrame(writer io.Writer, value any) error {
+	return writeDatabaseBrokerFrameLimit(writer, value, DatabaseBrokerMaximumFrame)
+}
+
+func writeDatabaseBrokerFrameLimit(writer io.Writer, value any, maximum int) error {
 	content, err := json.Marshal(value)
-	if err != nil || len(content) == 0 || len(content) > DatabaseBrokerMaximumFrame { return ErrInvalidCommand }
+	if err != nil || len(content) == 0 || len(content) > maximum { return ErrInvalidCommand }
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(content)))
 	if err = writeDatabaseBrokerBytes(writer, header[:]); err != nil { return err }
@@ -270,10 +367,14 @@ func writeDatabaseBrokerBytes(writer io.Writer, content []byte) error {
 }
 
 func readDatabaseBrokerFrame(reader io.Reader, target any) error {
+	return readDatabaseBrokerFrameLimit(reader, target, DatabaseBrokerMaximumFrame)
+}
+
+func readDatabaseBrokerFrameLimit(reader io.Reader, target any, maximum uint32) error {
 	var header [4]byte
 	if _, err := io.ReadFull(reader, header[:]); err != nil { return err }
 	size := binary.BigEndian.Uint32(header[:])
-	if size == 0 || size > DatabaseBrokerMaximumFrame { return ErrInvalidCommand }
+	if size == 0 || size > maximum { return ErrInvalidCommand }
 	content := make([]byte, size)
 	if _, err := io.ReadFull(reader, content); err != nil { return err }
 	decoder := json.NewDecoder(bytes.NewReader(content))
@@ -287,6 +388,8 @@ func classifyBrokerFailure(err error) string {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled): return "deadline"
 	case errors.Is(err, ErrUnauthorized): return "unauthorized"
+	case errors.Is(err, ErrNotFound): return "not_found"
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotency): return "conflict"
 	case errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrInvalidResource): return "invalid_request"
 	case errors.Is(err, ErrAmbiguous): return "ambiguous"
 	case err == nil: return "internal"
@@ -298,9 +401,13 @@ func brokerFailure(code string) error {
 	switch code {
 	case "invalid_request": return ErrInvalidCommand
 	case "unauthorized": return ErrUnauthorized
+	case "not_found": return ErrNotFound
+	case "conflict": return ErrConflict
 	case "deadline": return context.DeadlineExceeded
 	case "ambiguous": return ErrAmbiguous
 	case "unavailable", "internal": return errors.New("database broker unavailable")
 	default: return ErrInvalidReceipt
 	}
 }
+
+var _ WorkspaceExecutor = (*BrokerClient)(nil)

@@ -87,6 +87,8 @@ type LinuxMariaDBExecutor struct {
 	distribution LinuxMariaDBDistribution
 	now          func() time.Time
 	mu           sync.Mutex
+	workspaceMu  sync.Mutex
+	workspaceConnections map[string]uint16
 }
 
 type effectApplication struct {
@@ -122,7 +124,7 @@ func NewLinuxMariaDBExecutor(secrets LinuxMariaDBSecretSource, distribution Linu
 	if os.Geteuid() != 0 || secrets == nil || distribution != LinuxMariaDBUbuntu && distribution != LinuxMariaDBAlma {
 		return nil, ErrUnauthorized
 	}
-	executor := &LinuxMariaDBExecutor{secrets: secrets, distribution: distribution, now: time.Now}
+	executor := &LinuxMariaDBExecutor{secrets: secrets, distribution: distribution, now: time.Now, workspaceConnections: make(map[string]uint16)}
 	if err := executor.initializeRoots(); err != nil {
 		return nil, err
 	}
