@@ -14,12 +14,14 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/ha"
+	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 )
 
 type fleetHAEdge struct {
 	repository *ha.SQLRepository
 	groups     ha.GroupService
 	verifier   ha.EnrollmentVerifier
+	failover   ha.FailoverCoordinator
 	now        func() time.Time
 }
 
@@ -33,6 +35,7 @@ func newFleetHAEdge(repository *ha.SQLRepository, now func() time.Time) (*fleetH
 	edge := &fleetHAEdge{repository:repository, now:now}
 	edge.groups = ha.GroupService{Store:*repository, Now:now}
 	edge.verifier = ha.EnrollmentVerifier{Now:now}
+	edge.failover = ha.FailoverCoordinator{Store:*repository, Now:now}
 	return edge, nil
 }
 
@@ -302,6 +305,49 @@ func (edge *fleetHAEdge) PlanPromotion(ctx context.Context, call apiserver.EdgeC
 	return promotionMutation(promotion, promotionPlanDigest(promotion)), nil
 }
 
+func (edge *fleetHAEdge) ExecutePromotion(ctx context.Context, call apiserver.EdgeCall, payload apiserver.HAPromotionExecutePayload) (apiserver.EdgeMutation[apiserver.HAPromotionProjection], error) {
+	if edge == nil || edge.repository == nil || ctx == nil || call.TenantID != "" || call.ResourceID == "" || call.CommandID == "" || call.ExpectedGeneration == 0 || call.Assurance < identity.AssurancePhishingResistant || payload.PromotionID == "" || payload.WriterLeaseGeneration == 0 || payload.PlanDigest == "" {
+		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrInvalid
+	}
+	selectedWriter, err := edge.repository.LoadNode(ctx, ha.NodeID(call.ResourceID))
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
+	}
+	if selectedWriter.Generation != call.ExpectedGeneration {
+		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrStaleGeneration
+	}
+	promotion, err := edge.repository.LoadPromotion(ctx, ha.PromotionID(payload.PromotionID))
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
+	}
+	if promotion.PreviousWriter != selectedWriter.ID || promotion.GroupID != selectedWriter.GroupID {
+		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrConflict
+	}
+	var quorum ha.QuorumObservation
+	if err = json.Unmarshal([]byte(payload.QuorumEvidence), &quorum); err != nil {
+		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrInvalid
+	}
+	bindings, err := parsePromotionFenceBindings(payload.FenceProviderBindings)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
+	}
+	runID := ha.FailoverRunID(fleetEffectID("failover", string(promotion.ID), promotion.ResourceID))
+	request := ha.PromotionExecutionRequest{
+		PromotionID:promotion.ID, RunID:runID, ExpectedLeaseGeneration:payload.WriterLeaseGeneration,
+		Approval:ha.PromotionApprovalEvidence{
+			CommandID:ha.CommandID(call.CommandID), ActorID:call.PrincipalID, CredentialID:call.CredentialID,
+			SessionID:call.SessionID, AuthzEpoch:call.AuthzEpoch, PlanDigest:payload.PlanDigest,
+			PhishingResistant:call.Assurance >= identity.AssurancePhishingResistant, ApprovedAt:edge.now().UTC(),
+		},
+		Quorum:quorum, FenceProviderBindings:bindings,
+	}
+	promotion, run, executeErr := edge.failover.Execute(ctx, request)
+	if executeErr != nil && !errors.Is(executeErr, ha.ErrReconciliationRequired) {
+		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, executeErr
+	}
+	return promotionExecutionMutation(promotion, run), nil
+}
+
 func fleetNodeProjection(node ha.NodeMember) apiserver.FleetNodeProjection {
 	roles := make([]string, len(node.Roles))
 	for index := range node.Roles {
@@ -335,14 +381,52 @@ func promotionMutation(promotion ha.Promotion, digest string) apiserver.EdgeMuta
 }
 
 func promotionPlanDigest(promotion ha.Promotion) string {
-	value := promotion
-	value.Approvals = nil
-	raw, _ := json.Marshal(struct {
-		Domain string       `json:"domain"`
-		Plan   ha.Promotion `json:"plan"`
-	}{Domain:"cyberpanel-ha-promotion-plan-v1", Plan:value})
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
+	digest, _ := ha.PromotionPlanDigest(promotion)
+	return digest
+}
+
+func promotionExecutionMutation(promotion ha.Promotion, run ha.FailoverRun) apiserver.EdgeMutation[apiserver.HAPromotionProjection] {
+	effects := make([]apiserver.HAPromotionEffectProjection, len(run.Effects))
+	for index, receipt := range run.Effects {
+		effects[index] = apiserver.HAPromotionEffectProjection{
+			Sequence:receipt.Sequence, EffectID:receipt.EffectID, Kind:receipt.Kind, Outcome:string(receipt.Outcome),
+			ReceiptDigest:receipt.ReceiptDigest, Frontier:receipt.Frontier, Irreversible:receipt.Irreversible,
+			Failure:receipt.Failure, StartedAt:receipt.StartedAt, CompletedAt:receipt.CompletedAt,
+		}
+	}
+	projection := apiserver.HAPromotionProjection{
+		ID:string(promotion.ID), ResourceID:promotion.ResourceID, PreviousWriterNodeID:string(promotion.PreviousWriter), CandidateNodeID:string(promotion.Candidate),
+		WriterLeaseGeneration:promotion.ExpectedGeneration, MaximumDataLoss:promotion.MaximumDataLoss, PotentialDataLoss:promotion.PotentialDataLoss,
+		PlanDigest:run.PlanDigest, State:string(run.State), RunID:string(run.ID), Step:run.Step, Effects:effects,
+		ReconciliationRequired:run.ReconciliationRequired, ReconciliationReason:run.ReconciliationReason,
+		Failure:run.Failure, Generation:promotion.Generation,
+	}
+	return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{OperationID:string(run.Approval.CommandID), State:string(run.State), Generation:promotion.Generation, Resource:projection}
+}
+
+func parsePromotionFenceBindings(value string) (map[ha.FenceClass]string, error) {
+	result := map[ha.FenceClass]string{}
+	for _, line := range strings.Split(strings.TrimSpace(value), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+			return nil, ha.ErrInvalid
+		}
+		class := ha.FenceClass(strings.TrimSpace(parts[0]))
+		switch class {
+		case ha.FencePower, ha.FenceStorage, ha.FenceDatabase, ha.FenceMandatoryLease, ha.FenceAdministrative:
+		default:
+			return nil, ha.ErrInvalid
+		}
+		if _, duplicate := result[class]; duplicate {
+			return nil, ha.ErrConflict
+		}
+		result[class] = strings.TrimSpace(parts[1])
+	}
+	return result, nil
 }
 
 func promotionTrafficCovers(policy ha.TrafficPolicy, previous, candidate ha.NodeID) bool {

@@ -721,6 +721,27 @@ type HAPromotionPlanPayload struct {
 	MaximumDataLoss        time.Duration `json:"maximum_data_loss"`
 }
 
+type HAPromotionExecutePayload struct {
+	PromotionID            string `json:"promotion_id"`
+	WriterLeaseGeneration  uint64 `json:"writer_lease_generation"`
+	PlanDigest             string `json:"plan_digest"`
+	QuorumEvidence         string `json:"quorum_evidence"`
+	FenceProviderBindings  string `json:"fence_provider_bindings,omitempty"`
+}
+
+type HAPromotionEffectProjection struct {
+	Sequence      uint32    `json:"sequence"`
+	EffectID      string    `json:"effect_id"`
+	Kind          string    `json:"kind"`
+	Outcome       string    `json:"outcome"`
+	ReceiptDigest string    `json:"receipt_digest,omitempty"`
+	Frontier      uint64    `json:"frontier,omitempty"`
+	Irreversible  bool      `json:"irreversible"`
+	Failure       string    `json:"failure,omitempty"`
+	StartedAt     time.Time `json:"started_at"`
+	CompletedAt   time.Time `json:"completed_at,omitempty"`
+}
+
 type HAPromotionProjection struct {
 	ID                    string        `json:"id"`
 	ResourceID            string        `json:"resource_id"`
@@ -731,6 +752,11 @@ type HAPromotionProjection struct {
 	PotentialDataLoss     bool          `json:"potential_data_loss"`
 	PlanDigest            string        `json:"plan_digest"`
 	State                 string        `json:"state"`
+	RunID                 string        `json:"run_id,omitempty"`
+	Step                  string        `json:"step,omitempty"`
+	Effects               []HAPromotionEffectProjection `json:"effects,omitempty"`
+	ReconciliationRequired bool         `json:"reconciliation_required"`
+	ReconciliationReason  string        `json:"reconciliation_reason,omitempty"`
 	Failure               string        `json:"failure,omitempty"`
 	Generation            uint64        `json:"generation"`
 }
@@ -1050,6 +1076,7 @@ type HAEdgeService interface {
 	NodeHealth(context.Context, EdgeCall) (HANodeHealthProjection, error)
 	DrainNode(context.Context, EdgeCall, HANodeDrainPayload) (EdgeMutation[FleetNodeProjection], error)
 	PlanPromotion(context.Context, EdgeCall, HAPromotionPlanPayload) (EdgeMutation[HAPromotionProjection], error)
+	ExecutePromotion(context.Context, EdgeCall, HAPromotionExecutePayload) (EdgeMutation[HAPromotionProjection], error)
 }
 
 type MigrationEdgeService interface {
@@ -1208,6 +1235,7 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("ha.node.health", "fleet:observe", password, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
 		consoleOperation("ha.node.drain", "ha:manage", mfa, true, func() any { return &HANodeDrainPayload{} }, validateHANodeDrain, edgeInstallationExistingMutationScope),
 		consoleOperation("ha.promotion.plan", "ha:manage", phishingResistant, true, func() any { return &HAPromotionPlanPayload{} }, validateHAPromotionPlan, edgeInstallationExistingMutationScope),
+		consoleOperation("ha.promotion.execute", "ha:manage", phishingResistant, true, func() any { return &HAPromotionExecutePayload{} }, validateHAPromotionExecute, edgeInstallationExistingMutationScope),
 
 		consoleOperation("migration.list", "migration:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
 		consoleOperation("migration.inspect", "migration:manage", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantResourceReadScope),
@@ -1659,13 +1687,25 @@ func validateHAPromotionPlan(value any) error {
 	return nil
 }
 
+func validateHAPromotionExecute(value any) error {
+	payload := value.(*HAPromotionExecutePayload)
+	if !validEdgeID(payload.PromotionID) || payload.WriterLeaseGeneration == 0 || !validDigestReference(payload.PlanDigest) || len(payload.QuorumEvidence) == 0 || len(payload.QuorumEvidence) > 64<<10 || len(payload.FenceProviderBindings) > 4096 {
+		return invalid("promotion execution")
+	}
+	var quorum ha.QuorumObservation
+	if json.Unmarshal([]byte(payload.QuorumEvidence), &quorum) != nil || quorum.Validate(time.Now().UTC()) != nil {
+		return invalid("promotion quorum evidence")
+	}
+	return nil
+}
+
 func mapHAEdgeError(err error) error {
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, ha.ErrLeaseLost), errors.Is(err, ha.ErrCheckpointStale):
 		return ErrConflict
-	case errors.Is(err, ha.ErrFenceFailed), errors.Is(err, ha.ErrSplitBrainRisk), errors.Is(err, ha.ErrDataLossApproval), errors.Is(err, ha.ErrIrreversibleFrontier):
+	case errors.Is(err, ha.ErrFenceFailed), errors.Is(err, ha.ErrSplitBrainRisk), errors.Is(err, ha.ErrDataLossApproval), errors.Is(err, ha.ErrIrreversibleFrontier), errors.Is(err, ha.ErrReconciliationRequired):
 		return ErrUnavailable
 	default:
 		return mapDomainError(err)
@@ -2400,6 +2440,10 @@ func bindConsoleEdgeContractsThree(registry *Registry, services DomainServices) 
 		if err := registry.Bind("ha.promotion.plan", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.HAEdge.PlanPromotion(ctx, edgeCall(inv), *value.(*HAPromotionPlanPayload)); if err != nil { return OperationResult{}, mapHAEdgeError(err) }
 			return edgeOperationResult(http.StatusCreated, result), nil
+		}); err != nil { return err }
+		if err := registry.Bind("ha.promotion.execute", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.HAEdge.ExecutePromotion(ctx, edgeCall(inv), *value.(*HAPromotionExecutePayload)); if err != nil { return OperationResult{}, mapHAEdgeError(err) }
+			return edgeOperationResult(http.StatusAccepted, result), nil
 		}); err != nil { return err }
 	}
 	if services.MigrationEdge != nil {

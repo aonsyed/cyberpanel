@@ -30,6 +30,7 @@ var (
 	ErrUnsafePromotion = errors.New("high availability promotion is unsafe")
 	ErrIrreversibleFrontier = errors.New("high availability crossed irreversible write frontier")
 	ErrProviderAmbiguous = errors.New("high availability traffic provider ambiguous")
+	ErrReconciliationRequired = errors.New("high availability promotion reconciliation required")
 	ErrForbidden = errors.New("high availability operation forbidden")
 	ErrExpired = errors.New("high availability authority expired")
 	ErrUnsupported = errors.New("high availability capability unsupported")
@@ -144,11 +145,64 @@ type TrafficEndpoint struct { NodeID NodeID `json:"node_id"`; Address string `js
 type TrafficPolicy struct { ID TrafficPolicyID `json:"id"`; GroupID NodeGroupID `json:"group_id"`; Kind string `json:"kind"`; ProviderBindingID string `json:"provider_binding_id"`; ProviderMode TrafficProviderMode `json:"provider_mode"`; Resource string `json:"resource"`; TTL uint32 `json:"ttl"`; Endpoints []TrafficEndpoint `json:"endpoints"`; ExpectedRevision string `json:"expected_revision"`; DesiredDigest string `json:"desired_digest"`; ObservedDigest string `json:"observed_digest,omitempty"`; Generation uint64 `json:"generation"`; UpdatedAt time.Time `json:"updated_at"` }
 
 type PromotionState string
-const ( PromotionPlanned PromotionState = "planned"; PromotionChecking PromotionState = "checking"; PromotionFencing PromotionState = "fencing"; PromotionFenced PromotionState = "fenced"; PromotionPromoting PromotionState = "promoting"; PromotionRouting PromotionState = "routing"; PromotionProbing PromotionState = "probing"; PromotionSoaking PromotionState = "soaking"; PromotionCommitted PromotionState = "committed"; PromotionRollingBack PromotionState = "rolling_back"; PromotionRolledBack PromotionState = "rolled_back"; PromotionFailForward PromotionState = "fail_forward"; PromotionFailed PromotionState = "failed" )
+const ( PromotionPlanned PromotionState = "planned"; PromotionChecking PromotionState = "checking"; PromotionFencing PromotionState = "fencing"; PromotionFenced PromotionState = "fenced"; PromotionPromoting PromotionState = "promoting"; PromotionRouting PromotionState = "routing"; PromotionProbing PromotionState = "probing"; PromotionSoaking PromotionState = "soaking"; PromotionCommitted PromotionState = "committed"; PromotionRollingBack PromotionState = "rolling_back"; PromotionRolledBack PromotionState = "rolled_back"; PromotionFailForward PromotionState = "fail_forward"; PromotionReconciliation PromotionState = "reconciliation_required"; PromotionFailed PromotionState = "failed" )
 type Approval struct { ID string `json:"id"`; ActorID string `json:"actor_id"`; Kind string `json:"kind"`; PlanDigest string `json:"plan_digest"`; IssuedAt time.Time `json:"issued_at"`; ExpiresAt time.Time `json:"expires_at"`; Signature string `json:"signature"` }
 type Promotion struct { ID PromotionID `json:"id"`; CommandID CommandID `json:"command_id"`; GroupID NodeGroupID `json:"group_id"`; ResourceID string `json:"resource_id"`; PreviousWriter NodeID `json:"previous_writer"`; Candidate NodeID `json:"candidate"`; ExpectedGeneration uint64 `json:"expected_generation"`; CheckpointID CheckpointID `json:"checkpoint_id"`; CheckpointFrontier uint64 `json:"checkpoint_frontier"`; MaximumDataLoss time.Duration `json:"maximum_data_loss"`; LeaseID WriterLeaseID `json:"lease_id,omitempty"`; FenceIDs []FenceID `json:"fence_ids"`; TrafficPolicyID TrafficPolicyID `json:"traffic_policy_id"`; Automatic bool `json:"automatic"`; PotentialDataLoss bool `json:"potential_data_loss"`; Approvals []Approval `json:"approvals"`; State PromotionState `json:"state"`; WriteFrontier uint64 `json:"write_frontier"`; Irreversible bool `json:"irreversible"`; Failure string `json:"failure,omitempty"`; Generation uint64 `json:"generation"`; CreatedAt time.Time `json:"created_at"`; UpdatedAt time.Time `json:"updated_at"` }
 
-type FailoverRun struct { ID FailoverRunID `json:"id"`; PromotionID PromotionID `json:"promotion_id"`; PlanDigest string `json:"plan_digest"`; HealthQuorumDigest string `json:"health_quorum_digest"`; FenceProofDigest string `json:"fence_proof_digest,omitempty"`; TrafficBeforeDigest string `json:"traffic_before_digest,omitempty"`; TrafficAfterDigest string `json:"traffic_after_digest,omitempty"`; ProviderRevision string `json:"provider_revision,omitempty"`; State PromotionState `json:"state"`; Step string `json:"step"`; Attempt uint32 `json:"attempt"`; Failure string `json:"failure,omitempty"`; StartedAt time.Time `json:"started_at"`; UpdatedAt time.Time `json:"updated_at"`; CompletedAt time.Time `json:"completed_at,omitempty"` }
+type PromotionApprovalEvidence struct {
+	CommandID          CommandID `json:"command_id"`
+	ActorID            string    `json:"actor_id"`
+	CredentialID       string    `json:"credential_id"`
+	SessionID          string    `json:"session_id,omitempty"`
+	AuthzEpoch         uint64    `json:"authz_epoch"`
+	PlanDigest         string    `json:"plan_digest"`
+	PhishingResistant  bool      `json:"phishing_resistant"`
+	ApprovedAt         time.Time `json:"approved_at"`
+}
+
+type PromotionEffectOutcome string
+
+const (
+	PromotionEffectPending   PromotionEffectOutcome = "pending"
+	PromotionEffectConfirmed PromotionEffectOutcome = "confirmed"
+	PromotionEffectAmbiguous PromotionEffectOutcome = "ambiguous"
+)
+
+type PromotionEffectReceipt struct {
+	Sequence      uint32                 `json:"sequence"`
+	EffectID      string                 `json:"effect_id"`
+	Kind          string                 `json:"kind"`
+	Outcome       PromotionEffectOutcome `json:"outcome"`
+	Receipt       string                 `json:"receipt,omitempty"`
+	ReceiptDigest string                 `json:"receipt_digest,omitempty"`
+	Frontier      uint64                 `json:"frontier,omitempty"`
+	Irreversible  bool                   `json:"irreversible"`
+	Failure       string                 `json:"failure,omitempty"`
+	StartedAt     time.Time              `json:"started_at"`
+	CompletedAt   time.Time              `json:"completed_at,omitempty"`
+}
+
+type FailoverRun struct {
+	ID                     FailoverRunID               `json:"id"`
+	PromotionID            PromotionID                `json:"promotion_id"`
+	PlanDigest             string                     `json:"plan_digest"`
+	Approval               PromotionApprovalEvidence  `json:"approval"`
+	HealthQuorumDigest     string                     `json:"health_quorum_digest"`
+	FenceProofDigest       string                     `json:"fence_proof_digest,omitempty"`
+	TrafficBeforeDigest    string                     `json:"traffic_before_digest,omitempty"`
+	TrafficAfterDigest     string                     `json:"traffic_after_digest,omitempty"`
+	ProviderRevision       string                     `json:"provider_revision,omitempty"`
+	Effects                []PromotionEffectReceipt   `json:"effects"`
+	ReconciliationRequired bool                       `json:"reconciliation_required"`
+	ReconciliationReason   string                     `json:"reconciliation_reason,omitempty"`
+	State                  PromotionState             `json:"state"`
+	Step                   string                     `json:"step"`
+	Attempt                uint32                     `json:"attempt"`
+	Failure                string                     `json:"failure,omitempty"`
+	StartedAt              time.Time                  `json:"started_at"`
+	UpdatedAt              time.Time                  `json:"updated_at"`
+	CompletedAt            time.Time                  `json:"completed_at,omitempty"`
+}
 
 type BackupReplicaCopy struct { ID BackupCopyID `json:"id"`; RecoveryPointID string `json:"recovery_point_id"`; SourceNodeID NodeID `json:"source_node_id"`; TargetNodeID NodeID `json:"target_node_id"`; FailureDomain string `json:"failure_domain"`; ManifestDigest string `json:"manifest_digest"`; CommitMarker string `json:"commit_marker"`; VerifiedAt time.Time `json:"verified_at"`; CleanRestoreProvenAt time.Time `json:"clean_restore_proven_at,omitempty"` }
 
