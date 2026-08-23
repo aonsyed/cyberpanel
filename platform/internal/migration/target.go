@@ -148,7 +148,7 @@ func (target *CanonicalTargetImporter) Plan(ctx context.Context, manifest Manife
 }
 
 func (target *CanonicalTargetImporter) Prepare(ctx context.Context, migration Migration, plan Plan) error {
-	if target == nil || validateMigration(migration) != nil || validatePlan(plan) != nil || plan.MigrationID != migration.ID {
+	if target == nil || ctx == nil || validateMigration(migration) != nil || validatePlan(plan) != nil || plan.MigrationID != migration.ID || plan.ManifestRoot != migration.ManifestRoot || plan.DryRunDigest != migration.PlanDigest || plan.ApprovedAt == nil || plan.ApprovedAt.IsZero() || !isDigest(plan.ApprovalDigest) || len(plan.Unsupported) != 0 {
 		return ErrInvalid
 	}
 	available, err := target.Capacity(ctx)
@@ -221,6 +221,18 @@ func (target *CanonicalTargetImporter) VerifyDark(ctx context.Context, migration
 }
 
 func (target *CanonicalTargetImporter) Activate(ctx context.Context, migration Migration, plan Plan) (ActivationReceipt, error) {
+	if target == nil || ctx == nil {
+		return ActivationReceipt{}, ErrInvalid
+	}
+	available, err := target.Capacity(ctx)
+	if err != nil {
+		return ActivationReceipt{}, err
+	}
+	for key, required := range plan.RequiredCapacity {
+		if available[key] < required {
+			return ActivationReceipt{}, errors.Join(ErrCapacity, fmt.Errorf("%s requires %d, available %d", key, required, available[key]))
+		}
+	}
 	receipt, err := target.activation.ActivateMigration(ctx, migration, plan)
 	if err != nil {
 		return receipt, err
@@ -447,17 +459,33 @@ CREATE TABLE IF NOT EXISTS panel_migration_import_effects(migration_id TEXT NOT 
 type SQLImportLedger struct { db *sql.DB; mu sync.Mutex; clock func() time.Time }
 
 func NewSQLImportLedger(db *sql.DB) (*SQLImportLedger, error) { if db == nil { return nil, ErrInvalid }; return &SQLImportLedger{db: db, clock: time.Now}, nil }
-func (ledger *SQLImportLedger) Bootstrap(ctx context.Context) error { _, err := ledger.db.ExecContext(ctx, importLedgerSchema); return err }
-
-func (ledger *SQLImportLedger) Prepare(ctx context.Context, migration Migration, plan Plan) error {
-	if validateMigration(migration) != nil || validatePlan(plan) != nil || migration.ID != plan.MigrationID { return ErrInvalid }
+func (ledger *SQLImportLedger) Bootstrap(ctx context.Context) error {
+	if ledger == nil || ledger.db == nil || ctx == nil { return ErrInvalid }
 	ledger.mu.Lock(); defer ledger.mu.Unlock()
-	_, err := ledger.db.ExecContext(ctx, `INSERT INTO panel_migration_import_runs VALUES(?,?,?,?,?) ON CONFLICT(migration_id) DO UPDATE SET state='prepared' WHERE panel_migration_import_runs.plan_digest=excluded.plan_digest`, migration.ID.String(), plan.DryRunDigest, "prepared", encodeTime(ledger.clock().UTC()), "")
+	_, err := ledger.db.ExecContext(ctx, importLedgerSchema)
 	return err
 }
 
+func (ledger *SQLImportLedger) Prepare(ctx context.Context, migration Migration, plan Plan) error {
+	if ledger == nil || ledger.db == nil || ctx == nil || validateMigration(migration) != nil || validatePlan(plan) != nil || migration.ID != plan.MigrationID { return ErrInvalid }
+	ledger.mu.Lock(); defer ledger.mu.Unlock()
+	tx, err := ledger.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil { return err }
+	defer tx.Rollback()
+	var planDigest, state string
+	err = tx.QueryRowContext(ctx, `SELECT plan_digest,state FROM panel_migration_import_runs WHERE migration_id=?`, migration.ID.String()).Scan(&planDigest, &state)
+	if err == nil {
+		if planDigest != plan.DryRunDigest || state != "prepared" { return ErrConflict }
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) { return err }
+	_, err = tx.ExecContext(ctx, `INSERT INTO panel_migration_import_runs(migration_id,plan_digest,state,prepared_at,finalized_at) VALUES(?,?,'prepared',?,?)`, migration.ID.String(), plan.DryRunDigest, encodeTime(ledger.clock().UTC()), "")
+	if err != nil { return err }
+	return tx.Commit()
+}
+
 func (ledger *SQLImportLedger) LoadEffect(ctx context.Context, migrationID ID, effectID string) (ImportEffect, bool, error) {
-	if !migrationID.Valid() || !isDigest(effectID) { return ImportEffect{}, false, ErrInvalid }
+	if ledger == nil || ledger.db == nil || ctx == nil || !migrationID.Valid() || !isDigest(effectID) { return ImportEffect{}, false, ErrInvalid }
 	var raw []byte
 	err := ledger.db.QueryRowContext(ctx, `SELECT effect_json FROM panel_migration_import_effects WHERE migration_id=? AND effect_id=?`, migrationID.String(), effectID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) { return ImportEffect{}, false, nil }
@@ -468,21 +496,47 @@ func (ledger *SQLImportLedger) LoadEffect(ctx context.Context, migrationID ID, e
 }
 
 func (ledger *SQLImportLedger) PutEffect(ctx context.Context, migrationID ID, intent ImportIntent, effect ImportEffect) error {
-	if !migrationID.Valid() || migrationID != intent.MigrationID || !effectMatches(effect, intent) { return ErrInvalid }
+	if ledger == nil || ledger.db == nil || ctx == nil || !migrationID.Valid() || migrationID != intent.MigrationID || !effectMatches(effect, intent) { return ErrInvalid }
 	intentRaw, err := canonicalJSON(intent, 8<<20); if err != nil { return err }
 	effectRaw, err := canonicalJSON(effect, 1<<20); if err != nil { return err }
 	ledger.mu.Lock(); defer ledger.mu.Unlock()
-	_, err = ledger.db.ExecContext(ctx, `INSERT INTO panel_migration_import_effects VALUES(?,?,?,?,?,?,?) ON CONFLICT(migration_id,effect_id) DO UPDATE SET effect_json=excluded.effect_json,status=excluded.status,updated_at=excluded.updated_at WHERE panel_migration_import_effects.input_digest=excluded.input_digest`, migrationID.String(), intent.EffectID, intent.InputDigest, intentRaw, effectRaw, string(effect.Status), encodeTime(ledger.clock().UTC()))
-	return err
+	tx, err := ledger.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil { return err }
+	defer tx.Rollback()
+	var storedInput, storedStatus string
+	var storedIntent, storedEffect []byte
+	err = tx.QueryRowContext(ctx, `SELECT input_digest,intent_json,effect_json,status FROM panel_migration_import_effects WHERE migration_id=? AND effect_id=?`, migrationID.String(), intent.EffectID).Scan(&storedInput, &storedIntent, &storedEffect, &storedStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, `INSERT INTO panel_migration_import_effects(migration_id,effect_id,input_digest,intent_json,effect_json,status,updated_at) VALUES(?,?,?,?,?,?,?)`, migrationID.String(), intent.EffectID, intent.InputDigest, intentRaw, effectRaw, string(effect.Status), encodeTime(ledger.clock().UTC()))
+		if err != nil { return err }
+		return tx.Commit()
+	}
+	if err != nil { return err }
+	if storedInput != intent.InputDigest || !bytes.Equal(storedIntent, intentRaw) { return ErrConflict }
+	if bytes.Equal(storedEffect, effectRaw) && storedStatus == string(effect.Status) { return nil }
+	if ImportEffectStatus(storedStatus) != ImportEffectAmbiguous { return ErrConflict }
+	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_import_effects SET effect_json=?,status=?,updated_at=? WHERE migration_id=? AND effect_id=? AND input_digest=? AND status='ambiguous'`, effectRaw, string(effect.Status), encodeTime(ledger.clock().UTC()), migrationID.String(), intent.EffectID, intent.InputDigest)
+	if err != nil { return err }
+	rows, err := result.RowsAffected(); if err != nil { return err }; if rows != 1 { return ErrConflict }
+	return tx.Commit()
 }
 
 func (ledger *SQLImportLedger) MarkFinalized(ctx context.Context, migrationID ID, checkpoint string) error {
-	if !migrationID.Valid() || checkpoint == "" { return ErrInvalid }
+	if ledger == nil || ledger.db == nil || ctx == nil || !migrationID.Valid() || checkpoint == "" { return ErrInvalid }
 	ledger.mu.Lock(); defer ledger.mu.Unlock()
-	result, err := ledger.db.ExecContext(ctx, `UPDATE panel_migration_import_runs SET state='finalized',finalized_at=? WHERE migration_id=? AND state='prepared'`, encodeTime(ledger.clock().UTC()), migrationID.String())
+	tx, err := ledger.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil { return err }
-	rows, err := result.RowsAffected(); if err != nil || rows != 1 { return ErrConflict }
-	return nil
+	defer tx.Rollback()
+	var state string
+	err = tx.QueryRowContext(ctx, `SELECT state FROM panel_migration_import_runs WHERE migration_id=?`, migrationID.String()).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) { return ErrNotFound }
+	if err != nil { return err }
+	if state == "finalized" { return nil }
+	if state != "prepared" && state != "active" { return ErrConflict }
+	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_import_runs SET state='finalized',finalized_at=? WHERE migration_id=? AND state=?`, encodeTime(ledger.clock().UTC()), migrationID.String(), state)
+	if err != nil { return err }
+	rows, err := result.RowsAffected(); if err != nil { return err }; if rows != 1 { return ErrConflict }
+	return tx.Commit()
 }
 
 // LocalImportGateway is a closed in-process command router. Each resource kind

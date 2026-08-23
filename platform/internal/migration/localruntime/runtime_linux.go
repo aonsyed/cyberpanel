@@ -17,6 +17,8 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,25 +30,55 @@ import (
 
 const (
 	DefaultTrustPath             = "/etc/cyberpanel/migration/trust.json"
+	DefaultChunkPath             = "/var/lib/cyberpanel/control/migration-chunks"
 	defaultClientCertificatePath = "/run/credentials/panel-core.service/migration-client.crt"
 	defaultClientKeyPath         = "/run/credentials/panel-core.service/migration-client.key"
 	defaultCertificateAuthority  = "/run/credentials/panel-core.service/migration-ca.pem"
 )
 
-// Runtime is the local panel-core migration authority. It provides signed
-// remote inventory and collision-safe dry runs. Target mutation remains
-// closed until every canonical resource handler, probe, activation controller,
-// and secret gateway is registered.
+// Runtime is the local panel-core migration authority. The target side accepts
+// only signed canonical resources and keeps their durable generations dark
+// until the guarded cutover controller activates them.
 type Runtime struct {
 	Repository   *migration.SQLRepository
 	Scopes       *migration.RuntimeScopeStore
 	Orchestrator *migration.Orchestrator
+	Target       *migration.CanonicalTargetImporter
+	Chunks       *migration.ChunkStore
+}
+
+type Config struct {
+	ChunkPath         string
+	MaximumChunkBytes uint64
 }
 
 func New(ctx context.Context, db *sql.DB, repository *migration.SQLRepository) (*Runtime, error) {
+	return NewWithConfig(ctx, db, repository, Config{})
+}
+
+func NewWithConfig(ctx context.Context, db *sql.DB, repository *migration.SQLRepository, config Config) (*Runtime, error) {
 	if ctx == nil || db == nil || repository == nil {
 		return nil, migration.ErrInvalid
 	}
+	if config.ChunkPath == "" {
+		config.ChunkPath = DefaultChunkPath
+	}
+	if !filepath.IsAbs(config.ChunkPath) || filepath.Clean(config.ChunkPath) != config.ChunkPath {
+		return nil, migration.ErrInvalid
+	}
+	if err := ensurePrivateDirectory(config.ChunkPath); err != nil {
+		return nil, err
+	}
+	chunks, err := migration.OpenChunkStore(config.ChunkPath, config.MaximumChunkBytes)
+	if err != nil {
+		return nil, err
+	}
+	closeChunks := true
+	defer func() {
+		if closeChunks {
+			_ = chunks.Close()
+		}
+	}()
 	scopes, err := migration.NewRuntimeScopeStore(db)
 	if err != nil {
 		return nil, err
@@ -54,12 +86,30 @@ func New(ctx context.Context, db *sql.DB, repository *migration.SQLRepository) (
 	if err = scopes.Bootstrap(ctx); err != nil {
 		return nil, err
 	}
-	source := &scopedExtractorSource{scopes:scopes, clients:map[migration.ID]scopedClient{}, chunks:map[string][]migration.ID{}}
-	orchestrator, err := migration.NewOrchestrator(repository, configuredManifestVerifier{path: DefaultTrustPath}, source, source, blockedTarget{})
+	capacity := filesystemCapacity{path: config.ChunkPath}
+	target, err := migration.NewSQLCanonicalTargetImporter(ctx, db, chunks, capacity)
 	if err != nil {
 		return nil, err
 	}
-	return &Runtime{Repository: repository, Scopes: scopes, Orchestrator: orchestrator}, nil
+	stager, err := migration.NewChunkStager(chunks, repository)
+	if err != nil {
+		return nil, err
+	}
+	source := &scopedExtractorSource{scopes:scopes, clients:map[migration.ID]scopedClient{}, chunks:map[string][]migration.ID{}}
+	orchestrator, err := migration.NewOrchestrator(repository, configuredManifestVerifier{path: DefaultTrustPath}, source, source, target)
+	if err != nil {
+		return nil, err
+	}
+	orchestrator.WithChunkStager(stager)
+	closeChunks = false
+	return &Runtime{Repository: repository, Scopes: scopes, Orchestrator: orchestrator, Target: target, Chunks: chunks}, nil
+}
+
+func (runtime *Runtime) Close() error {
+	if runtime == nil || runtime.Chunks == nil {
+		return nil
+	}
+	return runtime.Chunks.Close()
 }
 
 type trustDocument struct {
@@ -282,17 +332,19 @@ func extractorDialer(endpoint string) (cyberpanelextractor.DialContext, error) {
 	return func(ctx context.Context) (net.Conn, error) { return dialer.DialContext(ctx, "tcp", address) }, nil
 }
 
-// blockedTarget provides exact dry-run mappings and capacity observations but
-// rejects every write. It is intentionally replaced only by a fully populated
-// CanonicalTargetImporter; partial handler registration is not accepted.
-type blockedTarget struct{}
+type filesystemCapacity struct{ path string }
 
-func (blockedTarget) Capacity(ctx context.Context) (map[string]uint64, error) {
-	if ctx == nil {
+func (provider filesystemCapacity) Capacity(ctx context.Context) (map[string]uint64, error) {
+	if ctx == nil || !filepath.IsAbs(provider.path) || filepath.Clean(provider.path) != provider.path {
 		return nil, migration.ErrInvalid
 	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 	var statistics syscall.Statfs_t
-	if err := syscall.Statfs("/", &statistics); err != nil {
+	if err := syscall.Statfs(provider.path, &statistics); err != nil {
 		return nil, err
 	}
 	free := uint64(statistics.Bavail)
@@ -302,50 +354,45 @@ func (blockedTarget) Capacity(ctx context.Context) (map[string]uint64, error) {
 	} else {
 		free *= block
 	}
-	return map[string]uint64{"disk_bytes": free, "database_bytes": free, "mail_bytes": free, "certificate_bytes": free, "container_bytes": free, "dns_recordsets": ^uint64(0), "mailboxes": ^uint64(0)}, nil
+	objects := uint64(statistics.Ffree)
+	var system syscall.Sysinfo_t
+	if err := syscall.Sysinfo(&system); err != nil {
+		return nil, err
+	}
+	memory := uint64(system.Freeram)
+	unit := uint64(system.Unit)
+	if unit != 0 && memory > ^uint64(0)/unit {
+		memory = ^uint64(0)
+	} else {
+		memory *= unit
+	}
+	cpuMilli := uint64(runtime.NumCPU()) * 1000
+	return map[string]uint64{"disk_bytes": free, "database_bytes": free, "mail_bytes": free, "certificate_bytes": free, "container_bytes": free, "dns_recordsets": objects, "mailboxes": objects, "transfer_bytes": ^uint64(0), "memory_bytes": memory, "cpu_milli": cpuMilli, "io_bytes_per_second": ^uint64(0), "max_connections": 10000, "enabled": ^uint64(0)}, nil
 }
 
-func (blockedTarget) Plan(ctx context.Context, manifest migration.Manifest) ([]migration.Mapping, error) {
-	if ctx == nil || manifest.Validate() != nil {
-		return nil, migration.ErrInvalid
+func ensurePrivateDirectory(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return migration.ErrInvalid
 	}
-	values := make([]migration.Mapping, 0, len(manifest.Sites)+len(manifest.Databases)+len(manifest.DNSZones)+len(manifest.MailDomains)+len(manifest.Certificates)+len(manifest.Credentials)+len(manifest.Schedules)+len(manifest.Repositories)+len(manifest.Containers)+len(manifest.BackupPolicies))
-	appendMapping := func(kind string, source migration.ID, capacity map[string]uint64) {
-		sum := sha256.Sum256([]byte("cyberpanel-migration-target-v1\x00" + kind + "\x00" + manifest.TargetInstallationID + "\x00" + source.String()))
-		target, _ := migration.NewID("target_" + hex.EncodeToString(sum[:24]))
-		values = append(values, migration.Mapping{SourceKind: kind, SourceID: source, TargetID: target, Disposition: migration.DispositionBlock, Reason: "canonical target mutation authority is not registered", Capacity: capacity})
-	}
-	for _, value := range manifest.Sites { appendMapping("site", value.SourceID, map[string]uint64{"disk_bytes": chunkBytes(value.Content)}) }
-	for _, value := range manifest.Databases { appendMapping("database", value.SourceID, map[string]uint64{"database_bytes": chunkBytes(value.Dump)}) }
-	for _, value := range manifest.DNSZones { appendMapping("dns_zone", value.SourceID, map[string]uint64{"dns_recordsets": uint64(len(value.RecordSets))}) }
-	for _, value := range manifest.MailDomains { chunks := append([]migration.Chunk(nil), value.MailData...); for _, mailbox := range value.Mailboxes { chunks=append(chunks,mailbox.Data...) }; appendMapping("mail_domain", value.SourceID, map[string]uint64{"mail_bytes": chunkBytes(chunks), "mailboxes": uint64(len(value.Mailboxes))}) }
-	for _, value := range manifest.Certificates { appendMapping("certificate", value.SourceID, map[string]uint64{"certificate_bytes": chunkBytes(append(append([]migration.Chunk(nil),value.Certificate...),value.Chain...))}) }
-	for _, value := range manifest.Credentials { appendMapping("credential", value.SourceID, nil) }
-	for _, value := range manifest.Schedules { appendMapping("schedule", value.SourceID, nil) }
-	for _, value := range manifest.Repositories { appendMapping("repository", value.SourceID, nil) }
-	for _, value := range manifest.Containers { appendMapping("container_application", value.SourceID, map[string]uint64{"container_bytes": chunkBytes(append(append([]migration.Chunk(nil),value.Descriptor...),value.VolumeData...))}) }
-	for _, value := range manifest.BackupPolicies { appendMapping("backup_policy", value.SourceID, nil) }
-	return values, nil
-}
-
-func (blockedTarget) Prepare(context.Context, migration.Migration, migration.Plan) error { return migration.ErrBlocked }
-func (blockedTarget) ImportResource(context.Context, migration.Migration, migration.Mapping, migration.Manifest) (migration.ResourceProgress, error) { return migration.ResourceProgress{}, migration.ErrBlocked }
-func (blockedTarget) ApplyDelta(context.Context, migration.Migration, migration.Manifest) ([]migration.ResourceProgress, error) { return nil, migration.ErrBlocked }
-func (blockedTarget) VerifyDark(context.Context, migration.Migration, migration.Plan) (migration.Verification, error) { return migration.Verification{}, migration.ErrBlocked }
-func (blockedTarget) Activate(context.Context, migration.Migration, migration.Plan) (migration.ActivationReceipt, error) { return migration.ActivationReceipt{}, migration.ErrBlocked }
-func (blockedTarget) VerifyActive(context.Context, migration.Migration, migration.Plan, migration.ActivationReceipt) (migration.Verification, error) { return migration.Verification{}, migration.ErrBlocked }
-func (blockedTarget) Deactivate(context.Context, migration.ActivationReceipt) error { return migration.ErrBlocked }
-func (blockedTarget) Finalize(context.Context, migration.Migration) error { return migration.ErrBlocked }
-
-func chunkBytes(values []migration.Chunk) uint64 {
-	var total uint64
-	for _, value := range values {
-		if total > ^uint64(0)-value.Size {
-			return ^uint64(0)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err = os.Mkdir(path, 0o700); err != nil {
+			return err
 		}
-		total += value.Size
+		info, err = os.Lstat(path)
 	}
-	return total
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		return migration.ErrInvalid
+	}
+	metadata, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(metadata.Uid) != os.Geteuid() {
+		return migration.ErrBlocked
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path {
+		return migration.ErrBlocked
+	}
+	return nil
 }
 
 func readStableFile(path string, maximum int64, private bool) ([]byte, error) {
@@ -369,4 +416,4 @@ func readStableFile(path string, maximum int64, private bool) ([]byte, error) {
 
 var _ migration.SourceReader = (*scopedExtractorSource)(nil)
 var _ migration.CutoverSource = (*scopedExtractorSource)(nil)
-var _ migration.TargetImporter = blockedTarget{}
+var _ migration.TargetCapacityProvider = filesystemCapacity{}
