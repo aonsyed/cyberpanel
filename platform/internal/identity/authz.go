@@ -11,7 +11,8 @@ type AuthorizationRepository interface {
 	Tenant(context.Context, ID) (Tenant, error)
 	Memberships(context.Context, ID) ([]Membership, error)
 	Bindings(context.Context, ID) ([]RoleBinding, error)
-	Role(context.Context, ID) (Role, error)
+	BindingEffective(context.Context, ID, time.Time) (bool, error)
+	AuthorizationRole(context.Context, ID) (Role, error)
 	TenantAncestors(context.Context, ID) ([]Tenant, error)
 	Delegation(context.Context, ID) (DelegationCeiling, error)
 }
@@ -33,6 +34,7 @@ type AuthorizationDecision struct {
 	TenantEpoch     uint64
 	BindingIDs      []ID
 	RoleIDs         []ID
+	DelegationIDs   []ID
 	Reason          string
 	DecidedAt       time.Time
 }
@@ -74,14 +76,18 @@ func (a *Authorizer) Decide(ctx context.Context, request AuthorizationRequest) (
 				decision.Reason = "delegation_ceiling"
 				return decision, ErrDelegationExceeded
 			}
+			decision.DelegationIDs = append(decision.DelegationIDs, ceiling.ID)
 		}
 	}
 	bindings, err := a.repository.Bindings(ctx, principal.ID)
 	if err != nil { decision.Reason = "bindings_unavailable"; return decision, err }
 	for _, binding := range bindings {
+		effective, effectiveErr := a.repository.BindingEffective(ctx, binding.ID, request.At)
+		if effectiveErr != nil { decision.Reason = "binding_unavailable"; return decision, effectiveErr }
+		if !effective { continue }
 		if binding.ExpiresAt != nil && !request.At.Before(*binding.ExpiresAt) { continue }
 		if !scopeContains(binding.Scope, request.Scope) { continue }
-		role, roleErr := a.repository.Role(ctx, binding.RoleID)
+		role, roleErr := a.repository.AuthorizationRole(ctx, binding.RoleID)
 		if roleErr != nil { return decision, roleErr }
 		if !containsPermission(role.Permissions, request.Permission) { continue }
 		decision.Allowed = true

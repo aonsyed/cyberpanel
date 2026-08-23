@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS identity_invitations (
 );
 CREATE INDEX IF NOT EXISTS identity_invitations_tenant ON identity_invitations(tenant_id,id);
 CREATE UNIQUE INDEX IF NOT EXISTS identity_invitations_token ON identity_invitations(token_digest) WHERE token_digest <> '';
+CREATE TABLE IF NOT EXISTS identity_invitation_role_provenance (
+ invitation_id TEXT NOT NULL, provenance_id TEXT NOT NULL,
+ PRIMARY KEY(invitation_id,provenance_id)
+);
 CREATE TABLE IF NOT EXISTS identity_support_grants (
  id TEXT PRIMARY KEY, issuer_id TEXT NOT NULL, target_tenant_id TEXT NOT NULL,
  scope_kind TEXT NOT NULL, resource_id TEXT NOT NULL, permissions_json TEXT NOT NULL,
@@ -85,6 +89,22 @@ CREATE TABLE IF NOT EXISTS identity_roles (
  created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
  UNIQUE(tenant_id, name)
 );
+CREATE TABLE IF NOT EXISTS identity_role_catalog (
+ role_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, description TEXT NOT NULL,
+ state TEXT NOT NULL, builtin_key TEXT NOT NULL, version BIGINT NOT NULL,
+ revision BIGINT NOT NULL, selectors_json TEXT NOT NULL, cloned_from_id TEXT NOT NULL,
+ created_by_id TEXT NOT NULL, created_at TIMESTAMP NOT NULL,
+ updated_at TIMESTAMP NOT NULL, retired_at TIMESTAMP, deleted_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS identity_role_catalog_tenant ON identity_role_catalog(tenant_id,role_id);
+CREATE UNIQUE INDEX IF NOT EXISTS identity_role_catalog_builtin ON identity_role_catalog(tenant_id,builtin_key) WHERE builtin_key <> '';
+CREATE TABLE IF NOT EXISTS identity_role_versions (
+ role_id TEXT NOT NULL, tenant_id TEXT NOT NULL, version BIGINT NOT NULL,
+ name TEXT NOT NULL, description TEXT NOT NULL, permissions_json TEXT NOT NULL,
+ selectors_json TEXT NOT NULL, state TEXT NOT NULL, changed_fields_json TEXT NOT NULL,
+ changed_by_id TEXT NOT NULL, created_at TIMESTAMP NOT NULL,
+ PRIMARY KEY(role_id,version)
+);
 CREATE TABLE IF NOT EXISTS identity_role_bindings (
  id TEXT PRIMARY KEY, subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL,
  role_id TEXT NOT NULL, scope_kind TEXT NOT NULL, tenant_id TEXT NOT NULL,
@@ -92,6 +112,19 @@ CREATE TABLE IF NOT EXISTS identity_role_bindings (
  created_at TIMESTAMP NOT NULL
 );
 CREATE INDEX IF NOT EXISTS identity_bindings_subject ON identity_role_bindings(subject_id);
+CREATE TABLE IF NOT EXISTS identity_managed_role_bindings (
+ id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, subject_kind TEXT NOT NULL,
+ subject_id TEXT NOT NULL, role_id TEXT NOT NULL, selectors_json TEXT NOT NULL,
+ effective_at TIMESTAMP NOT NULL, expires_at TIMESTAMP, granted_by_id TEXT NOT NULL,
+ provenance_json TEXT NOT NULL, revision BIGINT NOT NULL, created_at TIMESTAMP NOT NULL,
+ revoked_at TIMESTAMP, revoked_by_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_managed_bindings_tenant ON identity_managed_role_bindings(tenant_id,id);
+CREATE INDEX IF NOT EXISTS identity_managed_bindings_subject ON identity_managed_role_bindings(subject_id,id);
+CREATE TABLE IF NOT EXISTS identity_managed_role_binding_edges (
+ edge_id TEXT PRIMARY KEY, logical_binding_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_managed_binding_edges_logical ON identity_managed_role_binding_edges(logical_binding_id);
 CREATE TABLE IF NOT EXISTS identity_delegations (
  id TEXT PRIMARY KEY, sponsor_tenant_id TEXT NOT NULL, child_tenant_id TEXT NOT NULL UNIQUE,
  permissions_json TEXT NOT NULL, quota_json TEXT NOT NULL, generation BIGINT NOT NULL,
@@ -189,7 +222,9 @@ func (s *Store) Bindings(ctx context.Context, principal ID) ([]RoleBinding,error
 	for rows.Next(){var b RoleBinding;var subject,scope string;var expiry sql.NullTime;if err:=rows.Scan(&b.ID,&subject,&b.SubjectID,&b.RoleID,&scope,&b.Scope.TenantID,&b.Scope.ResourceID,&expiry,&b.Generation,&b.CreatedAt);err!=nil{return nil,err};b.SubjectKind=SubjectKind(subject);b.Scope.Kind=ScopeKind(scope);if expiry.Valid{b.ExpiresAt=&expiry.Time};if err:=b.Validate();err!=nil{return nil,err};out=append(out,b)};return out,rows.Err()
 }
 
-func (s *Store) Role(ctx context.Context,id ID)(Role,error){var r Role;var raw []byte;var builtin int;err:=s.db.QueryRowContext(ctx,`SELECT id,tenant_id,name,permissions_json,builtin,generation,created_at,updated_at FROM identity_roles WHERE id=?`,id).Scan(&r.ID,&r.TenantID,&r.Name,&raw,&builtin,&r.Generation,&r.CreatedAt,&r.UpdatedAt);if errors.Is(err,sql.ErrNoRows){return Role{},ErrNotFound};if err!=nil{return Role{},err};r.Builtin=builtin!=0;if err=json.Unmarshal(raw,&r.Permissions);err!=nil{return Role{},err};if err=r.Validate();err!=nil{return Role{},err};return r,nil}
+func (s *Store) Role(ctx context.Context,id ID)(Role,error){role,state,err:=s.loadRole(ctx,id);if err!=nil{return Role{},err};if state==string(RoleRetired){return Role{},ErrRoleRetired};if state==string(RoleDeleted){return Role{},ErrNotFound};return role,nil}
+func (s *Store) AuthorizationRole(ctx context.Context,id ID)(Role,error){role,state,err:=s.loadRole(ctx,id);if err!=nil{return Role{},err};if state==string(RoleDeleted){return Role{},ErrNotFound};return role,nil}
+func (s *Store) loadRole(ctx context.Context,id ID)(Role,string,error){var r Role;var raw []byte;var builtin int;var state string;err:=s.db.QueryRowContext(ctx,`SELECT r.id,r.tenant_id,r.name,r.permissions_json,r.builtin,r.generation,r.created_at,r.updated_at,COALESCE(c.state,'') FROM identity_roles r LEFT JOIN identity_role_catalog c ON c.role_id=r.id WHERE r.id=?`,id).Scan(&r.ID,&r.TenantID,&r.Name,&raw,&builtin,&r.Generation,&r.CreatedAt,&r.UpdatedAt,&state);if errors.Is(err,sql.ErrNoRows){return Role{},"",ErrNotFound};if err!=nil{return Role{},"",err};r.Builtin=builtin!=0;if err=json.Unmarshal(raw,&r.Permissions);err!=nil{return Role{},"",err};if err=r.Validate();err!=nil{return Role{},"",err};return r,state,nil}
 
 func (s *Store) TenantAncestors(ctx context.Context,id ID)([]Tenant,error){var out []Tenant;seen:=map[ID]bool{};current,err:=s.Tenant(ctx,id);if err!=nil{return nil,err};for current.ParentTenantID!=""{if seen[current.ParentTenantID]{return nil,fmt.Errorf("%w: tenant cycle",ErrConflict)};seen[current.ParentTenantID]=true;current,err=s.Tenant(ctx,current.ParentTenantID);if err!=nil{return nil,err};out=append(out,current)};return out,nil}
 
@@ -225,7 +260,7 @@ func(s *Store)ListPrincipalSessions(ctx context.Context,principalID ID,limit int
 
 type Mutation struct{ Principal *Principal; Tenant *Tenant; Membership *Membership; Role *Role; Binding *RoleBinding; Delegation *DelegationCeiling; Plan *Plan; Credential *Credential; Session *Session; Usage *Usage }
 
-func(s *Store)Apply(ctx context.Context,mutation Mutation)error{if s==nil||s.db==nil{return ErrInvalid};tx,err:=s.db.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return err};defer tx.Rollback();if mutation.Principal!=nil{err=putPrincipal(ctx,tx,*mutation.Principal)};if err==nil&&mutation.Tenant!=nil{err=putTenant(ctx,tx,*mutation.Tenant)};if err==nil&&mutation.Membership!=nil{err=putMembership(ctx,tx,*mutation.Membership)};if err==nil&&mutation.Role!=nil{err=putRole(ctx,tx,*mutation.Role)};if err==nil&&mutation.Binding!=nil{err=putBinding(ctx,tx,*mutation.Binding)};if err==nil&&mutation.Delegation!=nil{err=putDelegation(ctx,tx,*mutation.Delegation)};if err==nil&&mutation.Plan!=nil{err=putPlan(ctx,tx,*mutation.Plan)};if err==nil&&mutation.Credential!=nil{err=putCredential(ctx,tx,*mutation.Credential)};if err==nil&&mutation.Session!=nil{err=putSession(ctx,tx,*mutation.Session)};if err==nil&&mutation.Usage!=nil{err=putUsage(ctx,tx,*mutation.Usage)};if err!=nil{return err};return tx.Commit()}
+func(s *Store)Apply(ctx context.Context,mutation Mutation)error{if s==nil||s.db==nil{return ErrInvalid};if mutation.Role!=nil||mutation.Binding!=nil{return fmt.Errorf("%w: use managed role lifecycle",ErrForbidden)};tx,err:=s.db.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return err};defer tx.Rollback();if mutation.Principal!=nil{err=putPrincipal(ctx,tx,*mutation.Principal)};if err==nil&&mutation.Tenant!=nil{err=putTenant(ctx,tx,*mutation.Tenant)};if err==nil&&mutation.Membership!=nil{err=putMembership(ctx,tx,*mutation.Membership)};if err==nil&&mutation.Delegation!=nil{err=putDelegation(ctx,tx,*mutation.Delegation)};if err==nil&&mutation.Plan!=nil{err=putPlan(ctx,tx,*mutation.Plan)};if err==nil&&mutation.Credential!=nil{err=putCredential(ctx,tx,*mutation.Credential)};if err==nil&&mutation.Session!=nil{err=putSession(ctx,tx,*mutation.Session)};if err==nil&&mutation.Usage!=nil{err=putUsage(ctx,tx,*mutation.Usage)};if err!=nil{return err};return tx.Commit()}
 
 func putPrincipal(ctx context.Context,tx *sql.Tx,p Principal)error{if err:=p.Validate();err!=nil{return err};_,err:=tx.ExecContext(ctx,`INSERT INTO identity_principals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,state=excluded.state,locale=excluded.locale,theme=excluded.theme,authz_epoch=excluded.authz_epoch,credential_epoch=excluded.credential_epoch,generation=excluded.generation,updated_at=excluded.updated_at,deleted_at=excluded.deleted_at WHERE identity_principals.generation+1=excluded.generation`,p.ID,p.Kind,p.Username,p.Email,p.DisplayName,p.State,p.Locale,p.Theme,p.AuthzEpoch,p.CredentialEpoch,p.Generation,p.CreatedAt,p.UpdatedAt,p.DeletedAt);return err}
 func putTenant(ctx context.Context,tx *sql.Tx,t Tenant)error{if err:=t.Validate();err!=nil{return err};_,err:=tx.ExecContext(ctx,`INSERT INTO identity_tenants VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,state=excluded.state,plan_id=excluded.plan_id,generation=excluded.generation,authz_epoch=excluded.authz_epoch,updated_at=excluded.updated_at WHERE identity_tenants.generation+1=excluded.generation`,t.ID,t.ParentTenantID,t.SponsorID,t.Kind,t.Name,t.State,t.PlanID,t.Generation,t.AuthzEpoch,t.CreatedAt,t.UpdatedAt);return err}

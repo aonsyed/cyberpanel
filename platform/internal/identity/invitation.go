@@ -197,16 +197,15 @@ func (s *Service) CreateInvitation(ctx context.Context, command CreateInvitation
 		return Invitation{}, ErrForbidden
 	}
 	ceiling := CanonicalPermissions(role.Permissions)
-	for _, permission := range ceiling {
-		if _, err = s.AuthorizeActor(ctx, command.Actor, permission, command.Scope, AssuranceMFA); err != nil {
-			return Invitation{}, ErrDelegationExceeded
-		}
-	}
 	now := s.clock().UTC()
 	command.ExpiresAt = command.ExpiresAt.UTC()
 	if !command.ExpiresAt.After(now) || command.ExpiresAt.After(now.Add(maximumInvitationLifetime)) {
 		return Invitation{}, ErrInvalid
 	}
+	if managed, loadErr := s.store.managedRole(ctx, command.TenantID, command.RoleID); loadErr == nil {
+		if !roleContainsSelector(managed, command.Scope) || managed.BuiltInKey == BuiltInOwner && command.Scope.Kind != ScopeTenant { return Invitation{}, ErrGrantCeiling }
+	} else if !errors.Is(loadErr, ErrNotFound) { return Invitation{}, loadErr }
+	provenance, err := s.roleActorCanGrant(ctx, command.Actor, ceiling, []Scope{command.Scope}, now, nil); if err != nil { return Invitation{}, err }
 	token := issueInvitationToken()
 	defer clearBytes(token)
 	invitation := Invitation{ID: command.InvitationID, TenantID: command.TenantID, IntendedEmail: command.IntendedEmail, InviterID: command.Actor.PrincipalID, RoleID: command.RoleID, RoleCeiling: ceiling, Scope: command.Scope, State: InvitationPending, Generation: 1, TokenEpoch: 1, CreatedAt: now, ExpiresAt: command.ExpiresAt}
@@ -222,6 +221,7 @@ func (s *Service) CreateInvitation(ctx context.Context, command CreateInvitation
 	if err = insertInvitation(ctx, tx, invitation); err != nil {
 		return Invitation{}, err
 	}
+	for _, provenanceID := range provenance { if _, err = tx.ExecContext(ctx, `INSERT INTO identity_invitation_role_provenance(invitation_id,provenance_id) VALUES(?,?)`, invitation.ID, provenanceID); err != nil { return Invitation{}, err } }
 	if err = tx.Commit(); err != nil {
 		return Invitation{}, err
 	}
@@ -348,6 +348,7 @@ func (s *Service) AcceptInvitation(ctx context.Context, actor ActorContext, tena
 	if role.TenantID != invitation.TenantID || !roleWithinInvitationCeiling(role.Permissions, invitation.RoleCeiling) {
 		return Invitation{}, ErrDelegationExceeded
 	}
+	if err = invitationManagedRoleAllows(ctx, tx, invitation.RoleID, invitation.Scope); err != nil { return Invitation{}, err }
 	membership, exists, err := loadInvitationMembership(ctx, tx, principal.ID, invitation.TenantID)
 	if err != nil {
 		return Invitation{}, err
@@ -379,23 +380,17 @@ func (s *Service) AcceptInvitation(ctx context.Context, actor ActorContext, tena
 	if err != nil {
 		return Invitation{}, err
 	}
-	binding := RoleBinding{ID: bindingID, SubjectKind: SubjectPrincipal, SubjectID: principal.ID, RoleID: invitation.RoleID, Scope: invitation.Scope, Generation: 1, CreatedAt: now}
-	if err = binding.Validate(); err != nil {
-		return Invitation{}, err
-	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO identity_role_bindings(id,subject_kind,subject_id,role_id,scope_kind,tenant_id,resource_id,expires_at,generation,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, binding.ID, binding.SubjectKind, binding.SubjectID, binding.RoleID, binding.Scope.Kind, binding.Scope.TenantID, binding.Scope.ResourceID, binding.ExpiresAt, binding.Generation, binding.CreatedAt)
-	if err != nil {
-		return Invitation{}, err
-	}
-	if rows, _ := result.RowsAffected(); rows != 1 {
-		return Invitation{}, ErrConflict
-	}
+	provenance, err := invitationRoleProvenance(ctx, tx, invitation.ID); if err != nil { return Invitation{}, err }
+	binding := ManagedRoleBinding{ID: bindingID, TenantID: invitation.TenantID, SubjectKind: SubjectPrincipal, SubjectID: principal.ID, RoleID: invitation.RoleID, Selectors: []Scope{invitation.Scope}, EffectiveAt: now, GrantedByID: invitation.InviterID, Provenance: provenance, Revision: 1, CreatedAt: now}
+	if err = binding.Validate(); err != nil { return Invitation{}, err }
+	if err = insertManagedBindingTx(ctx, tx, binding); err != nil { return Invitation{}, err }
+	if err = invalidateRoleSubjectTx(ctx, tx, principal.ID, now); err != nil { return Invitation{}, err }
 	previous := invitation.Generation
 	invitation.State = InvitationAccepted
 	invitation.Generation++
 	invitation.TokenEpoch++
 	invitation.TokenDigest = ""
-	result, err = tx.ExecContext(ctx, `UPDATE identity_invitations SET state=?,generation=?,token_epoch=?,token_digest='' WHERE id=? AND generation=? AND state=?`, invitation.State, invitation.Generation, invitation.TokenEpoch, invitation.ID, previous, InvitationPending)
+	result, err := tx.ExecContext(ctx, `UPDATE identity_invitations SET state=?,generation=?,token_epoch=?,token_digest='' WHERE id=? AND generation=? AND state=?`, invitation.State, invitation.Generation, invitation.TokenEpoch, invitation.ID, previous, InvitationPending)
 	if err != nil {
 		return Invitation{}, err
 	}
@@ -405,6 +400,7 @@ func (s *Service) AcceptInvitation(ctx context.Context, actor ActorContext, tena
 	if err = tx.Commit(); err != nil {
 		return Invitation{}, err
 	}
+	s.auditRole(ctx, invitation.InviterID, invitation.TenantID, "role_binding.assign", "role_binding", binding.ID, nil, binding, nil, "applied")
 	s.record(ctx, actor.PrincipalID, invitation.TenantID, "invitation.accept", "invitation", invitation.ID, "applied", invitation.ID.String()+"\x00"+fmt.Sprint(invitation.Generation))
 	return invitation, nil
 }
@@ -428,18 +424,46 @@ func scanInvitationRole(tx *sql.Tx, id ID) (Role, error) {
 	var value Role
 	var permissions []byte
 	var builtin int
-	err := tx.QueryRow(`SELECT id,tenant_id,name,permissions_json,builtin,generation,created_at,updated_at FROM identity_roles WHERE id=?`, id).Scan(&value.ID, &value.TenantID, &value.Name, &permissions, &builtin, &value.Generation, &value.CreatedAt, &value.UpdatedAt)
+	var state string
+	err := tx.QueryRow(`SELECT r.id,r.tenant_id,r.name,r.permissions_json,r.builtin,r.generation,r.created_at,r.updated_at,COALESCE(c.state,'') FROM identity_roles r LEFT JOIN identity_role_catalog c ON c.role_id=r.id WHERE r.id=?`, id).Scan(&value.ID, &value.TenantID, &value.Name, &permissions, &builtin, &value.Generation, &value.CreatedAt, &value.UpdatedAt, &state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Role{}, ErrNotFound
 	}
 	if err != nil {
 		return Role{}, err
 	}
+	if state == string(RoleRetired) {
+		return Role{}, ErrRoleRetired
+	}
+	if state == string(RoleDeleted) {
+		return Role{}, ErrNotFound
+	}
 	value.Builtin = builtin != 0
 	if err = json.Unmarshal(permissions, &value.Permissions); err != nil {
 		return Role{}, err
 	}
 	return value, value.Validate()
+}
+
+func invitationManagedRoleAllows(ctx context.Context, tx *sql.Tx, roleID ID, scope Scope) error {
+	var state, builtinKey string
+	var selectorsJSON []byte
+	err := tx.QueryRowContext(ctx, `SELECT state,builtin_key,selectors_json FROM identity_role_catalog WHERE role_id=?`, roleID).Scan(&state, &builtinKey, &selectorsJSON)
+	if errors.Is(err, sql.ErrNoRows) { return nil }
+	if err != nil { return err }
+	if RoleLifecycleState(state) != RoleActive { return ErrRoleRetired }
+	var selectors []Scope
+	if err = json.Unmarshal(selectorsJSON, &selectors); err != nil { return ErrConflict }
+	allowed := false; for _, selector := range selectors { if scopeContains(selector, scope) { allowed = true; break } }
+	if !allowed || BuiltInRoleKey(builtinKey) == BuiltInOwner && scope.Kind != ScopeTenant { return ErrGrantCeiling }
+	return nil
+}
+
+func invitationRoleProvenance(ctx context.Context, tx *sql.Tx, invitationID ID) ([]ID, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT provenance_id FROM identity_invitation_role_provenance WHERE invitation_id=? ORDER BY provenance_id LIMIT 129`, invitationID); if err != nil { return nil, err }; defer rows.Close()
+	values := make([]ID, 0, 8); for rows.Next() { var id ID; if err = rows.Scan(&id); err != nil { return nil, err }; if !id.Valid() { return nil, ErrConflict }; values = append(values, id) }; if err = rows.Err(); err != nil { return nil, err }
+	if len(values) == 0 || len(values) > 128 { return nil, ErrGrantCeiling }
+	return values, nil
 }
 
 func loadInvitationMembership(ctx context.Context, tx *sql.Tx, principalID, tenantID ID) (Membership, bool, error) {
