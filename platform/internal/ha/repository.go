@@ -6,12 +6,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 const SQLSchema = `
 CREATE TABLE IF NOT EXISTS ha_node_groups (id TEXT PRIMARY KEY, generation INTEGER NOT NULL, group_json BLOB NOT NULL, updated_at TIMESTAMP NOT NULL);
-CREATE TABLE IF NOT EXISTS ha_nodes (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, workload_identity TEXT NOT NULL UNIQUE, state TEXT NOT NULL, generation INTEGER NOT NULL, node_json BLOB NOT NULL, updated_at TIMESTAMP NOT NULL);
+CREATE TABLE IF NOT EXISTS ha_nodes (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, workload_identity TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, node_json BLOB NOT NULL, updated_at TIMESTAMP NOT NULL);
 CREATE INDEX IF NOT EXISTS ha_nodes_group ON ha_nodes(group_id, state, id);
+CREATE UNIQUE INDEX IF NOT EXISTS ha_nodes_workload_identity ON ha_nodes(workload_identity);
 CREATE TABLE IF NOT EXISTS ha_enrollment_tokens (token_id TEXT PRIMARY KEY, token_digest TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL UNIQUE, command_id TEXT NOT NULL UNIQUE, consumed_at TIMESTAMP NOT NULL);
 CREATE TABLE IF NOT EXISTS ha_health (node_id TEXT NOT NULL, observer_node_id TEXT NOT NULL, sequence INTEGER NOT NULL, health_json BLOB NOT NULL, observed_at TIMESTAMP NOT NULL, PRIMARY KEY(node_id, observer_node_id));
 CREATE TABLE IF NOT EXISTS ha_placement_groups (id TEXT PRIMARY KEY, node_group_id TEXT NOT NULL, generation INTEGER NOT NULL, placement_json BLOB NOT NULL);
@@ -64,7 +66,87 @@ type Store interface {
 }
 
 type SQLRepository struct{ DB *sql.DB }
-func (repository SQLRepository) Bootstrap(ctx context.Context) error { if repository.DB == nil { return errors.New("ha database required") }; _, err := repository.DB.ExecContext(ctx, SQLSchema); return err }
+func (repository SQLRepository) Bootstrap(ctx context.Context) error {
+	if repository.DB == nil { return errors.New("ha database required") }
+	if ctx == nil { return ErrInvalid }
+	if err := repository.migrateNodeWorkloadIdentity(ctx); err != nil { return fmt.Errorf("migrate HA node workload identities: %w", err) }
+	_, err := repository.DB.ExecContext(ctx, SQLSchema)
+	return err
+}
+
+type nodeTableColumn struct { notNull bool; primaryKey bool }
+type migratedNodeRow struct { node NodeMember; raw []byte }
+
+func (repository SQLRepository) migrateNodeWorkloadIdentity(ctx context.Context) error {
+	tx, err := repository.DB.BeginTx(ctx, &sql.TxOptions{Isolation:sql.LevelSerializable})
+	if err != nil { return err }
+	defer tx.Rollback()
+
+	columnRows, err := tx.QueryContext(ctx, `PRAGMA table_info(ha_nodes)`)
+	if err != nil { return err }
+	columns := map[string]nodeTableColumn{}
+	for columnRows.Next() {
+		var position, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err = columnRows.Scan(&position, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil { columnRows.Close(); return err }
+		if _, duplicate := columns[name]; duplicate { columnRows.Close(); return fmt.Errorf("%w: duplicate ha_nodes column", ErrInvalid) }
+		columns[name] = nodeTableColumn{notNull:notNull == 1, primaryKey:primaryKey == 1}
+	}
+	if err = columnRows.Err(); err != nil { columnRows.Close(); return err }
+	if err = columnRows.Close(); err != nil { return err }
+	if len(columns) == 0 { return tx.Commit() }
+
+	for _, name := range []string{"id", "group_id", "state", "generation", "node_json", "updated_at"} {
+		if _, exists := columns[name]; !exists { return fmt.Errorf("%w: ha_nodes missing %s", ErrInvalid, name) }
+	}
+	if !columns["id"].primaryKey { return fmt.Errorf("%w: ha_nodes id is not the primary key", ErrInvalid) }
+	_, hasIdentity := columns["workload_identity"]
+	needsRebuild := !hasIdentity || !columns["workload_identity"].notNull
+	query := `SELECT id,group_id,state,generation,node_json FROM ha_nodes ORDER BY id`
+	if hasIdentity { query = `SELECT id,group_id,state,generation,node_json,workload_identity FROM ha_nodes ORDER BY id` }
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil { return err }
+	identities := map[string]NodeID{}
+	values := []migratedNodeRow{}
+	for rows.Next() {
+		var id, groupID, state string
+		var generation int64
+		var raw []byte
+		var storedIdentity sql.NullString
+		if hasIdentity { err = rows.Scan(&id, &groupID, &state, &generation, &raw, &storedIdentity) } else { err = rows.Scan(&id, &groupID, &state, &generation, &raw) }
+		if err != nil { rows.Close(); return err }
+		if generation <= 0 { rows.Close(); return fmt.Errorf("%w: invalid ha_nodes generation", ErrInvalid) }
+		var node NodeMember
+		if err = decode(raw, &node); err != nil { rows.Close(); return fmt.Errorf("%w: corrupt ha_nodes JSON", ErrInvalid) }
+		if err = node.Validate(); err != nil { rows.Close(); return fmt.Errorf("%w: invalid ha_nodes JSON", ErrInvalid) }
+		if string(node.ID) != id || string(node.GroupID) != groupID || string(node.State) != state || node.Generation != uint64(generation) { rows.Close(); return fmt.Errorf("%w: ha_nodes columns disagree with JSON", ErrInvalid) }
+		if previous, duplicate := identities[node.WorkloadIdentity]; duplicate && previous != node.ID { rows.Close(); return fmt.Errorf("%w: duplicate HA workload identity", ErrConflict) }
+		identities[node.WorkloadIdentity] = node.ID
+		if hasIdentity {
+			if !storedIdentity.Valid || storedIdentity.String == "" { needsRebuild = true } else if storedIdentity.String != node.WorkloadIdentity { rows.Close(); return fmt.Errorf("%w: ha_nodes workload identity disagrees with JSON", ErrInvalid) }
+		}
+		values = append(values, migratedNodeRow{node:node, raw:append([]byte(nil), raw...)})
+	}
+	if err = rows.Err(); err != nil { rows.Close(); return err }
+	if err = rows.Close(); err != nil { return err }
+
+	if !needsRebuild {
+		if _, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS ha_nodes_group ON ha_nodes(group_id,state,id)`); err != nil { return err }
+		if _, err = tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS ha_nodes_workload_identity ON ha_nodes(workload_identity)`); err != nil { return err }
+		return tx.Commit()
+	}
+	if _, err = tx.ExecContext(ctx, `CREATE TABLE ha_nodes__workload_identity_migration (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, workload_identity TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, node_json BLOB NOT NULL, updated_at TIMESTAMP NOT NULL)`); err != nil { return err }
+	for _, value := range values {
+		node := value.node
+		if _, err = tx.ExecContext(ctx, `INSERT INTO ha_nodes__workload_identity_migration (id,group_id,workload_identity,state,generation,node_json,updated_at) VALUES (?,?,?,?,?,?,?)`, node.ID, node.GroupID, node.WorkloadIdentity, node.State, node.Generation, value.raw, node.UpdatedAt); err != nil { return err }
+	}
+	if _, err = tx.ExecContext(ctx, `DROP TABLE ha_nodes`); err != nil { return err }
+	if _, err = tx.ExecContext(ctx, `ALTER TABLE ha_nodes__workload_identity_migration RENAME TO ha_nodes`); err != nil { return err }
+	if _, err = tx.ExecContext(ctx, `CREATE INDEX ha_nodes_group ON ha_nodes(group_id,state,id)`); err != nil { return err }
+	if _, err = tx.ExecContext(ctx, `CREATE UNIQUE INDEX ha_nodes_workload_identity ON ha_nodes(workload_identity)`); err != nil { return err }
+	return tx.Commit()
+}
 func encode(value any) ([]byte,error) { return json.Marshal(value) }
 func decode(data []byte,value any) error { if len(data)==0{return ErrInvalid}; if json.Unmarshal(data,value)!=nil{return ErrInvalid}; return nil }
 func one(result sql.Result) error { count,err:=result.RowsAffected();if err!=nil{return err};if count!=1{return ErrNotFound};return nil }
