@@ -61,7 +61,7 @@ type localMariaDBHAProviders struct {
 	manualFence    ha.ManualFenceConfirmer
 }
 
-func newLocalMariaDBHAProviders(ctx context.Context, repository *ha.SQLRepository, database ha.DatabaseReplicationExecutor, signer ha.WritePermitSigner, catalog *webcatalog.SQLCatalog, activator *webactivation.Client, listeners []composer.ListenerInput, sender ha.FederatedHAIntentSender, now func() time.Time) (*localMariaDBHAProviders, error) {
+func newLocalMariaDBHAProviders(ctx context.Context, repository *ha.SQLRepository, database ha.DatabaseReplicationExecutor, signer ha.WritePermitSigner, catalog *webcatalog.SQLCatalog, activator *webactivation.Client, listeners []composer.ListenerInput, approvalVerifier ha.AdministrativeApprovalVerifier, sender ha.FederatedHAIntentSender, now func() time.Time) (*localMariaDBHAProviders, error) {
 	if ctx == nil || repository == nil || repository.DB == nil || database == nil || signer == nil || catalog == nil || activator == nil { return nil, ha.ErrInvalid }
 	leaseAuthority, err := ha.NewLocalSQLLeaseAuthority(ctx, repository, now)
 	if err != nil { return nil, err }
@@ -78,7 +78,20 @@ func newLocalMariaDBHAProviders(ctx context.Context, repository *ha.SQLRepositor
 	if err != nil { return nil, err }
 	traffic, err := ha.NewOwningNodeTrafficProvider(ha.NodeID(localFederationNodeID), localTraffic, dispatcher)
 	if err != nil { return nil, err }
-	return &localMariaDBHAProviders{leases:leaseAuthority,gate:gate,promotion:promotion,traffic:traffic,fences:map[ha.FenceClass]ha.FenceProvider{}},nil
+	fences := map[ha.FenceClass]ha.FenceProvider{}
+	if provider, initializeErr := ha.NewLocalMariaDBFenceProvider(*repository, database, leaseAuthority, ha.NodeID(localFederationNodeID), now); initializeErr == nil {
+		fences[provider.Class()] = provider
+	}
+	if provider, initializeErr := ha.NewMandatoryLeaseFenceProvider(*repository, leaseAuthority, ha.NodeID(localFederationNodeID), now); initializeErr == nil {
+		fences[provider.Class()] = provider
+	}
+	var manualFence ha.ManualFenceConfirmer
+	if approvalVerifier != nil {
+		if confirmer, initializeErr := ha.NewAdministrativeFenceConfirmer(approvalVerifier, now); initializeErr == nil {
+			manualFence = confirmer
+		}
+	}
+	return &localMariaDBHAProviders{leases:leaseAuthority,gate:gate,promotion:promotion,traffic:traffic,fences:fences,manualFence:manualFence},nil
 }
 
 func (providers *localMariaDBHAProviders) coordinator(store ha.Store, group ha.NodeGroup, promotion ha.Promotion, policy ha.TrafficPolicy, now func() time.Time) (ha.FailoverCoordinator, error) {
