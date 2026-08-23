@@ -307,7 +307,12 @@ func sameServicePrincipalDefinition(left, right ServicePrincipal) bool {
 
 func (s *Service) authorizeServicePrincipalAdmin(ctx context.Context, actor ActorContext, tenantID ID, minimum AssuranceLevel) error {
 	_, err := s.authorize(ctx, actor, MustPermission("principal:manage"), Scope{Kind: ScopeTenant, TenantID: tenantID}, minimum)
-	return err
+	if err != nil { return err }
+	tenant, err := s.store.Tenant(ctx, tenantID); if err != nil { return err }
+	if tenant.Kind == TenantOwner { return nil }
+	managed, err := s.store.ManagedTenant(ctx, tenantID); if err != nil { return err }
+	if !managed.Delegation.AllowServicePrincipals { return ErrDelegationExceeded }
+	return nil
 }
 
 func (s *Service) validateServicePrincipalCeiling(ctx context.Context, actor ActorContext, value ServicePrincipal) error {

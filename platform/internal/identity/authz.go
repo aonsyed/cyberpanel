@@ -63,6 +63,13 @@ func (a *Authorizer) Decide(ctx context.Context, request AuthorizationRequest) (
 		if loadErr != nil { decision.Reason = "tenant_unavailable"; return decision, loadErr }
 		decision.TenantEpoch = tenant.AuthzEpoch
 		if tenant.State != TenantActive { decision.Reason = "tenant_inactive"; return decision, ErrSuspended }
+		if request.Permission == "role:bind" && tenant.Kind != TenantOwner {
+			managedRepository, ok := a.repository.(interface { ManagedTenant(context.Context, ID) (ManagedTenant, error) })
+			if !ok { decision.Reason = "delegation_policy_unavailable"; return decision, ErrDelegationExceeded }
+			managed, policyErr := managedRepository.ManagedTenant(ctx, tenant.ID)
+			if policyErr != nil { decision.Reason = "delegation_policy_unavailable"; return decision, policyErr }
+			if !managed.Delegation.AllowRoleBindings { decision.Reason = "role_binding_delegation_disabled"; return decision, ErrDelegationExceeded }
+		}
 		memberships, membershipErr := a.repository.Memberships(ctx, principal.ID)
 		if membershipErr != nil { decision.Reason = "membership_unavailable"; return decision, membershipErr }
 		if !hasActiveMembership(memberships, request.Scope.TenantID) {
@@ -70,13 +77,25 @@ func (a *Authorizer) Decide(ctx context.Context, request AuthorizationRequest) (
 			if ancestorErr != nil { decision.Reason = "tenant_lineage_unavailable"; return decision, ancestorErr }
 			memberTenant, ok := activeMembershipAncestor(memberships, ancestors)
 			if !ok { decision.Reason = "not_a_member"; return decision, ErrForbidden }
-			ceiling, ceilingErr := a.repository.Delegation(ctx, request.Scope.TenantID)
-			if ceilingErr != nil { decision.Reason = "delegation_unavailable"; return decision, ceilingErr }
-			if ceiling.SponsorTenantID != memberTenant || !containsPermission(ceiling.Permissions, request.Permission) {
-				decision.Reason = "delegation_ceiling"
-				return decision, ErrDelegationExceeded
+			// A delegated decision is valid only when every edge from the target
+			// back to the actor's nearest active membership admits it. Checking
+			// only the target edge would either deny valid grandchildren or let a
+			// narrower intermediate reseller ceiling be skipped.
+			childID := request.Scope.TenantID
+			reachedMembership := false
+			for _, ancestor := range ancestors {
+				if ancestor.State != TenantActive { decision.Reason = "tenant_ancestor_inactive"; return decision, ErrSuspended }
+				ceiling, ceilingErr := a.repository.Delegation(ctx, childID)
+				if ceilingErr != nil { decision.Reason = "delegation_unavailable"; return decision, ceilingErr }
+				if ceiling.SponsorTenantID != ancestor.ID || ceiling.ChildTenantID != childID || !containsPermission(ceiling.Permissions, request.Permission) {
+					decision.Reason = "delegation_ceiling"
+					return decision, ErrDelegationExceeded
+				}
+				decision.DelegationIDs = append(decision.DelegationIDs, ceiling.ID)
+				if ancestor.ID == memberTenant { reachedMembership = true; break }
+				childID = ancestor.ID
 			}
-			decision.DelegationIDs = append(decision.DelegationIDs, ceiling.ID)
+			if !reachedMembership { decision.Reason = "tenant_lineage_changed"; return decision, ErrForbidden }
 		}
 	}
 	bindings, err := a.repository.Bindings(ctx, principal.ID)

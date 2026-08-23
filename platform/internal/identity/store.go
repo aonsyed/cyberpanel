@@ -157,6 +157,34 @@ CREATE TABLE IF NOT EXISTS identity_delegations (
  permissions_json TEXT NOT NULL, quota_json TEXT NOT NULL, generation BIGINT NOT NULL,
  created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL
 );
+CREATE TABLE IF NOT EXISTS identity_tenant_lifecycle (
+ tenant_id TEXT PRIMARY KEY, delegation_id TEXT NOT NULL UNIQUE,
+ manager_principal_id TEXT NOT NULL, manager_membership_id TEXT NOT NULL UNIQUE,
+ manager_binding_id TEXT NOT NULL UNIQUE, permissions_json TEXT NOT NULL,
+ selectors_json TEXT NOT NULL, quota_json TEXT NOT NULL,
+ maximum_child_depth INTEGER NOT NULL, maximum_child_count INTEGER NOT NULL,
+ allow_service_principals INTEGER NOT NULL, allow_role_bindings INTEGER NOT NULL,
+ valid_until TIMESTAMP, plan_ceiling_id TEXT NOT NULL,
+ ownership_contacts_json TEXT NOT NULL, provenance_json TEXT NOT NULL,
+ revision BIGINT NOT NULL, authz_epoch BIGINT NOT NULL,
+ created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
+ suspended_at TIMESTAMP, deletion_requested_at TIMESTAMP,
+ retention_deadline TIMESTAMP, deleted_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS identity_tenant_lifecycle_manager ON identity_tenant_lifecycle(manager_principal_id,tenant_id);
+CREATE TABLE IF NOT EXISTS identity_tenant_delegation_revisions (
+ tenant_id TEXT NOT NULL, revision BIGINT NOT NULL, delegation_id TEXT NOT NULL,
+ sponsor_tenant_id TEXT NOT NULL, policy_digest TEXT NOT NULL,
+ changed_by_id TEXT NOT NULL, created_at TIMESTAMP NOT NULL,
+ PRIMARY KEY(tenant_id,revision)
+);
+CREATE TABLE IF NOT EXISTS identity_tenant_approvals (
+ id TEXT PRIMARY KEY, action TEXT NOT NULL, target_tenant_id TEXT NOT NULL,
+ request_digest TEXT NOT NULL, approved_by_id TEXT NOT NULL,
+ approved_at TIMESTAMP NOT NULL, expires_at TIMESTAMP NOT NULL,
+ consumed_at TIMESTAMP, consumed_command_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_tenant_approvals_target ON identity_tenant_approvals(target_tenant_id,action,id);
 CREATE TABLE IF NOT EXISTS identity_plans (
  id TEXT PRIMARY KEY, owner_tenant_id TEXT NOT NULL, name TEXT NOT NULL,
  quota_json TEXT NOT NULL, generation BIGINT NOT NULL, created_at TIMESTAMP NOT NULL,
