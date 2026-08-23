@@ -177,6 +177,81 @@ type Membership struct {
 	UpdatedAt   time.Time
 }
 
+type InvitationState string
+
+const (
+	InvitationPending  InvitationState = "pending"
+	InvitationAccepted InvitationState = "accepted"
+	InvitationExpired  InvitationState = "expired"
+	InvitationRevoked  InvitationState = "revoked"
+)
+
+// Invitation is an immutable grant offer except for its lifecycle, delivery,
+// token, and generation fields. TokenDigest is persistence-only and must never
+// be projected across an API boundary.
+type Invitation struct {
+	ID              ID
+	TenantID        ID
+	IntendedEmail   string
+	InviterID       ID
+	RoleID          ID
+	RoleCeiling     []Permission
+	Scope           Scope
+	State           InvitationState
+	Generation      uint64
+	TokenEpoch      uint64
+	TokenDigest     string
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+	LastDeliveredAt *time.Time
+}
+
+func (i Invitation) Validate() error {
+	if !i.ID.Valid() || !i.TenantID.Valid() || !i.InviterID.Valid() || !i.RoleID.Valid() || i.Generation == 0 || i.TokenEpoch == 0 {
+		return fmt.Errorf("%w: invitation identity", ErrInvalid)
+	}
+	if i.IntendedEmail != normalizeInvitationEmail(i.IntendedEmail) || !validInvitationEmail(i.IntendedEmail) {
+		return fmt.Errorf("%w: invitation email", ErrInvalid)
+	}
+	if err := i.Scope.Validate(); err != nil || i.Scope.Kind == ScopeInstallation || i.Scope.TenantID != i.TenantID {
+		return fmt.Errorf("%w: invitation scope", ErrInvalid)
+	}
+	if len(i.RoleCeiling) == 0 {
+		return fmt.Errorf("%w: invitation role ceiling", ErrInvalid)
+	}
+	canonical := CanonicalPermissions(i.RoleCeiling)
+	if len(canonical) != len(i.RoleCeiling) {
+		return fmt.Errorf("%w: invitation role ceiling", ErrInvalid)
+	}
+	for index := range canonical {
+		if canonical[index] != i.RoleCeiling[index] {
+			return fmt.Errorf("%w: invitation role ceiling", ErrInvalid)
+		}
+		if _, err := NewPermission(string(canonical[index])); err != nil {
+			return fmt.Errorf("%w: invitation role ceiling", ErrInvalid)
+		}
+	}
+	if i.CreatedAt.IsZero() || !i.ExpiresAt.After(i.CreatedAt) {
+		return fmt.Errorf("%w: invitation lifetime", ErrInvalid)
+	}
+	if i.LastDeliveredAt != nil && i.LastDeliveredAt.Before(i.CreatedAt) {
+		return fmt.Errorf("%w: invitation delivery", ErrInvalid)
+	}
+	switch i.State {
+	case InvitationPending:
+		if !validInvitationDigest(i.TokenDigest) {
+			return fmt.Errorf("%w: invitation token", ErrInvalid)
+		}
+	case InvitationAccepted, InvitationExpired, InvitationRevoked:
+		if i.TokenDigest != "" {
+			return fmt.Errorf("%w: terminal invitation token", ErrInvalid)
+		}
+	default:
+		return fmt.Errorf("%w: invitation state", ErrInvalid)
+	}
+	return nil
+}
+
 func (m Membership) Validate() error {
 	if !m.ID.Valid() || !m.PrincipalID.Valid() || !m.TenantID.Valid() || m.Generation == 0 {
 		return fmt.Errorf("%w: membership identity", ErrInvalid)

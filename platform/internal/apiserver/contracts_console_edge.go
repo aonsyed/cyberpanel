@@ -602,6 +602,22 @@ type IdentityRoleBindingProjection struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+type IdentityInvitationProjection struct {
+	ID              string     `json:"id"`
+	TenantID        string     `json:"tenant_id"`
+	IntendedEmail   string     `json:"intended_email"`
+	InviterID       string     `json:"inviter_id"`
+	RoleID          string     `json:"role_id"`
+	RoleCeiling     []string   `json:"role_ceiling"`
+	ScopeKind       string     `json:"scope_kind"`
+	ResourceID      string     `json:"resource_id,omitempty"`
+	State           string     `json:"state"`
+	Generation      uint64     `json:"generation"`
+	CreatedAt       time.Time  `json:"created_at"`
+	ExpiresAt       time.Time  `json:"expires_at"`
+	LastDeliveredAt *time.Time `json:"last_delivered_at,omitempty"`
+}
+
 type IdentityTenantCreatePayload struct {
 	Name           string `json:"name"`
 	ParentTenantID string `json:"parent_tenant_id,omitempty"`
@@ -611,6 +627,18 @@ type IdentityTenantCreatePayload struct {
 type IdentityEntitlementPayload struct {
 	PlanID string            `json:"plan_id"`
 	Limits map[string]uint64 `json:"limits,omitempty"`
+}
+
+type IdentityInvitationCreatePayload struct {
+	IntendedEmail string    `json:"intended_email"`
+	RoleID        string    `json:"role_id"`
+	ScopeKind     string    `json:"scope_kind"`
+	ResourceID    string    `json:"resource_id,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at"`
+}
+
+type IdentityInvitationAcceptPayload struct {
+	Token string `json:"token"`
 }
 
 type WebEngineProjection struct {
@@ -832,6 +860,13 @@ type IdentityEdgeService interface {
 	ListMemberships(context.Context, EdgeCall, EdgePagePayload) (EdgePage[IdentityMembershipProjection], error)
 	ListRoleBindings(context.Context, EdgeCall, EdgePagePayload) (EdgePage[IdentityRoleBindingProjection], error)
 	ConfigureEntitlement(context.Context, EdgeCall, IdentityEntitlementPayload) (EdgeMutation[IdentityTenantProjection], error)
+	ListInvitations(context.Context, EdgeCall, EdgePagePayload) (EdgePage[IdentityInvitationProjection], error)
+	GetInvitation(context.Context, EdgeCall) (IdentityInvitationProjection, error)
+	CreateInvitation(context.Context, EdgeCall, IdentityInvitationCreatePayload) (EdgeMutation[IdentityInvitationProjection], error)
+	ResendInvitation(context.Context, EdgeCall) (EdgeMutation[IdentityInvitationProjection], error)
+	AcceptInvitation(context.Context, EdgeCall, IdentityInvitationAcceptPayload, []byte) (EdgeMutation[IdentityInvitationProjection], error)
+	ExpireInvitation(context.Context, EdgeCall) (EdgeMutation[IdentityInvitationProjection], error)
+	RevokeInvitation(context.Context, EdgeCall) (EdgeMutation[IdentityInvitationProjection], error)
 }
 
 type WebEngineEdgeService interface {
@@ -948,6 +983,13 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("identity.membership.list", "identity:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantResourceReadScope),
 		consoleOperation("identity.role_binding.list", "identity:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantResourceReadScope),
 		consoleOperation("identity.entitlement.configure", "identity:manage", mfa, true, func() any { return &IdentityEntitlementPayload{} }, validateIdentityEntitlement, edgeTenantExistingMutationScope),
+		consoleOperation("identity.invitation.list", "identity:manage", password, false, func() any { return &EdgePagePayload{} }, validateIdentityInvitationPage, edgeTenantListScope),
+		consoleOperation("identity.invitation.get", "identity:manage", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantResourceReadScope),
+		consoleOperation("identity.invitation.create", "identity:manage", mfa, true, func() any { return &IdentityInvitationCreatePayload{} }, validateIdentityInvitationCreate, edgeTenantCreateScope),
+		consoleOperation("identity.invitation.resend", "identity:manage", mfa, true, func() any { return &EmptyPayload{} }, nil, edgeTenantExistingMutationScope),
+		{Name:"identity.invitation.accept", Assurance:password, Auth:AuthRequired, SelfService:true, Mutating:true, MaximumBodyBytes:4096, NewPayload:func() any { return &IdentityInvitationAcceptPayload{} }, ValidatePayload:validateIdentityInvitationAccept, ResolveScope:edgeTenantExistingMutationScope},
+		consoleOperation("identity.invitation.expire", "identity:manage", mfa, true, func() any { return &EmptyPayload{} }, nil, edgeTenantExistingMutationScope),
+		consoleOperation("identity.invitation.revoke", "identity:manage", mfa, true, func() any { return &EmptyPayload{} }, nil, edgeTenantExistingMutationScope),
 
 		consoleOperation("webengine.installation.list", "webengine:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
 		consoleOperation("webengine.license.configure", "webengine:manage", mfa, true, func() any { return &WebEngineLicensePayload{} }, validateWebEngineLicense, edgeInstallationExistingMutationScope),
@@ -1291,6 +1333,36 @@ func validateIdentityEntitlement(value any) error {
 	payload := value.(*IdentityEntitlementPayload)
 	if !validEdgeID(payload.PlanID) || len(payload.Limits) > 128 { return invalid("entitlement") }
 	for name, limit := range payload.Limits { if !validEdgeID(name) || limit > 1<<60 { return invalid("entitlement limit") } }
+	return nil
+}
+
+func validateIdentityInvitationPage(value any) error {
+	if err := validateEdgePage(value); err != nil { return err }
+	if value.(*EdgePagePayload).Limit > 200 { return invalid("invitation page") }
+	return nil
+}
+
+func validateIdentityInvitationCreate(value any) error {
+	payload := value.(*IdentityInvitationCreatePayload)
+	if !safeEdgeText(payload.IntendedEmail, 254) || !strings.Contains(payload.IntendedEmail, "@") || !validEdgeID(payload.RoleID) || payload.ExpiresAt.IsZero() {
+		return invalid("invitation")
+	}
+	switch payload.ScopeKind {
+	case "tenant":
+		if payload.ResourceID != "" { return invalid("invitation scope") }
+	case "project", "site":
+		if !validEdgeID(payload.ResourceID) { return invalid("invitation scope") }
+	default:
+		return invalid("invitation scope")
+	}
+	return nil
+}
+
+func validateIdentityInvitationAccept(value any) error {
+	payload := value.(*IdentityInvitationAcceptPayload)
+	if len(payload.Token) < 40 || len(payload.Token) > 128 || strings.ContainsAny(payload.Token, "\x00\r\n\t ") {
+		return invalid("invitation token")
+	}
 	return nil
 }
 
@@ -1941,6 +2013,35 @@ func bindConsoleEdgeContractsFour(registry *Registry, services DomainServices) e
 		}); err != nil { return err }
 		if err := registry.Bind("identity.entitlement.configure", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.IdentityEdge.ConfigureEntitlement(ctx, edgeCall(inv), *value.(*IdentityEntitlementPayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusOK, result), nil
+		}); err != nil { return err }
+		if err := registry.Bind("identity.invitation.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.IdentityEdge.ListInvitations(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("identity.invitation.get", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.IdentityEdge.GetInvitation(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("identity.invitation.create", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.IdentityEdge.CreateInvitation(ctx, edgeCall(inv), *value.(*IdentityInvitationCreatePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusCreated, result), nil
+		}); err != nil { return err }
+		if err := registry.Bind("identity.invitation.resend", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.IdentityEdge.ResendInvitation(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusOK, result), nil
+		}); err != nil { return err }
+		if err := registry.Bind("identity.invitation.accept", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			payload := value.(*IdentityInvitationAcceptPayload); token := []byte(payload.Token); payload.Token = ""; defer clearSecret(token)
+			result, err := services.IdentityEdge.AcceptInvitation(ctx, edgeCall(inv), *payload, token); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusOK, result), nil
+		}); err != nil { return err }
+		if err := registry.Bind("identity.invitation.expire", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.IdentityEdge.ExpireInvitation(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusOK, result), nil
+		}); err != nil { return err }
+		if err := registry.Bind("identity.invitation.revoke", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.IdentityEdge.RevokeInvitation(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return edgeOperationResult(http.StatusOK, result), nil
 		}); err != nil { return err }
 	}

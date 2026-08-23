@@ -29,6 +29,15 @@ CREATE TABLE IF NOT EXISTS identity_memberships (
  state TEXT NOT NULL, generation BIGINT NOT NULL, created_at TIMESTAMP NOT NULL,
  updated_at TIMESTAMP NOT NULL, UNIQUE(principal_id, tenant_id)
 );
+CREATE TABLE IF NOT EXISTS identity_invitations (
+ id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, intended_email TEXT NOT NULL,
+ inviter_id TEXT NOT NULL, role_id TEXT NOT NULL, role_ceiling_json TEXT NOT NULL,
+ scope_kind TEXT NOT NULL, resource_id TEXT NOT NULL, state TEXT NOT NULL,
+ generation BIGINT NOT NULL, token_epoch BIGINT NOT NULL, token_digest TEXT NOT NULL,
+ created_at TIMESTAMP NOT NULL, expires_at TIMESTAMP NOT NULL, last_delivered_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS identity_invitations_tenant ON identity_invitations(tenant_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS identity_invitations_token ON identity_invitations(token_digest) WHERE token_digest <> '';
 CREATE TABLE IF NOT EXISTS identity_roles (
  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL,
  permissions_json TEXT NOT NULL, builtin INTEGER NOT NULL, generation BIGINT NOT NULL,
