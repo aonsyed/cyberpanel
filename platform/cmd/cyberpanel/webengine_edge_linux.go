@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
+	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/management"
 )
@@ -32,7 +33,7 @@ func (edge *webEngineEdge) WebEngineCapabilities() apiserver.WebEngineEdgeCapabi
 		return apiserver.WebEngineEdgeCapabilities{}
 	}
 	capabilities := edge.service.Capabilities()
-	return apiserver.WebEngineEdgeCapabilities{List: capabilities.Inspect, Tuning: capabilities.Tune, Upgrade: capabilities.Upgrade}
+	return apiserver.WebEngineEdgeCapabilities{List: capabilities.Inspect, Tuning: capabilities.Tune, Upgrade: capabilities.Upgrade, Remove: capabilities.Remove}
 }
 
 func (edge *webEngineEdge) ListInstallations(ctx context.Context, call apiserver.EdgeCall, page apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.WebEngineProjection], error) {
@@ -123,6 +124,39 @@ func (edge *webEngineEdge) Upgrade(ctx context.Context, call apiserver.EdgeCall,
 	installation,err:=edge.service.Upgrade(ctx,management.UpgradeCommand{CommandID:call.CommandID,Version:payload.Version,Channel:channel,ExpectedGeneration:call.ExpectedGeneration,Fence:call.ExpectedGeneration+1,CommitAuthorizationDigest:webEngineAuthorizationDigest(call)});if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err}
 	tuning,err:=edge.service.CurrentTuning(ctx);if err!=nil{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},err};if tuning.Generation!=installation.Generation{return apiserver.EdgeMutation[apiserver.WebEngineProjection]{},management.ErrConflict}
 	return apiserver.EdgeMutation[apiserver.WebEngineProjection]{OperationID:webEngineEffectID(call.CommandID,"upgrade",payload.Version),State:string(installation.State),Generation:installation.Generation,Resource:webEngineProjection(installation,tuning)},nil
+}
+
+func (edge *webEngineEdge) Remove(ctx context.Context, call apiserver.EdgeCall, payload apiserver.WebEngineRemovePayload) (apiserver.EdgeMutation[apiserver.WebEngineProjection], error) {
+	if edge == nil || edge.service == nil || ctx == nil || call.TenantID != "" || call.ResourceID != "node-webengine" ||
+		call.ExpectedGeneration == 0 || call.CommandID == "" || call.PrincipalID == "" || call.CredentialID == "" || call.AuthzEpoch == 0 ||
+		call.Assurance < identity.AssurancePhishingResistant || payload.Confirmation != apiserver.WebEngineRemoveConfirmation {
+		return apiserver.EdgeMutation[apiserver.WebEngineProjection]{}, management.ErrInvalid
+	}
+	current, err := edge.service.Installation(ctx)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.WebEngineProjection]{}, err
+	}
+	if current.ID != call.ResourceID || current.Edition != edge.edition || current.Generation != call.ExpectedGeneration || current.State != management.StateActive {
+		return apiserver.EdgeMutation[apiserver.WebEngineProjection]{}, management.ErrConflict
+	}
+	installation, err := edge.service.Remove(ctx, management.RemoveCommand{
+		CommandID: call.CommandID, ExpectedGeneration: call.ExpectedGeneration, Fence: call.ExpectedGeneration + 1,
+		CommitAuthorizationDigest: webEngineAuthorizationDigest(call),
+	})
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.WebEngineProjection]{}, err
+	}
+	tuning, err := edge.service.CurrentTuning(ctx)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.WebEngineProjection]{}, err
+	}
+	if tuning.Generation != installation.Generation || installation.State != management.StateAbsent {
+		return apiserver.EdgeMutation[apiserver.WebEngineProjection]{}, management.ErrConflict
+	}
+	return apiserver.EdgeMutation[apiserver.WebEngineProjection]{
+		OperationID: call.CommandID, State: string(installation.State), Generation: installation.Generation,
+		Resource: webEngineProjection(installation, tuning),
+	}, nil
 }
 
 func (*webEngineEdge) CreatePHPProfile(context.Context, apiserver.EdgeCall, apiserver.WebEnginePHPProfilePayload) (apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection], error) {

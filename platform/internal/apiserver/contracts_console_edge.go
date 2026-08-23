@@ -636,6 +636,12 @@ type WebEngineUpgradePayload struct {
 	Channel string `json:"channel,omitempty"`
 }
 
+const WebEngineRemoveConfirmation = "REMOVE node-webengine"
+
+type WebEngineRemovePayload struct {
+	Confirmation string `json:"confirmation"`
+}
+
 type WebEnginePHPProfilePayload struct {
 	Name       string   `json:"name"`
 	Version    string   `json:"version"`
@@ -826,10 +832,11 @@ type WebEngineEdgeService interface {
 	ConfigureLicense(context.Context, EdgeCall, WebEngineLicensePayload, []byte) (EdgeMutation[WebEngineProjection], error)
 	ConfigureTuning(context.Context, EdgeCall, WebEngineTuningPayload) (EdgeMutation[WebEngineProjection], error)
 	Upgrade(context.Context, EdgeCall, WebEngineUpgradePayload) (EdgeMutation[WebEngineProjection], error)
+	Remove(context.Context, EdgeCall, WebEngineRemovePayload) (EdgeMutation[WebEngineProjection], error)
 	CreatePHPProfile(context.Context, EdgeCall, WebEnginePHPProfilePayload) (EdgeMutation[WebEnginePHPProfileProjection], error)
 }
 
-type WebEngineEdgeCapabilities struct{List,License,Tuning,Upgrade,PHPProfile bool}
+type WebEngineEdgeCapabilities struct{List,License,Tuning,Upgrade,Remove,PHPProfile bool}
 type WebEngineEdgeCapabilityProvider interface{WebEngineCapabilities() WebEngineEdgeCapabilities}
 
 type IntegrationEdgeService interface {
@@ -939,6 +946,7 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("webengine.license.configure", "webengine:manage", mfa, true, func() any { return &WebEngineLicensePayload{} }, validateWebEngineLicense, edgeInstallationExistingMutationScope),
 		consoleOperation("webengine.tuning.configure", "webengine:manage", mfa, true, func() any { return &WebEngineTuningPayload{} }, validateWebEngineTuning, edgeInstallationExistingMutationScope),
 		consoleOperation("webengine.upgrade", "webengine:manage", mfa, true, func() any { return &WebEngineUpgradePayload{} }, validateWebEngineUpgrade, edgeInstallationExistingMutationScope),
+		consoleOperation("webengine.remove", "webengine:manage", phishingResistant, true, func() any { return &WebEngineRemovePayload{} }, validateWebEngineRemove, edgeInstallationExistingMutationScope),
 		consoleOperation("webengine.php_profile.create", "webengine:manage", mfa, true, func() any { return &WebEnginePHPProfilePayload{} }, validateWebEnginePHPProfile, edgeInstallationCreateScope),
 
 		consoleOperation("integration.binding.list", "integration:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
@@ -1293,6 +1301,12 @@ func validateWebEngineTuning(value any) error {
 func validateWebEngineUpgrade(value any) error {
 	payload := value.(*WebEngineUpgradePayload)
 	if !validVersion(payload.Version) || payload.Channel != "" && payload.Channel != "stable" && payload.Channel != "pinned" { return invalid("web engine upgrade") }
+	return nil
+}
+
+func validateWebEngineRemove(value any) error {
+	payload := value.(*WebEngineRemovePayload)
+	if payload.Confirmation != WebEngineRemoveConfirmation { return invalid("web engine removal confirmation") }
 	return nil
 }
 
@@ -1921,7 +1935,7 @@ func bindConsoleEdgeContractsFour(registry *Registry, services DomainServices) e
 		}); err != nil { return err }
 	}
 	if services.WebEngineEdge != nil {
-		capabilities:=WebEngineEdgeCapabilities{List:true,License:true,Tuning:true,Upgrade:true,PHPProfile:true};if provider,ok:=services.WebEngineEdge.(WebEngineEdgeCapabilityProvider);ok{capabilities=provider.WebEngineCapabilities()}
+		capabilities:=WebEngineEdgeCapabilities{List:true,License:true,Tuning:true,Upgrade:true,Remove:true,PHPProfile:true};if provider,ok:=services.WebEngineEdge.(WebEngineEdgeCapabilityProvider);ok{capabilities=provider.WebEngineCapabilities()}
 		if capabilities.List { if err := registry.Bind("webengine.installation.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.WebEngineEdge.ListInstallations(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result}, nil
@@ -1938,6 +1952,10 @@ func bindConsoleEdgeContractsFour(registry *Registry, services DomainServices) e
 		if capabilities.Upgrade { if err := registry.Bind("webengine.upgrade", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.WebEngineEdge.Upgrade(ctx, edgeCall(inv), *value.(*WebEngineUpgradePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return edgeOperationResult(http.StatusAccepted, result), nil
+		}); err != nil { return err } }
+		if capabilities.Remove { if err := registry.Bind("webengine.remove", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.WebEngineEdge.Remove(ctx, edgeCall(inv), *value.(*WebEngineRemovePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusOK, result), nil
 		}); err != nil { return err } }
 		if capabilities.PHPProfile { if err := registry.Bind("webengine.php_profile.create", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.WebEngineEdge.CreatePHPProfile(ctx, edgeCall(inv), *value.(*WebEnginePHPProfilePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
