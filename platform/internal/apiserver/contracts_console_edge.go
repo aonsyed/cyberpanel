@@ -790,6 +790,24 @@ type MigrationProviderProjection struct {
 	CreationOperation  string `json:"creation_operation"`
 }
 
+type MigrationChunkGCProjection struct {
+	MigrationID                  string     `json:"migration_id"`
+	TenantID                     string     `json:"tenant_id"`
+	Digest                       string     `json:"digest"`
+	Size                         uint64     `json:"size"`
+	ObjectEpoch                  string     `json:"object_epoch"`
+	State                        string     `json:"state"`
+	Materialized                 bool       `json:"materialized"`
+	QuarantineAfter              time.Time  `json:"quarantine_after"`
+	StartedAt                    time.Time  `json:"started_at"`
+	AmbiguousEvidenceDigest      string     `json:"ambiguous_evidence_digest"`
+	Resolution                   string     `json:"resolution,omitempty"`
+	Observation                  string     `json:"observation,omitempty"`
+	ReconciledAt                 *time.Time `json:"reconciled_at,omitempty"`
+	ReconciliationEvidenceDigest string     `json:"reconciliation_evidence_digest,omitempty"`
+	Generation                   uint64     `json:"generation"`
+}
+
 type MigrationCreatePayload struct {
 	Source         string `json:"source"`
 	SourceEndpoint string `json:"source_endpoint"`
@@ -809,6 +827,13 @@ type MigrationSyncPayload struct {
 
 type MigrationCutoverPayload struct {
 	ApprovalRef string `json:"approval_ref"`
+}
+
+type MigrationChunkGCReconcilePayload struct {
+	Digest         string `json:"digest"`
+	ObjectEpoch    string `json:"object_epoch"`
+	EvidenceDigest string `json:"evidence_digest"`
+	Resolution     string `json:"resolution"`
 }
 
 type IdentityTenantProjection struct {
@@ -1103,6 +1128,11 @@ type MigrationProviderDiscoveryEdgeService interface {
 	ListMigrationProviders(context.Context, EdgeCall) ([]MigrationProviderProjection, error)
 }
 
+type MigrationChunkGCEdgeService interface {
+	InspectMigrationChunkGC(context.Context, EdgeCall, EdgePagePayload) (EdgePage[MigrationChunkGCProjection], error)
+	ReconcileMigrationChunkGC(context.Context, EdgeCall, MigrationChunkGCReconcilePayload) (EdgeMutation[MigrationChunkGCProjection], error)
+}
+
 // MigrationEdgeCapabilities lets a concrete runtime keep destructive stages
 // unbound until every authority required by that stage is present. Implementors
 // that do not expose this optional interface retain the complete legacy surface.
@@ -1253,6 +1283,8 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("migration.provider.list", "migration:manage", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantListScope),
 		consoleOperation("migration.list", "migration:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
 		consoleOperation("migration.inspect", "migration:manage", password, false, func() any { return &EmptyPayload{} }, nil, edgeTenantResourceReadScope),
+		consoleOperation("migration.chunk_gc.inspect", "migration:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantResourceReadScope),
+		consoleOperation("migration.chunk_gc.reconcile", "migration:manage", mfa, true, func() any { return &MigrationChunkGCReconcilePayload{} }, validateMigrationChunkGCReconcile, edgeTenantExistingMutationScope),
 		consoleOperation("migration.create", "migration:manage", mfa, true, func() any { return &MigrationCreatePayload{} }, validateMigrationCreate, edgeTenantCreateScope),
 		consoleOperation("migration.cancel", "migration:manage", mfa, true, func() any { return &EmptyPayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("migration.inventory", "migration:manage", password, true, func() any { return &MigrationInventoryPayload{} }, nil, edgeTenantExistingMutationScope),
@@ -1764,6 +1796,20 @@ func validateMigrationCutover(value any) error {
 	payload := value.(*MigrationCutoverPayload)
 	if !validEdgeID(payload.ApprovalRef) { return invalid("migration approval") }
 	return nil
+}
+
+func validateMigrationChunkGCReconcile(value any) error {
+	payload := value.(*MigrationChunkGCReconcilePayload)
+	if !validDigestReference(payload.Digest) || !validDigestReference(payload.EvidenceDigest) || payload.Resolution != "confirm_deleted" && payload.Resolution != "retain_present" || !validPositiveInt64Text(payload.ObjectEpoch) {
+		return invalid("migration chunk GC reconciliation")
+	}
+	return nil
+}
+
+func validPositiveInt64Text(value string) bool {
+	if len(value) == 0 || len(value) > 19 || value[0] == '0' || len(value) == 19 && value > "9223372036854775807" { return false }
+	for _, character := range value { if character < '0' || character > '9' { return false } }
+	return true
 }
 
 func validateIdentityTenantCreate(value any) error {
@@ -2489,6 +2535,16 @@ func bindConsoleEdgeContractsThree(registry *Registry, services DomainServices) 
 			result, err := services.MigrationEdge.InspectMigration(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result, Generation:result.Generation}, nil
 		}); err != nil { return err } }
+		if chunkGC, ok := services.MigrationEdge.(MigrationChunkGCEdgeService); ok {
+			if err := registry.Bind("migration.chunk_gc.inspect", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+				result, err := chunkGC.InspectMigrationChunkGC(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+				return OperationResult{Status:http.StatusOK, Value:result}, nil
+			}); err != nil { return err }
+			if err := registry.Bind("migration.chunk_gc.reconcile", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+				result, err := chunkGC.ReconcileMigrationChunkGC(ctx, edgeCall(inv), *value.(*MigrationChunkGCReconcilePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+				return edgeOperationResult(http.StatusOK, result), nil
+			}); err != nil { return err }
+		}
 		if capabilities.Create { if err := registry.Bind("migration.create", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.MigrationEdge.CreateMigration(ctx, edgeCall(inv), *value.(*MigrationCreatePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return edgeOperationResult(http.StatusCreated, result), nil

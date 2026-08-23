@@ -38,7 +38,22 @@ CREATE TABLE IF NOT EXISTS panel_migration_chunk_maintenance (
   CHECK(state IN ('idle','running','healthy','degraded','needs_reconciliation','stopped'))
 );
 INSERT OR IGNORE INTO panel_migration_chunk_maintenance(singleton,lease_owner,lease_token,lease_fence,lease_until,release_cursor,gc_cursor,state,cycle_started_at,cycle_completed_at,last_success_at,last_error,evidence_digest,released_migrations,gc_receipts,updated_at)
-VALUES(1,'','',0,'','','','idle','','','','','',0,0,'');`
+VALUES(1,'','',0,'','','','idle','','','','','',0,0,'');
+CREATE TABLE IF NOT EXISTS panel_migration_chunk_gc_reconciliations (
+  digest TEXT NOT NULL,
+  object_epoch INTEGER NOT NULL,
+  tenant_id TEXT NOT NULL,
+  migration_id TEXT NOT NULL,
+  resolution TEXT NOT NULL,
+  ambiguous_evidence_digest TEXT NOT NULL,
+  receipt_json BLOB NOT NULL,
+  reconciled_at TEXT NOT NULL,
+  PRIMARY KEY(digest,object_epoch),
+  FOREIGN KEY(digest,object_epoch) REFERENCES panel_migration_chunk_gc_receipts(digest,object_epoch) ON DELETE RESTRICT,
+  FOREIGN KEY(migration_id) REFERENCES panel_migration_scopes(migration_id) ON DELETE RESTRICT,
+  CHECK(object_epoch > 0),
+  CHECK(resolution IN ('confirm_deleted','retain_present'))
+);`
 
 const (
 	ChunkMaintenanceHealthy             = "healthy"
@@ -150,13 +165,18 @@ func (scheduler *ChunkMaintenanceScheduler) RunOnce(ctx context.Context) (ChunkM
 	var garbage []ChunkGCReceipt
 	garbageCursor := lease.GarbageCursor
 	var garbageErr error
+	var reconciliationErr error
+	needsReconciliation := false
 	if cycleContext.Err() == nil {
 		garbage, garbageCursor, garbageErr = scheduler.store.collectChunkGarbageAfter(cycleContext, scheduler.chunks, lease.GarbageCursor, scheduler.config.GarbageLimit)
 	} else {
 		garbageErr = cycleContext.Err()
 	}
+	if cycleContext.Err() == nil {
+		needsReconciliation, reconciliationErr = scheduler.store.hasAmbiguousChunkGC(cycleContext)
+	}
 	cancel()
-	workErr := errors.Join(releaseErr, garbageErr)
+	workErr := errors.Join(releaseErr, garbageErr, reconciliationErr)
 	completedAt := scheduler.store.clock().UTC()
 	if completedAt.Before(lease.StartedAt) {
 		completedAt = lease.StartedAt
@@ -174,7 +194,7 @@ func (scheduler *ChunkMaintenanceScheduler) RunOnce(ctx context.Context) (ChunkM
 	}
 	if ctx.Err() != nil {
 		evidence.State = ChunkMaintenanceStopped
-	} else if errors.Is(workErr, ErrAmbiguous) || hasAmbiguousChunkGCReceipt(garbage) {
+	} else if needsReconciliation || errors.Is(workErr, ErrAmbiguous) || hasAmbiguousChunkGCReceipt(garbage) {
 		evidence.State = ChunkMaintenanceNeedsReconciliation
 	} else if workErr != nil {
 		evidence.State = ChunkMaintenanceDegraded

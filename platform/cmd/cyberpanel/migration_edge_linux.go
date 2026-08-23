@@ -10,10 +10,12 @@ import (
 	"errors"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
+	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 	localmigration "github.com/aonsyed/cyberpanel/platform/internal/migration/localruntime"
 )
@@ -84,6 +86,58 @@ func (edge *migrationEdge) InspectMigration(ctx context.Context, call apiserver.
 		return apiserver.MigrationProjection{}, err
 	}
 	return edge.projection(ctx, value, scope), nil
+}
+
+func (edge *migrationEdge) InspectMigrationChunkGC(ctx context.Context, call apiserver.EdgeCall, payload apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.MigrationChunkGCProjection], error) {
+	if edge == nil || edge.runtime == nil || edge.runtime.Scopes == nil || ctx == nil || strings.TrimSpace(call.TenantID) == "" || call.ExpectedGeneration != 0 {
+		return apiserver.EdgePage[apiserver.MigrationChunkGCProjection]{}, migration.ErrInvalid
+	}
+	id, err := migration.NewID(call.ResourceID)
+	if err != nil {
+		return apiserver.EdgePage[apiserver.MigrationChunkGCProjection]{}, err
+	}
+	limit := payload.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	values, next, total, err := edge.runtime.Scopes.InspectAmbiguousChunkGC(ctx, call.TenantID, id, limit, payload.Cursor)
+	if err != nil {
+		if errors.Is(err, migration.ErrAmbiguous) {
+			return apiserver.EdgePage[apiserver.MigrationChunkGCProjection]{}, migration.ErrBlocked
+		}
+		return apiserver.EdgePage[apiserver.MigrationChunkGCProjection]{}, err
+	}
+	items := make([]apiserver.MigrationChunkGCProjection, 0, len(values))
+	for _, value := range values {
+		items = append(items, migrationChunkGCAmbiguityProjection(value))
+	}
+	return apiserver.EdgePage[apiserver.MigrationChunkGCProjection]{Items:items, NextCursor:next, Total:total}, nil
+}
+
+func (edge *migrationEdge) ReconcileMigrationChunkGC(ctx context.Context, call apiserver.EdgeCall, payload apiserver.MigrationChunkGCReconcilePayload) (apiserver.EdgeMutation[apiserver.MigrationChunkGCProjection], error) {
+	if edge == nil || edge.runtime == nil || edge.runtime.Scopes == nil || edge.runtime.Chunks == nil || ctx == nil || strings.TrimSpace(call.TenantID) == "" || strings.TrimSpace(call.CommandID) == "" || strings.TrimSpace(call.PrincipalID) == "" || call.ExpectedGeneration == 0 {
+		return apiserver.EdgeMutation[apiserver.MigrationChunkGCProjection]{}, migration.ErrInvalid
+	}
+	if call.Assurance < identity.AssuranceMFA {
+		return apiserver.EdgeMutation[apiserver.MigrationChunkGCProjection]{}, identity.ErrAssuranceRequired
+	}
+	id, err := migration.NewID(call.ResourceID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationChunkGCProjection]{}, err
+	}
+	epoch, err := strconv.ParseUint(payload.ObjectEpoch, 10, 64)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.MigrationChunkGCProjection]{}, migration.ErrInvalid
+	}
+	receipt, err := edge.runtime.Scopes.ReconcileAmbiguousChunkGC(ctx, edge.runtime.Chunks, migration.ChunkGCReconcileCommand{MigrationID:id, TenantID:call.TenantID, Digest:payload.Digest, ObjectEpoch:epoch, EvidenceDigest:payload.EvidenceDigest, Resolution:migration.ChunkGCResolution(payload.Resolution), ExpectedGeneration:call.ExpectedGeneration, ActorID:call.PrincipalID, CommandID:call.CommandID})
+	if err != nil {
+		if errors.Is(err, migration.ErrAmbiguous) {
+			return apiserver.EdgeMutation[apiserver.MigrationChunkGCProjection]{}, migration.ErrBlocked
+		}
+		return apiserver.EdgeMutation[apiserver.MigrationChunkGCProjection]{}, err
+	}
+	projection := migrationChunkGCReconciliationProjection(receipt)
+	return apiserver.EdgeMutation[apiserver.MigrationChunkGCProjection]{OperationID:call.CommandID, State:"reconciled", Generation:receipt.ScopeGeneration, Resource:projection}, nil
 }
 
 func (edge *migrationEdge) CreateMigration(ctx context.Context, call apiserver.EdgeCall, payload apiserver.MigrationCreatePayload) (apiserver.EdgeMutation[apiserver.MigrationProjection], error) {
@@ -501,6 +555,19 @@ func redactedMigrationError(value migration.Migration, state string) (string, st
 
 func migrationMutation(operationID string, value migration.Migration, scope migration.RuntimeScope, projection apiserver.MigrationProjection) apiserver.EdgeMutation[apiserver.MigrationProjection] {
 	return apiserver.EdgeMutation[apiserver.MigrationProjection]{OperationID: operationID, State: projection.State, Generation: scope.Generation, Resource: projection}
+}
+
+func migrationChunkGCAmbiguityProjection(value migration.ChunkGCAmbiguity) apiserver.MigrationChunkGCProjection {
+	return apiserver.MigrationChunkGCProjection{MigrationID:value.MigrationID.String(), TenantID:value.TenantID, Digest:value.Digest, Size:value.Size, ObjectEpoch:strconv.FormatUint(value.ObjectEpoch, 10), State:"ambiguous", Materialized:value.Materialized, QuarantineAfter:value.QuarantineAfter, StartedAt:value.StartedAt, AmbiguousEvidenceDigest:value.EvidenceDigest, Generation:value.ScopeGeneration}
+}
+
+func migrationChunkGCReconciliationProjection(receipt migration.ChunkGCReconciliationReceipt) apiserver.MigrationChunkGCProjection {
+	state, observation := "deleted", "absent"
+	if receipt.ObservedPresent {
+		state, observation = "active", "present"
+	}
+	reconciledAt := receipt.ReconciledAt
+	return apiserver.MigrationChunkGCProjection{MigrationID:receipt.MigrationID.String(), TenantID:receipt.TenantID, Digest:receipt.Digest, Size:receipt.Size, ObjectEpoch:strconv.FormatUint(receipt.ObjectEpoch, 10), State:state, Materialized:receipt.ObservedPresent, QuarantineAfter:receipt.QuarantineAfter, StartedAt:receipt.StartedAt, AmbiguousEvidenceDigest:receipt.AmbiguousEvidenceDigest, Resolution:string(receipt.Resolution), Observation:observation, ReconciledAt:&reconciledAt, ReconciliationEvidenceDigest:receipt.EvidenceDigest, Generation:receipt.ScopeGeneration}
 }
 
 func migrationID(commandID, tenantID string) migration.ID {

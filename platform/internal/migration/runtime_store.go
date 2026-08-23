@@ -141,6 +141,57 @@ type ChunkGCReceipt struct {
 	EvidenceDigest  string
 }
 
+type ChunkGCResolution string
+
+const (
+	ChunkGCConfirmDeleted ChunkGCResolution = "confirm_deleted"
+	ChunkGCRetainPresent  ChunkGCResolution = "retain_present"
+)
+
+type ChunkGCAmbiguity struct {
+	MigrationID      ID
+	TenantID         string
+	Digest           string
+	Size             uint64
+	ObjectEpoch      uint64
+	Materialized     bool
+	QuarantineAfter  time.Time
+	StartedAt        time.Time
+	EvidenceDigest   string
+	ScopeGeneration  uint64
+}
+
+type ChunkGCReconcileCommand struct {
+	MigrationID       ID
+	TenantID          string
+	Digest            string
+	ObjectEpoch       uint64
+	EvidenceDigest    string
+	Resolution        ChunkGCResolution
+	ExpectedGeneration uint64
+	ActorID           string
+	CommandID         string
+}
+
+type ChunkGCReconciliationReceipt struct {
+	MigrationID              ID
+	TenantID                 string
+	Digest                   string
+	Size                     uint64
+	ObjectEpoch              uint64
+	AmbiguousEvidenceDigest  string
+	Resolution               ChunkGCResolution
+	ObservedPresent          bool
+	QuarantineAfter          time.Time
+	StartedAt                time.Time
+	PreviousGeneration       uint64
+	ScopeGeneration          uint64
+	ActorID                  string
+	CommandID                string
+	ReconciledAt             time.Time
+	EvidenceDigest           string
+}
+
 type ChunkReferenceStore interface {
 	AcquireChunkReference(context.Context, ID, Chunk) (ChunkReference, error)
 	ConfirmChunkReference(context.Context, ID, Chunk) error
@@ -874,6 +925,163 @@ func (store *RuntimeScopeStore) markChunkGCAmbiguousLocked(ctx context.Context, 
 	return receipt, nil
 }
 
+func (store *RuntimeScopeStore) InspectAmbiguousChunkGC(ctx context.Context, tenantID string, migrationID ID, limit uint16, cursor string) ([]ChunkGCAmbiguity, string, uint64, error) {
+	if store == nil || store.db == nil || ctx == nil || !runtimeScopeText(tenantID, 128) || !migrationID.Valid() || limit == 0 || limit > 200 || cursor != "" && !isDigest(cursor) {
+		return nil, "", 0, ErrInvalid
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var generation int64
+	if err := store.db.QueryRowContext(ctx, `SELECT generation FROM panel_migration_scopes WHERE migration_id=? AND tenant_id=?`, migrationID.String(), tenantID).Scan(&generation); errors.Is(err, sql.ErrNoRows) {
+		return nil, "", 0, ErrNotFound
+	} else if err != nil {
+		return nil, "", 0, err
+	} else if generation <= 0 {
+		return nil, "", 0, ErrAmbiguous
+	}
+	where := ` FROM panel_migration_chunk_refs r JOIN panel_migration_chunk_objects o ON o.digest=r.digest AND o.object_epoch=r.object_epoch JOIN panel_migration_chunk_gc_receipts g ON g.digest=o.digest AND g.object_epoch=o.object_epoch WHERE r.tenant_id=? AND r.migration_id=? AND r.state='released' AND o.state='ambiguous' AND g.state='ambiguous'`
+	var total uint64
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*)`+where, tenantID, migrationID.String()).Scan(&total); err != nil {
+		return nil, "", 0, err
+	}
+	rows, err := store.db.QueryContext(ctx, `SELECT o.digest,o.size_bytes,o.object_epoch,o.materialized,g.receipt_json`+where+` AND o.digest>? ORDER BY o.digest LIMIT ?`, tenantID, migrationID.String(), cursor, int(limit)+1)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	defer rows.Close()
+	values := make([]ChunkGCAmbiguity, 0, int(limit)+1)
+	for rows.Next() {
+		var digest string
+		var size, epoch int64
+		var materialized int
+		var raw []byte
+		if err = rows.Scan(&digest, &size, &epoch, &materialized, &raw); err != nil {
+			return nil, "", 0, err
+		}
+		var receipt ChunkGCReceipt
+		if strictDecode(raw, &receipt, 1<<20) != nil || !validChunkGCReceipt(receipt) || receipt.State != "ambiguous" || receipt.Digest != digest || size < 0 || receipt.Size != uint64(size) || epoch <= 0 || receipt.ObjectEpoch != uint64(epoch) || materialized != 0 && materialized != 1 {
+			return nil, "", 0, ErrAmbiguous
+		}
+		values = append(values, ChunkGCAmbiguity{MigrationID:migrationID, TenantID:tenantID, Digest:digest, Size:receipt.Size, ObjectEpoch:receipt.ObjectEpoch, Materialized:materialized == 1, QuarantineAfter:receipt.QuarantineAfter, StartedAt:receipt.StartedAt, EvidenceDigest:receipt.EvidenceDigest, ScopeGeneration:uint64(generation)})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, "", 0, err
+	}
+	next := ""
+	if len(values) > int(limit) {
+		next = values[limit-1].Digest
+		values = values[:limit]
+	}
+	return values, next, total, nil
+}
+
+func (store *RuntimeScopeStore) ReconcileAmbiguousChunkGC(ctx context.Context, chunks *ChunkStore, command ChunkGCReconcileCommand) (ChunkGCReconciliationReceipt, error) {
+	if store == nil || store.db == nil || ctx == nil || chunks == nil || !validChunkGCReconcileCommand(command) {
+		return ChunkGCReconciliationReceipt{}, ErrInvalid
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var existingRaw []byte
+	if err := store.db.QueryRowContext(ctx, `SELECT receipt_json FROM panel_migration_chunk_gc_reconciliations WHERE digest=? AND object_epoch=?`, command.Digest, command.ObjectEpoch).Scan(&existingRaw); err == nil {
+		var existing ChunkGCReconciliationReceipt
+		if strictDecode(existingRaw, &existing, 1<<20) != nil || !validChunkGCReconciliationReceipt(existing) || existing.Digest != command.Digest || existing.ObjectEpoch != command.ObjectEpoch {
+			return ChunkGCReconciliationReceipt{}, ErrAmbiguous
+		}
+		if existing.MigrationID == command.MigrationID && existing.TenantID == command.TenantID && existing.AmbiguousEvidenceDigest == command.EvidenceDigest && existing.Resolution == command.Resolution && existing.PreviousGeneration == command.ExpectedGeneration && existing.ActorID == command.ActorID && existing.CommandID == command.CommandID {
+			return existing, nil
+		}
+		return ChunkGCReconciliationReceipt{}, ErrConflict
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return ChunkGCReconciliationReceipt{}, err
+	}
+	var generation int64
+	if err := store.db.QueryRowContext(ctx, `SELECT generation FROM panel_migration_scopes WHERE migration_id=? AND tenant_id=?`, command.MigrationID.String(), command.TenantID).Scan(&generation); errors.Is(err, sql.ErrNoRows) {
+		return ChunkGCReconciliationReceipt{}, ErrNotFound
+	} else if err != nil {
+		return ChunkGCReconciliationReceipt{}, err
+	} else if generation <= 0 || uint64(generation) != command.ExpectedGeneration {
+		return ChunkGCReconciliationReceipt{}, ErrConflict
+	}
+	var size, epoch int64
+	var raw []byte
+	err := store.db.QueryRowContext(ctx, `SELECT o.size_bytes,o.object_epoch,g.receipt_json FROM panel_migration_chunk_refs r JOIN panel_migration_chunk_objects o ON o.digest=r.digest AND o.object_epoch=r.object_epoch JOIN panel_migration_chunk_gc_receipts g ON g.digest=o.digest AND g.object_epoch=o.object_epoch WHERE r.tenant_id=? AND r.migration_id=? AND r.digest=? AND r.object_epoch=? AND r.state='released' AND o.state='ambiguous' AND g.state='ambiguous'`, command.TenantID, command.MigrationID.String(), command.Digest, command.ObjectEpoch).Scan(&size, &epoch, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ChunkGCReconciliationReceipt{}, ErrNotFound
+	} else if err != nil {
+		return ChunkGCReconciliationReceipt{}, err
+	}
+	var ambiguous ChunkGCReceipt
+	if strictDecode(raw, &ambiguous, 1<<20) != nil || !validChunkGCReceipt(ambiguous) || ambiguous.State != "ambiguous" || ambiguous.Digest != command.Digest || size < 0 || ambiguous.Size != uint64(size) || epoch <= 0 || ambiguous.ObjectEpoch != uint64(epoch) || ambiguous.EvidenceDigest != command.EvidenceDigest {
+		return ChunkGCReconciliationReceipt{}, ErrConflict
+	}
+	var active uint64
+	if err = store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM panel_migration_chunk_refs WHERE digest=? AND object_epoch=? AND state='active'`, command.Digest, command.ObjectEpoch).Scan(&active); err != nil {
+		return ChunkGCReconciliationReceipt{}, err
+	} else if active != 0 {
+		return ChunkGCReconciliationReceipt{}, ErrConflict
+	}
+	present, err := chunks.Has(ctx, Chunk{Digest:command.Digest, Size:uint64(size)})
+	if err != nil {
+		return ChunkGCReconciliationReceipt{}, errors.Join(ErrAmbiguous, err)
+	}
+	if command.Resolution == ChunkGCConfirmDeleted && present || command.Resolution == ChunkGCRetainPresent && !present {
+		return ChunkGCReconciliationReceipt{}, ErrConflict
+	}
+	now := store.clock().UTC()
+	if now.Before(ambiguous.StartedAt) {
+		now = ambiguous.StartedAt
+	}
+	receipt := ChunkGCReconciliationReceipt{MigrationID:command.MigrationID, TenantID:command.TenantID, Digest:command.Digest, Size:uint64(size), ObjectEpoch:command.ObjectEpoch, AmbiguousEvidenceDigest:command.EvidenceDigest, Resolution:command.Resolution, ObservedPresent:present, QuarantineAfter:ambiguous.QuarantineAfter, StartedAt:ambiguous.StartedAt, PreviousGeneration:command.ExpectedGeneration, ScopeGeneration:command.ExpectedGeneration + 1, ActorID:command.ActorID, CommandID:command.CommandID, ReconciledAt:now}
+	receipt.EvidenceDigest = chunkGCReconciliationEvidence(receipt)
+	receiptRaw, err := canonicalJSON(receipt, 1<<20)
+	if err != nil {
+		return ChunkGCReconciliationReceipt{}, err
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ChunkGCReconciliationReceipt{}, err
+	}
+	defer tx.Rollback()
+	state, materialized := "deleted", 0
+	if present {
+		state, materialized = "active", 1
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_chunk_objects SET materialized=?,state=?,quarantine_after='',updated_at=? WHERE digest=? AND object_epoch=? AND state='ambiguous'`, materialized, state, encodeTime(now), command.Digest, command.ObjectEpoch)
+	if err != nil {
+		return ChunkGCReconciliationReceipt{}, err
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		return ChunkGCReconciliationReceipt{}, ErrConflict
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE panel_migration_scopes SET generation=generation+1,last_command_id=?,updated_at=? WHERE migration_id=? AND tenant_id=? AND generation=?`, command.CommandID, encodeTime(now), command.MigrationID.String(), command.TenantID, command.ExpectedGeneration)
+	if err != nil {
+		return ChunkGCReconciliationReceipt{}, err
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		return ChunkGCReconciliationReceipt{}, ErrConflict
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO panel_migration_chunk_gc_reconciliations(digest,object_epoch,tenant_id,migration_id,resolution,ambiguous_evidence_digest,receipt_json,reconciled_at) VALUES(?,?,?,?,?,?,?,?)`, command.Digest, command.ObjectEpoch, command.TenantID, command.MigrationID.String(), command.Resolution, command.EvidenceDigest, receiptRaw, encodeTime(now)); err != nil {
+		return ChunkGCReconciliationReceipt{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return ChunkGCReconciliationReceipt{}, err
+	}
+	return receipt, nil
+}
+
+func (store *RuntimeScopeStore) hasAmbiguousChunkGC(ctx context.Context) (bool, error) {
+	if store == nil || store.db == nil || ctx == nil {
+		return false, ErrInvalid
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var count uint64
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM panel_migration_chunk_objects WHERE state='ambiguous'`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count != 0, nil
+}
+
 func validStoredChunkObject(digest string, size, epoch int64, materialized int, state string) bool {
 	if !isDigest(digest) || size < 0 || epoch <= 0 || materialized != 0 && materialized != 1 {
 		return false
@@ -939,6 +1147,29 @@ func chunkGCEvidence(receipt ChunkGCReceipt) string {
 		Domain  string
 		Receipt ChunkGCReceipt
 	}{"migration-chunk-gc-v1", receipt})
+}
+
+func validChunkGCReconcileCommand(command ChunkGCReconcileCommand) bool {
+	return command.MigrationID.Valid() && runtimeScopeText(command.TenantID, 128) && isDigest(command.Digest) && command.ObjectEpoch > 0 && command.ObjectEpoch <= uint64(math.MaxInt64) && isDigest(command.EvidenceDigest) && validChunkGCResolution(command.Resolution) && command.ExpectedGeneration > 0 && command.ExpectedGeneration < uint64(math.MaxInt64) && runtimeScopeText(command.ActorID, 256) && runtimeScopeText(command.CommandID, 256)
+}
+
+func validChunkGCReconciliationReceipt(receipt ChunkGCReconciliationReceipt) bool {
+	if !receipt.MigrationID.Valid() || !runtimeScopeText(receipt.TenantID, 128) || !isDigest(receipt.Digest) || receipt.Size > uint64(math.MaxInt64) || receipt.ObjectEpoch == 0 || receipt.ObjectEpoch > uint64(math.MaxInt64) || !isDigest(receipt.AmbiguousEvidenceDigest) || !validChunkGCResolution(receipt.Resolution) || receipt.ObservedPresent != (receipt.Resolution == ChunkGCRetainPresent) || receipt.QuarantineAfter.IsZero() || receipt.StartedAt.IsZero() || receipt.StartedAt.Before(receipt.QuarantineAfter) || receipt.PreviousGeneration == 0 || receipt.PreviousGeneration >= uint64(math.MaxInt64) || receipt.ScopeGeneration != receipt.PreviousGeneration+1 || !runtimeScopeText(receipt.ActorID, 256) || !runtimeScopeText(receipt.CommandID, 256) || receipt.ReconciledAt.IsZero() || receipt.ReconciledAt.Before(receipt.StartedAt) || !isDigest(receipt.EvidenceDigest) {
+		return false
+	}
+	return receipt.EvidenceDigest == chunkGCReconciliationEvidence(receipt)
+}
+
+func validChunkGCResolution(resolution ChunkGCResolution) bool {
+	return resolution == ChunkGCConfirmDeleted || resolution == ChunkGCRetainPresent
+}
+
+func chunkGCReconciliationEvidence(receipt ChunkGCReconciliationReceipt) string {
+	receipt.EvidenceDigest = ""
+	return digestJSON(struct {
+		Domain  string
+		Receipt ChunkGCReconciliationReceipt
+	}{"migration-chunk-gc-reconciliation-v1", receipt})
 }
 
 func (store *RuntimeScopeStore) scan(row *sql.Row, tenantID string, migrationID ID) (RuntimeScope, error) {
