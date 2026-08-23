@@ -33,11 +33,14 @@ type rebootControlPlanRequest struct {
 	PlanID                   string
 	Reason                   rebootcontrol.PlanReason
 	MaintenanceOccurrenceID  string
+	ApprovalRef              string
+	IndependentApprover      string
 	DrainMode                rebootcontrol.DrainMode
 	ExpectedReturn           time.Duration
 	PackageOperation         packagemaint.MaintenanceOperation
 	PackagePlan              packagemaint.MaintenancePlan
 	PackageInventory         packagemaint.InventorySnapshot
+	Requirement              rebootcontrol.RebootRequirement
 	RequestedAt              time.Time
 }
 
@@ -147,7 +150,7 @@ func (edge *rebootControlLinuxEdge) ListRebootControls(ctx context.Context, call
 		return apiserver.EdgePage[apiserver.RebootControlProjection]{}, err
 	}
 	page := apiserver.EdgePage[apiserver.RebootControlProjection]{Items: make([]apiserver.RebootControlProjection, 0, limit), NextCursor: stored.NextCursor}
-	representedInventories := make(map[string]struct{}, len(stored.Items))
+	representedOperations := make(map[string]struct{}, len(stored.Items))
 	for _, item := range stored.Items {
 		projection, projectErr := edge.projection(ctx, item.Plan, item.State)
 		if projectErr != nil {
@@ -155,17 +158,12 @@ func (edge *rebootControlLinuxEdge) ListRebootControls(ctx context.Context, call
 		}
 		page.Items = append(page.Items, projection)
 		if item.State.Phase != rebootcontrol.PhaseCancelled && item.State.Phase != rebootcontrol.PhaseSucceeded {
-			representedInventories[item.Plan.Packages.InventoryDigest] = struct{}{}
+			representedOperations[item.Plan.Packages.TransactionID] = struct{}{}
 		}
 	}
 	if payload.Cursor == "" && page.NextCursor == "" && len(page.Items) < limit {
-		snapshot, inventoryErr := edge.packages.LatestInventory(ctx, edge.nodeID, edge.manager)
-		_, represented := representedInventories[snapshot.ContentDigest]
-		if inventoryErr == nil && snapshot.RebootRequired && !represented {
-			page.Items = append(page.Items, rebootRequiredProjection(snapshot))
-		} else if inventoryErr != nil && !errors.Is(inventoryErr, packagemaint.ErrNotFound) {
-			return apiserver.EdgePage[apiserver.RebootControlProjection]{}, inventoryErr
-		}
+		requirements,requirementErr:=edge.repository.ListRequirements(ctx,edge.nodeID,limit-len(page.Items),"");if requirementErr!=nil{return apiserver.EdgePage[apiserver.RebootControlProjection]{},requirementErr}
+		for _,requirement:=range requirements.Items{if _,represented:=representedOperations[requirement.PackageOperationID];!represented{page.Items=append(page.Items,rebootRequiredProjection(requirement))}}
 	}
 	return page, nil
 }
@@ -185,12 +183,13 @@ func (edge *rebootControlLinuxEdge) ScheduleReboot(ctx context.Context, call api
 		payload.ExpectedReturnSeconds = 1800
 	}
 	if !validRebootControlRuntimeID(payload.RequirementReference) || !validRebootControlRuntimeID(payload.MaintenanceOccurrence) ||
+		!validRebootControlRuntimeID(payload.ApprovalRef) || !validRebootControlRuntimeID(payload.IndependentApprover) || payload.IndependentApprover == call.PrincipalID ||
 		payload.DrainMode != rebootcontrol.DrainGraceful && payload.DrainMode != rebootcontrol.DrainRequired ||
 		payload.ExpectedReturnSeconds < 60 || payload.ExpectedReturnSeconds > 86400 {
 		return apiserver.EdgeMutation[apiserver.RebootControlProjection]{}, rebootcontrol.ErrInvalid
 	}
 	now := edge.now().UTC()
-	operation, packagePlan, inventory, err := edge.packageEvidence(ctx, payload)
+	requirement,operation, packagePlan, inventory, err := edge.packageEvidence(ctx, payload)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.RebootControlProjection]{}, err
 	}
@@ -199,8 +198,10 @@ func (edge *rebootControlLinuxEdge) ScheduleReboot(ctx context.Context, call api
 	if loadErr == nil {
 		if storedPlan.NodeID != edge.nodeID || storedPlan.Reason != payload.Reason ||
 			storedPlan.Packages.TransactionID != operation.ID || storedPlan.Packages.TransactionDigest != operation.Receipt.EvidenceDigest ||
+			storedPlan.Packages.RequirementDigest != requirement.Digest ||
 			storedPlan.Maintenance.OccurrenceID != payload.MaintenanceOccurrence || storedPlan.Drain.Mode != payload.DrainMode ||
-			!storedPlan.ExpectedBoot.ReturnDeadline.Equal(storedPlan.RequestedAt.Add(time.Duration(payload.ExpectedReturnSeconds)*time.Second)) ||
+			storedPlan.Approval.Reference != payload.ApprovalRef || storedPlan.Approval.Approver != payload.IndependentApprover ||
+			!storedPlan.ExpectedBoot.ReturnDeadline.Equal(rebootReturnDeadline(storedPlan.RequestedAt, storedPlan.Maintenance.StartsAt, time.Duration(payload.ExpectedReturnSeconds)*time.Second)) ||
 			storedPlan.Authorization.Subject != call.PrincipalID {
 			return apiserver.EdgeMutation[apiserver.RebootControlProjection]{}, rebootcontrol.ErrConflict
 		}
@@ -216,7 +217,8 @@ func (edge *rebootControlLinuxEdge) ScheduleReboot(ctx context.Context, call api
 	duration := time.Duration(payload.ExpectedReturnSeconds) * time.Second
 	plan, err := edge.authority.ResolveRebootPlan(ctx, rebootControlPlanRequest{Call: call, PlanID: planID, Reason: payload.Reason,
 		MaintenanceOccurrenceID: payload.MaintenanceOccurrence, DrainMode: payload.DrainMode, ExpectedReturn: duration,
-		PackageOperation: operation, PackagePlan: packagePlan, PackageInventory: inventory, RequestedAt: now})
+		ApprovalRef: payload.ApprovalRef, IndependentApprover: payload.IndependentApprover,
+		PackageOperation: operation, PackagePlan: packagePlan, PackageInventory: inventory, Requirement: requirement, RequestedAt: now})
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.RebootControlProjection]{}, err
 	}
@@ -227,8 +229,9 @@ func (edge *rebootControlLinuxEdge) ScheduleReboot(ctx context.Context, call api
 	if canonical.ID != planID || canonical.NodeID != edge.nodeID || canonical.Reason != payload.Reason ||
 		canonical.Maintenance.OccurrenceID != payload.MaintenanceOccurrence || canonical.Drain.Mode != payload.DrainMode ||
 		canonical.Packages.InventoryDigest != packagePlan.InventoryDigest || canonical.Packages.TransactionID != operation.ID ||
-		canonical.Packages.TransactionDigest != operation.Receipt.EvidenceDigest || canonical.Authorization.Subject != call.PrincipalID ||
-		!canonical.RequestedAt.Equal(now) || !canonical.ExpectedBoot.ReturnDeadline.Equal(now.Add(duration)) {
+		canonical.Packages.TransactionDigest != operation.Receipt.EvidenceDigest || canonical.Packages.RequirementDigest != requirement.Digest || canonical.Authorization.Subject != call.PrincipalID ||
+		canonical.Approval.Reference != payload.ApprovalRef || canonical.Approval.Approver != payload.IndependentApprover ||
+		!canonical.RequestedAt.Equal(now) || !canonical.ExpectedBoot.ReturnDeadline.Equal(rebootReturnDeadline(now, canonical.Maintenance.StartsAt, duration)) {
 		return apiserver.EdgeMutation[apiserver.RebootControlProjection]{}, rebootcontrol.ErrIntegrity
 	}
 	if canonical.Reason == rebootcontrol.ReasonKernelUpdate && canonical.Kernel.CurrentRelease == canonical.Kernel.NextRelease && canonical.Kernel.CurrentDigest == canonical.Kernel.NextDigest {
@@ -352,18 +355,19 @@ func (edge *rebootControlLinuxEdge) ReconcileReboot(ctx context.Context, call ap
 	return edge.mutation(ctx, call.CommandID, plan, state)
 }
 
-func (edge *rebootControlLinuxEdge) packageEvidence(ctx context.Context, payload apiserver.RebootControlSchedulePayload) (packagemaint.MaintenanceOperation, packagemaint.MaintenancePlan, packagemaint.InventorySnapshot, error) {
-	operation, err := edge.packages.Operation(ctx, payload.RequirementReference)
+func (edge *rebootControlLinuxEdge) packageEvidence(ctx context.Context, payload apiserver.RebootControlSchedulePayload) (rebootcontrol.RebootRequirement,packagemaint.MaintenanceOperation, packagemaint.MaintenancePlan, packagemaint.InventorySnapshot, error) {
+	requirement,err:=edge.repository.LoadRequirement(ctx,payload.RequirementReference);if err!=nil{return rebootcontrol.RebootRequirement{},packagemaint.MaintenanceOperation{},packagemaint.MaintenancePlan{},packagemaint.InventorySnapshot{},err}
+	operation, err := edge.packages.Operation(ctx, requirement.PackageOperationID)
 	if err != nil {
-		return packagemaint.MaintenanceOperation{}, packagemaint.MaintenancePlan{}, packagemaint.InventorySnapshot{}, err
+		return requirement,packagemaint.MaintenanceOperation{}, packagemaint.MaintenancePlan{}, packagemaint.InventorySnapshot{}, err
 	}
 	plan, err := edge.packages.Plan(ctx, operation.PlanID)
 	if err != nil {
-		return operation, packagemaint.MaintenancePlan{}, packagemaint.InventorySnapshot{}, err
+		return requirement,operation, packagemaint.MaintenancePlan{}, packagemaint.InventorySnapshot{}, err
 	}
 	inventory, err := edge.packages.Inventory(ctx, plan.InventoryID)
 	if err != nil {
-		return operation, plan, packagemaint.InventorySnapshot{}, err
+		return requirement,operation, plan, packagemaint.InventorySnapshot{}, err
 	}
 	if plan.NodeID != edge.nodeID || plan.Manager != edge.manager || inventory.NodeID != edge.nodeID || inventory.Manager != edge.manager ||
 		operation.PlanDigest != plan.Digest || operation.PlanGeneration != plan.Generation || operation.InventoryDigest != plan.InventoryDigest ||
@@ -373,16 +377,16 @@ func (edge *rebootControlLinuxEdge) packageEvidence(ctx context.Context, payload
 		operation.Receipt.PlanID != plan.ID || operation.Receipt.PlanDigest != plan.Digest || !validRebootControlDigest(operation.Receipt.EvidenceDigest) ||
 		operation.Receipt.InventoryGeneration != plan.InventoryGeneration || operation.Receipt.BeforeInventoryDigest != plan.InventoryDigest ||
 		operation.Receipt.Fence != operation.Fence ||
-		plan.Reboot != packagemaint.RebootRequired && !inventory.RebootRequired {
-		return operation, plan, inventory, rebootcontrol.ErrIntegrity
+		plan.Reboot != packagemaint.RebootRequired && !inventory.RebootRequired || requirement.NodeID!=edge.nodeID||requirement.Reason!=payload.Reason {
+		return requirement,operation, plan, inventory, rebootcontrol.ErrIntegrity
 	}
 	if payload.Reason == rebootcontrol.ReasonSecurityResponse && (plan.Security == packagemaint.SecurityNone || plan.Security == packagemaint.SecurityUnknown) {
-		return operation, plan, inventory, rebootcontrol.ErrUnauthorized
+		return requirement,operation, plan, inventory, rebootcontrol.ErrUnauthorized
 	}
 	if payload.Reason == rebootcontrol.ReasonRecovery && (operation.State != packagemaint.OperationRecovered || operation.Receipt.Outcome != packagemaint.OutcomeRecovered) {
-		return operation, plan, inventory, rebootcontrol.ErrConflict
+		return requirement,operation, plan, inventory, rebootcontrol.ErrConflict
 	}
-	return operation, plan, inventory, nil
+	return requirement,operation, plan, inventory, nil
 }
 
 func (edge *rebootControlLinuxEdge) controlled(ctx context.Context, call apiserver.EdgeCall) (rebootcontrol.Plan, rebootcontrol.State, error) {
@@ -471,7 +475,7 @@ func (edge *rebootControlLinuxEdge) projection(ctx context.Context, plan rebootc
 		MaintenanceOccurrenceID: plan.Maintenance.OccurrenceID, MaintenanceStartsAt: plan.Maintenance.StartsAt,
 		MaintenanceEndsAt: plan.Maintenance.EndsAt, MaintenanceStatus: maintenanceStatus, Phase: string(state.Phase), Outcome: string(state.Outcome),
 		DrainStatus: rebootDrainStatus(state.Phase), DrainReady: drainReady, QuiesceStatus: rebootQuiesceStatus(state.Phase), QuiesceReady: quiesceReady,
-		ApprovalStatus: rebootApprovalStatus(state.Phase), SourceBootID: plan.SourceBoot.BootID, ObservedBootID: actual.BootID,
+		ApprovalStatus: rebootApprovalStatus(state.Phase), ApprovalRef:plan.Approval.Reference, IndependentApprover:plan.Approval.Approver, SourceBootID: plan.SourceBoot.BootID, ObservedBootID: actual.BootID,
 		BootConfirmationStatus: bootStatus, CurrentKernel: plan.Kernel.CurrentRelease, ExpectedKernel: plan.Kernel.NextRelease,
 		ObservedKernel: actual.KernelRelease, Ambiguous: state.Phase == rebootcontrol.PhaseUncertain,
 		CanExecute: maintenanceStatus == "active" && rebootExecutable(state.Phase), CanCancel: rebootCancellable(state.Phase),
@@ -480,12 +484,13 @@ func (edge *rebootControlLinuxEdge) projection(ctx context.Context, plan rebootc
 	return projection, nil
 }
 
-func rebootRequiredProjection(snapshot packagemaint.InventorySnapshot) apiserver.RebootControlProjection {
-	return apiserver.RebootControlProjection{ID: "reboot_required_" + snapshot.ContentDigest[:48], Type: "required_unscheduled",
-		NodeID: snapshot.NodeID, Required: true, Reasons: []apiserver.RebootRequiredReasonProjection{{Code: rebootcontrol.ReasonPackageUpdate,
-			Source: "package_inventory", Reference: snapshot.ID, EvidenceDigest: snapshot.ContentDigest, ObservedAt: snapshot.CapturedAt}},
+
+func rebootRequiredProjection(requirement rebootcontrol.RebootRequirement) apiserver.RebootControlProjection {
+	return apiserver.RebootControlProjection{ID: requirement.ID, Type: "required_unscheduled",
+		NodeID: requirement.NodeID, Required: true, Reasons: []apiserver.RebootRequiredReasonProjection{{Code: requirement.Reason,
+			Source: "package_maintenance", Reference: requirement.PackageOperationID, EvidenceDigest: requirement.EvidenceDigest, ObservedAt: requirement.ObservedAt}},
 		MaintenanceStatus: "unscheduled", Phase: "unscheduled", DrainStatus: "pending", QuiesceStatus: "pending",
-		ApprovalStatus: "not_requested", BootConfirmationStatus: "not_expected", Generation: snapshot.Generation, UpdatedAt: snapshot.CapturedAt}
+		ApprovalStatus: "not_requested", BootConfirmationStatus: "not_expected", Generation: requirement.Generation, SourceBootID:requirement.SourceBoot.BootID, UpdatedAt: requirement.ObservedAt}
 }
 
 func rebootControlType(phase rebootcontrol.Phase, maintenance string) string {
@@ -567,6 +572,11 @@ func rebootCancellable(phase rebootcontrol.Phase) bool {
 func rebootMatchesExpected(actual rebootcontrol.BootIdentity, expected rebootcontrol.ExpectedBoot) bool {
 	return actual.KernelRelease == expected.KernelRelease && actual.KernelDigest == expected.KernelDigest &&
 		(expected.BootSlot == "" || actual.BootSlot == expected.BootSlot)
+}
+
+func rebootReturnDeadline(requestedAt, startsAt time.Time, duration time.Duration) time.Time {
+	if startsAt.After(requestedAt) { return startsAt.Add(duration) }
+	return requestedAt.Add(duration)
 }
 
 func rebootControlID(commandID string) string {

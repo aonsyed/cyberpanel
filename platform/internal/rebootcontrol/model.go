@@ -77,10 +77,23 @@ type PackageState struct {
 	InventoryDigest string `json:"inventory_digest"`
 	TransactionID   string `json:"transaction_id"`
 	TransactionDigest string `json:"transaction_digest"`
+	RequirementDigest string `json:"requirement_digest"`
 }
 
+// RebootRequirement is passive evidence: it cannot authorize, schedule, or
+// dispatch a reboot. ID is the originating immutable package operation ID.
+type RebootRequirement struct { ID string `json:"id"`; NodeID string `json:"node_id"`; Reason PlanReason `json:"reason"`; PackageOperationID string `json:"package_operation_id"`; EvidenceDigest string `json:"evidence_digest"`; SourceBoot BootIdentity `json:"source_boot"`; ObservedAt time.Time `json:"observed_at"`; Generation uint64 `json:"generation"`; Digest string `json:"digest"` }
+
+func CanonicalRequirement(value RebootRequirement) (RebootRequirement,error) {
+	value.SourceBoot.ObservedAt=value.SourceBoot.ObservedAt.UTC();value.ObservedAt=value.ObservedAt.UTC();if value.Generation==0{value.Generation=1};provided:=value.Digest;value.Digest=""
+	if !identifierPattern.MatchString(value.ID)||value.ID!=value.PackageOperationID||!identifierPattern.MatchString(value.NodeID)||!value.Reason.Valid()||value.Reason==ReasonOperatorMaintenance||!validDigest(value.EvidenceDigest)||value.SourceBoot.Validate()!=nil||!validTimestamp(value.ObservedAt)||value.SourceBoot.ObservedAt.After(value.ObservedAt)||value.Generation!=1{return RebootRequirement{},ErrInvalid}
+	raw,err:=json.Marshal(value);if err!=nil{return RebootRequirement{},err};value.Digest=digestBytes(raw);if provided!=""&&provided!=value.Digest{return RebootRequirement{},ErrIntegrity};return value,nil
+}
+
+func(value RebootRequirement)Validate()error{canonical,err:=CanonicalRequirement(value);if err!=nil||canonical!=value{return ErrIntegrity};return nil}
+
 func (state PackageState) Validate() error {
-	if !validDigest(state.InventoryDigest) || !identifierPattern.MatchString(state.TransactionID) || !validDigest(state.TransactionDigest) {
+	if !validDigest(state.InventoryDigest) || !identifierPattern.MatchString(state.TransactionID) || !validDigest(state.TransactionDigest) || !validDigest(state.RequirementDigest) {
 		return ErrInvalid
 	}
 	return nil
@@ -219,6 +232,7 @@ type Authorization struct {
 
 type Approval struct {
 	ID          string    `json:"id"`
+	Reference   string    `json:"reference"`
 	Approver    string    `json:"approver"`
 	Role        string    `json:"role"`
 	PlanScopeDigest string `json:"plan_scope_digest"`
@@ -565,7 +579,7 @@ func canonicalApproval(value Approval) (Approval, error) {
 	value.ExpiresAt = value.ExpiresAt.UTC()
 	provided := value.Digest
 	value.Digest = ""
-	if !identifierPattern.MatchString(value.ID) || !identifierPattern.MatchString(value.Approver) || !identifierPattern.MatchString(value.Role) || !validDigest(value.PlanScopeDigest) || !validDigest(value.ProofDigest) || !validTimestamp(value.ApprovedAt) || !validTimestamp(value.ExpiresAt) || !value.ExpiresAt.After(value.ApprovedAt) {
+	if !identifierPattern.MatchString(value.ID) || !identifierPattern.MatchString(value.Reference) || !identifierPattern.MatchString(value.Approver) || !identifierPattern.MatchString(value.Role) || !validDigest(value.PlanScopeDigest) || !validDigest(value.ProofDigest) || !validTimestamp(value.ApprovedAt) || !validTimestamp(value.ExpiresAt) || !value.ExpiresAt.After(value.ApprovedAt) {
 		return Approval{}, ErrUnauthorized
 	}
 	raw, err := json.Marshal(value)

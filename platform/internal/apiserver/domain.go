@@ -73,6 +73,8 @@ type RebootControlProjection struct {
 	QuiesceStatus string `json:"quiesce_status"`
 	QuiesceReady bool `json:"quiesce_ready"`
 	ApprovalStatus string `json:"approval_status"`
+	ApprovalRef string `json:"approval_ref,omitempty"`
+	IndependentApprover string `json:"independent_approver,omitempty"`
 	SourceBootID string `json:"source_boot_id,omitempty"`
 	ObservedBootID string `json:"observed_boot_id,omitempty"`
 	BootConfirmationStatus string `json:"boot_confirmation_status"`
@@ -93,6 +95,8 @@ type RebootControlSchedulePayload struct {
 	Reason rebootcontrol.PlanReason `json:"reason"`
 	RequirementReference string `json:"requirement_reference"`
 	MaintenanceOccurrence string `json:"maintenance_occurrence_id"`
+	ApprovalRef string `json:"approval_ref"`
+	IndependentApprover string `json:"independent_approver"`
 	DrainMode rebootcontrol.DrainMode `json:"drain_mode"`
 	ExpectedReturnSeconds uint32 `json:"expected_return_seconds,omitempty"`
 }
@@ -128,7 +132,7 @@ func validateRebootControlSchedule(value any) error {
 	case rebootcontrol.ReasonKernelUpdate,rebootcontrol.ReasonPackageUpdate,rebootcontrol.ReasonSecurityResponse,rebootcontrol.ReasonRecovery:
 	default:return invalid("controlled reboot reason")
 	}
-	if !validEdgeID(payload.RequirementReference)||!validEdgeID(payload.MaintenanceOccurrence)||payload.DrainMode!=rebootcontrol.DrainGraceful&&payload.DrainMode!=rebootcontrol.DrainRequired{return invalid("controlled reboot schedule")}
+	if !validEdgeID(payload.RequirementReference)||!validEdgeID(payload.MaintenanceOccurrence)||!validEdgeID(payload.ApprovalRef)||!validEdgeID(payload.IndependentApprover)||payload.DrainMode!=rebootcontrol.DrainGraceful&&payload.DrainMode!=rebootcontrol.DrainRequired{return invalid("controlled reboot schedule")}
 	if payload.ExpectedReturnSeconds==0{payload.ExpectedReturnSeconds=1800}
 	if payload.ExpectedReturnSeconds<60||payload.ExpectedReturnSeconds>86400{return invalid("controlled reboot return window")}
 	return nil

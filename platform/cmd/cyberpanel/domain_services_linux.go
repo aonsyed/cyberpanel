@@ -384,6 +384,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	productUpdateEdge,err:=assembleProductUpdateEdge(ctx,repositories.ControlDB,auditService,runtimeClock{});if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize product-update catalog: %w",err)}
 	packageMaintenanceEdge,err:=assemblePackageMaintenanceEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize package-maintenance runtime: %w",err)}
 	if err=migrationRuntime.StartChunkMaintenance(ctx,migrationChunkMaintenanceAudit{service:auditService});err!=nil{_=migrationRuntime.Close();return apiserver.DomainServices{},fmt.Errorf("start migration chunk maintenance: %w",err)}
+	rebootControlEdge,err:=assembleRebootControlLinuxEdge(ctx,repositories.ControlDB,operationsExecutor,repositories.HA,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize reboot-control runtime: %w",err)}
 	repositories.WebCatalog = catalog
 	go certificateRenewal.RunQueue(ctx,15*time.Minute,4)
 	if mailTelemetryReady{go mailConsoleEdge.RunMailTelemetry(ctx,15*time.Second)}
@@ -403,6 +404,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		ProductUpdates:   productUpdateEdge,
 		PackageMaintenance: packageMaintenanceEdge,
 		MaintenanceWindows: maintenanceWindows,
+		RebootControl:    rebootControlEdge,
 		MailControl:      mailCoordinator,
 		MailQueue:        mailClient,
 		MailEdge:         mailConsoleEdge,

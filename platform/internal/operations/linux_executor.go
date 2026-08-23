@@ -606,6 +606,10 @@ func (executor *LinuxOperationsExecutor) apply(ctx context.Context, request Effe
 	case EffectPackageTransaction: return executor.applyPackageTransaction(ctx, *request.PackageTransaction)
 	case EffectManagedService: return executor.applyManagedService(ctx, *request.ManagedService)
 	case EffectProductUpdate: return executor.applyProductUpdate(ctx, *request.ProductUpdate)
+	case EffectControlledReboot:
+		if !executor.clock.Now().UTC().Before(request.ControlledReboot.DispatchBy){return linuxEffectResult{},ErrInvalidEffect}
+		_,err:=executor.runner.Run(ctx,"/usr/bin/systemctl","reboot","--no-block")
+		return linuxEffectResult{MutationObserved:true,ExecutionEvidenceDigest:request.RequestDigest},err
 	default: return linuxEffectResult{}, ErrInvalidEffect
 	}
 }

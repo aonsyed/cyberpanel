@@ -36,6 +36,7 @@ const (
 	EffectPackageTransaction EffectKind = "package_transaction"
 	EffectManagedService EffectKind = "reconcile_managed_service"
 	EffectProductUpdate EffectKind = "execute_product_update"
+	EffectControlledReboot EffectKind = "controlled_reboot"
 )
 
 const KindProductUpdate ResourceKind = "product_update"
@@ -172,6 +173,12 @@ type ProductUpdateResult struct {
 	FrontierReceiptDigest string `json:"frontier_receipt_digest,omitempty"`
 }
 
+const KindControlledReboot ResourceKind = "controlled_reboot"
+
+// ControlledRebootEffect is the sole host power transition exposed by the
+// operations executor. Every field is fixed by a durable reboot plan.
+type ControlledRebootEffect struct { PlanID ResourceID `json:"plan_id"`; PlanDigest string `json:"plan_digest"`; ApprovalReference string `json:"approval_reference"`; ApprovalDigest string `json:"approval_digest"`; MarkerDigest string `json:"marker_digest"`; WriterAuthorityDigest string `json:"writer_authority_digest"`; SourceBootID ResourceID `json:"source_boot_id"`; Fence uint64 `json:"fence"`; DispatchBy time.Time `json:"dispatch_by"`; OperationDigest string `json:"operation_digest"` }
+
 type EffectRequest struct {
 	EffectID string `json:"effect_id"`
 	RequestDigest string `json:"request_digest"`
@@ -198,6 +205,7 @@ type EffectRequest struct {
 	PackageTransaction *PackageTransactionEffect `json:"package_transaction,omitempty"`
 	ManagedService *ManagedServiceEffect `json:"managed_service,omitempty"`
 	ProductUpdate *ProductUpdateEffect `json:"product_update,omitempty"`
+	ControlledReboot *ControlledRebootEffect `json:"controlled_reboot,omitempty"`
 }
 
 type EffectOutcome string
@@ -362,6 +370,12 @@ func NewProductUpdateEffectRequest(effect ProductUpdateEffect) (EffectRequest, e
 		Kind:EffectProductUpdate, ProductUpdate:&effect})
 }
 
+func NewControlledRebootRequest(nodeID ResourceID, effect ControlledRebootEffect) (EffectRequest, error) {
+	return finalizeEffect(EffectRequest{Scope: OperationScope{NodeID: nodeID, Kind: KindControlledReboot, ID: effect.PlanID}, Kind: EffectControlledReboot, ControlledReboot: &effect})
+}
+
+func NewControlledRebootServiceProbeRequest(nodeID,planID ResourceID,since time.Time)(EffectRequest,error){return finalizeEffect(EffectRequest{Scope:OperationScope{NodeID:nodeID,Kind:KindControlledReboot,ID:planID},Kind:EffectServiceDiagnose,ServiceDiagnose:&ServiceDiagnoseEffect{Service:ServicePanel,Depth:DiagnosticSummary,Since:since.UTC()}})}
+
 func finalizeEffect(request EffectRequest) (EffectRequest, error) {
 	request.EffectID, request.RequestDigest = "", ""
 	if validateEffectShape(request) != nil { return EffectRequest{}, ErrInvalidCommand }
@@ -388,7 +402,7 @@ func validateEffectShape(request EffectRequest) error {
 		request.PutSSHKey != nil, request.DeleteSSHKey != nil, request.WAFPolicy != nil, request.ServicePolicy != nil,
 		request.ServiceControl != nil, request.ServiceDiagnose != nil, request.ServiceRepair != nil, request.MetricsQuery != nil,
 		request.LogQuery != nil, request.SSHLoginQuery != nil, request.SSHSessionQuery != nil, request.ProcessInvestigate != nil,
-		request.ProcessTerminate != nil, request.PackageTransaction != nil, request.ManagedService != nil, request.ProductUpdate != nil,
+		request.ProcessTerminate != nil, request.PackageTransaction != nil, request.ManagedService != nil, request.ProductUpdate != nil, request.ControlledReboot != nil,
 	} { if present { count++ } }
 	if count != 1 { return ErrInvalidCommand }
 	switch request.Kind {
@@ -413,7 +427,7 @@ func validateEffectShape(request EffectRequest) error {
 	case EffectServiceControl:
 		if request.ServiceControl == nil || !validService(request.ServiceControl.Service) || request.ServiceControl.PolicyGeneration == 0 { return ErrInvalidCommand }
 	case EffectServiceDiagnose:
-		if request.ServiceDiagnose == nil || !validService(request.ServiceDiagnose.Service) { return ErrInvalidCommand }
+		if request.ServiceDiagnose == nil || !validService(request.ServiceDiagnose.Service) || request.ServiceDiagnose.Depth!=DiagnosticSummary&&request.ServiceDiagnose.Depth!=DiagnosticDependency&&request.ServiceDiagnose.Depth!=DiagnosticDeep || request.ServiceDiagnose.Since.IsZero() { return ErrInvalidCommand }
 	case EffectServiceRepair:
 		if request.ServiceRepair == nil || !validService(request.ServiceRepair.Service) || !validSHA256(request.ServiceRepair.DiagnosticProofDigest) { return ErrInvalidCommand }
 	case EffectMetricsQuery:
@@ -434,6 +448,9 @@ func validateEffectShape(request EffectRequest) error {
 		if request.ManagedService == nil || request.ManagedService.Service.Validate() != nil || validateManagedRedisData(request.ManagedService.Service, request.ManagedService.RedisData) != nil { return ErrInvalidCommand }
 	case EffectProductUpdate:
 		if request.ProductUpdate == nil || request.Scope.Kind != KindProductUpdate || validateProductUpdateEffect(*request.ProductUpdate) != nil { return ErrInvalidCommand }
+	case EffectControlledReboot:
+		effect:=request.ControlledReboot
+		if effect==nil||request.Scope.Kind!=KindControlledReboot||request.Scope.ID!=effect.PlanID||effect.PlanID.IsZero()||effect.SourceBootID.IsZero()||!validControlledRebootID(effect.ApprovalReference)||!validSHA256(effect.PlanDigest)||!validSHA256(effect.ApprovalDigest)||!validSHA256(effect.MarkerDigest)||!validSHA256(effect.WriterAuthorityDigest)||!validSHA256(effect.OperationDigest)||effect.Fence==0||effect.Fence>1<<63-1||effect.DispatchBy.IsZero(){return ErrInvalidCommand}
 	default:
 		return ErrInvalidCommand
 	}
@@ -581,6 +598,8 @@ func productUpdateJSONDigest(value any) string {
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
 }
+
+func validControlledRebootID(value string) bool { if value==""||len(value)>128{return false};for index:=range value{character:=value[index];if character>='a'&&character<='z'||character>='A'&&character<='Z'||character>='0'&&character<='9'||index>0&&(character=='-'||character=='_'||character=='.'||character==':'){continue};return false};return true }
 
 func effectIsMutation(kind EffectKind) bool {
 	switch kind {
