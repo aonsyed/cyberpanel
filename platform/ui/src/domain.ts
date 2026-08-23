@@ -67,8 +67,8 @@ const lifecycleActions = (prefix: string): ActionDefinition[] => [
 
 export const pages: Record<string, PageDefinition> = {
   dashboard: {
-    id: "dashboard", title: "Operational overview", description: "Live node health, workload pressure, risk, and unfinished operations.", resourceKind: "dashboard",
-    listOperation: "dashboard.summary", columns: [], emptyTitle: "No node data yet", emptyBody: "The local node is still publishing its first health projection."
+    id: "dashboard", title: "Operational overview", description: "Cached node telemetry, explicit missing data, tenant usage, alerts, and functional service health.", resourceKind: "observability.dashboard",
+    listOperation: "observability.dashboard.get", columns: [], emptyTitle: "No node data yet", emptyBody: "The local node is still publishing its first bounded observation."
   },
   sites: {
     id: "sites", title: "Sites", description: "Web applications, domain bindings, PHP runtimes, limits, and lifecycle.", resourceKind: "hosting.site", listOperation: "hosting.site.list", detailOperation: "hosting.site.get",
@@ -78,7 +78,7 @@ export const pages: Record<string, PageDefinition> = {
       { key: "php_profile", label: "PHP runtime", type: "select", required: true, options: [{label:"PHP 8.4",value:"php84"},{label:"PHP 8.3",value:"php83"},{label:"PHP 8.2",value:"php82"}] }
     ] },
     columns: [{key:"primary_hostname",label:"Site",format:"hostname"},{key:"lifecycle",label:"State",format:"status"},{key:"php_profile",label:"Runtime"},{key:"disk_usage",label:"Disk",format:"bytes"},{key:"bandwidth",label:"Transfer",format:"bytes"},{key:"updated_at",label:"Updated",format:"date"}],
-    rowActions: [{id:"preview",label:"Preview",operation:"hosting.site.preview.issue",mutating:true,tone:"info"},{id:"clone",label:"Clone",operation:"hosting.site.clone",mutating:true},...lifecycleActions("hosting.site")], emptyTitle:"No sites",emptyBody:"Create the first isolated site on this node."
+    rowActions: [{id:"usage",label:"Usage",operation:"observability.site_usage.get",mutating:false},{id:"preview",label:"Preview",operation:"hosting.site.preview.issue",mutating:true,tone:"info"},{id:"clone",label:"Clone",operation:"hosting.site.clone",mutating:true},...lifecycleActions("hosting.site")], emptyTitle:"No sites",emptyBody:"Create the first isolated site on this node."
   },
   domains: {
     id:"domains",title:"Domains & routes",description:"Primary domains, aliases, redirects, child applications, access policies, and previews.",resourceKind:"hosting.binding",listOperation:"hosting.binding.list",
@@ -175,9 +175,30 @@ export const pages: Record<string, PageDefinition> = {
     rowActions:[{id:"inspect",label:"Inspect",operation:"security.finding.get",mutating:false},{id:"remediate",label:"Remediate",operation:"security.remediation.apply",mutating:true,assurance:"mfa"},{id:"suppress",label:"Suppress",operation:"security.finding.suppress",mutating:true}],globalActions:[{id:"scan",label:"Run host scan",operation:"security.scan.start",mutating:true,tone:"info"}],emptyTitle:"No active findings",emptyBody:"Current policy checks and scanners have no unresolved findings."
   },
   services: {
-    id:"services",title:"Services & diagnostics",description:"Managed service health, lifecycle, dependency diagnostics, repairs, metrics, and logs.",resourceKind:"operations.service",listOperation:"operations.service.list",
-    columns:[{key:"name",label:"Service"},{key:"state",label:"State",format:"status"},{key:"health",label:"Health",format:"status"},{key:"version",label:"Version"},{key:"uptime",label:"Uptime",format:"duration"},{key:"updated_at",label:"Observed",format:"date"}],
-    rowActions:[{id:"restart",label:"Restart",operation:"operations.service.restart",mutating:true},{id:"diagnose",label:"Diagnose",operation:"operations.diagnostic.run",mutating:true},{id:"logs",label:"Logs",operation:"operations.logs.query",mutating:false},{id:"stop",label:"Stop",operation:"operations.service.stop",mutating:true,tone:"critical",assurance:"mfa"}],emptyTitle:"No service projection",emptyBody:"Service discovery has not completed."
+    id:"services",title:"Services & diagnostics",description:"Cached structured health with dependency, configuration, listener, internal, and external functional evidence.",resourceKind:"observability.service_health",listOperation:"observability.service_health.list",
+    columns:[{key:"name",label:"Service"},{key:"health",label:"Health",format:"status"},{key:"active",label:"Active",format:"status"},{key:"configuration",label:"Configuration",format:"status"},{key:"externally_functional",label:"Functional",format:"status"},{key:"observed_at",label:"Observed",format:"date"}],
+    emptyTitle:"No service observations",emptyBody:"The collector has not published a managed-service observation yet."
+  },
+  observability: {
+    id:"observability",title:"Metrics & usage",description:"Materialized tenant usage and limits backed by bounded historical metric retention; unavailable evidence remains visibly unknown.",resourceKind:"observability.usage",listOperation:"observability.usage.list",
+    columns:[{key:"dimension",label:"Dimension"},{key:"used",label:"Used",format:"number"},{key:"limit",label:"Limit",format:"number"},{key:"unit",label:"Unit"},{key:"limit_state",label:"Limit state",format:"status"},{key:"missing_reason",label:"Evidence gap"},{key:"updated_at",label:"Observed",format:"date"}],
+    globalActions:[{id:"export",label:"Generate usage export",operation:"observability.usage_export.create",mutating:true,assurance:"mfa",confirmation:"Generate a signed evidence export for the current completed billing period. Missing dimensions remain explicitly listed."}],emptyTitle:"No usage projection",emptyBody:"The materialized tenant usage collector has not published evidence yet."
+  },
+  logs: {
+    id:"logs",title:"Structured logs",description:"Closed-source log registry with bounded tail, search, signed cursors, deterministic redaction, and explicit exports.",resourceKind:"observability.log_source",listOperation:"observability.log_source.list",
+    columns:[{key:"id",label:"Source"},{key:"category",label:"Category"},{key:"backend",label:"Backend"},{key:"unit",label:"Managed unit"},{key:"retention_authority",label:"Retention"},{key:"redaction_policy",label:"Redaction"},{key:"generation",label:"Generation",format:"number"},{key:"protected",label:"Protected",format:"status"}],
+    rowActions:[{id:"tail",label:"Tail",operation:"observability.log.query",mutating:false},{id:"search",label:"Search",operation:"observability.log.query",mutating:false,fields:[{key:"mode",label:"Projection",type:"select",required:true,defaultValue:"search",options:[{label:"Search",value:"search"}]},{key:"literal",label:"Required literal",type:"text",required:true},{key:"regex",label:"Optional RE2 filter",type:"text"},{key:"case_sensitive",label:"Case sensitive",type:"boolean",defaultValue:false}]},{id:"cursor",label:"Continue cursor",operation:"observability.log.query",mutating:false,fields:[{key:"mode",label:"Projection",type:"select",required:true,defaultValue:"cursor",options:[{label:"Signed cursor",value:"cursor"}]},{key:"cursor",label:"Cursor",type:"textarea",required:true}]},{id:"export",label:"Export redacted log",operation:"observability.log_export.create",mutating:true,assurance:"mfa",confirmation:"Read this bounded source once, redact secrets deterministically, and return an integrity-hashed export."}],emptyTitle:"No visible log sources",emptyBody:"No registered log source is visible in the current tenant scope."
+  },
+  alertRules: {
+    id:"alertRules",title:"Alert rules",description:"Typed alert conditions and evaluation state kept separate from delivery and acknowledgement.",resourceKind:"observability.alert_rule",listOperation:"observability.alert_rule.list",
+    createAction:{id:"create",label:"Create alert rule",operation:"observability.alert_rule.create",mutating:true,assurance:"mfa",fields:[{key:"kind",label:"Signal",type:"select",required:true,options:[{label:"Service health",value:"service_health"},{label:"Disk pressure",value:"disk_pressure"},{label:"Inode pressure",value:"inode_pressure"},{label:"Quota",value:"quota"},{label:"Operation failure",value:"operation_failure"},{label:"Certificate expiry",value:"certificate_expiry"},{label:"Backup RPO",value:"backup_rpo"},{label:"Mail queue",value:"mail_queue"},{label:"Security finding",value:"security_finding"},{label:"Provider outage",value:"provider_outage"},{label:"Audit integrity",value:"audit_integrity"}]},{key:"resource_kind",label:"Resource kind",type:"text",required:true},{key:"resource_id",label:"Resource ID",type:"text",required:true},{key:"comparator",label:"Condition",type:"select",required:true,options:[{label:"Greater than",value:"gt"},{label:"At least",value:"gte"},{label:"Less than",value:"lt"},{label:"At most",value:"lte"},{label:"Equal",value:"eq"},{label:"Not equal",value:"neq"}]},{key:"threshold",label:"Threshold",type:"number",required:true},{key:"severity",label:"Severity",type:"select",required:true,options:[{label:"Info",value:"info"},{label:"Warning",value:"warning"},{label:"Error",value:"error"},{label:"Critical",value:"critical"}]},{key:"enabled",label:"Enabled",type:"boolean",defaultValue:true}]},
+    columns:[{key:"kind",label:"Signal"},{key:"severity",label:"Severity",format:"status"},{key:"condition",label:"Condition",format:"status"},{key:"active",label:"Active",format:"status"},{key:"enabled",label:"Enabled",format:"status"},{key:"updated_at",label:"Updated",format:"date"}],
+    rowActions:[{id:"status",label:"Evaluation status",operation:"observability.alert_status.get",mutating:false}],emptyTitle:"No alert rules",emptyBody:"Create a typed rule from a measured or functional-health signal."
+  },
+  alerts: {
+    id:"alerts",title:"Alert inbox",description:"Tenant-scoped alert notifications with explicit read and acknowledgement state.",resourceKind:"observability.alert",listOperation:"observability.alert_inbox.list",
+    columns:[{key:"subject",label:"Alert"},{key:"severity",label:"Severity",format:"status"},{key:"kind",label:"Kind"},{key:"unread",label:"Unread",format:"status"},{key:"acknowledged_at",label:"Acknowledged",format:"date"},{key:"updated_at",label:"Updated",format:"date"}],
+    rowActions:[{id:"acknowledge",label:"Acknowledge",operation:"observability.alert.acknowledge",mutating:true,tone:"healthy"}],emptyTitle:"No alerts",emptyBody:"No delivered alert requires attention in this tenant."
   },
   fleet: {
     id:"fleet",title:"Fleet & high availability",description:"Optional central enrollment, node health, placement, replication, fencing, and promotion.",resourceKind:"fleet.node",listOperation:"fleet.node.list",
@@ -244,6 +265,10 @@ export const navigation: NavigationGroup[] = [
   {id:"runtime",label:"Runtime & fleet",items:[
     {id:"containers",label:"Containers",route:"/containers",icon:"Cube",pageId:"containers",keywords:["docker","image","volume"]},
     {id:"services",label:"Services & diagnostics",route:"/services",icon:"Pulse",pageId:"services",keywords:["logs","metrics","redis"]},
+    {id:"observability",label:"Metrics & usage",route:"/observability",icon:"ChartLineUp",pageId:"observability",keywords:["metrics","usage","limits","forecast","export"]},
+    {id:"logs",label:"Structured logs",route:"/logs",icon:"FileMagnifyingGlass",pageId:"logs",keywords:["tail","search","cursor","redaction","export"]},
+    {id:"alert-rules",label:"Alert rules",route:"/alert-rules",icon:"BellRinging",pageId:"alertRules",keywords:["threshold","severity","condition","health"]},
+    {id:"alerts",label:"Alert inbox",route:"/alerts",icon:"Bell",pageId:"alerts",keywords:["notification","acknowledge","incident"]},
     {id:"fleet",label:"Fleet & HA",route:"/fleet",icon:"Stack",pageId:"fleet",keywords:["central","cluster","replication"]},
     {id:"migrations",label:"Migrations",route:"/migrations",icon:"ArrowsLeftRight",pageId:"migrations",keywords:["cyberpanel","cpanel","cutover"]}
   ]},
