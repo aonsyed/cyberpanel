@@ -30,6 +30,13 @@
       "archive_path": "panel-providerd",
       "install_path": "/usr/local/libexec/cyberpanel/panel-providerd",
       "mode": "0755"
+    },
+    {
+      "path_id": "cpanel_archive_migrator",
+      "command": "./cmd/cpanel-archive-migrator",
+      "archive_path": "cpanel-archive-migrator",
+      "install_path": "/usr/local/libexec/cyberpanel/cpanel-archive-migrator",
+      "mode": "0755"
     }
   ]
 }
