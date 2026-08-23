@@ -48,6 +48,18 @@ type PackageMaintenanceProjection struct {
 	UpdatedAt                time.Time `json:"updated_at"`
 }
 
+type PackageMaintenancePackageProjection struct {
+	ID string `json:"id"`; Type string `json:"type"`; NodeID string `json:"node_id"`; Manager string `json:"manager"`
+	Name string `json:"name"`; Architecture string `json:"architecture"`; InstalledVersion string `json:"installed_version"`; CandidateVersion string `json:"candidate_version,omitempty"`
+	PendingSecurity bool `json:"pending_security"`; Security string `json:"security"`; RepositoryID string `json:"repository_id,omitempty"`; RepositoryOrigin string `json:"repository_origin,omitempty"`
+	RepositorySuite string `json:"repository_suite,omitempty"`; RepositoryComponent string `json:"repository_component,omitempty"`; RepositoryEnabled bool `json:"repository_enabled"`; RepositoryMetadataRevision string `json:"repository_metadata_revision,omitempty"`; RepositorySignature string `json:"repository_signature,omitempty"`; RepositorySigningKeyID string `json:"repository_signing_key_id,omitempty"`; RepositoryDigest string `json:"repository_digest,omitempty"`
+	InstalledProvenanceDigest string `json:"installed_provenance_digest"`; InstalledProvenanceSignature string `json:"installed_provenance_signature"`; InstalledProvenanceSigningKeyID string `json:"installed_provenance_signing_key_id,omitempty"`; InstalledVendor string `json:"installed_vendor,omitempty"`; LocalArtifact bool `json:"local_artifact"`
+	CandidateProvenanceDigest string `json:"candidate_provenance_digest,omitempty"`; CandidateProvenanceSignature string `json:"candidate_provenance_signature,omitempty"`
+	Held bool `json:"held"`; HoldKind string `json:"hold_kind,omitempty"`; HoldSource string `json:"hold_source,omitempty"`
+	HoldOperationID string `json:"hold_operation_id,omitempty"`; HoldOutcome string `json:"hold_outcome,omitempty"`; HoldReceiptDigest string `json:"hold_receipt_digest,omitempty"`
+	InventoryID string `json:"inventory_id"`; InventoryDigest string `json:"inventory_digest"`; Generation uint64 `json:"generation"`; UpdatedAt time.Time `json:"updated_at"`
+}
+
 type PackageMaintenancePlanPayload struct {
 	ValidForSeconds         uint32 `json:"valid_for_seconds,omitempty"`
 	MaintenanceOccurrenceID string `json:"maintenance_occurrence_id"`
@@ -59,6 +71,10 @@ type PackageMaintenanceApplyPayload struct {
 
 type PackageMaintenanceEdgeService interface {
 	ListPackageMaintenance(context.Context, EdgeCall, EdgePagePayload) (EdgePage[PackageMaintenanceProjection], error)
+	ListPackageMaintenancePackages(context.Context, EdgeCall, EdgePagePayload) (EdgePage[PackageMaintenancePackageProjection], error)
+	GetPackageMaintenancePackage(context.Context, EdgeCall) (PackageMaintenancePackageProjection, error)
+	HoldPackageMaintenancePackage(context.Context, EdgeCall) (EdgeMutation[PackageMaintenancePackageProjection], error)
+	UnholdPackageMaintenancePackage(context.Context, EdgeCall) (EdgeMutation[PackageMaintenancePackageProjection], error)
 	RefreshPackageMaintenance(context.Context, EdgeCall) (EdgeMutation[PackageMaintenanceProjection], error)
 	PlanPackageMaintenance(context.Context, EdgeCall, PackageMaintenancePlanPayload) (EdgeMutation[PackageMaintenanceProjection], error)
 	ApplyPackageMaintenance(context.Context, EdgeCall, PackageMaintenanceApplyPayload) (EdgeMutation[PackageMaintenanceProjection], error)
@@ -72,6 +88,8 @@ type PackageMaintenanceEdgeCapabilities struct {
 	Refresh bool
 	Plan    bool
 	Apply   bool
+	Packages bool
+	Holds bool
 }
 
 type PackageMaintenanceEdgeCapabilityProvider interface {
@@ -81,6 +99,10 @@ type PackageMaintenanceEdgeCapabilityProvider interface {
 func registerPackageMaintenanceContracts(registry *Registry) error {
 	definitions := []Operation{
 		consoleOperation("package_maintenance.status.list", "operations:observe", identity.AssurancePassword, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
+		consoleOperation("package_maintenance.package.list", "operations:observe", identity.AssurancePassword, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
+		consoleOperation("package_maintenance.package.get", "operations:observe", identity.AssurancePassword, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
+		consoleOperation("package_maintenance.package.hold", "package:manage", identity.AssuranceMFA, true, func() any { return &EmptyPayload{} }, nil, edgeInstallationExistingMutationScope),
+		consoleOperation("package_maintenance.package.unhold", "package:manage", identity.AssuranceMFA, true, func() any { return &EmptyPayload{} }, nil, edgeInstallationExistingMutationScope),
 		consoleOperation("package_maintenance.refresh", "package:manage", identity.AssuranceMFA, true, func() any { return &EmptyPayload{} }, nil, edgeInstallationCreateScope),
 		consoleOperation("package_maintenance.plan", "package:manage", identity.AssuranceMFA, true, func() any { return &PackageMaintenancePlanPayload{} }, validatePackageMaintenancePlan, edgeInstallationExistingMutationScope),
 		consoleOperation("package_maintenance.apply", "package:manage", identity.AssurancePhishingResistant, true, func() any { return &PackageMaintenanceApplyPayload{} }, validatePackageMaintenanceApply, edgeInstallationExistingMutationScope),
@@ -115,7 +137,7 @@ func bindPackageMaintenanceContracts(registry *Registry, services DomainServices
 	if services.PackageMaintenance == nil {
 		return nil
 	}
-	capabilities := PackageMaintenanceEdgeCapabilities{List: true, Refresh: true, Plan: true, Apply: true}
+	capabilities := PackageMaintenanceEdgeCapabilities{List: true, Refresh: true, Plan: true, Apply: true, Packages: true, Holds: true}
 	if provider, ok := services.PackageMaintenance.(PackageMaintenanceEdgeCapabilityProvider); ok {
 		capabilities = provider.PackageMaintenanceCapabilities()
 	}
@@ -129,6 +151,26 @@ func bindPackageMaintenanceContracts(registry *Registry, services DomainServices
 		}); err != nil {
 			return err
 		}
+	}
+	if capabilities.Packages {
+		if err := registry.Bind("package_maintenance.package.list", func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
+			result, err := services.PackageMaintenance.ListPackageMaintenancePackages(ctx, edgeCall(invocation), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return OperationResult{Status: http.StatusOK, Value: result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("package_maintenance.package.get", func(ctx context.Context, invocation Invocation, _ any) (OperationResult, error) {
+			result, err := services.PackageMaintenance.GetPackageMaintenancePackage(ctx, edgeCall(invocation)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return OperationResult{Status: http.StatusOK, Value: result}, nil
+		}); err != nil { return err }
+	}
+	if capabilities.Holds {
+		if err := registry.Bind("package_maintenance.package.hold", func(ctx context.Context, invocation Invocation, _ any) (OperationResult, error) {
+			result, err := services.PackageMaintenance.HoldPackageMaintenancePackage(ctx, edgeCall(invocation)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusAccepted, result), nil
+		}); err != nil { return err }
+		if err := registry.Bind("package_maintenance.package.unhold", func(ctx context.Context, invocation Invocation, _ any) (OperationResult, error) {
+			result, err := services.PackageMaintenance.UnholdPackageMaintenancePackage(ctx, edgeCall(invocation)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusAccepted, result), nil
+		}); err != nil { return err }
 	}
 	if capabilities.Refresh {
 		if err := registry.Bind("package_maintenance.refresh", func(ctx context.Context, invocation Invocation, _ any) (OperationResult, error) {

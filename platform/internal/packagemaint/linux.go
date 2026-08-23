@@ -165,6 +165,10 @@ type InventoryProvider interface {
 	Snapshot(context.Context, InventoryRequest) (InventorySnapshot, error)
 }
 
+type PackageHoldExecutor interface {
+	SetPackageHold(context.Context, PackageHoldRequest) (PackageHoldReceipt, InventorySnapshot, error)
+}
+
 type LinuxInventory struct {
 	Runner         Runner
 	OverallTimeout time.Duration
@@ -818,7 +822,8 @@ func allowedInvocation(executable string, argv []string) bool {
 	case dpkgPath:
 		return equalStrings(argv, []string{"--audit"})
 	case aptMarkPath:
-		return equalStrings(argv, []string{"showhold"})
+		return equalStrings(argv, []string{"showhold"}) || len(argv) == 2 &&
+			(argv[0] == "hold" || argv[0] == "unhold") && safeAPTSelector(argv[1])
 	case rpmPath:
 		return equalStrings(argv, []string{"--verifydb"}) || equalStrings(argv, []string{"-qa", "--qf", "%{NAME}\t%{ARCH}\t%{EPOCHNUM}\t%{VERSION}-%{RELEASE}\t%{VENDOR}\t%{SIGPGP:pgpsig}\n"})
 	case aptGetPath:
@@ -830,12 +835,70 @@ func allowedInvocation(executable string, argv []string) bool {
 		if equalStrings(argv, []string{"-q", "--cacheonly", "repolist", "--enabled"}) || equalStrings(argv, []string{"-q", "--cacheonly", "repoinfo", "--enabled"}) || equalStrings(argv, []string{"-q", "--cacheonly", "check-update"}) || equalStrings(argv, []string{"-q", "--cacheonly", "updateinfo", "list", "--security", "--available"}) || equalStrings(argv, []string{"-q", "--cacheonly", "versionlock", "list"}) {
 			return true
 		}
+		if len(argv) == 6 && equalStrings(argv[:3], []string{"-y", "--cacheonly", "versionlock"}) &&
+			(argv[3] == "add" || argv[3] == "delete") && argv[4] == "--" {
+			return safeDNFArgument(argv[5])
+		}
 		return validDNFMutation(argv)
 	case systemctlPath:
 		return validLinuxSystemdProbeInvocation(argv)
 	default:
 		return false
 	}
+}
+
+func packageHoldCommand(request PackageHoldRequest) (string, []string, error) {
+	if validatePackageHoldRequest(request) != nil {
+		return "", nil, ErrInvalid
+	}
+	if request.Manager == ManagerAPT {
+		return aptMarkPath, []string{string(request.Action), request.PackageName + ":" + request.Architecture}, nil
+	}
+	action := "add"
+	if request.Action == PackageUnhold {
+		action = "delete"
+	}
+	identity := request.PackageName + "-" + request.InstalledVersion + "." + request.Architecture
+	argv := []string{"-y", "--cacheonly", "versionlock", action, "--", identity}
+	if !allowedInvocation(dnfPath, argv) {
+		return "", nil, ErrUnsupported
+	}
+	return dnfPath, argv, nil
+}
+
+func packageHeld(snapshot InventorySnapshot, packageName string) bool {
+	for _, hold := range snapshot.Holds {
+		if hold.PackageName == packageName {
+			return true
+		}
+	}
+	return false
+}
+
+// exactPackageHoldEffect permits only the requested package's hold marker to
+// change. Installed packages, candidates, repositories, provenance, locks,
+// advisories, and every other hold must remain byte-for-byte equivalent.
+func exactPackageHoldEffect(before, after InventorySnapshot, request PackageHoldRequest) bool {
+	if before.NodeID != after.NodeID || before.Manager != after.Manager || after.Generation != before.Generation+1 ||
+		packageHeld(before, request.PackageName) == (request.Action == PackageHold) ||
+		packageHeld(after, request.PackageName) != (request.Action == PackageHold) {
+		return false
+	}
+	left, right := before, after
+	left.Holds, right.Holds = holdsWithoutPackage(before.Holds, request.PackageName), holdsWithoutPackage(after.Holds, request.PackageName)
+	leftDigest, leftErr := canonicalDigest(inventoryContent(left))
+	rightDigest, rightErr := canonicalDigest(inventoryContent(right))
+	return leftErr == nil && rightErr == nil && leftDigest == rightDigest
+}
+
+func holdsWithoutPackage(values []Hold, packageName string) []Hold {
+	result := make([]Hold, 0, len(values))
+	for _, value := range values {
+		if value.PackageName != packageName {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func validAPTMutation(argv []string) bool {

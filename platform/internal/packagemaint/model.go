@@ -115,6 +115,23 @@ type Hold struct {
 	Source      string `json:"source"`
 }
 
+type PackageHoldAction string
+
+const (
+	PackageHold   PackageHoldAction = "hold"
+	PackageUnhold PackageHoldAction = "unhold"
+)
+
+type PackageHoldState string
+
+const (
+	PackageHoldAdmitted  PackageHoldState = "admitted"
+	PackageHoldRunning   PackageHoldState = "running"
+	PackageHoldSucceeded PackageHoldState = "succeeded"
+	PackageHoldFailed    PackageHoldState = "failed"
+	PackageHoldAmbiguous PackageHoldState = "ambiguous"
+)
+
 type Lock struct {
 	Kind       string    `json:"kind"`
 	Path       string    `json:"path,omitempty"`
@@ -378,6 +395,155 @@ type ExecutionReceipt struct {
 	IrreversibleCrossed  bool                  `json:"irreversible_crossed"`
 	EvidenceDigest       string                `json:"evidence_digest"`
 	ObservedAt           time.Time             `json:"observed_at"`
+}
+
+// PackageHoldRequest is the complete immutable authority for one package hold
+// effect. Native selectors are derived from these validated fields and never
+// accepted from an API caller.
+type PackageHoldRequest struct {
+	EffectID            string                `json:"effect_id"`
+	NodeID              string                `json:"node_id"`
+	Manager             Manager               `json:"manager"`
+	Action              PackageHoldAction     `json:"action"`
+	PackageName         string                `json:"package_name"`
+	Architecture        string                `json:"architecture"`
+	InstalledVersion    string                `json:"installed_version"`
+	RepositoryID        string                `json:"repository_id,omitempty"`
+	ProvenanceDigest    string                `json:"provenance_digest"`
+	InventoryID         string                `json:"inventory_id"`
+	InventoryGeneration uint64                `json:"inventory_generation"`
+	InventoryDigest     string                `json:"inventory_digest"`
+	Authorization       AuthorizationEvidence `json:"authorization"`
+	RequestedAt         time.Time             `json:"requested_at"`
+	Digest              string                `json:"digest"`
+}
+
+func SealPackageHoldRequest(request *PackageHoldRequest) error {
+	if request == nil {
+		return ErrInvalid
+	}
+	request.RequestedAt = request.RequestedAt.UTC()
+	request.Digest = ""
+	digest, err := canonicalDigest(*request)
+	if err != nil {
+		return err
+	}
+	request.Digest = digest
+	return validatePackageHoldRequest(*request)
+}
+
+func validatePackageHoldRequest(request PackageHoldRequest) error {
+	if !safeID.MatchString(request.EffectID) || !safeID.MatchString(request.NodeID) || !validManager(request.Manager) ||
+		request.Action != PackageHold && request.Action != PackageUnhold || !safePackage.MatchString(request.PackageName) ||
+		!safeArchitecture.MatchString(request.Architecture) || !safeVersion.MatchString(request.InstalledVersion) ||
+		request.RepositoryID != "" && !safeID.MatchString(request.RepositoryID) || !validDigest(request.ProvenanceDigest) ||
+		!safeID.MatchString(request.InventoryID) || request.InventoryGeneration == 0 || !validDigest(request.InventoryDigest) ||
+		validateEvidenceStored(request.Authorization, AssuranceMFA) != nil || request.RequestedAt.IsZero() ||
+		request.RequestedAt.Location() != time.UTC || !validDigest(request.Digest) {
+		return ErrInvalid
+	}
+	scope := "package-maintenance:" + string(request.Action) + ":" + request.EffectID
+	authorization := AuthorizationRequest{Boundary: BoundaryAcceptance, OperationID: request.EffectID,
+		ActorID: request.Authorization.ActorID, Scope: scope, PlanID: request.InventoryID,
+		PlanDigest: request.InventoryDigest, PlanGeneration: request.InventoryGeneration,
+		MinimumAssurance: AssuranceMFA, Irreversible: false}
+	digest, err := canonicalDigest(authorization)
+	if err != nil || request.Authorization.Scope != scope || request.Authorization.RequestDigest != digest {
+		return ErrUnauthorized
+	}
+	copyOfRequest := request
+	copyOfRequest.Digest = ""
+	digest, err = canonicalDigest(copyOfRequest)
+	if err != nil || digest != request.Digest {
+		return ErrInvalid
+	}
+	return nil
+}
+
+type PackageHoldReceipt struct {
+	EffectID             string           `json:"effect_id"`
+	RequestDigest        string           `json:"request_digest"`
+	Action               PackageHoldAction `json:"action"`
+	BeforeInventoryDigest string          `json:"before_inventory_digest"`
+	AfterInventoryID     string           `json:"after_inventory_id"`
+	AfterInventoryGeneration uint64       `json:"after_inventory_generation"`
+	AfterInventoryDigest string           `json:"after_inventory_digest"`
+	Held                 bool             `json:"held"`
+	Command              CommandReceipt   `json:"command"`
+	Outcome              ExecutionOutcome `json:"outcome"`
+	AuthorizationDigest  string           `json:"authorization_digest"`
+	ObservedAt           time.Time        `json:"observed_at"`
+	EvidenceDigest       string           `json:"evidence_digest"`
+}
+
+func SealPackageHoldReceipt(receipt *PackageHoldReceipt) error {
+	if receipt == nil {
+		return ErrInvalid
+	}
+	receipt.ObservedAt = receipt.ObservedAt.UTC()
+	receipt.EvidenceDigest = ""
+	digest, err := canonicalDigest(*receipt)
+	if err != nil {
+		return err
+	}
+	receipt.EvidenceDigest = digest
+	return validatePackageHoldReceipt(*receipt)
+}
+
+func validatePackageHoldReceipt(receipt PackageHoldReceipt) error {
+	if !safeID.MatchString(receipt.EffectID) || !validDigest(receipt.RequestDigest) ||
+		receipt.Action != PackageHold && receipt.Action != PackageUnhold || !validDigest(receipt.BeforeInventoryDigest) ||
+		!safeID.MatchString(receipt.AfterInventoryID) || receipt.AfterInventoryGeneration == 0 ||
+		!validDigest(receipt.AfterInventoryDigest) || !validDigest(receipt.AuthorizationDigest) ||
+		(receipt.Outcome != OutcomeConfirmed && receipt.Outcome != OutcomeFailed && receipt.Outcome != OutcomeAmbiguous) ||
+		receipt.Outcome == OutcomeConfirmed && receipt.Held != (receipt.Action == PackageHold) ||
+		receipt.Command.Executable == "" || !validDigest(receipt.Command.ArgvDigest) || !validDigest(receipt.Command.OutputDigest) ||
+		receipt.Command.StartedAt.IsZero() || receipt.Command.CompletedAt.Before(receipt.Command.StartedAt) ||
+		receipt.ObservedAt.IsZero() || receipt.ObservedAt.Location() != time.UTC || !validDigest(receipt.EvidenceDigest) {
+		return ErrInvalid
+	}
+	copyOfReceipt := receipt
+	copyOfReceipt.EvidenceDigest = ""
+	digest, err := canonicalDigest(copyOfReceipt)
+	if err != nil || digest != receipt.EvidenceDigest {
+		return ErrInvalid
+	}
+	return nil
+}
+
+type PackageHoldOperation struct {
+	ID          string             `json:"id"`
+	Request     PackageHoldRequest `json:"request"`
+	State       PackageHoldState   `json:"state"`
+	Generation  uint64             `json:"generation"`
+	Receipt     PackageHoldReceipt `json:"receipt,omitempty"`
+	FailureCode string             `json:"failure_code,omitempty"`
+	CreatedAt   time.Time          `json:"created_at"`
+	UpdatedAt   time.Time          `json:"updated_at"`
+}
+
+func validatePackageHoldOperation(operation PackageHoldOperation) error {
+	if operation.ID != operation.Request.EffectID || validatePackageHoldRequest(operation.Request) != nil ||
+		(operation.State != PackageHoldAdmitted && operation.State != PackageHoldRunning && operation.State != PackageHoldSucceeded &&
+			operation.State != PackageHoldFailed && operation.State != PackageHoldAmbiguous) || operation.Generation == 0 ||
+		operation.CreatedAt.IsZero() || operation.UpdatedAt.Before(operation.CreatedAt) ||
+		operation.FailureCode != "" && !safeID.MatchString(operation.FailureCode) {
+		return ErrInvalid
+	}
+	terminal := operation.State == PackageHoldSucceeded || operation.State == PackageHoldFailed || operation.State == PackageHoldAmbiguous
+	if operation.Receipt.EffectID != "" {
+		if validatePackageHoldReceipt(operation.Receipt) != nil || operation.Receipt.EffectID != operation.ID ||
+			operation.Receipt.RequestDigest != operation.Request.Digest || operation.Receipt.Action != operation.Request.Action ||
+			operation.Receipt.AuthorizationDigest != operation.Request.Authorization.Digest || !terminal {
+			return ErrInvalid
+		}
+	} else if operation.State == PackageHoldSucceeded || operation.State == PackageHoldAmbiguous {
+		return ErrInvalid
+	}
+	if !terminal && operation.FailureCode != "" {
+		return ErrInvalid
+	}
+	return nil
 }
 
 // RebootBootIdentity is the stable host identity a composed publisher must

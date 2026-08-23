@@ -947,6 +947,7 @@ const (
 	LinuxBrokerObserve LinuxBrokerOperation = "observe"
 	LinuxBrokerResolve LinuxBrokerOperation = "resolve_security"
 	LinuxBrokerApply   LinuxBrokerOperation = "apply"
+	LinuxBrokerHold    LinuxBrokerOperation = "package_hold"
 )
 
 type LinuxBrokerRequest struct {
@@ -957,6 +958,7 @@ type LinuxBrokerRequest struct {
 	Observation *InventoryRequest      `json:"observation,omitempty"`
 	Snapshot    *InventorySnapshot     `json:"snapshot,omitempty"`
 	Execution   *ExecutionRequest      `json:"execution,omitempty"`
+	Hold        *PackageHoldRequest    `json:"hold,omitempty"`
 }
 
 type LinuxBrokerResponse struct {
@@ -968,6 +970,7 @@ type LinuxBrokerResponse struct {
 	Inventory   *InventorySnapshot `json:"inventory,omitempty"`
 	Attestation *SolverAttestation `json:"attestation,omitempty"`
 	Receipt     *ExecutionReceipt  `json:"receipt,omitempty"`
+	HoldReceipt *PackageHoldReceipt `json:"hold_receipt,omitempty"`
 	CompletedAt time.Time          `json:"completed_at"`
 }
 
@@ -981,16 +984,20 @@ func (request LinuxBrokerRequest) validate(now time.Time) error {
 	}
 	switch request.Operation {
 	case LinuxBrokerObserve:
-		if request.Observation == nil || request.Snapshot != nil || request.Execution != nil || !safeID.MatchString(request.Observation.NodeID) ||
+		if request.Observation == nil || request.Snapshot != nil || request.Execution != nil || request.Hold != nil || !safeID.MatchString(request.Observation.NodeID) ||
 			!validManager(request.Observation.Manager) || request.Observation.Generation == 0 {
 			return ErrInvalid
 		}
 	case LinuxBrokerResolve:
-		if request.Observation != nil || request.Snapshot == nil || request.Execution != nil || request.Snapshot.Validate() != nil {
+		if request.Observation != nil || request.Snapshot == nil || request.Execution != nil || request.Hold != nil || request.Snapshot.Validate() != nil {
 			return ErrInvalid
 		}
 	case LinuxBrokerApply:
-		if request.Observation != nil || request.Snapshot != nil || request.Execution == nil || validateLinuxBrokerExecutionShape(*request.Execution) != nil {
+		if request.Observation != nil || request.Snapshot != nil || request.Execution == nil || request.Hold != nil || validateLinuxBrokerExecutionShape(*request.Execution) != nil {
+			return ErrInvalid
+		}
+	case LinuxBrokerHold:
+		if request.Observation != nil || request.Snapshot != nil || request.Execution != nil || request.Hold == nil || validatePackageHoldRequest(*request.Hold) != nil {
 			return ErrInvalid
 		}
 	default:
@@ -1009,16 +1016,23 @@ func (response LinuxBrokerResponse) validate(request LinuxBrokerRequest, now tim
 	}
 	switch request.Operation {
 	case LinuxBrokerObserve:
-		if response.Succeeded && (response.Inventory == nil || response.Inventory.Validate() != nil) || response.Attestation != nil || response.Receipt != nil {
+		if response.Succeeded && (response.Inventory == nil || response.Inventory.Validate() != nil) || response.Attestation != nil || response.Receipt != nil || response.HoldReceipt != nil {
 			return ErrInvalid
 		}
 	case LinuxBrokerResolve:
 		if response.Succeeded && (response.Attestation == nil || validateAttestation(*response.Attestation, request.Snapshot.ContentDigest, now) != nil) ||
-			response.Inventory != nil || response.Receipt != nil {
+			response.Inventory != nil || response.Receipt != nil || response.HoldReceipt != nil {
 			return ErrInvalid
 		}
 	case LinuxBrokerApply:
-		if response.Inventory != nil || response.Attestation != nil || response.Receipt != nil && validReceiptStructure(*response.Receipt) == false {
+		if response.Inventory != nil || response.Attestation != nil || response.HoldReceipt != nil || response.Receipt != nil && validReceiptStructure(*response.Receipt) == false {
+			return ErrInvalid
+		}
+	case LinuxBrokerHold:
+		if response.Attestation != nil || response.Receipt != nil || response.Succeeded && response.HoldReceipt == nil || (response.Inventory == nil) != (response.HoldReceipt == nil) ||
+			response.HoldReceipt != nil && (validatePackageHoldReceipt(*response.HoldReceipt) != nil || response.Inventory.Validate() != nil ||
+				response.HoldReceipt.EffectID != request.Hold.EffectID || response.HoldReceipt.RequestDigest != request.Hold.Digest ||
+				response.HoldReceipt.AfterInventoryID != response.Inventory.ID || response.HoldReceipt.AfterInventoryDigest != response.Inventory.ContentDigest) {
 			return ErrInvalid
 		}
 	}
@@ -1063,6 +1077,14 @@ func (client *LocalLinuxClient) Apply(ctx context.Context, request ExecutionRequ
 		return ExecutionReceipt{}, err
 	}
 	return *response.Receipt, err
+}
+
+func (client *LocalLinuxClient) SetPackageHold(ctx context.Context, request PackageHoldRequest) (PackageHoldReceipt, InventorySnapshot, error) {
+	response, err := client.roundTrip(ctx, LinuxBrokerRequest{Operation: LinuxBrokerHold, Hold: &request})
+	if response.HoldReceipt == nil || response.Inventory == nil {
+		return PackageHoldReceipt{}, InventorySnapshot{}, err
+	}
+	return *response.HoldReceipt, *response.Inventory, err
 }
 
 func (client *LocalLinuxClient) roundTrip(ctx context.Context, request LinuxBrokerRequest) (LinuxBrokerResponse, error) {
@@ -1202,6 +1224,13 @@ func (server *LinuxBrokerServer) serve(connection net.Conn) {
 		receipt, err = server.Broker.Apply(ctx, *request.Execution)
 		if receipt.EffectID != "" {
 			response.Receipt = &receipt
+		}
+	case LinuxBrokerHold:
+		var receipt PackageHoldReceipt
+		var inventory InventorySnapshot
+		receipt, inventory, err = server.Broker.SetPackageHold(ctx, *request.Hold)
+		if receipt.EffectID != "" {
+			response.HoldReceipt, response.Inventory = &receipt, &inventory
 		}
 	}
 	response.Succeeded = err == nil
@@ -1346,6 +1375,19 @@ type linuxJournalEntry struct {
 	CompletedAt   time.Time             `json:"completed_at,omitempty"`
 }
 
+type linuxHoldJournalEntry struct {
+	SchemaVersion uint8                 `json:"schema_version"`
+	RequestDigest string                `json:"request_digest"`
+	Request       PackageHoldRequest    `json:"request"`
+	Before        InventorySnapshot     `json:"before,omitempty"`
+	Command       linuxJournalCommand   `json:"command,omitempty"`
+	After         InventorySnapshot     `json:"after,omitempty"`
+	Receipt       PackageHoldReceipt    `json:"receipt,omitempty"`
+	FailureCode   string                `json:"failure_code,omitempty"`
+	StartedAt     time.Time             `json:"started_at"`
+	CompletedAt   time.Time             `json:"completed_at,omitempty"`
+}
+
 type LinuxJournal struct {
 	root string
 	mu   sync.Mutex
@@ -1461,11 +1503,86 @@ func (journal *LinuxJournal) loadLocked(effectID string) (linuxJournalEntry, boo
 	return entry, true, nil
 }
 
+func (journal *LinuxJournal) prepareHold(request PackageHoldRequest, digest string, now time.Time) (linuxHoldJournalEntry, bool, error) {
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	entry, found, err := journal.loadHoldLocked(request.EffectID)
+	if err != nil || found {
+		return entry, found, err
+	}
+	entry = linuxHoldJournalEntry{SchemaVersion: 1, RequestDigest: digest, Request: request, StartedAt: now.UTC()}
+	return entry, false, journal.writeHoldLocked(entry)
+}
+
+func (journal *LinuxJournal) startHold(request PackageHoldRequest, before InventorySnapshot, executable string, argv []string, now time.Time) error {
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	entry, found, err := journal.loadHoldLocked(request.EffectID)
+	if err != nil || !found || entry.RequestDigest != request.Digest || entry.Command.Executable != "" ||
+		packageHoldMatchesInventory(request, before, true) != nil || !allowedInvocation(executable, argv) {
+		if err != nil { return err }
+		return ErrConflict
+	}
+	entry.Before = before
+	entry.Command = linuxJournalCommand{Executable: executable, Argv: append([]string(nil), argv...), StartedAt: now.UTC()}
+	return journal.writeHoldLocked(entry)
+}
+
+func (journal *LinuxJournal) recordHoldCommand(effectID, digest string, result CommandResult) error {
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	entry, found, err := journal.loadHoldLocked(effectID)
+	if err != nil || !found || entry.RequestDigest != digest || entry.Command.Executable != result.Executable ||
+		!equalStrings(entry.Command.Argv, result.Argv) || result.StartedAt.IsZero() {
+		if err != nil { return err }
+		return ErrConflict
+	}
+	entry.Command.Receipt = commandReceipt(result)
+	return journal.writeHoldLocked(entry)
+}
+
+func (journal *LinuxJournal) completeHold(entry linuxHoldJournalEntry, after InventorySnapshot,
+	receipt PackageHoldReceipt, failure string, now time.Time) error {
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	current, found, err := journal.loadHoldLocked(entry.Request.EffectID)
+	if err != nil || !found || current.RequestDigest != entry.RequestDigest || validatePackageHoldReceipt(receipt) != nil || after.Validate() != nil {
+		if err != nil { return err }
+		return ErrConflict
+	}
+	if current.Command.Receipt.Executable == "" { current.Command.Receipt = receipt.Command }
+	current.After, current.Receipt, current.FailureCode, current.CompletedAt = after, receipt, failure, now.UTC()
+	return journal.writeHoldLocked(current)
+}
+
+func (journal *LinuxJournal) loadHoldLocked(effectID string) (linuxHoldJournalEntry, bool, error) {
+	if journal == nil || journal.root != DefaultLinuxJournalRoot || !safeID.MatchString(effectID) {
+		return linuxHoldJournalEntry{}, false, ErrInvalid
+	}
+	raw, err := readRootOwnedLinuxRuntimeFile(journal.holdPath(effectID), linuxJournalMaximumBytes)
+	if errors.Is(err, os.ErrNotExist) { return linuxHoldJournalEntry{}, false, nil }
+	if err != nil { return linuxHoldJournalEntry{}, false, err }
+	var entry linuxHoldJournalEntry
+	if decodeLinuxRuntimeJSON(raw, &entry) != nil || validateLinuxHoldJournalEntry(entry) != nil {
+		return linuxHoldJournalEntry{}, false, ErrAmbiguous
+	}
+	return entry, true, nil
+}
+
+func (journal *LinuxJournal) writeHoldLocked(entry linuxHoldJournalEntry) error {
+	if validateLinuxHoldJournalEntry(entry) != nil { return ErrInvalid }
+	return journal.writeValueLocked(journal.holdPath(entry.Request.EffectID), entry)
+}
+
 func (journal *LinuxJournal) writeLocked(entry linuxJournalEntry) error {
 	if validateLinuxJournalEntry(entry) != nil {
 		return ErrInvalid
 	}
-	encoded, err := json.Marshal(entry)
+	return journal.writeValueLocked(journal.path(entry.Request.EffectID), entry)
+}
+
+func (journal *LinuxJournal) writeValueLocked(path string, value any) error {
+	encoded, err := json.Marshal(value)
 	if err != nil || len(encoded) == 0 || len(encoded) > linuxJournalMaximumBytes {
 		return ErrInvalid
 	}
@@ -1494,7 +1611,7 @@ func (journal *LinuxJournal) writeLocked(entry linuxJournalEntry) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(temporary, journal.path(entry.Request.EffectID)); err != nil {
+	if err = os.Rename(temporary, path); err != nil {
 		return err
 	}
 	written = true
@@ -1508,6 +1625,11 @@ func (journal *LinuxJournal) writeLocked(entry linuxJournalEntry) error {
 
 func (journal *LinuxJournal) path(effectID string) string {
 	sum := sha256.Sum256([]byte("cyberpanel-package-maintenance-journal-v1\x00" + effectID))
+	return filepath.Join(journal.root, hex.EncodeToString(sum[:])+".json")
+}
+
+func (journal *LinuxJournal) holdPath(effectID string) string {
+	sum := sha256.Sum256([]byte("cyberpanel-package-hold-journal-v1\x00" + effectID))
 	return filepath.Join(journal.root, hex.EncodeToString(sum[:])+".json")
 }
 
@@ -1536,6 +1658,41 @@ func validateLinuxJournalEntry(entry linuxJournalEntry) error {
 		return nil
 	}
 	if !validReceiptStructure(entry.Receipt) || entry.Receipt.EffectID != entry.Request.EffectID || entry.CompletedAt.IsZero() ||
+		entry.FailureCode != "" && classifyLinuxBrokerError(linuxBrokerFailureError(entry.FailureCode)) != entry.FailureCode {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validateLinuxHoldJournalEntry(entry linuxHoldJournalEntry) error {
+	if entry.SchemaVersion != 1 || entry.RequestDigest != entry.Request.Digest || validatePackageHoldRequest(entry.Request) != nil ||
+		entry.StartedAt.IsZero() {
+		return ErrInvalid
+	}
+	if entry.Command.Executable == "" {
+		if entry.Before.ID != "" || entry.Receipt.EffectID != "" || !entry.CompletedAt.IsZero() { return ErrInvalid }
+		return nil
+	}
+	if packageHoldMatchesInventory(entry.Request, entry.Before, true) != nil || !allowedInvocation(entry.Command.Executable, entry.Command.Argv) || entry.Command.StartedAt.IsZero() {
+		return ErrInvalid
+	}
+	if entry.Command.Receipt.Executable == "" {
+		if entry.Receipt.EffectID != "" || !entry.CompletedAt.IsZero() { return ErrInvalid }
+		return nil
+	}
+	command := entry.Command.Receipt
+	argvDigest, _ := canonicalDigest(struct { Executable string `json:"executable"`; Argv []string `json:"argv"` }{entry.Command.Executable, entry.Command.Argv})
+	if command.Executable != entry.Command.Executable || !validDigest(command.ArgvDigest) || !validDigest(command.OutputDigest) ||
+		command.ArgvDigest != argvDigest || command.StartedAt.IsZero() || command.CompletedAt.Before(command.StartedAt) {
+		return ErrInvalid
+	}
+	if entry.Receipt.EffectID == "" {
+		if entry.After.ID != "" || !entry.CompletedAt.IsZero() { return ErrInvalid }
+		return nil
+	}
+	if validatePackageHoldReceipt(entry.Receipt) != nil || entry.After.Validate() != nil ||
+		entry.Receipt.EffectID != entry.Request.EffectID || entry.Receipt.AfterInventoryID != entry.After.ID ||
+		entry.Receipt.AfterInventoryDigest != entry.After.ContentDigest || entry.CompletedAt.IsZero() ||
 		entry.FailureCode != "" && classifyLinuxBrokerError(linuxBrokerFailureError(entry.FailureCode)) != entry.FailureCode {
 		return ErrInvalid
 	}
@@ -1652,6 +1809,90 @@ func (broker *LinuxBroker) Apply(ctx context.Context, request ExecutionRequest) 
 		return receipt, ErrAmbiguous
 	}
 	return receipt, executionErr
+}
+
+func (broker *LinuxBroker) SetPackageHold(ctx context.Context, request PackageHoldRequest) (PackageHoldReceipt, InventorySnapshot, error) {
+	if broker == nil || broker.runtime == nil || broker.journal == nil || ctx == nil || validatePackageHoldRequest(request) != nil {
+		return PackageHoldReceipt{}, InventorySnapshot{}, ErrInvalid
+	}
+	broker.applyMu.Lock()
+	defer broker.applyMu.Unlock()
+	now := broker.now().UTC()
+	entry, found, err := broker.journal.prepareHold(request, request.Digest, now)
+	if err != nil { return PackageHoldReceipt{}, InventorySnapshot{}, ErrAmbiguous }
+	if found {
+		if entry.RequestDigest != request.Digest { return PackageHoldReceipt{}, InventorySnapshot{}, ErrConflict }
+		if entry.Receipt.EffectID != "" {
+			if entry.FailureCode == "" { return entry.Receipt, entry.After, nil }
+			return entry.Receipt, entry.After, linuxBrokerFailureError(entry.FailureCode)
+		}
+		if entry.Command.Executable != "" { return broker.reconcilePackageHold(ctx, entry) }
+	}
+	if broker.runtime.catalog.validate(now) != nil || request.Authorization.PolicyDigest != broker.runtime.catalog.digest ||
+		request.Authorization.Validate(AssuranceMFA, now) != nil {
+		return PackageHoldReceipt{}, InventorySnapshot{}, ErrUnauthorized
+	}
+	before, err := broker.runtime.Snapshot(ctx, InventoryRequest{NodeID: request.NodeID, Manager: request.Manager, Generation: request.InventoryGeneration})
+	if err != nil || packageHoldMatchesInventory(request, before, true) != nil {
+		if err != nil { return PackageHoldReceipt{}, InventorySnapshot{}, err }
+		return PackageHoldReceipt{}, InventorySnapshot{}, ErrStaleInventory
+	}
+	executable, argv, err := packageHoldCommand(request)
+	if err != nil { return PackageHoldReceipt{}, InventorySnapshot{}, err }
+	if err = broker.journal.startHold(request, before, executable, argv, now); err != nil {
+		return PackageHoldReceipt{}, InventorySnapshot{}, ErrAmbiguous
+	}
+	result, runErr := broker.runtime.runner.Run(ctx, executable, argv, MaximumOutputBytes)
+	if result.StartedAt.IsZero() || broker.journal.recordHoldCommand(request.EffectID, request.Digest, result) != nil {
+		loaded, _, _ := broker.journal.loadHold(request.EffectID)
+		return broker.reconcilePackageHold(ctx, loaded)
+	}
+	entry.Before = before
+	entry.Command = linuxJournalCommand{Executable: executable, Argv: argv, StartedAt: now, Receipt: commandReceipt(result)}
+	after, observationErr := broker.runtime.Snapshot(ctx, InventoryRequest{NodeID: request.NodeID, Manager: request.Manager, Generation: request.InventoryGeneration + 1})
+	if observationErr != nil { return PackageHoldReceipt{}, InventorySnapshot{}, ErrAmbiguous }
+	return broker.finishPackageHold(entry, after, runErr != nil || result.ExitCode != 0 || packageLockOutput(result.Output))
+}
+
+func (journal *LinuxJournal) loadHold(effectID string) (linuxHoldJournalEntry, bool, error) {
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	return journal.loadHoldLocked(effectID)
+}
+
+func (broker *LinuxBroker) reconcilePackageHold(ctx context.Context, entry linuxHoldJournalEntry) (PackageHoldReceipt, InventorySnapshot, error) {
+	if entry.Request.EffectID == "" { return PackageHoldReceipt{}, InventorySnapshot{}, ErrAmbiguous }
+	after, err := broker.runtime.Snapshot(ctx, InventoryRequest{NodeID: entry.Request.NodeID, Manager: entry.Request.Manager,
+		Generation: entry.Request.InventoryGeneration + 1})
+	if err != nil { return PackageHoldReceipt{}, InventorySnapshot{}, ErrAmbiguous }
+	return broker.finishPackageHold(entry, after, entry.Command.Receipt.Executable == "" || entry.Command.Receipt.ExitCode != 0)
+}
+
+func (broker *LinuxBroker) finishPackageHold(entry linuxHoldJournalEntry, after InventorySnapshot,
+	forceAmbiguous bool) (PackageHoldReceipt, InventorySnapshot, error) {
+	now := broker.now().UTC()
+	command := entry.Command.Receipt
+	if command.Executable == "" {
+		argvDigest, _ := canonicalDigest(struct { Executable string `json:"executable"`; Argv []string `json:"argv"` }{entry.Command.Executable, entry.Command.Argv})
+		command = CommandReceipt{Executable: entry.Command.Executable, ArgvDigest: argvDigest,
+			OutputDigest: digestStrings("package_hold_reconciled", entry.Request.EffectID, argvDigest), ExitCode: -1,
+			StartedAt: entry.Command.StartedAt, CompletedAt: now}
+	}
+	confirmed := !forceAmbiguous && exactPackageHoldEffect(entry.Before, after, entry.Request)
+	receipt := PackageHoldReceipt{EffectID: entry.Request.EffectID, RequestDigest: entry.Request.Digest,
+		Action: entry.Request.Action, BeforeInventoryDigest: entry.Request.InventoryDigest, AfterInventoryID: after.ID,
+		AfterInventoryGeneration: after.Generation, AfterInventoryDigest: after.ContentDigest,
+		Held: packageHeld(after, entry.Request.PackageName), Command: command, Outcome: OutcomeAmbiguous,
+		AuthorizationDigest: entry.Request.Authorization.Digest, ObservedAt: now}
+	if confirmed { receipt.Outcome = OutcomeConfirmed }
+	if SealPackageHoldReceipt(&receipt) != nil { return PackageHoldReceipt{}, InventorySnapshot{}, ErrAmbiguous }
+	failure := ""
+	if !confirmed { failure = "ambiguous" }
+	if broker.journal.completeHold(entry, after, receipt, failure, now) != nil {
+		return receipt, after, ErrAmbiguous
+	}
+	if !confirmed { return receipt, after, ErrAmbiguous }
+	return receipt, after, nil
 }
 
 func (journal *LinuxJournal) load(effectID string) (linuxJournalEntry, bool, error) {

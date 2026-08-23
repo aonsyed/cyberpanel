@@ -54,6 +54,23 @@ CREATE TABLE IF NOT EXISTS package_maintenance_operations (
   updated_at TEXT NOT NULL,
   FOREIGN KEY(plan_id) REFERENCES package_maintenance_plans(id)
 );
+CREATE TABLE IF NOT EXISTS package_maintenance_hold_operations (
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  manager TEXT NOT NULL,
+  inventory_id TEXT NOT NULL,
+  inventory_generation INTEGER NOT NULL,
+  inventory_digest TEXT NOT NULL,
+  package_name TEXT NOT NULL,
+  architecture TEXT NOT NULL,
+  installed_version TEXT NOT NULL,
+  action TEXT NOT NULL,
+  state TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  operation_json BLOB NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(inventory_id) REFERENCES package_maintenance_inventories(id)
+);
 CREATE TABLE IF NOT EXISTS package_maintenance_audit (
   id TEXT PRIMARY KEY,
   operation_id TEXT NOT NULL,
@@ -68,6 +85,7 @@ const (
 	maximumInventoryJSON = 64 << 20
 	maximumPlanJSON      = 16 << 20
 	maximumOperationJSON = 16 << 20
+	maximumHoldOperationJSON = 2 << 20
 	maximumAuditJSON     = 1 << 20
 )
 
@@ -305,6 +323,190 @@ func (repository *SQLRepository) Operation(ctx context.Context, id string) (Main
 	return scanOperation(repository.db.QueryRowContext(ctx, `SELECT operation_json FROM package_maintenance_operations WHERE id=?`, id))
 }
 
+// AdmitPackageHold persists the complete inventory- and authorization-bound
+// intent before any privileged effect can begin. Reuse of an identifier with
+// different authority is a conflict; an exact retry returns the original row.
+func (repository *SQLRepository) AdmitPackageHold(ctx context.Context, operation PackageHoldOperation) (PackageHoldOperation, error) {
+	if repository == nil || repository.db == nil || validatePackageHoldOperation(operation) != nil ||
+		operation.State != PackageHoldAdmitted || operation.Generation != 1 {
+		return PackageHoldOperation{}, ErrInvalid
+	}
+	encoded, err := boundedJSON(operation, maximumHoldOperationJSON)
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	repository.writer.Lock()
+	defer repository.writer.Unlock()
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	defer transaction.Rollback()
+	latest, err := scanInventory(transaction.QueryRowContext(ctx, `SELECT inventory_json FROM package_maintenance_inventories WHERE node_id=? AND manager=? ORDER BY generation DESC LIMIT 1`, operation.Request.NodeID, string(operation.Request.Manager)))
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	if err = packageHoldMatchesInventory(operation.Request, latest, true); err != nil {
+		return PackageHoldOperation{}, err
+	}
+	_, err = transaction.ExecContext(ctx, `INSERT INTO package_maintenance_hold_operations(id,node_id,manager,inventory_id,inventory_generation,inventory_digest,package_name,architecture,installed_version,action,state,generation,operation_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		operation.ID, operation.Request.NodeID, string(operation.Request.Manager), operation.Request.InventoryID,
+		operation.Request.InventoryGeneration, operation.Request.InventoryDigest, operation.Request.PackageName,
+		operation.Request.Architecture, operation.Request.InstalledVersion, string(operation.Request.Action),
+		string(operation.State), operation.Generation, encoded, operation.UpdatedAt.Format(timeLayout))
+	if isConstraint(err) {
+		existing, loadErr := scanPackageHoldOperation(transaction.QueryRowContext(ctx, `SELECT operation_json FROM package_maintenance_hold_operations WHERE id=?`, operation.ID))
+		if loadErr == nil && existing.Request.Digest == operation.Request.Digest {
+			return existing, transaction.Commit()
+		}
+		return PackageHoldOperation{}, ErrConflict
+	}
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	if err = transaction.Commit(); err != nil {
+		return PackageHoldOperation{}, err
+	}
+	return operation, nil
+}
+
+func (repository *SQLRepository) PackageHoldOperation(ctx context.Context, id string) (PackageHoldOperation, error) {
+	if repository == nil || repository.db == nil || !safeID.MatchString(id) {
+		return PackageHoldOperation{}, ErrInvalid
+	}
+	return scanPackageHoldOperation(repository.db.QueryRowContext(ctx, `SELECT operation_json FROM package_maintenance_hold_operations WHERE id=?`, id))
+}
+
+func (repository *SQLRepository) StartPackageHold(ctx context.Context, id string, at time.Time) (PackageHoldOperation, error) {
+	if repository == nil || repository.db == nil || !safeID.MatchString(id) || at.IsZero() {
+		return PackageHoldOperation{}, ErrInvalid
+	}
+	repository.writer.Lock()
+	defer repository.writer.Unlock()
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	defer transaction.Rollback()
+	operation, err := scanPackageHoldOperation(transaction.QueryRowContext(ctx, `SELECT operation_json FROM package_maintenance_hold_operations WHERE id=?`, id))
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	if operation.State == PackageHoldRunning {
+		return operation, transaction.Commit()
+	}
+	if operation.State != PackageHoldAdmitted {
+		return PackageHoldOperation{}, ErrConflict
+	}
+	latest, err := scanInventory(transaction.QueryRowContext(ctx, `SELECT inventory_json FROM package_maintenance_inventories WHERE node_id=? AND manager=? ORDER BY generation DESC LIMIT 1`, operation.Request.NodeID, string(operation.Request.Manager)))
+	if err != nil || packageHoldMatchesInventory(operation.Request, latest, true) != nil {
+		if err != nil {
+			return PackageHoldOperation{}, err
+		}
+		return PackageHoldOperation{}, ErrStaleInventory
+	}
+	operation.State, operation.Generation = PackageHoldRunning, operation.Generation+1
+	operation.UpdatedAt = at.UTC()
+	return repository.updatePackageHold(ctx, transaction, operation, PackageHoldAdmitted, operation.Generation-1)
+}
+
+func (repository *SQLRepository) FinishPackageHold(ctx context.Context, id string, state PackageHoldState,
+	receipt PackageHoldReceipt, failureCode string, at time.Time) (PackageHoldOperation, error) {
+	if repository == nil || repository.db == nil || !safeID.MatchString(id) || at.IsZero() ||
+		(state != PackageHoldSucceeded && state != PackageHoldFailed && state != PackageHoldAmbiguous) {
+		return PackageHoldOperation{}, ErrInvalid
+	}
+	repository.writer.Lock()
+	defer repository.writer.Unlock()
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	defer transaction.Rollback()
+	operation, err := scanPackageHoldOperation(transaction.QueryRowContext(ctx, `SELECT operation_json FROM package_maintenance_hold_operations WHERE id=?`, id))
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	if operation.State == PackageHoldSucceeded || operation.State == PackageHoldFailed || operation.State == PackageHoldAmbiguous {
+		if operation.State == state && operation.Receipt.EvidenceDigest == receipt.EvidenceDigest && operation.FailureCode == failureCode {
+			return operation, transaction.Commit()
+		}
+		return PackageHoldOperation{}, ErrConflict
+	}
+	if operation.State != PackageHoldRunning {
+		return PackageHoldOperation{}, ErrConflict
+	}
+	if receipt.EffectID != "" {
+		if validatePackageHoldReceipt(receipt) != nil || receipt.EffectID != id || receipt.RequestDigest != operation.Request.Digest ||
+			receipt.BeforeInventoryDigest != operation.Request.InventoryDigest {
+			return PackageHoldOperation{}, ErrInvalid
+		}
+		latest, loadErr := scanInventory(transaction.QueryRowContext(ctx, `SELECT inventory_json FROM package_maintenance_inventories WHERE node_id=? AND manager=? ORDER BY generation DESC LIMIT 1`, operation.Request.NodeID, string(operation.Request.Manager)))
+		if loadErr != nil || latest.ID != receipt.AfterInventoryID || latest.Generation != receipt.AfterInventoryGeneration || latest.ContentDigest != receipt.AfterInventoryDigest {
+			if loadErr != nil {
+				return PackageHoldOperation{}, loadErr
+			}
+			return PackageHoldOperation{}, ErrStaleInventory
+		}
+	}
+	operation.State, operation.Receipt, operation.FailureCode = state, receipt, failureCode
+	operation.Generation++
+	operation.UpdatedAt = at.UTC()
+	return repository.updatePackageHold(ctx, transaction, operation, PackageHoldRunning, operation.Generation-1)
+}
+
+func (repository *SQLRepository) updatePackageHold(ctx context.Context, transaction *sql.Tx, operation PackageHoldOperation,
+	from PackageHoldState, expectedGeneration uint64) (PackageHoldOperation, error) {
+	if validatePackageHoldOperation(operation) != nil {
+		return PackageHoldOperation{}, ErrInvalid
+	}
+	encoded, err := boundedJSON(operation, maximumHoldOperationJSON)
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	result, err := transaction.ExecContext(ctx, `UPDATE package_maintenance_hold_operations SET state=?,generation=?,operation_json=?,updated_at=? WHERE id=? AND state=? AND generation=?`,
+		string(operation.State), operation.Generation, encoded, operation.UpdatedAt.Format(timeLayout), operation.ID, string(from), expectedGeneration)
+	if err != nil {
+		return PackageHoldOperation{}, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return PackageHoldOperation{}, ErrConflict
+	}
+	if err = transaction.Commit(); err != nil {
+		return PackageHoldOperation{}, err
+	}
+	return operation, nil
+}
+
+func packageHoldMatchesInventory(request PackageHoldRequest, snapshot InventorySnapshot, requireOpposite bool) error {
+	if snapshot.NodeID != request.NodeID || snapshot.Manager != request.Manager || snapshot.ID != request.InventoryID ||
+		snapshot.Generation != request.InventoryGeneration || snapshot.ContentDigest != request.InventoryDigest {
+		return ErrStaleInventory
+	}
+	matches := 0
+	for _, installed := range snapshot.Packages { if installed.Name == request.PackageName { matches++ } }
+	if matches != 1 { return ErrUnsupported }
+	for _, installed := range snapshot.Packages {
+		if installed.Name != request.PackageName || installed.Architecture != request.Architecture {
+			continue
+		}
+		if installed.State != PackageInstalled || installed.InstalledVersion != request.InstalledVersion ||
+			installed.RepositoryID != request.RepositoryID || installed.ProvenanceDigest != request.ProvenanceDigest {
+			return ErrStaleInventory
+		}
+		held := false
+		for _, hold := range snapshot.Holds {
+			held = held || hold.PackageName == request.PackageName
+		}
+		if requireOpposite && held == (request.Action == PackageHold) {
+			return ErrConflict
+		}
+		return nil
+	}
+	return ErrStaleInventory
+}
+
 // LatestOperation returns the newest durable apply record for a package
 // manager. It is intentionally read-only: reconciliation and API retries use
 // the stored outcome rather than inferring success or replaying an effect.
@@ -456,6 +658,21 @@ func scanOperation(row rowScanner) (MaintenanceOperation, error) {
 	var value MaintenanceOperation
 	if strictBoundedJSON(encoded, &value, maximumOperationJSON) != nil || validateOperation(value) != nil {
 		return MaintenanceOperation{}, ErrInvalid
+	}
+	return value, nil
+}
+
+func scanPackageHoldOperation(row rowScanner) (PackageHoldOperation, error) {
+	var encoded []byte
+	if err := row.Scan(&encoded); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return PackageHoldOperation{}, ErrNotFound
+		}
+		return PackageHoldOperation{}, err
+	}
+	var value PackageHoldOperation
+	if strictBoundedJSON(encoded, &value, maximumHoldOperationJSON) != nil || validatePackageHoldOperation(value) != nil {
+		return PackageHoldOperation{}, ErrInvalid
 	}
 	return value, nil
 }

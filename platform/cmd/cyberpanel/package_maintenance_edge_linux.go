@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
@@ -28,6 +30,7 @@ type packageMaintenanceLinuxEdge struct {
 	repository *packagemaint.SQLRepository
 	inventory  packagemaint.InventoryProvider
 	resolver   packageMaintenancePlanResolver
+	holds      packagemaint.PackageHoldExecutor
 	service    packagemaint.Service
 	nodeID     string
 	manager    packagemaint.Manager
@@ -46,7 +49,8 @@ const packageMaintenanceMaximumGeneration = uint64(1<<63 - 1)
 func newPackageMaintenanceLinuxEdge(repository *packagemaint.SQLRepository, inventory packagemaint.InventoryProvider,
 	resolver packageMaintenancePlanResolver, authorizer packagemaint.Authorizer, executor packagemaint.MaintenanceExecutor,
 	maintenanceGate packagemaint.MaintenanceGate, nodeID string, manager packagemaint.Manager, now func() time.Time) (*packageMaintenanceLinuxEdge, error) {
-	if repository == nil || inventory == nil || resolver == nil || authorizer == nil || executor == nil ||
+	holds, supportsHolds := executor.(packagemaint.PackageHoldExecutor)
+	if repository == nil || inventory == nil || resolver == nil || authorizer == nil || executor == nil || !supportsHolds ||
 		maintenanceGate == nil || !validPackageMaintenanceRuntimeID(nodeID) || manager != packagemaint.ManagerAPT && manager != packagemaint.ManagerDNF {
 		return nil, packagemaint.ErrInvalid
 	}
@@ -54,7 +58,7 @@ func newPackageMaintenanceLinuxEdge(repository *packagemaint.SQLRepository, inve
 		now = time.Now
 	}
 	edge := &packageMaintenanceLinuxEdge{repository: repository, inventory: inventory, resolver: resolver,
-		nodeID: nodeID, manager: manager, now: now}
+		nodeID: nodeID, manager: manager, holds: holds, now: now}
 	edge.service = packagemaint.Service{Store: repository, Authorizer: authorizer, Executor: executor, Maintenance: maintenanceGate, Now: now}
 	return edge, nil
 }
@@ -138,7 +142,148 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 }
 
 func (*packageMaintenanceLinuxEdge) PackageMaintenanceCapabilities() apiserver.PackageMaintenanceEdgeCapabilities {
-	return apiserver.PackageMaintenanceEdgeCapabilities{List: true, Refresh: true, Plan: true, Apply: true}
+	return apiserver.PackageMaintenanceEdgeCapabilities{List: true, Refresh: true, Plan: true, Apply: true, Packages: true, Holds: true}
+}
+
+func (edge *packageMaintenanceLinuxEdge) ListPackageMaintenancePackages(ctx context.Context, call apiserver.EdgeCall,
+	payload apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.PackageMaintenancePackageProjection], error) {
+	if edge == nil || ctx == nil || call.TenantID != "" || call.ResourceID != "" || call.ExpectedGeneration != 0 ||
+		call.PrincipalID == "" || call.CredentialID == "" {
+		return apiserver.EdgePage[apiserver.PackageMaintenancePackageProjection]{}, packagemaint.ErrInvalid
+	}
+	snapshot, err := edge.repository.LatestInventory(ctx, edge.nodeID, edge.manager)
+	if err != nil { return apiserver.EdgePage[apiserver.PackageMaintenancePackageProjection]{}, err }
+	items := make([]apiserver.PackageMaintenancePackageProjection, 0, len(snapshot.Packages))
+	for _, installed := range snapshot.Packages { items = append(items, projectPackageMaintenancePackage(snapshot, installed)) }
+	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+	start := 0
+	for start < len(items) && items[start].ID <= payload.Cursor { start++ }
+	limit := int(payload.Limit); if limit == 0 { limit = 100 }
+	end := start + limit; if end > len(items) { end = len(items) }
+	next := ""; if end < len(items) && end > start { next = items[end-1].ID }
+	return apiserver.EdgePage[apiserver.PackageMaintenancePackageProjection]{Items: append([]apiserver.PackageMaintenancePackageProjection(nil), items[start:end]...), NextCursor: next, Total: uint64(len(items))}, nil
+}
+
+func (edge *packageMaintenanceLinuxEdge) GetPackageMaintenancePackage(ctx context.Context, call apiserver.EdgeCall) (apiserver.PackageMaintenancePackageProjection, error) {
+	if edge == nil || ctx == nil || call.TenantID != "" || !validPackageMaintenanceRuntimeID(call.ResourceID) ||
+		call.ExpectedGeneration != 0 || call.PrincipalID == "" || call.CredentialID == "" {
+		return apiserver.PackageMaintenancePackageProjection{}, packagemaint.ErrInvalid
+	}
+	snapshot, err := edge.repository.LatestInventory(ctx, edge.nodeID, edge.manager)
+	if err != nil { return apiserver.PackageMaintenancePackageProjection{}, err }
+	return packageMaintenancePackageByID(snapshot, call.ResourceID)
+}
+
+func (edge *packageMaintenanceLinuxEdge) HoldPackageMaintenancePackage(ctx context.Context, call apiserver.EdgeCall) (apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection], error) {
+	return edge.setPackageHold(ctx, call, packagemaint.PackageHold)
+}
+
+func (edge *packageMaintenanceLinuxEdge) UnholdPackageMaintenancePackage(ctx context.Context, call apiserver.EdgeCall) (apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection], error) {
+	return edge.setPackageHold(ctx, call, packagemaint.PackageUnhold)
+}
+
+func (edge *packageMaintenanceLinuxEdge) setPackageHold(ctx context.Context, call apiserver.EdgeCall,
+	action packagemaint.PackageHoldAction) (apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection], error) {
+	if err := edge.validateMutation(ctx, call, true); err != nil || call.AuthzEpoch == 0 {
+		if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, err }
+		return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, packagemaint.ErrUnauthorized
+	}
+	effectID := "pkghold_" + packageMaintenanceDigest(call.CommandID, call.IdempotencyKey, string(action), call.ResourceID)[:40]
+	operation, err := edge.repository.PackageHoldOperation(ctx, effectID)
+	var snapshot packagemaint.InventorySnapshot
+	var projection apiserver.PackageMaintenancePackageProjection
+	if errors.Is(err, packagemaint.ErrNotFound) {
+		snapshot, err = edge.repository.LatestInventory(ctx, edge.nodeID, edge.manager)
+		if err != nil || snapshot.Generation != call.ExpectedGeneration {
+			if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, err }
+			return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, packagemaint.ErrStaleInventory
+		}
+		projection, err = packageMaintenancePackageByID(snapshot, call.ResourceID)
+		if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, err }
+		scope := "package-maintenance:" + string(action) + ":" + effectID
+		authorization := packagemaint.AuthorizationRequest{Boundary: packagemaint.BoundaryAcceptance, OperationID: effectID,
+			ActorID: call.PrincipalID, Scope: scope, PlanID: snapshot.ID, PlanDigest: snapshot.ContentDigest,
+			PlanGeneration: snapshot.Generation, MinimumAssurance: packagemaint.AssuranceMFA}
+		encoded, encodeErr := json.Marshal(authorization); if encodeErr != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, encodeErr }
+		digest := sha256.Sum256(encoded); authorization.RequestDigest = hex.EncodeToString(digest[:])
+		evidence, authorizeErr := edge.service.Authorizer.Authorize(ctx, authorization)
+		if authorizeErr != nil || evidence.ActorID != call.PrincipalID || evidence.Scope != scope || evidence.RequestDigest != authorization.RequestDigest || evidence.AuthorizationEpoch != call.AuthzEpoch {
+			return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, packagemaint.ErrUnauthorized
+		}
+		request := packagemaint.PackageHoldRequest{EffectID: effectID, NodeID: edge.nodeID, Manager: edge.manager, Action: action,
+			PackageName: projection.Name, Architecture: projection.Architecture, InstalledVersion: projection.InstalledVersion,
+			RepositoryID: projection.RepositoryID, ProvenanceDigest: projection.InstalledProvenanceDigest,
+			InventoryID: snapshot.ID, InventoryGeneration: snapshot.Generation, InventoryDigest: snapshot.ContentDigest,
+			Authorization: evidence, RequestedAt: edge.now().UTC()}
+		if err = packagemaint.SealPackageHoldRequest(&request); err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, err }
+		operation, err = edge.repository.AdmitPackageHold(ctx, packagemaint.PackageHoldOperation{ID: effectID, Request: request,
+			State: packagemaint.PackageHoldAdmitted, Generation: 1, CreatedAt: edge.now().UTC(), UpdatedAt: edge.now().UTC()})
+	} else if err == nil {
+		if operation.Request.Action != action || operation.Request.InventoryGeneration != call.ExpectedGeneration {
+			return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, packagemaint.ErrConflict
+		}
+		snapshot, err = edge.repository.Inventory(ctx, operation.Request.InventoryID)
+		if err == nil { projection, err = packageMaintenancePackageByID(snapshot, call.ResourceID) }
+		if err == nil && (projection.Name != operation.Request.PackageName || projection.Architecture != operation.Request.Architecture || projection.InstalledVersion != operation.Request.InstalledVersion) {
+			err = packagemaint.ErrConflict
+		}
+	}
+	if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, err }
+	if operation.Request.Authorization.ActorID != call.PrincipalID || operation.Request.Authorization.AuthorizationEpoch != call.AuthzEpoch {
+		return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, packagemaint.ErrUnauthorized
+	}
+	if operation.State == packagemaint.PackageHoldAdmitted { operation, err = edge.repository.StartPackageHold(ctx, operation.ID, edge.now().UTC()) }
+	if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, err }
+	if operation.State == packagemaint.PackageHoldRunning {
+		receipt, after, effectErr := edge.holds.SetPackageHold(ctx, operation.Request)
+		if receipt.EffectID == "" && errors.Is(effectErr, packagemaint.ErrAmbiguous) {
+			return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, effectErr
+		}
+		state, failure := packagemaint.PackageHoldSucceeded, ""
+		if effectErr != nil { state, failure = packagemaint.PackageHoldFailed, "effect_rejected" }
+		if receipt.EffectID != "" {
+			latest, latestErr := edge.repository.LatestInventory(ctx, edge.nodeID, edge.manager)
+			if latestErr != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, latestErr }
+			if latest.ID == snapshot.ID { err = edge.repository.SaveInventory(ctx, after, snapshot.Generation) } else if latest.ID != after.ID { err = packagemaint.ErrStaleInventory }
+			if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, err }
+			if receipt.Outcome == packagemaint.OutcomeAmbiguous { state, failure = packagemaint.PackageHoldAmbiguous, "ambiguous" }
+		}
+		operation, err = edge.repository.FinishPackageHold(ctx, operation.ID, state, receipt, failure, edge.now().UTC())
+		if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, err }
+	}
+	latest, err := edge.repository.LatestInventory(ctx, edge.nodeID, edge.manager)
+	if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{}, err }
+	resultSnapshot := latest
+	if operation.Receipt.AfterInventoryID != "" { resultSnapshot, err = edge.repository.Inventory(ctx, operation.Receipt.AfterInventoryID) }
+	if err == nil { projection, err = packageMaintenancePackageByID(resultSnapshot, call.ResourceID) }
+	projection.HoldOperationID, projection.HoldOutcome, projection.HoldReceiptDigest = operation.ID, string(operation.Receipt.Outcome), operation.Receipt.EvidenceDigest
+	return apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection]{OperationID: operation.ID, State: string(operation.State), Generation: projection.Generation, Resource: projection}, err
+}
+
+func packageMaintenancePackageByID(snapshot packagemaint.InventorySnapshot, id string) (apiserver.PackageMaintenancePackageProjection, error) {
+	for _, installed := range snapshot.Packages {
+		projection := projectPackageMaintenancePackage(snapshot, installed)
+		if projection.ID == id { return projection, nil }
+	}
+	return apiserver.PackageMaintenancePackageProjection{}, packagemaint.ErrNotFound
+}
+
+func projectPackageMaintenancePackage(snapshot packagemaint.InventorySnapshot, installed packagemaint.Package) apiserver.PackageMaintenancePackageProjection {
+	security := packagemaint.SecurityNone
+	if installed.PendingSecurity { security = packageMaintenanceSecurity(snapshot.Advisories, installed) }
+	result := apiserver.PackageMaintenancePackageProjection{ID: "pkg_" + packageMaintenanceDigest(snapshot.NodeID, string(snapshot.Manager), installed.Name, installed.Architecture)[:32],
+		Type: "unheld", NodeID: snapshot.NodeID, Manager: string(snapshot.Manager), Name: installed.Name, Architecture: installed.Architecture,
+		InstalledVersion: installed.InstalledVersion, CandidateVersion: installed.CandidateVersion, PendingSecurity: installed.PendingSecurity,
+		Security: string(security), RepositoryID: installed.RepositoryID,
+		InstalledProvenanceDigest: installed.ProvenanceDigest, InventoryID: snapshot.ID, InventoryDigest: snapshot.ContentDigest,
+		Generation: snapshot.Generation, UpdatedAt: snapshot.CapturedAt}
+	for _, repository := range snapshot.Repositories { if repository.ID == installed.RepositoryID { result.RepositoryOrigin, result.RepositorySuite, result.RepositoryComponent, result.RepositoryEnabled, result.RepositoryMetadataRevision, result.RepositorySignature, result.RepositorySigningKeyID, result.RepositoryDigest = repository.Origin, repository.Suite, repository.Component, repository.Enabled, repository.MetadataRevision, string(repository.Signature), repository.SigningKeyID, repository.Digest } }
+	for _, provenance := range snapshot.Provenance {
+		if provenance.Digest == installed.ProvenanceDigest { result.InstalledProvenanceSignature, result.InstalledProvenanceSigningKeyID, result.InstalledVendor, result.LocalArtifact = string(provenance.Signature), provenance.SigningKeyID, provenance.Vendor, provenance.LocalArtifact }
+		if provenance.PackageName == installed.Name && provenance.Architecture == installed.Architecture && provenance.Version == installed.CandidateVersion && provenance.RepositoryID == installed.RepositoryID { result.CandidateProvenanceDigest, result.CandidateProvenanceSignature = provenance.Digest, string(provenance.Signature) }
+	}
+	for _, hold := range snapshot.Holds { if hold.PackageName == installed.Name { result.Type, result.Held, result.HoldKind, result.HoldSource = "held", true, hold.Kind, hold.Source } }
+	return result
 }
 
 func (edge *packageMaintenanceLinuxEdge) ListPackageMaintenance(ctx context.Context, call apiserver.EdgeCall,
