@@ -103,7 +103,7 @@ func dialIMAP(ctx context.Context, endpoint Endpoint, bearer string) (*imapClien
 		return nil, ErrUnavailable
 	}
 	capabilities, err := client.command("CAPABILITY")
-	if err != nil || !hasCapabilities(capabilities, "IMAP4REV1", "AUTH=OAUTHBEARER", "SASL-IR", "ESEARCH", "PARTIAL", "SORT", "CONDSTORE", "LIST-EXTENDED", "LIST-STATUS", "SPECIAL-USE", "QUOTA") {
+	if err != nil || !hasCapabilities(capabilities, "IMAP4REV1", "AUTH=OAUTHBEARER", "SASL-IR", "ESEARCH", "PARTIAL", "SORT", "CONDSTORE", "LIST-EXTENDED", "LIST-STATUS", "SPECIAL-USE", "QUOTA", "BINARY", "MOVE", "UIDPLUS") {
 		client.stop()
 		connection.Close()
 		return nil, ErrUnavailable
@@ -196,6 +196,122 @@ func (client *imapClient) command(command string) ([]string, error) {
 		lines = append(lines, line)
 	}
 	return nil, ErrPartial
+}
+
+type imapLiteralReader struct {
+	client    *imapClient
+	tag       string
+	remaining int64
+	finished  bool
+	closed    bool
+}
+
+func (reader *imapLiteralReader) Read(buffer []byte) (int, error) {
+	if reader == nil || reader.client == nil || reader.closed {
+		return 0, io.ErrClosedPipe
+	}
+	if reader.remaining == 0 {
+		if err := reader.finish(); err != nil {
+			return 0, err
+		}
+		return 0, io.EOF
+	}
+	if int64(len(buffer)) > reader.remaining {
+		buffer = buffer[:reader.remaining]
+	}
+	read, err := reader.client.reader.Read(buffer)
+	reader.remaining -= int64(read)
+	if err != nil {
+		return read, errors.Join(ErrUnavailable, err)
+	}
+	return read, nil
+}
+
+func (reader *imapLiteralReader) finish() error {
+	if reader.finished {
+		return nil
+	}
+	if reader.remaining != 0 {
+		return ErrPartial
+	}
+	for count := 0; count < 16; count++ {
+		line, _, err := readPhysicalLine(reader.client.reader)
+		if err != nil {
+			return errors.Join(ErrUnavailable, err)
+		}
+		if strings.HasPrefix(line, reader.tag+" ") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 || fields[0] != reader.tag {
+				return ErrAmbiguous
+			}
+			if strings.EqualFold(fields[1], "OK") {
+				reader.finished = true
+				return nil
+			}
+			return ErrUnavailable
+		}
+		if count != 0 || line != ")" {
+			return ErrAmbiguous
+		}
+	}
+	return ErrPartial
+}
+
+func (reader *imapLiteralReader) Close() error {
+	if reader == nil || reader.closed {
+		return nil
+	}
+	reader.closed = true
+	var result error
+	if reader.remaining > 0 {
+		_, result = io.CopyN(io.Discard, reader.client.reader, reader.remaining)
+		reader.remaining = 0
+	}
+	if result == nil {
+		result = reader.finish()
+	}
+	reader.client.close()
+	return result
+}
+
+func (client *imapClient) literalCommand(command string, expectedUID uint32, maximum uint64) (io.ReadCloser, uint64, error) {
+	if client == nil || client.connection == nil || command == "" || len(command) > maximumIMAPCommandBytes ||
+		strings.ContainsAny(command, "\x00\r\n") || expectedUID == 0 || maximum == 0 || maximum > MaximumAttachmentBytes {
+		return nil, 0, ErrInvalid
+	}
+	sequence := atomic.AddUint32(&client.sequence, 1)
+	if sequence == 0 {
+		return nil, 0, ErrProtocol
+	}
+	tag := fmt.Sprintf("W%08X", sequence)
+	if err := client.connection.SetDeadline(time.Now().Add(client.timeout)); err != nil {
+		return nil, 0, errors.Join(ErrUnavailable, err)
+	}
+	if _, err := io.WriteString(client.connection, tag+" "+command+"\r\n"); err != nil {
+		return nil, 0, errors.Join(ErrUnavailable, err)
+	}
+	uidMarker := " UID " + strconv.FormatUint(uint64(expectedUID), 10) + " "
+	for count := 0; count < 16; count++ {
+		line, _, err := readPhysicalLine(client.reader)
+		if err != nil {
+			return nil, 0, errors.Join(ErrUnavailable, err)
+		}
+		if strings.HasPrefix(strings.ToUpper(line), "* BYE") || strings.HasPrefix(line, "+") {
+			return nil, 0, ErrUnavailable
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			return nil, 0, ErrProtocol
+		}
+		length, markerStart, ok := literalSuffix(line)
+		if !ok {
+			return nil, 0, ErrAmbiguous
+		}
+		if !strings.Contains(line[:markerStart], uidMarker) || length < 0 || uint64(length) > maximum {
+			return nil, 0, ErrLimit
+		}
+		return &imapLiteralReader{client: client, tag: tag, remaining: int64(length)}, uint64(length), nil
+	}
+	return nil, 0, ErrPartial
 }
 
 func (client *imapClient) readResponseLine() (string, int, error) {

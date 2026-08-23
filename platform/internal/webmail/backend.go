@@ -1,12 +1,24 @@
 package webmail
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
+	"errors"
+	"io"
+	"mime"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -317,6 +329,10 @@ type selectedMailbox struct {
 }
 
 func selectMailbox(client *imapClient, folder string) (selectedMailbox, error) {
+	return openMailbox(client, folder, true)
+}
+
+func openMailbox(client *imapClient, folder string, readOnly bool) (selectedMailbox, error) {
 	encoded, err := encodeMailbox(folder)
 	if err != nil {
 		return selectedMailbox{}, err
@@ -325,7 +341,11 @@ func selectMailbox(client *imapClient, folder string) (selectedMailbox, error) {
 	if err != nil {
 		return selectedMailbox{}, err
 	}
-	lines, err := client.command("EXAMINE " + quoted + " (CONDSTORE)")
+	verb := "SELECT"
+	if readOnly {
+		verb = "EXAMINE"
+	}
+	lines, err := client.command(verb + " " + quoted + " (CONDSTORE)")
 	if err != nil {
 		return selectedMailbox{}, err
 	}
@@ -349,6 +369,194 @@ func selectMailbox(client *imapClient, folder string) (selectedMailbox, error) {
 		return selectedMailbox{}, ErrProtocol
 	}
 	return selected, nil
+}
+
+func (backend *DovecotBackend) OpenMessage(ctx context.Context, bearer string, identity MessageIdentity, maximum uint64) (io.ReadCloser, error) {
+	if ctx == nil || !identity.valid() || maximum == 0 || maximum > MaximumRawMessageBytes {
+		return nil, ErrInvalid
+	}
+	client, err := backend.connect(ctx, bearer)
+	if err != nil {
+		return nil, err
+	}
+	selected, err := selectMailbox(client, identity.Folder)
+	if err != nil {
+		client.close()
+		return nil, err
+	}
+	if selected.UIDValidity != identity.UIDValidity {
+		client.close()
+		return nil, ErrStaleUIDValidity
+	}
+	reader, _, err := client.literalCommand("UID FETCH "+strconv.FormatUint(uint64(identity.UID), 10)+" (UID BODY.PEEK[])", identity.UID, maximum)
+	if err != nil {
+		client.close()
+		return nil, err
+	}
+	return reader, nil
+}
+
+func (backend *DovecotBackend) OpenPart(ctx context.Context, bearer string, identity MessageIdentity, partID string, maximum uint64) (io.ReadCloser, uint64, error) {
+	if ctx == nil || !identity.valid() || len(partID) > 128 || !partIDPattern.MatchString(partID) || maximum == 0 || maximum > MaximumAttachmentBytes {
+		return nil, 0, ErrInvalid
+	}
+	client, err := backend.connect(ctx, bearer)
+	if err != nil {
+		return nil, 0, err
+	}
+	selected, err := selectMailbox(client, identity.Folder)
+	if err != nil {
+		client.close()
+		return nil, 0, err
+	}
+	if selected.UIDValidity != identity.UIDValidity {
+		client.close()
+		return nil, 0, ErrStaleUIDValidity
+	}
+	command := "UID FETCH " + strconv.FormatUint(uint64(identity.UID), 10) + " (UID BINARY.PEEK[" + partID + "])"
+	reader, size, err := client.literalCommand(command, identity.UID, maximum)
+	if err != nil {
+		client.close()
+		return nil, 0, err
+	}
+	return reader, size, nil
+}
+
+func (backend *DovecotBackend) ApplyMessages(ctx context.Context, bearer string, request MessageActionRequest) (MessageActionResult, error) {
+	if ctx == nil || !request.valid() {
+		return MessageActionResult{}, ErrInvalid
+	}
+	client, err := backend.connect(ctx, bearer)
+	if err != nil {
+		return MessageActionResult{}, err
+	}
+	defer client.close()
+	selected, err := openMailbox(client, request.Messages[0].Folder, false)
+	if err != nil {
+		return MessageActionResult{}, err
+	}
+	if selected.UIDValidity != request.Messages[0].UIDValidity {
+		return MessageActionResult{}, ErrStaleUIDValidity
+	}
+	uids := make([]uint32, len(request.Messages))
+	for index, identity := range request.Messages {
+		uids[index] = identity.UID
+	}
+	sort.Slice(uids, func(left, right int) bool { return uids[left] < uids[right] })
+	uidParts := make([]string, len(uids))
+	for index, uid := range uids {
+		uidParts[index] = strconv.FormatUint(uint64(uid), 10)
+	}
+	uidSet := strings.Join(uidParts, ",")
+	searchLines, err := client.command("UID SEARCH RETURN (PARTIAL 1:" + strconv.Itoa(len(uids)+1) + ") UID " + uidSet)
+	if err != nil {
+		return MessageActionResult{}, err
+	}
+	foundUIDs, err := parseESearch(searchLines, len(uids)+1)
+	if err != nil || len(foundUIDs) != len(uids) {
+		return MessageActionResult{}, errors.Join(ErrConflict, err)
+	}
+	found := make(map[uint32]bool, len(foundUIDs))
+	for _, uid := range foundUIDs {
+		found[uid] = true
+	}
+	for _, uid := range uids {
+		if !found[uid] {
+			return MessageActionResult{}, ErrConflict
+		}
+	}
+	command := ""
+	switch request.Action {
+	case ActionMove, ActionArchive, ActionSpam, ActionNotSpam:
+		target, encodeErr := encodeMailbox(request.TargetFolder)
+		if encodeErr != nil {
+			return MessageActionResult{}, encodeErr
+		}
+		quoted, quoteErr := imapQuote(target)
+		if quoteErr != nil {
+			return MessageActionResult{}, quoteErr
+		}
+		command = "UID MOVE " + uidSet + " " + quoted
+	case ActionCopy:
+		target, encodeErr := encodeMailbox(request.TargetFolder)
+		if encodeErr != nil {
+			return MessageActionResult{}, encodeErr
+		}
+		quoted, quoteErr := imapQuote(target)
+		if quoteErr != nil {
+			return MessageActionResult{}, quoteErr
+		}
+		command = "UID COPY " + uidSet + " " + quoted
+	case ActionDelete:
+		command = `UID STORE ` + uidSet + ` +FLAGS.SILENT (\Deleted)`
+	case ActionUndelete:
+		command = `UID STORE ` + uidSet + ` -FLAGS.SILENT (\Deleted)`
+	case ActionRead:
+		command = `UID STORE ` + uidSet + ` +FLAGS.SILENT (\Seen)`
+	case ActionUnread:
+		command = `UID STORE ` + uidSet + ` -FLAGS.SILENT (\Seen)`
+	case ActionFlag:
+		command = `UID STORE ` + uidSet + ` +FLAGS.SILENT (\Flagged)`
+	case ActionUnflag:
+		command = `UID STORE ` + uidSet + ` -FLAGS.SILENT (\Flagged)`
+	default:
+		return MessageActionResult{}, ErrInvalid
+	}
+	if _, err = client.command(command); err != nil {
+		return MessageActionResult{}, err
+	}
+	status, err := mailboxStatus(client, request.Messages[0].Folder)
+	if err != nil || status.UIDValidity != selected.UIDValidity {
+		return MessageActionResult{}, errors.Join(ErrPartial, err)
+	}
+	return MessageActionResult{Action: request.Action, Affected: uint16(len(request.Messages)),
+		UIDValidity: status.UIDValidity, HighestModSeq: status.HighestModSeq}, nil
+}
+
+func mailboxStatus(client *imapClient, folder string) (selectedMailbox, error) {
+	encoded, err := encodeMailbox(folder)
+	if err != nil {
+		return selectedMailbox{}, err
+	}
+	quoted, err := imapQuote(encoded)
+	if err != nil {
+		return selectedMailbox{}, err
+	}
+	lines, err := client.command("STATUS " + quoted + " (UIDVALIDITY HIGHESTMODSEQ)")
+	if err != nil {
+		return selectedMailbox{}, err
+	}
+	var status selectedMailbox
+	for _, line := range lines {
+		values, parseErr := parseIMAPValues(line)
+		if parseErr != nil || len(values) != 4 || values[0].atom != "*" || !strings.EqualFold(values[1].atom, "STATUS") || values[3].list == nil || len(values[3].list)%2 != 0 {
+			return selectedMailbox{}, ErrProtocol
+		}
+		for index := 0; index < len(values[3].list); index += 2 {
+			value, valueErr := strconv.ParseUint(values[3].list[index+1].atom, 10, 64)
+			if valueErr != nil {
+				return selectedMailbox{}, ErrProtocol
+			}
+			switch strings.ToUpper(values[3].list[index].atom) {
+			case "UIDVALIDITY":
+				if status.UIDValidity != 0 || value == 0 || value > uint64(^uint32(0)) {
+					return selectedMailbox{}, ErrAmbiguous
+				}
+				status.UIDValidity = uint32(value)
+			case "HIGHESTMODSEQ":
+				if status.HighestModSeq != 0 || value == 0 {
+					return selectedMailbox{}, ErrAmbiguous
+				}
+				status.HighestModSeq = value
+			default:
+				return selectedMailbox{}, ErrProtocol
+			}
+		}
+	}
+	if status.UIDValidity == 0 || status.HighestModSeq == 0 {
+		return selectedMailbox{}, ErrProtocol
+	}
+	return status, nil
 }
 
 func responseCodeNumber(line, code string) (uint64, bool) {
@@ -731,3 +939,412 @@ func buildSearchCriteria(criteria SearchCriteria) (string, error) {
 }
 
 var _ Backend = (*DovecotBackend)(nil)
+
+type cachedImage struct {
+	contentType string
+	content     []byte
+	expiresAt   time.Time
+}
+
+type HTTPRemoteImageProxy struct {
+	resolver   *net.Resolver
+	dialer     *net.Dialer
+	maximumCacheBytes uint64
+	cacheBytes uint64
+	cache      map[string]cachedImage
+	mutex      sync.Mutex
+}
+
+func NewHTTPRemoteImageProxy(resolver *net.Resolver, dialer *net.Dialer, maximumCacheBytes uint64) (*HTTPRemoteImageProxy, error) {
+	if resolver == nil || dialer == nil || maximumCacheBytes < MaximumRemoteImageBytes || maximumCacheBytes > 512<<20 {
+		return nil, ErrInvalid
+	}
+	return &HTTPRemoteImageProxy{resolver: resolver, dialer: dialer, maximumCacheBytes: maximumCacheBytes,
+		cache: make(map[string]cachedImage)}, nil
+}
+
+func normalizeRemoteImageURL(raw string) (*url.URL, error) {
+	if len(raw) == 0 || len(raw) > 4096 || strings.ContainsAny(raw, "\x00\r\n") {
+		return nil, ErrInvalid
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Fragment != "" || parsed.Hostname() == "" ||
+		parsed.Port() != "" && parsed.Port() != "443" {
+		return nil, ErrInvalid
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if net.ParseIP(host) == nil {
+		if len(host) > 253 {
+			return nil, ErrInvalid
+		}
+		for _, label := range strings.Split(host, ".") {
+			if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+				return nil, ErrInvalid
+			}
+			for _, character := range label {
+				if !((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-') {
+					return nil, ErrInvalid
+				}
+			}
+		}
+	}
+	parsed.Scheme = "https"
+	parsed.Host = host
+	if strings.Contains(host, ":") {
+		parsed.Host = "[" + host + "]"
+	}
+	return parsed, nil
+}
+
+func validImageBytes(contentType string, content []byte) bool {
+	if len(content) == 0 {
+		return false
+	}
+	switch contentType {
+	case "image/png":
+		return len(content) >= 8 && bytes.Equal(content[:8], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	case "image/jpeg":
+		return len(content) >= 3 && content[0] == 0xff && content[1] == 0xd8 && content[2] == 0xff
+	case "image/gif":
+		return len(content) >= 6 && (string(content[:6]) == "GIF87a" || string(content[:6]) == "GIF89a")
+	case "image/webp":
+		return len(content) >= 12 && string(content[:4]) == "RIFF" && string(content[8:12]) == "WEBP"
+	case "image/avif":
+		return len(content) >= 12 && string(content[4:8]) == "ftyp" && (string(content[8:12]) == "avif" || string(content[8:12]) == "avis")
+	default:
+		return false
+	}
+}
+
+func publicRemoteIP(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
+		return false
+	}
+	blocked := []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("240.0.0.0/4"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	}
+	for _, prefix := range blocked {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+func (proxy *HTTPRemoteImageProxy) resolvePublic(ctx context.Context, host string) (net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if !publicRemoteIP(ip) {
+			return nil, ErrUnauthorized
+		}
+		return ip, nil
+	}
+	addresses, err := proxy.resolver.LookupIPAddr(ctx, host)
+	if err != nil || len(addresses) == 0 || len(addresses) > 32 {
+		return nil, ErrUnavailable
+	}
+	for _, address := range addresses {
+		if !publicRemoteIP(address.IP) {
+			return nil, ErrUnauthorized
+		}
+	}
+	return addresses[0].IP, nil
+}
+
+func (proxy *HTTPRemoteImageProxy) cached(key string, now time.Time) (RemoteImage, bool) {
+	proxy.mutex.Lock()
+	defer proxy.mutex.Unlock()
+	item, ok := proxy.cache[key]
+	if !ok || !item.expiresAt.After(now) {
+		if ok {
+			proxy.cacheBytes -= uint64(len(item.content))
+			delete(proxy.cache, key)
+		}
+		return RemoteImage{}, false
+	}
+	content := append([]byte(nil), item.content...)
+	return RemoteImage{ContentType: item.contentType, Size: uint64(len(content)), Body: io.NopCloser(bytes.NewReader(content)),
+		CacheKey: key, CacheUntil: item.expiresAt, FromCache: true, CacheControl: "private, no-store", ReferrerPolicy: "no-referrer"}, true
+}
+
+func (proxy *HTTPRemoteImageProxy) putCached(key, contentType string, content []byte, expiresAt time.Time) error {
+	proxy.mutex.Lock()
+	defer proxy.mutex.Unlock()
+	if uint64(len(content)) > proxy.maximumCacheBytes {
+		return ErrLimit
+	}
+	for existingKey, item := range proxy.cache {
+		if !item.expiresAt.After(time.Now().UTC()) || proxy.cacheBytes+uint64(len(content)) > proxy.maximumCacheBytes {
+			proxy.cacheBytes -= uint64(len(item.content))
+			delete(proxy.cache, existingKey)
+		}
+	}
+	if proxy.cacheBytes+uint64(len(content)) > proxy.maximumCacheBytes {
+		return ErrLimit
+	}
+	if prior, ok := proxy.cache[key]; ok {
+		proxy.cacheBytes -= uint64(len(prior.content))
+	}
+	proxy.cache[key] = cachedImage{contentType: contentType, content: append([]byte(nil), content...), expiresAt: expiresAt}
+	proxy.cacheBytes += uint64(len(content))
+	return nil
+}
+
+func (proxy *HTTPRemoteImageProxy) Fetch(ctx context.Context, request RemoteImageRequest) (RemoteImage, error) {
+	if proxy == nil || proxy.resolver == nil || proxy.dialer == nil || ctx == nil || !opaqueIDPattern.MatchString(request.CachePartition) ||
+		!validDigest(request.ExpectedDigest) || request.MaximumBytes == 0 || request.MaximumBytes > MaximumRemoteImageBytes {
+		return RemoteImage{}, ErrInvalid
+	}
+	parsed, err := normalizeRemoteImageURL(request.URL)
+	if err != nil {
+		return RemoteImage{}, err
+	}
+	digest := sha256.Sum256([]byte(parsed.String()))
+	if hex.EncodeToString(digest[:]) != request.ExpectedDigest {
+		return RemoteImage{}, ErrUnauthorized
+	}
+	cacheKey := digestParts(request.CachePartition, request.ExpectedDigest)
+	if image, ok := proxy.cached(cacheKey, time.Now().UTC()); ok {
+		if image.Size > request.MaximumBytes {
+			image.Body.Close()
+			return RemoteImage{}, ErrLimit
+		}
+		return image, nil
+	}
+	current := parsed
+	for redirect := 0; redirect <= MaximumRemoteImageRedirects; redirect++ {
+		ip, resolveErr := proxy.resolvePublic(ctx, current.Hostname())
+		if resolveErr != nil {
+			return RemoteImage{}, resolveErr
+		}
+		transport := &http.Transport{Proxy: nil, DisableCompression: true, DisableKeepAlives: true,
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, ServerName: current.Hostname()},
+			TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 5 * time.Second, MaxResponseHeaderBytes: 32 << 10,
+			DialContext: func(dialContext context.Context, network, _ string) (net.Conn, error) {
+				return proxy.dialer.DialContext(dialContext, network, net.JoinHostPort(ip.String(), "443"))
+			}}
+		client := &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		httpRequest, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, current.String(), nil)
+		if requestErr != nil {
+			transport.CloseIdleConnections()
+			return RemoteImage{}, ErrInvalid
+		}
+		httpRequest.Header.Set("Accept", "image/avif,image/webp,image/png,image/jpeg,image/gif")
+		httpRequest.Header.Set("User-Agent", "CyberPanel-RemoteImage/1")
+		response, requestErr := client.Do(httpRequest)
+		if requestErr != nil {
+			transport.CloseIdleConnections()
+			return RemoteImage{}, ErrUnavailable
+		}
+		if response.StatusCode >= 300 && response.StatusCode < 400 {
+			location := response.Header.Get("Location")
+			response.Body.Close()
+			transport.CloseIdleConnections()
+			if redirect == MaximumRemoteImageRedirects {
+				return RemoteImage{}, ErrLimit
+			}
+			next, locationErr := current.Parse(location)
+			if locationErr != nil {
+				return RemoteImage{}, ErrInvalid
+			}
+			current, locationErr = normalizeRemoteImageURL(next.String())
+			if locationErr != nil {
+				return RemoteImage{}, locationErr
+			}
+			continue
+		}
+		if response.StatusCode != http.StatusOK || response.ContentLength > int64(request.MaximumBytes) || response.Header.Get("Content-Encoding") != "" {
+			response.Body.Close()
+			transport.CloseIdleConnections()
+			return RemoteImage{}, ErrUnavailable
+		}
+		contentType, _, typeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+		switch contentType {
+		case "image/avif", "image/webp", "image/png", "image/jpeg", "image/gif":
+		default:
+			response.Body.Close()
+			transport.CloseIdleConnections()
+			return RemoteImage{}, errors.Join(ErrUnauthorized, typeErr)
+		}
+		content, readErr := io.ReadAll(io.LimitReader(response.Body, int64(request.MaximumBytes)+1))
+		response.Body.Close()
+		transport.CloseIdleConnections()
+		if readErr != nil || uint64(len(content)) > request.MaximumBytes || !validImageBytes(contentType, content) {
+			return RemoteImage{}, ErrLimit
+		}
+		expiresAt := time.Now().UTC().Add(time.Hour)
+		if err = proxy.putCached(cacheKey, contentType, content, expiresAt); err != nil {
+			return RemoteImage{}, err
+		}
+		return RemoteImage{ContentType: contentType, Size: uint64(len(content)), Body: io.NopCloser(bytes.NewReader(content)),
+			CacheKey: cacheKey, CacheUntil: expiresAt, CacheControl: "private, no-store", ReferrerPolicy: "no-referrer"}, nil
+	}
+	return RemoteImage{}, ErrLimit
+}
+
+var _ RemoteImageProxy = (*HTTPRemoteImageProxy)(nil)
+
+type LocalBlobStore struct {
+	root string
+	mutex sync.Mutex
+}
+
+type contextReader struct {
+	ctx context.Context
+	reader io.Reader
+}
+
+func (reader *contextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
+}
+
+func NewLocalBlobStore(root string) (*LocalBlobStore, error) {
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" {
+		return nil, ErrInvalid
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+		return nil, ErrUnauthorized
+	}
+	return &LocalBlobStore{root: root}, nil
+}
+
+func (store *LocalBlobStore) blobPath(owner BlobOwner, id string) (string, error) {
+	if store == nil || !filepath.IsAbs(store.root) || !validOwner(owner) || !opaqueIDPattern.MatchString(id) {
+		return "", ErrInvalid
+	}
+	return filepath.Join(store.root, digestParts(owner.TenantID, owner.UserID, owner.MailboxID, id)), nil
+}
+
+func (store *LocalBlobStore) admit(now time.Time, maximum uint64) error {
+	directory, err := os.Open(store.root)
+	if err != nil {
+		return err
+	}
+	entries, readErr := directory.ReadDir(MaximumBlobStoreFiles + 1)
+	closeErr := directory.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) || closeErr != nil {
+		return errors.Join(readErr, closeErr)
+	}
+	var count int
+	var total uint64
+	for _, entry := range entries {
+		if len(entry.Name()) != 64 || !validDigest(entry.Name()) {
+			return ErrUnauthorized
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() < 0 {
+			return ErrUnauthorized
+		}
+		if info.ModTime().Before(now.Add(-MaximumUploadLifetime - time.Hour)) {
+			if removeErr := os.Remove(filepath.Join(store.root, entry.Name())); removeErr != nil {
+				return removeErr
+			}
+			continue
+		}
+		count++
+		if uint64(info.Size()) > MaximumBlobStoreBytes-total {
+			return ErrLimit
+		}
+		total += uint64(info.Size())
+	}
+	if count >= MaximumBlobStoreFiles || maximum > MaximumBlobStoreBytes-total {
+		return ErrLimit
+	}
+	return nil
+}
+
+func (store *LocalBlobStore) Put(ctx context.Context, blob BlobInfo, source io.Reader, maximum uint64) (BlobInfo, error) {
+	if ctx == nil || source == nil || maximum == 0 || maximum > MaximumAttachmentBytes || blob.Size != 0 || blob.Digest != "" ||
+		blob.Filename == "" || len(blob.Filename) > 255 || blob.ContentType == "" || len(blob.ContentType) > 127 || blob.ExpiresAt.IsZero() {
+		return BlobInfo{}, ErrInvalid
+	}
+	path, err := store.blobPath(blob.Owner, blob.ID)
+	if err != nil {
+		return BlobInfo{}, err
+	}
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	if err = store.admit(time.Now().UTC(), maximum); err != nil {
+		return BlobInfo{}, err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return BlobInfo{}, errors.Join(ErrConflict, err)
+	}
+	committed := false
+	defer func() {
+		file.Close()
+		if !committed {
+			_ = os.Remove(path)
+		}
+	}()
+	hash := sha256.New()
+	written, err := io.Copy(io.MultiWriter(file, hash), io.LimitReader(&contextReader{ctx: ctx, reader: source}, int64(maximum)+1))
+	if err != nil || written <= 0 || uint64(written) > maximum {
+		return BlobInfo{}, errors.Join(ErrLimit, err)
+	}
+	if err = file.Sync(); err != nil {
+		return BlobInfo{}, err
+	}
+	if err = file.Close(); err != nil {
+		return BlobInfo{}, err
+	}
+	committed = true
+	blob.Size = uint64(written)
+	blob.Digest = hex.EncodeToString(hash.Sum(nil))
+	return blob, nil
+}
+
+func (store *LocalBlobStore) Open(ctx context.Context, owner BlobOwner, id string) (io.ReadCloser, BlobInfo, error) {
+	if ctx == nil {
+		return nil, BlobInfo{}, ErrInvalid
+	}
+	path, err := store.blobPath(owner, id)
+	if err != nil {
+		return nil, BlobInfo{}, err
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, BlobInfo{}, ErrNotFound
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0600 || info.Size() <= 0 || info.Size() > MaximumAttachmentBytes {
+		return nil, BlobInfo{}, ErrUnauthorized
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, BlobInfo{}, err
+	}
+	return file, BlobInfo{ID: id, Owner: owner, Size: uint64(info.Size())}, nil
+}
+
+func (store *LocalBlobStore) Delete(ctx context.Context, owner BlobOwner, id string) error {
+	if ctx == nil {
+		return ErrInvalid
+	}
+	path, err := store.blobPath(owner, id)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrNotFound
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrUnauthorized
+	}
+	return os.Remove(path)
+}
+
+var _ BlobStore = (*LocalBlobStore)(nil)

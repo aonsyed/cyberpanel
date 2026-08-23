@@ -3,6 +3,7 @@ package webmail
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"math"
 	"sync"
@@ -38,6 +39,17 @@ CREATE TABLE IF NOT EXISTS webmail_receipts_v1 (
  occurred_at INTEGER NOT NULL, PRIMARY KEY(tenant_id,request_id)
 );
 CREATE INDEX IF NOT EXISTS webmail_receipts_age_v1 ON webmail_receipts_v1(tenant_id,occurred_at);
+CREATE TABLE IF NOT EXISTS webmail_uploads_v1 (
+ tenant_id TEXT NOT NULL,user_id TEXT NOT NULL,mailbox_id TEXT NOT NULL,blob_id TEXT NOT NULL,
+ filename TEXT NOT NULL,content_type TEXT NOT NULL,size INTEGER NOT NULL,digest TEXT NOT NULL,expires_at INTEGER NOT NULL,
+ PRIMARY KEY(tenant_id,user_id,mailbox_id,blob_id)
+);
+CREATE INDEX IF NOT EXISTS webmail_uploads_expiry_v1 ON webmail_uploads_v1(tenant_id,mailbox_id,expires_at);
+CREATE TABLE IF NOT EXISTS webmail_drafts_v1 (
+ tenant_id TEXT NOT NULL,user_id TEXT NOT NULL,mailbox_id TEXT NOT NULL,draft_id TEXT NOT NULL,
+ revision INTEGER NOT NULL,draft_json BLOB NOT NULL,updated_at INTEGER NOT NULL,
+ PRIMARY KEY(tenant_id,user_id,mailbox_id,draft_id)
+);
 `
 
 type SQLiteRepository struct {
@@ -378,6 +390,190 @@ VALUES(?,?,?,?,?,?,?,?,?)`, receipt.TenantID, receipt.RequestID, receipt.UserDig
 		return err
 	}
 	return tx.Commit()
+}
+
+func validOwner(owner BlobOwner) bool {
+	return opaqueIDPattern.MatchString(owner.TenantID) && opaqueIDPattern.MatchString(owner.UserID) && opaqueIDPattern.MatchString(owner.MailboxID)
+}
+
+func (repository *SQLiteRepository) StoreUpload(ctx context.Context, blob BlobInfo) error {
+	if repository == nil || repository.db == nil || ctx == nil || !validOwner(blob.Owner) || !opaqueIDPattern.MatchString(blob.ID) ||
+		!safeFilename(blob.Filename) || !safeContentType(blob.ContentType) ||
+		blob.Size == 0 || blob.Size > MaximumAttachmentBytes || !validDigest(blob.Digest) || blob.ExpiresAt.IsZero() {
+		return ErrInvalid
+	}
+	repository.writer.Lock()
+	defer repository.writer.Unlock()
+	tx, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM webmail_uploads_v1 WHERE tenant_id=? AND user_id=? AND mailbox_id=? AND expires_at<=?`,
+		blob.Owner.TenantID, blob.Owner.UserID, blob.Owner.MailboxID, unixNano(time.Now().UTC())); err != nil {
+		return err
+	}
+	var count uint64
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM webmail_uploads_v1 WHERE tenant_id=? AND user_id=? AND mailbox_id=?`,
+		blob.Owner.TenantID, blob.Owner.UserID, blob.Owner.MailboxID).Scan(&count); err != nil {
+		return err
+	}
+	if count >= MaximumUploadsPerMailbox {
+		return ErrLimit
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO webmail_uploads_v1
+(tenant_id,user_id,mailbox_id,blob_id,filename,content_type,size,digest,expires_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		blob.Owner.TenantID, blob.Owner.UserID, blob.Owner.MailboxID, blob.ID, blob.Filename, blob.ContentType,
+		blob.Size, blob.Digest, unixNano(blob.ExpiresAt))
+	if err != nil {
+		return errors.Join(ErrConflict, err)
+	}
+	return tx.Commit()
+}
+
+func (repository *SQLiteRepository) GetUploads(ctx context.Context, owner BlobOwner, ids []string, now time.Time) ([]BlobInfo, error) {
+	if repository == nil || repository.db == nil || ctx == nil || !validOwner(owner) || len(ids) == 0 || len(ids) > MaximumComposeAttachments || now.IsZero() {
+		return nil, ErrInvalid
+	}
+	result := make([]BlobInfo, 0, len(ids))
+	seen := make(map[string]bool)
+	for _, id := range ids {
+		if !opaqueIDPattern.MatchString(id) || seen[id] {
+			return nil, ErrInvalid
+		}
+		seen[id] = true
+		var blob BlobInfo
+		var expiresAt int64
+		err := repository.db.QueryRowContext(ctx, `SELECT filename,content_type,size,digest,expires_at FROM webmail_uploads_v1
+WHERE tenant_id=? AND user_id=? AND mailbox_id=? AND blob_id=? AND expires_at>?`, owner.TenantID, owner.UserID,
+			owner.MailboxID, id, unixNano(now)).Scan(&blob.Filename, &blob.ContentType, &blob.Size, &blob.Digest, &expiresAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		blob.ID = id
+		blob.Owner = owner
+		blob.ExpiresAt = time.Unix(0, expiresAt).UTC()
+		if blob.Size == 0 || blob.Size > MaximumAttachmentBytes || !validDigest(blob.Digest) || !safeFilename(blob.Filename) || !safeContentType(blob.ContentType) {
+			return nil, ErrProtocol
+		}
+		result = append(result, blob)
+	}
+	return result, nil
+}
+
+func (repository *SQLiteRepository) DeleteUpload(ctx context.Context, owner BlobOwner, id string) error {
+	if repository == nil || repository.db == nil || ctx == nil || !validOwner(owner) || !opaqueIDPattern.MatchString(id) {
+		return ErrInvalid
+	}
+	repository.writer.Lock()
+	defer repository.writer.Unlock()
+	result, err := repository.db.ExecContext(ctx, `DELETE FROM webmail_uploads_v1 WHERE tenant_id=? AND user_id=? AND mailbox_id=? AND blob_id=?`,
+		owner.TenantID, owner.UserID, owner.MailboxID, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (repository *SQLiteRepository) PutDraft(ctx context.Context, draft Draft, expectedRevision uint64) (Draft, error) {
+	owner := BlobOwner{TenantID: draft.TenantID, UserID: draft.UserID, MailboxID: draft.MailboxID}
+	if repository == nil || repository.db == nil || ctx == nil || !validOwner(owner) || !opaqueIDPattern.MatchString(draft.Message.ID) || expectedRevision >= math.MaxInt64 {
+		return Draft{}, ErrInvalid
+	}
+	draft.Revision = expectedRevision + 1
+	draft.UpdatedAt = time.Now().UTC()
+	encoded, err := json.Marshal(draft)
+	if err != nil || len(encoded) > MaximumRenderedPartBytes {
+		return Draft{}, ErrLimit
+	}
+	repository.writer.Lock()
+	defer repository.writer.Unlock()
+	var result sql.Result
+	if expectedRevision == 0 {
+		var count uint64
+		if err = repository.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM webmail_drafts_v1 WHERE tenant_id=? AND user_id=? AND mailbox_id=?`,
+			draft.TenantID, draft.UserID, draft.MailboxID).Scan(&count); err != nil {
+			return Draft{}, err
+		}
+		if count >= MaximumDraftsPerMailbox {
+			return Draft{}, ErrLimit
+		}
+		result, err = repository.db.ExecContext(ctx, `INSERT OR IGNORE INTO webmail_drafts_v1
+(tenant_id,user_id,mailbox_id,draft_id,revision,draft_json,updated_at) VALUES(?,?,?,?,?,?,?)`, draft.TenantID,
+			draft.UserID, draft.MailboxID, draft.Message.ID, draft.Revision, encoded, unixNano(draft.UpdatedAt))
+	} else {
+		result, err = repository.db.ExecContext(ctx, `UPDATE webmail_drafts_v1 SET revision=?,draft_json=?,updated_at=?
+WHERE tenant_id=? AND user_id=? AND mailbox_id=? AND draft_id=? AND revision=?`, draft.Revision, encoded,
+			unixNano(draft.UpdatedAt), draft.TenantID, draft.UserID, draft.MailboxID, draft.Message.ID, expectedRevision)
+	}
+	if err != nil {
+		return Draft{}, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return Draft{}, err
+	}
+	if rows != 1 {
+		return Draft{}, ErrConflict
+	}
+	return draft, nil
+}
+
+func (repository *SQLiteRepository) GetDraft(ctx context.Context, owner BlobOwner, id string) (Draft, error) {
+	if repository == nil || repository.db == nil || ctx == nil || !validOwner(owner) || !opaqueIDPattern.MatchString(id) {
+		return Draft{}, ErrInvalid
+	}
+	var encoded []byte
+	var revision uint64
+	var updatedAt int64
+	err := repository.db.QueryRowContext(ctx, `SELECT revision,draft_json,updated_at FROM webmail_drafts_v1
+WHERE tenant_id=? AND user_id=? AND mailbox_id=? AND draft_id=?`, owner.TenantID, owner.UserID, owner.MailboxID, id).Scan(&revision, &encoded, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Draft{}, ErrNotFound
+	}
+	if err != nil {
+		return Draft{}, err
+	}
+	if len(encoded) > MaximumRenderedPartBytes {
+		return Draft{}, ErrProtocol
+	}
+	var draft Draft
+	if err = json.Unmarshal(encoded, &draft); err != nil || draft.TenantID != owner.TenantID || draft.UserID != owner.UserID ||
+		draft.MailboxID != owner.MailboxID || draft.Message.ID != id || draft.Revision != revision || unixNano(draft.UpdatedAt) != updatedAt {
+		return Draft{}, ErrProtocol
+	}
+	return draft, nil
+}
+
+func (repository *SQLiteRepository) DeleteDraft(ctx context.Context, owner BlobOwner, id string, expectedRevision uint64) error {
+	if repository == nil || repository.db == nil || ctx == nil || !validOwner(owner) || !opaqueIDPattern.MatchString(id) || expectedRevision == 0 {
+		return ErrInvalid
+	}
+	repository.writer.Lock()
+	defer repository.writer.Unlock()
+	result, err := repository.db.ExecContext(ctx, `DELETE FROM webmail_drafts_v1 WHERE tenant_id=? AND user_id=? AND mailbox_id=? AND draft_id=? AND revision=?`,
+		owner.TenantID, owner.UserID, owner.MailboxID, id, expectedRevision)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrConflict
+	}
+	return nil
 }
 
 var _ Repository = (*SQLiteRepository)(nil)

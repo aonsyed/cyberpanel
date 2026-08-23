@@ -3,6 +3,7 @@ package webmail
 import (
 	"context"
 	"errors"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -35,9 +36,25 @@ const (
 	MaximumGrantsPerTenant = 4096
 	MaximumReceiptsPerTenant = 4096
 	MaximumCursorsPerTenant  = 4096
+	MaximumRawMessageBytes = 8 << 20
+	MaximumRenderedPartBytes = 1 << 20
+	MaximumAttachmentBytes = 25 << 20
+	MaximumComposeBytes = 32 << 20
+	MaximumComposeAttachments = 32
+	MaximumUploadsPerMailbox = 128
+	MaximumDraftsPerMailbox = 512
+	MaximumRecipients = 100
+	MaximumMessageBatch = 100
+	MaximumRemoteImageBytes = 5 << 20
+	MaximumRemoteImageRedirects = 3
+	MaximumRemoteImageLifetime = 24 * time.Hour
+	MaximumUploadLifetime = 24 * time.Hour
+	MaximumBlobStoreFiles = 65536
+	MaximumBlobStoreBytes = 10 << 30
 )
 
 var opaqueIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+var partIDPattern = regexp.MustCompile(`^[1-9][0-9]*(\.[1-9][0-9]*){0,15}$`)
 
 type Principal struct {
 	UserID    string
@@ -287,6 +304,10 @@ type MessageIdentity struct {
 	UID         uint32
 }
 
+func (identity MessageIdentity) valid() bool {
+	return validMailboxName(identity.Folder) && identity.UIDValidity > 0 && identity.UID > 0
+}
+
 type MessageSummary struct {
 	Identity      MessageIdentity
 	ModSeq        uint64
@@ -381,6 +402,229 @@ type SearchPage struct {
 	lastUID      uint32
 }
 
+type RemoteImagePolicy string
+
+const (
+	RemoteImagesBlocked RemoteImagePolicy = "blocked"
+	RemoteImagesProxy   RemoteImagePolicy = "proxy"
+)
+
+type RemoteImageReference struct {
+	ID        string
+	URL       string
+	URLDigest string
+	Blocked   bool
+}
+
+type RenderedMessage struct {
+	Identity      MessageIdentity
+	PlainText     string
+	SanitizedHTML string
+	CSP           string
+	ReferrerPolicy string
+	RemoteImages  []RemoteImageReference
+}
+
+type MessageReadRequest struct {
+	Identity          MessageIdentity
+	RemoteImagePolicy RemoteImagePolicy
+}
+
+type RemoteImageRequest struct {
+	Identity       MessageIdentity
+	ReferenceID    string
+	URL            string
+	ExpectedDigest string
+	MaximumBytes   uint64
+	CachePartition string
+}
+
+type RemoteImage struct {
+	ContentType  string
+	Size         uint64
+	Body         io.ReadCloser
+	CacheKey     string
+	CacheUntil   time.Time
+	FromCache    bool
+	CacheControl string
+	ReferrerPolicy string
+}
+
+type AttachmentRequest struct {
+	Identity     MessageIdentity
+	PartID       string
+	Filename     string
+	ContentType  string
+	Disposition  string
+	MaximumBytes uint64
+	Preview      bool
+}
+
+type AttachmentDownload struct {
+	Filename     string
+	ContentType  string
+	Disposition  string
+	Size         uint64
+	Digest       string
+	Body         io.ReadCloser
+	MalwareState string
+	CSP          string
+	NoSniff      bool
+}
+
+type BlobOwner struct {
+	TenantID  string
+	UserID    string
+	MailboxID string
+}
+
+type BlobInfo struct {
+	ID          string
+	Owner       BlobOwner
+	Filename    string
+	ContentType string
+	Size        uint64
+	Digest      string
+	ExpiresAt   time.Time
+}
+
+type BlobStore interface {
+	Put(context.Context, BlobInfo, io.Reader, uint64) (BlobInfo, error)
+	Open(context.Context, BlobOwner, string) (io.ReadCloser, BlobInfo, error)
+	Delete(context.Context, BlobOwner, string) error
+}
+
+type MalwareScanner interface {
+	Scan(context.Context, io.Reader, uint64) (string, error)
+}
+
+type RemoteImageProxy interface {
+	Fetch(context.Context, RemoteImageRequest) (RemoteImage, error)
+}
+
+type ComposeAddress struct {
+	Name    string
+	Address string
+}
+
+type ComposeMode string
+
+const (
+	ComposeNew      ComposeMode = "new"
+	ComposeReply    ComposeMode = "reply"
+	ComposeReplyAll ComposeMode = "reply_all"
+	ComposeForward  ComposeMode = "forward"
+)
+
+type ComposeMessage struct {
+	ID            string
+	Mode          ComposeMode
+	From          ComposeAddress
+	To            []ComposeAddress
+	CC            []ComposeAddress
+	BCC           []ComposeAddress
+	ReplyTo       []ComposeAddress
+	Subject       string
+	PlainText     string
+	SanitizedHTML string
+	InReplyTo     string
+	References    []string
+	AttachmentIDs []string
+	SendAt        time.Time
+}
+
+type Draft struct {
+	TenantID  string
+	UserID    string
+	MailboxID string
+	Revision  uint64
+	Message   ComposeMessage
+	UpdatedAt time.Time
+}
+
+type SubmissionEnvelope struct {
+	From       string
+	Recipients []string
+}
+
+type Submitter interface {
+	Submit(context.Context, SubmissionEnvelope, io.Reader, uint64) (string, error)
+}
+
+type SubmissionScheduler interface {
+	Schedule(context.Context, BlobOwner, ComposeMessage) (string, error)
+}
+
+type SpamReporter interface {
+	Report(context.Context, BlobOwner, []MessageIdentity, bool) error
+}
+
+type UploadRequest struct {
+	Filename    string
+	ContentType string
+	MaximumBytes uint64
+	ExpiresAt   time.Time
+}
+
+type MessageAction string
+
+const (
+	ActionMove      MessageAction = "move"
+	ActionCopy      MessageAction = "copy"
+	ActionDelete    MessageAction = "delete"
+	ActionUndelete  MessageAction = "undelete"
+	ActionArchive   MessageAction = "archive"
+	ActionRead      MessageAction = "read"
+	ActionUnread    MessageAction = "unread"
+	ActionFlag      MessageAction = "flag"
+	ActionUnflag    MessageAction = "unflag"
+	ActionSpam      MessageAction = "spam"
+	ActionNotSpam   MessageAction = "not_spam"
+)
+
+type MessageActionRequest struct {
+	Action       MessageAction
+	Messages     []MessageIdentity
+	TargetFolder string
+}
+
+type MessageActionResult struct {
+	Action       MessageAction
+	Affected     uint16
+	UIDValidity  uint32
+	HighestModSeq uint64
+}
+
+func (request MessageActionRequest) valid() bool {
+	if len(request.Messages) == 0 || len(request.Messages) > MaximumMessageBatch {
+		return false
+	}
+	switch request.Action {
+	case ActionMove, ActionCopy, ActionArchive, ActionSpam, ActionNotSpam:
+		if !validMailboxName(request.TargetFolder) {
+			return false
+		}
+	case ActionDelete, ActionUndelete, ActionRead, ActionUnread, ActionFlag, ActionUnflag:
+		if request.TargetFolder != "" {
+			return false
+		}
+	default:
+		return false
+	}
+	first := request.Messages[0]
+	if !first.valid() {
+		return false
+	}
+	seen := make(map[uint32]bool)
+	for _, identity := range request.Messages {
+		if !identity.valid() || identity.Folder != first.Folder || identity.UIDValidity != first.UIDValidity || seen[identity.UID] {
+			return false
+		}
+		seen[identity.UID] = true
+	}
+	return true
+}
+
 func validMailboxName(name string) bool {
 	return name != "" && len([]rune(name)) <= MaximumFolderNameRunes && len(name) <= 1024 &&
 		strings.IndexFunc(name, unicode.IsControl) < 0 && strings.ToValidUTF8(name, "") == name
@@ -417,6 +661,12 @@ type Repository interface {
 	StoreCursor(context.Context, string, CursorState) error
 	ConsumeCursor(context.Context, string, CursorState, time.Time) (CursorState, error)
 	StoreReceipt(context.Context, OperationReceipt) error
+	StoreUpload(context.Context, BlobInfo) error
+	GetUploads(context.Context, BlobOwner, []string, time.Time) ([]BlobInfo, error)
+	DeleteUpload(context.Context, BlobOwner, string) error
+	PutDraft(context.Context, Draft, uint64) (Draft, error)
+	GetDraft(context.Context, BlobOwner, string) (Draft, error)
+	DeleteDraft(context.Context, BlobOwner, string, uint64) error
 }
 
 type Backend interface {
@@ -424,4 +674,7 @@ type Backend interface {
 	MutateFolder(context.Context, string, FolderMutationRequest) error
 	ListMessages(context.Context, string, MessagePageRequest) (MessagePage, error)
 	Search(context.Context, string, SearchRequest) (SearchPage, error)
+	OpenMessage(context.Context, string, MessageIdentity, uint64) (io.ReadCloser, error)
+	OpenPart(context.Context, string, MessageIdentity, string, uint64) (io.ReadCloser, uint64, error)
+	ApplyMessages(context.Context, string, MessageActionRequest) (MessageActionResult, error)
 }
