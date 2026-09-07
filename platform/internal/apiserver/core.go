@@ -13,6 +13,10 @@ import (
 
 type NonceStore interface { Mark(string, time.Time) error }
 
+// MutationAdmission records an invocation before any domain effect and fences
+// it against controlled reboot. Read/observation handlers never acquire it.
+type MutationAdmission interface { AdmitMutation(context.Context,string,string,string)(func(bool)error,error) }
+
 type Core struct {
 	Registry *Registry
 	Authenticator Authenticator
@@ -22,6 +26,7 @@ type Core struct {
 	Clock func() time.Time
 	MaximumConcurrent uint32
 	Preview *preview.Service
+	Mutations MutationAdmission
 	semaphore chan struct{}
 }
 
@@ -91,13 +96,19 @@ func (core *Core) invoke(writer http.ResponseWriter, httpRequest *http.Request) 
 	} else if request.Auth != nil { core.writeInternalProblem(writer, classifyError(invalid("credentials on anonymous operation"), request.Request.RequestID)); return }
 	invocation := Invocation{Actor: actor, Request: request.Request, IdempotencyKey: request.IdempotencyKey, Meta: request.Meta}
 	var ledgerKey, requestDigest string
+	invocationCompleted:=false
 	if operation.Mutating {
 		ledgerKey = actor.PrincipalID.String()+"\x00"+operation.Name+"\x00"+request.IdempotencyKey
 		requestDigest, err = digestRequest(actor.PrincipalID, operation.Name, request.IdempotencyKey, request.Request)
 		if err != nil { core.writeInternalProblem(writer, classifyError(ErrInvalidRequest, request.Request.RequestID)); return }
+		if core.Mutations!=nil {
+			finish,admitErr:=core.Mutations.AdmitMutation(httpRequest.Context(),operation.Name,request.Request.RequestID,requestDigest)
+			if admitErr!=nil||finish==nil{core.writeInternalProblem(writer,classifyError(ErrUnavailable,request.Request.RequestID));return}
+			defer func(){_ = finish(invocationCompleted)}()
+		}
 		receipt, cached, acquireErr := core.Idempotency.Acquire(httpRequest.Context(), ledgerKey, requestDigest)
 		if acquireErr != nil { core.writeInternalProblem(writer, classifyError(acquireErr, request.Request.RequestID)); return }
-		if cached { core.writeInternal(writer, receipt.Response); return }
+		if cached { invocationCompleted=true;core.writeInternal(writer, receipt.Response); return }
 	}
 	result, err := operation.Handler(httpRequest.Context(), invocation, payload)
 	if err != nil {
@@ -116,6 +127,7 @@ func (core *Core) invoke(writer http.ResponseWriter, httpRequest *http.Request) 
 	if operation.Mutating {
 		if err = core.Idempotency.Complete(context.WithoutCancel(httpRequest.Context()), ledgerKey, requestDigest, response); err != nil { core.writeInternalProblem(writer, classifyError(ErrUnavailable, request.Request.RequestID)); return }
 	}
+	invocationCompleted=true
 	core.writeInternal(writer, response)
 }
 

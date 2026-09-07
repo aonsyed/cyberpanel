@@ -110,6 +110,12 @@ type rebootControlLinuxEdge struct {
 	now         func() time.Time
 }
 
+func(edge *rebootControlLinuxEdge)AdmitMutation(ctx context.Context,operation,requestID,digest string)(func(bool)error,error){
+	if edge==nil||edge.authority==nil{return nil,rebootcontrol.ErrInvalid}
+	gate,ok:=edge.authority.(apiserver.MutationAdmission);if !ok{return nil,rebootcontrol.ErrUnproven}
+	return gate.AdmitMutation(ctx,operation,requestID,digest)
+}
+
 func newRebootControlLinuxEdge(coordinator *rebootcontrol.Coordinator, repository *rebootcontrol.Repository,
 	packages *packagemaint.SQLRepository, authority rebootControlLinuxAuthority, nodeID, controllerID string,
 	manager packagemaint.Manager, now func() time.Time) (*rebootControlLinuxEdge, error) {
