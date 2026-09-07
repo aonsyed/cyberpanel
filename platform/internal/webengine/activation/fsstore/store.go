@@ -32,6 +32,7 @@ const (
 
 type Store struct {
 	root    *os.Root
+	rootPath string
 	edition webengine.Edition
 	master  string
 	vhost   string
@@ -108,7 +109,24 @@ func New(root string, edition webengine.Edition) (*Store, error) {
 		openedRoot.Close()
 		return nil, err
 	}
-	return &Store{root: openedRoot, edition: edition, master: master, vhost: vhost}, nil
+	return &Store{root: openedRoot, rootPath: root, edition: edition, master: master, vhost: vhost}, nil
+}
+
+// GenerationPath returns only a fully reverified, sealed master. Callers must
+// not accept a filesystem destination from an unprivileged request.
+func (s *Store) GenerationPath(ctx context.Context, receipt activation.Receipt) (string, error) {
+	if ctx == nil { return "", errors.New("context is required") }
+	if err := ctx.Err(); err != nil { return "", err }
+	sealed, _, err := s.resolve(receipt, true)
+	if err != nil { return "", err }
+	name, err := s.artifactPath(sealed, native.ArtifactServer, "engine")
+	if err != nil { return "", err }
+	return filepath.Join(s.rootPath, name), nil
+}
+
+func (s *Store) Close() error {
+	if s == nil || s.root == nil { return nil }
+	return s.root.Close()
 }
 
 func (s *Store) Stage(ctx context.Context, generation native.ConfigGeneration) (activation.Receipt, error) {

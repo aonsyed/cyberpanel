@@ -37,6 +37,13 @@ const (
 	LinuxManagementPHPInstall LinuxManagementOperation = "php.install"
 	LinuxManagementPHPProfileApply LinuxManagementOperation = "php.profile.apply"
 	LinuxManagementPHPRollback LinuxManagementOperation = "php.rollback"
+	LinuxManagementStage LinuxManagementOperation = "generation.stage"
+	LinuxManagementValidate LinuxManagementOperation = "generation.validate"
+	LinuxManagementShadow LinuxManagementOperation = "generation.shadow"
+	LinuxManagementActiveProbe LinuxManagementOperation = "generation.active_probe"
+	LinuxManagementSwitch LinuxManagementOperation = "generation.switch"
+	LinuxManagementConfirm LinuxManagementOperation = "generation.confirm"
+	LinuxManagementRestore LinuxManagementOperation = "generation.restore"
 )
 
 type LinuxManagementRequest struct {
@@ -60,6 +67,11 @@ type linuxManagementResponse struct {
 }
 
 type lifecyclePlanInput struct{Request EffectRequest `json:"request"`;Plan ArtifactPlan `json:"plan"`}
+type lifecycleGenerationInput struct {
+	Request EffectRequest `json:"request"`
+	Render native.RenderRequest `json:"render"`
+	ConfigDigest string `json:"config_digest"`
+}
 type lifecycleConvertInput struct{Request EffectRequest `json:"request"`;Plan ArtifactPlan `json:"plan"`;Generation native.ConfigGeneration `json:"generation"`;RollbackWindow time.Duration `json:"rollback_window"`}
 type lifecycleRemoveInput struct{Request EffectRequest `json:"request"`;Edition webengine.Edition `json:"edition"`}
 type licenseConfigureInput struct{Request EffectRequest `json:"request"`;License LicenseRequest `json:"license"`}

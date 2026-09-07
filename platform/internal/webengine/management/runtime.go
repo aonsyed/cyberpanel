@@ -54,7 +54,7 @@ func NewRuntime(catalogValue *catalog.SQLCatalog, activator VerifiedActivator, r
 }
 
 func (*Runtime) ManagementCapabilities() Capabilities {
-	return Capabilities{Inspect: true, Install: true, Convert: true, Upgrade: true, Remove: true, RefreshLicense: true, InstallPHP: true, Tune: true}
+	return Capabilities{Inspect: true, Install: true, Convert: false, Upgrade: true, Remove: true, RefreshLicense: true, InstallPHP: true, Tune: true}
 }
 
 func DefaultGlobalTuning() GlobalTuning {
@@ -237,23 +237,83 @@ func (runtime *Runtime) ApplyLicense(ctx context.Context, request EffectRequest,
 func (runtime *Runtime) RefreshLicense(ctx context.Context, request EffectRequest) (LicenseStatus, error) {
 	if runtime==nil||runtime.lifecycle==nil{return LicenseStatus{},ErrInvalid};return runtime.lifecycle.RefreshLicense(ctx,request)
 }
-func (*Runtime) StageGeneration(context.Context, EffectRequest, native.ConfigGeneration) (EffectReceipt, error) {
-	return EffectReceipt{}, ErrUnsupported
+func (runtime *Runtime) StageGeneration(ctx context.Context, request EffectRequest, generation native.ConfigGeneration) (EffectReceipt, error) {
+	input, err := runtime.generationInput(ctx, request, generation)
+	if err != nil { return EffectReceipt{}, err }
+	var result EffectReceipt
+	err = runtime.lifecycle.call(ctx, LinuxManagementStage, input, &result)
+	return result, err
 }
-func (*Runtime) ValidateGeneration(context.Context, EffectRequest, native.ConfigGeneration) (ValidationReceipt, error) {
-	return ValidationReceipt{}, ErrUnsupported
+func (runtime *Runtime) ValidateGeneration(ctx context.Context, request EffectRequest, generation native.ConfigGeneration) (ValidationReceipt, error) {
+	input, err := runtime.generationInput(ctx, request, generation)
+	if err != nil { return ValidationReceipt{}, err }
+	var result ValidationReceipt
+	err = runtime.lifecycle.call(ctx, LinuxManagementValidate, input, &result)
+	return result, err
 }
-func (*Runtime) ShadowProbe(context.Context, EffectRequest, native.ConfigGeneration) (ProbeReceipt, error) {
-	return ProbeReceipt{}, ErrUnsupported
+func (runtime *Runtime) ShadowProbe(ctx context.Context, request EffectRequest, generation native.ConfigGeneration) (ProbeReceipt, error) {
+	input, err := runtime.generationInput(ctx, request, generation)
+	if err != nil { return ProbeReceipt{}, err }
+	var result ProbeReceipt
+	err = runtime.lifecycle.call(ctx, LinuxManagementShadow, input, &result)
+	return result, err
 }
-func (*Runtime) SwitchService(context.Context, SwitchRequest) (SwitchReceipt, error) {
-	return SwitchReceipt{}, ErrUnsupported
+func (runtime *Runtime) SwitchService(ctx context.Context, request SwitchRequest) (SwitchReceipt, error) {
+	if runtime == nil || runtime.lifecycle == nil { return SwitchReceipt{}, ErrInvalid }
+	var result SwitchReceipt
+	err := runtime.lifecycle.call(ctx, LinuxManagementSwitch, request, &result)
+	return result, err
 }
-func (*Runtime) ConfirmService(context.Context, SwitchReceipt) (ProbeReceipt, error) {
-	return ProbeReceipt{}, ErrUnsupported
+func (runtime *Runtime) ConfirmService(ctx context.Context, request SwitchReceipt) (ProbeReceipt, error) {
+	if runtime == nil || runtime.lifecycle == nil { return ProbeReceipt{}, ErrInvalid }
+	var result ProbeReceipt
+	err := runtime.lifecycle.call(ctx, LinuxManagementConfirm, request, &result)
+	return result, err
 }
-func (*Runtime) RestoreService(context.Context, SwitchReceipt) (ProbeReceipt, error) {
-	return ProbeReceipt{}, ErrUnsupported
+func (runtime *Runtime) RestoreService(ctx context.Context, request SwitchReceipt) (ProbeReceipt, error) {
+	if runtime == nil || runtime.lifecycle == nil { return ProbeReceipt{}, ErrInvalid }
+	var result ProbeReceipt
+	err := runtime.lifecycle.call(ctx, LinuxManagementRestore, request, &result)
+	return result, err
+}
+
+func (runtime *Runtime) generationInput(ctx context.Context, request EffectRequest, generation native.ConfigGeneration) (lifecycleGenerationInput, error) {
+	if runtime == nil || runtime.catalog == nil || runtime.lifecycle == nil || ctx == nil { return lifecycleGenerationInput{}, ErrInvalid }
+	plan, err := runtime.catalog.PlanForEdition(ctx, generation.Edition, generation.SnapshotGeneration)
+	if err != nil { return lifecycleGenerationInput{}, err }
+	composed, err := composer.Compose(plan)
+	if err != nil { return lifecycleGenerationInput{}, err }
+	render := native.RenderRequest{Desired: composed.Desired, Snapshot: composed.Snapshot}
+	renderer := runtime.renderers[generation.Edition]
+	if renderer == nil { return lifecycleGenerationInput{}, ErrInvalid }
+	canonical, err := renderer.Render(ctx, render)
+	if err != nil || canonical.ContentDigest != generation.ContentDigest { return lifecycleGenerationInput{}, ErrConflict }
+	return lifecycleGenerationInput{Request: request, Render: render, ConfigDigest: canonical.ContentDigest}, nil
+}
+
+// ProbeCandidate never activates a public route. The broker renders this typed
+// candidate independently and executes it only in private Linux namespaces.
+func (runtime *Runtime) ProbeCandidate(ctx context.Context, request EffectRequest, render native.RenderRequest) (ProbeReceipt, error) {
+	return runtime.probeRender(ctx, request, render, LinuxManagementShadow)
+}
+
+// ProbeActive proves the supplied site's PHP/TLS paths on the current live
+// listeners. The subset digest and installed master digest are both bound into
+// evidence; a subset is not represented as the whole active configuration.
+func (runtime *Runtime) ProbeActive(ctx context.Context, request EffectRequest, render native.RenderRequest) (ProbeReceipt, error) {
+	return runtime.probeRender(ctx, request, render, LinuxManagementActiveProbe)
+}
+
+func (runtime *Runtime) probeRender(ctx context.Context, request EffectRequest, render native.RenderRequest, operation LinuxManagementOperation) (ProbeReceipt, error) {
+	if runtime == nil || runtime.lifecycle == nil || ctx == nil { return ProbeReceipt{}, ErrInvalid }
+	renderer := runtime.renderers[render.Desired.Engine.Edition]
+	if renderer == nil { return ProbeReceipt{}, ErrInvalid }
+	generation, err := renderer.Render(ctx, render)
+	if err != nil { return ProbeReceipt{}, err }
+	input := lifecycleGenerationInput{Request: request, Render: render, ConfigDigest: generation.ContentDigest}
+	var result ProbeReceipt
+	err = runtime.lifecycle.call(ctx, operation, input, &result)
+	return result, err
 }
 func (runtime *Runtime) Remove(ctx context.Context, request EffectRequest, edition webengine.Edition) (EffectReceipt, error) {
 	if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.Remove(ctx,request,edition)

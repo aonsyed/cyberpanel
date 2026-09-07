@@ -24,7 +24,6 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
-	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation/fsstore"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/native"
 )
@@ -75,9 +74,11 @@ type lifecycleJournal struct {
 	PHPProfiles map[string]PHPProfile `json:"php_profiles,omitempty"`
 	ActivePHP *PHPProfile `json:"active_php,omitempty"`
 	PHPCatalogSequence uint64 `json:"php_catalog_sequence,omitempty"`
+	Generations map[string]lifecycleGenerationRecord `json:"generations,omitempty"`
+	Switch *lifecycleSwitchRecord `json:"switch,omitempty"`
 }
 
-type LinuxLifecycleHost struct { mu sync.Mutex; journal lifecycleJournal; now func()time.Time }
+type LinuxLifecycleHost struct { mu sync.Mutex; journal lifecycleJournal; now func()time.Time; configurationRelease func() }
 
 func init(){rootOwnedFile=func(info os.FileInfo)bool{metadata,ok:=info.Sys().(*syscall.Stat_t);return ok&&metadata.Uid==0}}
 
@@ -87,11 +88,26 @@ func NewLinuxLifecycleHost()(*LinuxLifecycleHost,error){
 	if err:=ensureLifecycleDirectory(lifecyclePackageRoot,0o700);err!=nil{return nil,err}
 	if err:=ensurePHPProfileDirectory();err!=nil{return nil,err}
 	host:=&LinuxLifecycleHost{journal:lifecycleJournal{Version:1,Effects:map[string]lifecycleEffectRecord{},PHPProfiles:map[string]PHPProfile{}},now:time.Now}
-	if err:=host.load();err!=nil{return nil,err};return host,nil
+	if err:=host.load();err!=nil{return nil,err}
+	if err := recoverLifecycleChallenges(); err != nil { return nil, err }
+	if host.journal.Generations == nil { host.journal.Generations = map[string]lifecycleGenerationRecord{} }
+	if host.switchPending() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		if err := host.coordinateConfiguration(ctx); err != nil { cancel(); return nil, err }
+		_, err := host.restoreGeneration(ctx, host.journal.Switch.Receipt)
+		host.releaseConfiguration()
+		cancel()
+		if err != nil { return nil, errors.Join(ErrAmbiguous, err) }
+	}
+	return host,nil
 }
 
 func(host *LinuxLifecycleHost)HandleManagement(ctx context.Context,request LinuxManagementRequest)(any,error){
 	if host==nil||ctx==nil{return nil,ErrInvalid};host.mu.Lock();defer host.mu.Unlock()
+	if err := host.coordinateConfiguration(ctx); err != nil { return nil, err }
+	defer host.releaseConfiguration()
+	if generationOperation(request.Operation) { return host.handleGeneration(ctx, request) }
+	if host.switchPending() && request.Operation != LinuxManagementInspect { return nil, ErrConflict }
 	if request.Operation==LinuxManagementInspect{var input struct{Edition webengine.Edition `json:"edition"`};if decodeLifecyclePayload(request.Payload,&input)!=nil{return Installation{},ErrInvalid};return host.inspect(ctx,input.Edition)}
 	effect,err:=lifecycleEffect(request);if err!=nil{return nil,err};key:=string(request.Operation)+":"+effect;digest:=linuxManagementDigest(append([]byte(string(request.Operation)+"\x00"),request.Payload...))
 	if record,found:=host.journal.Effects[key];found{if record.RequestDigest!=digest{return nil,ErrConflict};if record.State!="completed"{return nil,ErrAmbiguous};return append(json.RawMessage(nil),record.Payload...),linuxManagementFailure(record.ErrorCode)}
@@ -104,6 +120,9 @@ func(host *LinuxLifecycleHost)HandleManagement(ctx context.Context,request Linux
 
 func(host *LinuxLifecycleHost)HandleLicensePHP(ctx context.Context,request LinuxManagementRequest)(any,error){
 	if host==nil||ctx==nil||!linuxLicensePHPOperation(request.Operation){return nil,ErrInvalid};host.mu.Lock();defer host.mu.Unlock()
+	if err := host.coordinateConfiguration(ctx); err != nil { return nil, err }
+	defer host.releaseConfiguration()
+	if host.switchPending() { return nil, ErrConflict }
 	effect,err:=licensePHPEffect(request);if err!=nil{return nil,err};key:=string(request.Operation)+":"+effect;digest:=linuxManagementDigest(append([]byte(string(request.Operation)+"\x00"),request.Payload...))
 	if record,found:=host.journal.Effects[key];found{if record.RequestDigest!=digest{return nil,ErrConflict};if record.State!="completed"{return nil,ErrAmbiguous};return append(json.RawMessage(nil),record.Payload...),linuxManagementFailure(record.ErrorCode)}
 	host.prune();if len(host.journal.Effects)>=2048{return nil,ErrConflict};now:=host.now().UTC();host.journal.Effects[key]=lifecycleEffectRecord{Key:key,RequestDigest:digest,State:"pending",StartedAt:now};if err=host.persist();err!=nil{return nil,err}
@@ -197,16 +216,10 @@ func(host *LinuxLifecycleHost)install(ctx context.Context,input lifecyclePlanInp
 }
 
 func(host *LinuxLifecycleHost)convert(ctx context.Context,input lifecycleConvertInput)(SwitchReceipt,error){
-	request,plan,generation:=input.Request,input.Plan,input.Generation;receipt:=SwitchReceipt{EffectID:request.EffectID,Previous:host.journal.Host.Plan.Edition,Target:plan.Edition,PreviousConfigDigest:host.journal.Host.ConfigDigest,TargetConfigDigest:generation.ContentDigest,Fence:request.Fence}
-	expectedDigest:=digestJSON(struct{Plan ArtifactPlan;Generation string}{plan,generation.ContentDigest});if validateLifecycleEffect(request,expectedDigest)!=nil||validateArtifactPlan(plan)!=nil||input.RollbackWindow<time.Minute||input.RollbackWindow>24*time.Hour{return receipt,ErrInvalid}
-	rebuilt,err:=nativeGeneration(generation);if err!=nil{return receipt,err};generation=rebuilt
-	channel,paths,err:=authorizeLifecyclePlan(ctx,plan);if err!=nil{return receipt,err};if err=host.adoptGeneration(ctx,request.ExpectedGeneration);err!=nil{return receipt,err};previous:=host.journal.Host
-	if !previous.Active||previous.Plan.Edition==plan.Edition{return receipt,ErrConflict};receipt.Previous=previous.Plan.Edition;receipt.PreviousConfigDigest=previous.ConfigDigest
-	previousStore,err:=fsstore.New(lifecycleConfigurationRoot,previous.Plan.Edition);if err!=nil{return receipt,err};previousActivation,err:=previousStore.Current(ctx);if err!=nil||previousActivation.Digest!=previous.ConfigDigest{return receipt,ErrConflict}
-	targetStore,err:=fsstore.New(lifecycleConfigurationRoot,plan.Edition);if err!=nil{return receipt,err};candidate,err:=targetStore.Stage(ctx,generation);if err!=nil{return receipt,err}
-	if err=runLifecycle(ctx,"/usr/bin/systemctl","stop",lifecycleService);err==nil{err=removeLifecyclePackages(ctx,previous.Plan)};if err==nil{err=installLifecyclePackages(ctx,paths)};if err==nil{err=writeLifecycleEdition(plan.Edition)};if err==nil{err=targetStore.SwapMaster(ctx,candidate)};if err==nil{_,err=runLifecycleOutput(ctx,lifecycleBinaryPath,"-t")};if err==nil{err=runLifecycle(ctx,"/usr/bin/systemctl","restart",lifecycleService)};if err==nil{err=verifyLifecycleService(ctx,plan)};if err==nil{err=targetStore.Confirm(ctx,candidate)}
-	if err!=nil{rollbackErr:=host.rollbackConversion(ctx,previous,previousStore,previousActivation,plan);receipt.Restored=rollbackErr==nil;receipt.EvidenceDigest=lifecycleEvidence(previous.Plan,previous.ConfigDigest);receipt.SwitchedAt=host.now().UTC();receipt.RollbackDeadline=receipt.SwitchedAt.Add(input.RollbackWindow);if rollbackErr==nil{return receipt,ErrInvalid};return receipt,errors.Join(ErrAmbiguous,err,rollbackErr)}
-	now:=host.now().UTC();host.journal.Host=lifecycleHostState{Active:true,Generation:request.ExpectedGeneration+1,Fence:request.Fence,Channel:channel,Plan:plan,ConfigDigest:generation.ContentDigest,UpdatedAt:now};receipt.Confirmed=true;receipt.EvidenceDigest=lifecycleEvidence(plan,generation.ContentDigest);receipt.SwitchedAt=now;receipt.RollbackDeadline=now.Add(input.RollbackWindow);receipt.LeaseID="conversion-"+request.EffectID;receipt.ConfirmNonce=receipt.EvidenceDigest;return receipt,nil
+	// The two editions replace the same installed binary tree. Until a signed
+	// target-package private runtime is admitted, the legacy package swap must
+	// not bypass candidate probes, durable leases, or rollback confirmation.
+	return SwitchReceipt{}, ErrUnsupported
 }
 
 func(host *LinuxLifecycleHost)remove(ctx context.Context,input lifecycleRemoveInput)(EffectReceipt,error){
@@ -217,11 +230,10 @@ func(host *LinuxLifecycleHost)remove(ctx context.Context,input lifecycleRemoveIn
 	host.journal.Host=lifecycleHostState{Active:false,Generation:request.ExpectedGeneration+1,Fence:request.Fence,Channel:previous.Channel,Plan:previous.Plan,ConfigDigest:"",UpdatedAt:host.now().UTC()};receipt.Outcome="confirmed";receipt.EvidenceDigest=lifecycleEvidence(previous.Plan,"removed");receipt.ObservedAt=host.now().UTC();return receipt,nil
 }
 
-func(host *LinuxLifecycleHost)adoptGeneration(ctx context.Context,expected uint64)error{if host.journal.Host.Generation==0{edition,err:=readLifecycleEdition();if err==nil{plan,channel,discoverErr:=host.activePlan(ctx,edition);if discoverErr==nil{host.journal.Host.Active,host.journal.Host.Plan,host.journal.Host.Channel=true,plan,channel}};host.journal.Host.Generation=expected};if host.journal.Host.Generation!=expected{return ErrConflict};return nil}
+func(host *LinuxLifecycleHost)adoptGeneration(ctx context.Context,expected uint64)error{if host.journal.Host.Generation==0{edition,err:=readLifecycleEdition();if err==nil{plan,channel,discoverErr:=host.activePlan(ctx,edition);if discoverErr==nil{host.journal.Host.Active,host.journal.Host.Plan,host.journal.Host.Channel=true,plan,channel;host.journal.Host.ConfigDigest=currentLifecycleConfig(ctx,edition)}};host.journal.Host.Generation=expected};if host.journal.Host.Generation!=expected{return ErrConflict};return nil}
 func(host *LinuxLifecycleHost)activePlan(ctx context.Context,edition webengine.Edition)(ArtifactPlan,Channel,error){current,err:=readLifecycleEdition();if err!=nil||current!=edition{return ArtifactPlan{},"",ErrNotFound};if host.journal.Host.Active&&host.journal.Host.Plan.Edition==edition&&validateArtifactPlan(host.journal.Host.Plan)==nil{if installedLifecyclePlan(ctx,host.journal.Host.Plan)==nil{return host.journal.Host.Plan,host.journal.Host.Channel,nil}};catalog,err:=readLocalArtifactCatalog(true);if err!=nil{return ArtifactPlan{},"",err};osName,osVersion,architecture,err:=localPlatformTuple();if err!=nil{return ArtifactPlan{},"",err};var plan ArtifactPlan;var channel Channel;for _,entry:=range catalog.Entries{if entry.OS!=osName||entry.OSVersion!=osVersion||entry.Architecture!=architecture||entry.Plan.Edition!=edition||installedLifecyclePlan(ctx,entry.Plan)!=nil{continue};if plan.Version!=""{return ArtifactPlan{},"",ErrConflict};plan,channel=entry.Plan,entry.Channel};if plan.Version==""{return ArtifactPlan{},"",ErrUnsupported};return plan,channel,nil}
 
 func(host *LinuxLifecycleHost)restorePlan(ctx context.Context,state lifecycleHostState)error{if !state.Active{return runLifecycle(ctx,"/usr/bin/systemctl","stop",lifecycleService)};_,paths,err:=authorizeLifecyclePlan(ctx,state.Plan);if err!=nil{return err};if err=installLifecyclePackages(ctx,paths);err==nil{err=writeLifecycleEdition(state.Plan.Edition)};if err==nil{err=runLifecycle(ctx,"/usr/bin/systemctl","restart",lifecycleService)};if err==nil{err=verifyLifecycleService(ctx,state.Plan)};if err==nil{host.journal.Host=state};return err}
-func(host *LinuxLifecycleHost)rollbackConversion(ctx context.Context,previous lifecycleHostState,store *fsstore.Store,current activation.Receipt,target ArtifactPlan)error{_ = runLifecycle(ctx,"/usr/bin/systemctl","stop",lifecycleService);_ = removeLifecyclePackages(ctx,target);_,paths,err:=authorizeLifecyclePlan(ctx,previous.Plan);if err!=nil{return err};if err=installLifecyclePackages(ctx,paths);err==nil{err=writeLifecycleEdition(previous.Plan.Edition)};if err==nil{err=store.RestoreMaster(ctx,current)};if err==nil{err=runLifecycle(ctx,"/usr/bin/systemctl","restart",lifecycleService)};if err==nil{err=verifyLifecycleService(ctx,previous.Plan)};if err==nil{host.journal.Host=previous};return err}
 
 type lifecycleRepositoryRecord struct{SchemaVersion uint32 `json:"schema_version"`;ID string `json:"id"`;SnapshotDigest string `json:"snapshot_digest"`;Packages []lifecycleRepositoryPackage `json:"packages"`}
 type lifecycleRepositoryPackage struct{Name,Version,Digest,Path string}
@@ -237,7 +249,7 @@ func verifyLifecycleService(ctx context.Context,plan ArtifactPlan)error{if err:=
 func verifyLifecycleRemoved(ctx context.Context,plan ArtifactPlan)error{if installedLifecyclePlan(ctx,plan)==nil{return ErrAmbiguous};if runLifecycle(ctx,"/usr/bin/systemctl","is-active","--quiet",lifecycleService)==nil{return ErrAmbiguous};return nil}
 
 func readLifecycleEdition()(webengine.Edition,error){info,err:=os.Lstat(lifecycleEditionPath);if err!=nil||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()&0o022!=0||!rootOwnedFile(info)||info.Size()<=0||info.Size()>128{return "",ErrNotFound};content,err:=os.ReadFile(lifecycleEditionPath);if err!=nil{return "",err};edition:=webengine.Edition(strings.TrimSpace(string(content)));if edition!=webengine.EditionOpenLiteSpeed&&edition!=webengine.EditionLiteSpeedEnterprise{return "",ErrInvalid};return edition,nil}
-func currentLifecycleConfig(ctx context.Context,edition webengine.Edition)string{store,err:=fsstore.New(lifecycleConfigurationRoot,edition);if err!=nil{return ""};receipt,err:=store.Current(ctx);if err!=nil{return ""};return receipt.Digest}
+func currentLifecycleConfig(ctx context.Context,edition webengine.Edition)string{store,err:=fsstore.New(lifecycleConfigurationRoot,edition);if err!=nil{return ""};defer store.Close();receipt,err:=store.Current(ctx);if err!=nil{return ""};return receipt.Digest}
 func writeLifecycleEdition(edition webengine.Edition)error{if edition!=webengine.EditionOpenLiteSpeed&&edition!=webengine.EditionLiteSpeedEnterprise{return ErrInvalid};temporary:=lifecycleEditionPath+".new";_ = os.Remove(temporary);file,err:=os.OpenFile(temporary,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0o644);if err!=nil{return err};content:=[]byte(string(edition)+"\n");written,writeErr:=file.Write(content);syncErr:=file.Sync();closeErr:=file.Close();if writeErr!=nil||syncErr!=nil||closeErr!=nil||written!=len(content){_ = os.Remove(temporary);return errors.Join(writeErr,syncErr,closeErr)};if err=os.Rename(temporary,lifecycleEditionPath);err!=nil{_ = os.Remove(temporary);return err};directory,err:=os.Open(filepath.Dir(lifecycleEditionPath));if err!=nil{return err};err=directory.Sync();return errors.Join(err,directory.Close())}
 
 func validateLifecycleEffect(request EffectRequest,digest string)error{if !validEffectToken(request.EffectID)||request.Fence!=request.ExpectedGeneration+1||request.PlanDigest!=digest||!validSHA256(request.PlanDigest)||!validSHA256(request.CommitAuthorizationDigest){return ErrInvalid};return nil}

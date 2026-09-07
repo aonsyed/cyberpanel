@@ -37,6 +37,10 @@ const webEngineConfigurationRoot = "/usr/local/lsws/conf"
 type serveResult struct { name string; err error }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == management.LinuxLifecycleWorkerMode {
+		if err := management.RunLinuxLifecycleWorker(); err != nil { log.Fatalf("run private web-engine candidate: %v", err) }
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == malwarescan.LinuxMalwareWorkerMode {
 		if err := malwarescan.RunLinuxMalwareSiteWorker(); err != nil { log.Fatalf("run site malware worker: %v", err) }
 		return

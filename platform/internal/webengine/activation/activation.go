@@ -57,6 +57,21 @@ type Activator struct {
 	mu     sync.Mutex
 }
 
+// Configuration changes share one privileged broker process (guarded by the
+// siteops registry's exclusive process lock). Management keeps this lease until
+// confirmation/rollback so ordinary activation cannot invalidate its baseline.
+var configurationLease = make(chan struct{}, 1)
+
+func LockConfiguration(ctx context.Context) (func(), error) {
+	if ctx == nil { return nil, errors.New("configuration context is required") }
+	select {
+	case configurationLease <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-configurationLease }) }, nil
+	case <-ctx.Done(): return nil, ctx.Err()
+	}
+}
+
 func (a *Activator) Apply(ctx context.Context, generation native.ConfigGeneration) (Receipt, error) {
 	if err := validGeneration(generation); err != nil {
 		return ambiguous(), err
@@ -66,6 +81,9 @@ func (a *Activator) Apply(ctx context.Context, generation native.ConfigGeneratio
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	release, lockErr := LockConfiguration(ctx)
+	if lockErr != nil { return ambiguous(), lockErr }
+	defer release()
 
 	candidate, err := a.Store.Stage(ctx, generation)
 	if err != nil {
