@@ -70,6 +70,8 @@ func (api *OperatorAPI) serveHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	switch {
+	case segments[1] == "projections":
+		api.projections(writer, request, operator, segments)
 	case len(segments) == 2 && segments[1] == "nodes" && request.Method == http.MethodGet:
 		api.listNodes(writer, request, operator)
 	case len(segments) == 3 && segments[1] == "nodes" && request.Method == http.MethodGet:

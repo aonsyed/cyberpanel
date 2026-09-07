@@ -32,6 +32,7 @@ CREATE INDEX IF NOT EXISTS fleet_node_evidence_lookup ON fleet_node_evidence_key
 CREATE INDEX IF NOT EXISTS fleet_nodes_tenant_id ON fleet_nodes(owner_tenant_id,id);
 CREATE INDEX IF NOT EXISTS fleet_grants_node_peer ON fleet_grants(node_id,peer_id,state,expires_at);
 CREATE INDEX IF NOT EXISTS fleet_projections_tenant ON fleet_projections(tenant_id,node_id,resource_kind,resource_id);
+CREATE INDEX IF NOT EXISTS fleet_projections_tenant_cursor ON fleet_projections(tenant_id,node_id COLLATE "C",resource_kind COLLATE "C",resource_id COLLATE "C");
 CREATE INDEX IF NOT EXISTS fleet_events_occurred ON fleet_events(node_id,occurred_at);
 ` + enrollmentSchema + lifecycleSchema + projectionSnapshotSchema
 type Store struct{db *authorityDB;clock func()time.Time}

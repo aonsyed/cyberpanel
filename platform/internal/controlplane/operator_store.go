@@ -54,6 +54,7 @@ var operatorPermissions = map[string]struct{}{
 	"node.list": {}, "node.inspect": {}, "node.intent.create": {},
 	"intent.inspect": {}, "grant.inspect": {}, "node.revoke": {},
 	"saga.inspect": {}, "saga.advance": {},
+	"projection.list": {}, "projection.inspect": {},
 }
 
 type OperatorGrant struct {
