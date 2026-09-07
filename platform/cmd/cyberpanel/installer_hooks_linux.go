@@ -59,6 +59,9 @@ func runInstallerHook(arguments []string) error {
 	if err=syscall.Flock(int(lock.Fd()),syscall.LOCK_EX);err!=nil{return err};defer syscall.Flock(int(lock.Fd()),syscall.LOCK_UN)
 	if invocation.Verb=="rollback" { return rollbackInstallerHook(invocation) }
 	indexPath:=filepath.Join(hookRoot,"by-hook",invocation.Verb+"-"+invocation.Release+"-"+invocation.Component+".json")
+	// Reconcile live authority even when this release already has a receipt.
+	// A receipt cannot prove the broker still holds the matching signing key.
+	if invocation.Verb=="reconcile-services" { if _,err=reconcileMalwareApprovalTrust();err!=nil{return err} }
 	if existing,loadErr:=readHookJournal(indexPath);loadErr==nil { if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority"{manifest,validateErr:=apps.ValidateLinuxApplicationCatalog(context.Background(),"",time.Now().UTC());if validateErr!=nil||manifest.ReleaseID!=invocation.Release{return errors.Join(errors.New("application catalog no longer matches installer receipt"),validateErr)}};_,err=io.WriteString(os.Stdout,existing.Response);return err } else if !errors.Is(loadErr,os.ErrNotExist){return loadErr}
 	changed,err:=applyHook(invocation);if err!=nil{return err}
 	responseValue:=struct{Version uint32 `json:"version"`;Hook,Release,Component,State string}{1,invocation.Verb,invocation.Release,invocation.Component,"applied"}
@@ -189,7 +192,7 @@ func bootstrapAuthn()([]string,error){uid,gid,err:=lookupIdentity("cyberpanel-au
 func bootstrapDatabaseAuthority()([]string,error){return ensureAuthorityMarker("database","mariadb-local-v1")}
 func bootstrapDNSAuthority()([]string,error){return ensureAuthorityMarker("dns","powerdns-mariadb-v1")}
 func bootstrapMailAuthority()([]string,error){return ensureAuthorityMarker("mail","postfix-dovecot-rspamd-v1")}
-func reconcileServiceAuthority()([]string,error){return ensureAuthorityMarker("services","reconcile-v1")}
+func reconcileServiceAuthority()([]string,error){changed,err:=ensureAuthorityMarker("services","reconcile-v1");return append(changed,malwareApprovalTrustPath),err}
 
 func ensureAuthorityMarker(name,value string)([]string,error){uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};root:="/var/lib/cyberpanel/control/bootstrap";if err=ensureOwnedDirectory(root,0700,uid,gid);err!=nil{return nil,err};path:=filepath.Join(root,name+".json");payload,_:=json.Marshal(struct{Version uint32 `json:"version"`;Kind,Contract string;CreatedAt time.Time `json:"created_at"`}{1,name,value,time.Now().UTC()});if _,err=ensureOwnedFile(path,0600,uid,gid,payload);err!=nil{return nil,err};return []string{path},nil}
 

@@ -26,6 +26,7 @@ const (
 	ManagementEnroll ManagementAction = "enroll"
 	ManagementRotate ManagementAction = "rotate"
 	ManagementRevoke ManagementAction = "revoke"
+	ManagementProvisionMalwareApproval ManagementAction = "provision_malware_approval"
 )
 
 type ManagementRequest struct {
@@ -47,6 +48,10 @@ func (request ManagementRequest) Validate(now time.Time) error {
 		return ErrInvalid
 	}
 	switch request.Action {
+	case ManagementProvisionMalwareApproval:
+		if request.ExpectedVersion != 0 || request.ExpectedBindingDigest != "" || validateMalwareApprovalProvision(request) != nil {
+			return ErrInvalid
+		}
 	case ManagementEnroll:
 		if len(request.Material) == 0 || request.ExpectedVersion != 0 || request.ExpectedBindingDigest != "" {
 			return ErrInvalid
@@ -71,6 +76,7 @@ type ManagementResponse struct {
 	SecretID    ID       `json:"secret_id"`
 	Metadata    Metadata `json:"metadata,omitempty"`
 	FailureCode string   `json:"failure_code,omitempty"`
+	PublicKey   []byte   `json:"public_key,omitempty"`
 }
 
 func (response ManagementResponse) Validate(request ManagementRequest) error {
@@ -78,10 +84,16 @@ func (response ManagementResponse) Validate(request ManagementRequest) error {
 		return ErrInvalid
 	}
 	if response.FailureCode != "" {
-		if response.Metadata.ID != "" || !validMaterialFailure(response.FailureCode) {
+		if response.Metadata.ID != "" || len(response.PublicKey) != 0 || !validMaterialFailure(response.FailureCode) {
 			return ErrInvalid
 		}
 		return nil
+	}
+	if request.Action == ManagementProvisionMalwareApproval {
+		return validateMalwareApprovalProvisionResponse(request, response)
+	}
+	if len(response.PublicKey) != 0 {
+		return ErrInvalid
 	}
 	expectedVersion := request.ExpectedVersion + 1
 	expectedState := StateActive
@@ -287,7 +299,8 @@ func (server *ManagementServer) Serve(listener net.Listener) error {
 }
 
 func (server *ManagementServer) serve(connection net.Conn) {
-	if _, err := server.Authorizer.Authorize(connection); err != nil {
+	peer, err := server.Authorizer.Authorize(connection)
+	if err != nil {
 		return
 	}
 	now := time.Now().UTC()
@@ -307,8 +320,15 @@ func (server *ManagementServer) serve(connection net.Conn) {
 	defer cancel()
 	response := ManagementResponse{Version: ManagementProtocolVersion, RequestID: request.RequestID, SecretID: request.SecretID}
 	var metadata Metadata
-	var err error
-	if request.Action == ManagementRevoke {
+	if request.Purpose == PurposeMalwareApproval && peer.UID != 0 {
+		err = ErrForbidden
+	} else if request.Action == ManagementProvisionMalwareApproval {
+		if peer.UID != 0 {
+			err = ErrForbidden
+		} else {
+			metadata, response.PublicKey, err = server.Broker.provisionMalwareApproval(ctx, request)
+		}
+	} else if request.Action == ManagementRevoke {
 		metadata, err = server.Broker.store.Head(ctx, request.SecretID)
 		if err == nil && (metadata.OwnerTenantID != request.OwnerTenantID || metadata.Purpose != request.Purpose || metadata.Version != request.ExpectedVersion || metadata.BindingDigest != request.ExpectedBindingDigest || digestJSON(metadata.Audience) != digestJSON(request.Audience)) {
 			err = ErrConflict
@@ -331,6 +351,7 @@ func (server *ManagementServer) serve(connection net.Conn) {
 		})
 	}
 	if err != nil {
+		response.PublicKey = nil
 		response.FailureCode = classifyMaterialFailure(err)
 	} else {
 		response.Metadata = metadata
@@ -348,6 +369,7 @@ func validManagementRequestID(value string) bool {
 
 func writeManagementFrame(writer io.Writer, value any) error {
 	content, err := json.Marshal(value)
+	defer wipe(content)
 	if err != nil || len(content) == 0 || len(content) > ManagementMaximumFrame {
 		return ErrInvalid
 	}
@@ -369,6 +391,7 @@ func readManagementFrame(reader io.Reader, target any) error {
 		return ErrInvalid
 	}
 	content := make([]byte, size)
+	defer wipe(content)
 	if _, err := io.ReadFull(reader, content); err != nil {
 		return err
 	}
