@@ -55,6 +55,10 @@ type coreConfiguration struct {
 }
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "federation-certificate" {
+		if err := runFederationCertificateCLI(os.Args[2:]); err != nil { log.Fatal(err) }
+		return
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "installer-hook" {
 		if err := runInstallerHook(os.Args[2:]); err != nil { log.Fatal(err) }
 		return

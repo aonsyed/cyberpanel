@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -161,9 +162,11 @@ func (api *OperatorAPI) rotateNodeCertificate(writer http.ResponseWriter, reques
 		ExpectedAuthorityEpoch uint64 `json:"expected_authority_epoch"`
 		IdempotencyKey string `json:"idempotency_key"`
 		SigningPublicKey []byte `json:"signing_public_key"`
+		PreviousCertificateFingerprint string `json:"previous_certificate_fingerprint_sha256"`
 	}
 	decodeErr := decodeOperatorJSON(request, &payload)
 	rotation := NodeCertificateRotationRequest{NodeID: id, TenantID: tenant, ExpectedGeneration: payload.ExpectedGeneration, ExpectedAuthorityEpoch: payload.ExpectedAuthorityEpoch, IdempotencyKey: payload.IdempotencyKey, SigningPublicKey: payload.SigningPublicKey}
+	rotation.PreviousCertificateFingerprint = payload.PreviousCertificateFingerprint
 	if idErr != nil || tenantErr != nil || decodeErr != nil || rotation.validate() != nil {
 		api.reject(writer, request, operator, permission, "node", rawID, ErrInvalid)
 		return
@@ -184,6 +187,12 @@ func (api *OperatorAPI) rotateNodeCertificate(writer http.ResponseWriter, reques
 		issued, err = api.issuer.Issue(id, rotation.SigningPublicKey, reservation.RequestDigest, reservation.IssuedAt)
 		if err == nil {
 			result = NodeCertificateRotationResult{NodeID: id, Generation: reservation.ResultGeneration, AuthorityEpoch: rotation.ExpectedAuthorityEpoch, EvidenceKeyID: "fedcert_"+issued.Fingerprint[:48], CertificateFingerprint: issued.Fingerprint, NodeCertificate: issued.PEM, CertificateExpiresAt: issued.ExpiresAt}
+			result.PeerID = api.issuer.peer
+			result.IdempotencyKey = rotation.IdempotencyKey
+			result.RequestDigest = reservation.RequestDigest
+			result.PreviousCertificateFingerprint = rotation.PreviousCertificateFingerprint
+			result.SigningPublicKey = append([]byte(nil), rotation.SigningPublicKey...)
+			result.Signature = ed25519.Sign(api.issuer.privateKey, result.SigStructure())
 			if err = api.authorizeNodeLifecycle(request.Context(), operator, permission, id); err == nil {
 				result, err = api.store.CompleteNodeCertificateRotation(request.Context(), rotation, reservation, issued, result)
 			}

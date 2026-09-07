@@ -72,6 +72,7 @@ type NodeCertificateRotationRequest struct {
 	ExpectedAuthorityEpoch uint64
 	IdempotencyKey         string
 	SigningPublicKey       []byte
+	PreviousCertificateFingerprint string
 }
 
 type NodeCertificateRotationReservation struct {
@@ -81,15 +82,7 @@ type NodeCertificateRotationReservation struct {
 	Result           *NodeCertificateRotationResult
 }
 
-type NodeCertificateRotationResult struct {
-	NodeID                 federation.ID `json:"node_id"`
-	Generation             uint64        `json:"generation"`
-	AuthorityEpoch         uint64        `json:"authority_epoch"`
-	EvidenceKeyID          string        `json:"evidence_key_id"`
-	CertificateFingerprint string        `json:"certificate_fingerprint_sha256"`
-	NodeCertificate        []byte        `json:"node_certificate"`
-	CertificateExpiresAt   time.Time     `json:"certificate_expires_at"`
-}
+type NodeCertificateRotationResult = federation.NodeCertificateRotationResult
 
 type NodeDetachRequest struct {
 	NodeID                 federation.ID
@@ -110,6 +103,9 @@ type NodeDetachResult struct {
 }
 
 func (request NodeCertificateRotationRequest) validate() error {
+	if !validSHA256(request.PreviousCertificateFingerprint) {
+		return ErrInvalid
+	}
 	if !request.NodeID.Valid() || !request.TenantID.Valid() || request.ExpectedGeneration == 0 || request.ExpectedGeneration >= 1<<63-1 || request.ExpectedAuthorityEpoch == 0 || request.ExpectedAuthorityEpoch >= 1<<63-1 || !validLifecycleIdempotency(request.IdempotencyKey) || len(request.SigningPublicKey) != ed25519.PublicKeySize {
 		return ErrInvalid
 	}
@@ -118,10 +114,10 @@ func (request NodeCertificateRotationRequest) validate() error {
 
 func (request NodeCertificateRotationRequest) requestDigest() string {
 	encoded, _ := json.Marshal(struct {
-		Domain, NodeID, TenantID, IdempotencyKey string
+		Domain, NodeID, TenantID, IdempotencyKey, PreviousCertificateFingerprint string
 		ExpectedGeneration, ExpectedAuthorityEpoch uint64
 		SigningPublicKey []byte
-	}{"cyberpanel-node-certificate-rotation-v1", request.NodeID.String(), request.TenantID.String(), request.IdempotencyKey, request.ExpectedGeneration, request.ExpectedAuthorityEpoch, request.SigningPublicKey})
+	}{"cyberpanel-node-certificate-rotation-v1", request.NodeID.String(), request.TenantID.String(), request.IdempotencyKey, request.PreviousCertificateFingerprint, request.ExpectedGeneration, request.ExpectedAuthorityEpoch, request.SigningPublicKey})
 	return digest(encoded)
 }
 
@@ -209,6 +205,9 @@ func (s *Store) ReserveNodeCertificateRotation(ctx context.Context, request Node
 	if err != nil {
 		return reservation, err
 	}
+	if node.CertificateFingerprint != request.PreviousCertificateFingerprint {
+		return reservation, ErrStale
+	}
 	if node.OwnerTenantID != request.TenantID || node.AuthorityEpoch != request.ExpectedAuthorityEpoch || node.State == NodeRevoked || node.State == NodeRevoking {
 		return reservation, ErrForbidden
 	}
@@ -235,6 +234,9 @@ func (s *Store) ReserveNodeCertificateRotation(ctx context.Context, request Node
 }
 
 func (s *Store) CompleteNodeCertificateRotation(ctx context.Context, request NodeCertificateRotationRequest, reservation NodeCertificateRotationReservation, issued IssuedEnrollmentCertificate, result NodeCertificateRotationResult) (NodeCertificateRotationResult, error) {
+	if result.PreviousCertificateFingerprint != request.PreviousCertificateFingerprint || result.RequestDigest != reservation.RequestDigest || result.IdempotencyKey != request.IdempotencyKey || !bytes.Equal(result.SigningPublicKey, request.SigningPublicKey) || len(result.Signature) != ed25519.SignatureSize {
+		return NodeCertificateRotationResult{}, ErrInvalid
+	}
 	if s == nil || s.db == nil || ctx == nil || request.validate() != nil || reservation.RequestDigest != request.requestDigest() || reservation.ResultGeneration != request.ExpectedGeneration+1 || !validSHA256(issued.Fingerprint) || result.NodeID != request.NodeID || result.Generation != reservation.ResultGeneration || result.AuthorityEpoch != request.ExpectedAuthorityEpoch || result.CertificateFingerprint != issued.Fingerprint || result.EvidenceKeyID != "fedcert_"+issued.Fingerprint[:48] || !result.CertificateExpiresAt.Equal(issued.ExpiresAt) || !bytes.Equal(result.NodeCertificate, issued.PEM) {
 		return NodeCertificateRotationResult{}, ErrInvalid
 	}
@@ -269,10 +271,13 @@ func (s *Store) CompleteNodeCertificateRotation(ctx context.Context, request Nod
 	if err != nil {
 		return NodeCertificateRotationResult{}, err
 	}
+	if node.CertificateFingerprint != request.PreviousCertificateFingerprint {
+		return NodeCertificateRotationResult{}, ErrStale
+	}
 	if node.OwnerTenantID != request.TenantID || node.AuthorityEpoch != request.ExpectedAuthorityEpoch || node.State == NodeRevoked || node.State == NodeRevoking {
 		return NodeCertificateRotationResult{}, ErrForbidden
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE fleet_node_evidence_keys SET state='revoked',updated_at=? WHERE node_id=? AND state='current'`, reservation.IssuedAt, node.ID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE fleet_node_evidence_keys SET state='historical',updated_at=? WHERE node_id=? AND state='current'`, reservation.IssuedAt, node.ID); err != nil {
 		return NodeCertificateRotationResult{}, err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO fleet_node_evidence_keys(node_id,key_id,state,public_key,not_before,expires_at,created_at,updated_at) VALUES(?,?,'current',?,?,?,?,?)`, node.ID, result.EvidenceKeyID, request.SigningPublicKey, issued.NotBefore, issued.ExpiresAt, reservation.IssuedAt, reservation.IssuedAt); err != nil {

@@ -389,6 +389,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	rebootControlEdge,err:=assembleRebootControlLinuxEdge(ctx,repositories.ControlDB,operationsExecutor,repositories.HA,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize reboot-control runtime: %w",err)}
 	repositories.WebCatalog = catalog
 	go certificateRenewal.RunQueue(ctx,15*time.Minute,4)
+	if err = startFederationRuntime(ctx,repositories.ControlDB,localHAProviders); err != nil { return apiserver.DomainServices{},fmt.Errorf("initialize federation runtime: %w",err) }
 	if mailTelemetryReady{go mailConsoleEdge.RunMailTelemetry(ctx,15*time.Second)}
 	return apiserver.DomainServices{
 		DashboardEdge:     dashboardConsoleEdge,
