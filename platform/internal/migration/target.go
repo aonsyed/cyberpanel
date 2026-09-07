@@ -86,6 +86,10 @@ type ImportCommandGateway interface {
 	CompensateCanonicalImport(context.Context, ImportIntent, ImportEffect) (ImportEffect, error)
 }
 
+// ValidateCanonicalImportIntent exposes the canonical payload/digest boundary
+// to ordinary domain adapters without invoking the SQL projection authority.
+func ValidateCanonicalImportIntent(intent ImportIntent) error { _,err:=validateCanonicalIntent(intent);return err }
+
 type TargetCapacityProvider interface{ Capacity(context.Context) (map[string]uint64, error) }
 
 type MigrationSecretGateway interface {

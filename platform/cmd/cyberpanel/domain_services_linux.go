@@ -41,6 +41,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/provisioning"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	hostingservice "github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
+	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
@@ -376,7 +377,20 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	backupWorkflow:=backupRuntime.BackupCoordinator(backupClient,backupClient)
 	restoreWorkflow:=backup.RestoreCoordinator{Store:backupRuntime.Restores,Capacity:backupClient,Source:backupRuntime.RestoreSource(),Scanner:backup.IntegrityRestoreScanner{},Target:backupClient,Safety:backupClient,Now:runtimeClock{}.Now}
 	backupConsoleEdge,err:=newBackupEdge(backupRuntime.Catalog,&restoreWorkflow,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize backup console edge: %w",err)}
-	migrationRuntime,err:=localmigration.New(ctx,repositories.ControlDB,repositories.Migrations);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration runtime: %w",err)}
+	var migrationSecrets *migrationSecretTarget
+	migrationSecretFactory:=func(ctx context.Context,db *sql.DB,scopes *migration.RuntimeScopeStore)(migration.MigrationSecretGateway,error){
+		value,createErr:=newMigrationSecretTarget(ctx,db,scopes);if createErr!=nil{return nil,createErr};migrationSecrets=value;return value,nil
+	}
+	migrationDatabaseFactory:=func(ctx context.Context,db *sql.DB,chunks *migration.ChunkStore,scopes *migration.RuntimeScopeStore)(migration.CanonicalImportHandler,error){
+		if migrationSecrets==nil{return nil,migration.ErrBlocked}
+		resolveSecret:=func(ctx context.Context,id migration.ID,envelope string)(migration.DatabaseImportCredential,error){metadata,resolveErr:=migrationSecrets.Resolve(ctx,id,envelope);if resolveErr!=nil{return migration.DatabaseImportCredential{},resolveErr};ref,resolveErr:=database.NewSecretRef(metadata.ID.String());if resolveErr!=nil{return migration.DatabaseImportCredential{},resolveErr};credential:=migration.DatabaseImportCredential{SecretRef:ref};switch metadata.Audience.ResourceKind{case "database_principal":case "database_principal_native_hash":credential.Format=database.CredentialFormatNativeHash;default:return migration.DatabaseImportCredential{},migration.ErrBlocked};return credential,nil}
+		resolveSite:=func(ctx context.Context,id,source migration.ID)(site.SiteID,error){value,loadErr:=repositories.Migrations.Migration(ctx,id);if loadErr!=nil{return site.SiteID{},loadErr};plan,loadErr:=repositories.Migrations.Plan(ctx,value.PlanDigest);if loadErr!=nil{return site.SiteID{},loadErr};if plan.ApprovedAt==nil||plan.ApprovalDigest==""||plan.MigrationID!=id{return site.SiteID{},migration.ErrBlocked};for _,mapping:=range plan.Mappings{if mapping.SourceKind==string(migration.ImportSite)&&mapping.SourceID==source&&mapping.Disposition==migration.DispositionCreate{return site.NewSiteID(mapping.TargetID.String())}};return site.SiteID{},migration.ErrBlocked}
+		return migration.NewDatabaseImportHandler(ctx,db,chunks,scopes,databaseCoordinator,repositories.Database,databaseExecutor,resolveSecret,resolveSite)
+	}
+	migrationScopes,err:=migration.NewRuntimeScopeStore(repositories.ControlDB);if err!=nil{return apiserver.DomainServices{},err}
+	migrationProbe:=&migrationApplicationProbe{catalog:catalog,runtime:webManagementRuntime,installations:repositories.WebEngine,scopes:migrationScopes}
+	migrationFactory:=migrationTargetFactory(hostingCoordinator,repositories.Hosting,fileService,dnsAuthority,repositories.Migrations,migrationProbe,migrationSecretFactory,migrationDatabaseFactory)
+	migrationRuntime,err:=localmigration.New(ctx,repositories.ControlDB,repositories.Migrations,migrationFactory);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration runtime: %w",err)}
 	migrationConsoleEdge,err:=newMigrationEdge(migrationRuntime,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration console edge: %w",err)}
 	haApprovalAuthority,_:=newHAPromotionApprovalAuthority(&repositories.HA,identityStore,runtimeClock{}.Now)
 	haRemoteSender,err:=newHAFederatedSender(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize federated HA sender: %w",err)}

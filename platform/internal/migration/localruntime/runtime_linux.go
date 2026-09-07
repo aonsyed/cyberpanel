@@ -62,19 +62,26 @@ type Config struct {
 	CPanelQuarantinePath     string
 	MaximumCPanelBundleBytes uint64
 	EnableCyberPanelBackup   bool
+	TargetFactory TargetFactory
 }
 
-func New(ctx context.Context, db *sql.DB, repository *migration.SQLRepository) (*Runtime, error) {
+// TargetFactory binds ordinary domain commands at the core composition root.
+// SQL migration projections are never a fallback for missing host capabilities.
+type TargetFactory func(context.Context,*sql.DB,*migration.ChunkStore,migration.TargetCapacityProvider,*migration.RuntimeScopeStore)(*migration.CanonicalTargetImporter,error)
+
+func New(ctx context.Context, db *sql.DB, repository *migration.SQLRepository, factories ...TargetFactory) (*Runtime, error) {
+	if len(factories)!=1||factories[0]==nil{return nil,migration.ErrBlocked}
 	return NewWithConfig(ctx, db, repository, Config{
 		TrustPath:            DefaultTrustPath,
 		CPanelIntakePath:     DefaultCPanelIntakePath,
 		CPanelQuarantinePath: DefaultCPanelQuarantinePath,
 		EnableCyberPanelBackup: true,
+		TargetFactory: factories[0],
 	})
 }
 
 func NewWithConfig(ctx context.Context, db *sql.DB, repository *migration.SQLRepository, config Config) (*Runtime, error) {
-	if ctx == nil || db == nil || repository == nil {
+	if ctx == nil || db == nil || repository == nil || config.TargetFactory == nil {
 		return nil, migration.ErrInvalid
 	}
 	if config.ChunkPath == "" {
@@ -110,7 +117,7 @@ func NewWithConfig(ctx context.Context, db *sql.DB, repository *migration.SQLRep
 		return nil, err
 	}
 	capacity := filesystemCapacity{path: config.ChunkPath}
-	target, err := migration.NewSQLCanonicalTargetImporter(ctx, db, chunks, capacity)
+	target, err := config.TargetFactory(ctx, db, chunks, capacity, scopes)
 	if err != nil {
 		return nil, err
 	}

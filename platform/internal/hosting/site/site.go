@@ -284,7 +284,8 @@ func (site Site) Transition(expectedGeneration uint64, next Lifecycle) (Site, er
 func allowedTransition(current, next Lifecycle) bool {
 	switch current {
 	case LifecycleProvisioning:
-		return next == LifecycleActive || next == LifecycleDegraded
+		// Failed/canceled provisioning must be removable without first serving it.
+		return next == LifecycleActive || next == LifecycleDegraded || next == LifecycleDeleting
 	case LifecycleActive:
 		return next == LifecycleSuspended || next == LifecycleDegraded || next == LifecycleDeleting
 	case LifecycleSuspended:
