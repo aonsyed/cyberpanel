@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -38,6 +39,8 @@ const (
 type SQLContainerSnapshotter struct {
 	database *sql.DB
 	maximumBytes uint64
+	mu sync.RWMutex
+	bindings map[string]legacyContainerBinding
 }
 
 func NewSQLContainerSnapshotter(database *sql.DB, maximumBytes uint64) (*SQLContainerSnapshotter, error) {
@@ -120,6 +123,8 @@ type legacyContainerService struct {
 	Volume string `json:"volume"`
 	Destination string `json:"destination"`
 	EnvironmentKeys []string `json:"environment_keys"`
+	EnvironmentSecretRef SecretRef `json:"environment_secret_ref"`
+	EnvironmentSecretID string `json:"environment_secret_id"`
 }
 
 type legacyContainerDescriptor struct {
@@ -138,19 +143,29 @@ type legacyContainerDescriptor struct {
 type legacyRuntimeSnapshot struct {
 	descriptor legacyContainerDescriptor
 	digest [32]byte
+	environments map[SecretRef][]byte
 }
 
 func (s *SQLContainerSnapshotter) WriteContainerArtifact(ctx context.Context, request ContainerArtifactRequest, destination io.Writer) (uint64, error) {
 	if s == nil || s.database == nil || ctx == nil || destination == nil { return 0, ErrInvalid }
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
+	binding, err := s.binding(request)
+	if err != nil { return 0, err }
 	owner, err := s.owner(ctx, request)
 	if err != nil { return 0, err }
+	if binding.owner != owner { return 0, ErrChanged }
 	docker, err := openLegacyFixedRoot(legacyDockerRoot)
 	if err != nil { return 0, err }
 	defer docker.Close()
 	runtime, err := readLegacyRuntime(ctx, docker, owner, request)
 	if err != nil { return 0, err }
+	runtime.clearSecrets()
+	if runtime.digest != binding.digest { return 0, ErrChanged }
+	for index := range runtime.descriptor.Services {
+		service := &runtime.descriptor.Services[index]
+		service.EnvironmentSecretID = secretEnvelopeID(binding.migrationID, service.EnvironmentSecretRef)
+	}
 	limited := &boundedWriter{destination: destination, remaining: s.maximumBytes}
 	objects := uint64(1)
 	if request.Kind == "descriptor" {
@@ -180,12 +195,14 @@ func (s *SQLContainerSnapshotter) WriteContainerArtifact(ctx context.Context, re
 	afterOwner, err := s.owner(ctx, request)
 	if err != nil || afterOwner != owner { return 0, errors.Join(ErrChanged, err) }
 	afterRuntime, err := readLegacyRuntime(ctx, docker, owner, request)
+	defer afterRuntime.clearSecrets()
 	if err != nil || afterRuntime.digest != runtime.digest { return 0, errors.Join(ErrChanged, err) }
 	return objects, nil
 }
 
-func readLegacyRuntime(ctx context.Context, root *os.File, owner legacyContainerOwner, request ContainerArtifactRequest) (legacyRuntimeSnapshot, error) {
-	var result legacyRuntimeSnapshot
+func readLegacyRuntime(ctx context.Context, root *os.File, owner legacyContainerOwner, request ContainerArtifactRequest) (result legacyRuntimeSnapshot, resultErr error) {
+	result.environments = map[SecretRef][]byte{}
+	defer func() { if resultErr != nil { result.clearSecrets() } }()
 	directory, err := legacyOpenChild(root, "containers", syscall.O_RDONLY|syscall.O_DIRECTORY)
 	if err != nil { return result, err }
 	defer directory.Close()
@@ -253,20 +270,27 @@ func readLegacyRuntime(ctx context.Context, root *os.File, owner legacyContainer
 			if mount.Type != "bind" || mount.Source != path+"/"+volume || !mount.RW || mount.Name != "" || mount.Driver != "" || key != mount.Destination { return result, ErrDenied }
 			value.Destination = mount.Destination
 		}
-		// Environment values are credentials in both legacy producers. They are
-		// not copied into plaintext descriptor JSON or silently called portable.
+		// Treat every environment value as secret; no allowlist or heuristic may
+		// accidentally classify a legacy credential as safe descriptor metadata.
 		keys := map[string]bool{}
+		environmentValues := map[string]string{}
+		environmentBytes := 0
 		for _, environment := range config.Config.Env {
-			key, _, ok := strings.Cut(environment, "=")
+			key, secret, ok := strings.Cut(environment, "=")
 			if !ok || !validSafeToken(key) || keys[key] { return result, ErrDenied }
+			environmentBytes += len(environment)
+			if environmentBytes > 128<<10 { return result, migration.ErrCapacity }
 			keys[key] = true
+			environmentValues[key] = secret
 			value.EnvironmentKeys = append(value.EnvironmentKeys, key)
 		}
 		sort.Strings(value.EnvironmentKeys)
-		if len(value.EnvironmentKeys) > 0 {
-			result.descriptor.RestoreBlockers = append(result.descriptor.RestoreBlockers,
-				"rebind environment for service "+service+" through target secret authority; values intentionally omitted: "+strings.Join(value.EnvironmentKeys, ","))
-		}
+		value.EnvironmentSecretRef = legacyEnvironmentRef(owner, volume)
+		secret, err := json.Marshal(legacyEnvironmentSecret{Schema: "cyberpanel.legacy-container-environment/v1",
+			SecretRef: value.EnvironmentSecretRef, SourceID: request.SourceID, SiteSourceID: request.SiteSourceID,
+			Service: service, RuntimeID: id, Environment: environmentValues})
+		if err != nil || len(secret) > maximumMigrationSecretBytes { wipe(secret); return result, errors.Join(ErrDenied, err) }
+		result.environments[value.EnvironmentSecretRef] = secret
 		seen[service] = true
 		result.descriptor.Services = append(result.descriptor.Services, value)
 	}

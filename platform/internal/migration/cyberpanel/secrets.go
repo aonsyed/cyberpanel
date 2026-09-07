@@ -37,7 +37,7 @@ func (s *X25519Sealer) Seal(ctx context.Context, migrationID migration.ID, mater
 	select{case<-ctx.Done():return migration.SecretEnvelope{},ctx.Err();default:}
 	ephemeral,err:=ecdh.X25519().GenerateKey(s.random);if err!=nil{return migration.SecretEnvelope{},err};shared,err:=ephemeral.ECDH(s.publicKey);if err!=nil{return migration.SecretEnvelope{},err};defer wipe(shared)
 	salt:=sha256.Sum256([]byte("cyberpanel-migration-secret-v1\x00"+migrationID.String()+"\x00"+material.AudienceDigest))
-	secretID:="sec_"+digestText(migrationID.String()+"\x00"+string(material.Ref))[:32]
+	secretID:=secretEnvelopeID(migrationID,material.Ref)
 	key:=hkdfSHA256(shared,salt[:],[]byte(material.Purpose+"\x00"+secretID),32);defer wipe(key)
 	block,err:=aes.NewCipher(key);if err!=nil{return migration.SecretEnvelope{},err};var aead cipher.AEAD;aead,err=cipher.NewGCM(block);if err!=nil{return migration.SecretEnvelope{},err}
 	nonce:=make([]byte,aead.NonceSize());if _,err:=io.ReadFull(s.random,nonce);err!=nil{return migration.SecretEnvelope{},err}
@@ -45,6 +45,8 @@ func (s *X25519Sealer) Seal(ctx context.Context, migrationID migration.ID, mater
 	ciphertext:=aead.Seal(nil,nonce,plaintext,aad);ciphertext=append(nonce,ciphertext...)
 	return migration.SecretEnvelope{SecretID:secretID,Purpose:material.Purpose,AudienceDigest:material.AudienceDigest,Algorithm:secretEnvelopeAlgorithm,KeyID:s.keyID,Version:1,EncapsulatedKey:append([]byte(nil),ephemeral.PublicKey().Bytes()...),Ciphertext:ciphertext},nil
 }
+
+func secretEnvelopeID(migrationID migration.ID,ref SecretRef)string{return "sec_"+digestText(migrationID.String()+"\x00"+string(ref))[:32]}
 
 func hkdfSHA256(secret,salt,info []byte,size int)[]byte{extract:=hmac.New(sha256.New,salt);extract.Write(secret);pseudorandom:=extract.Sum(nil);defer wipe(pseudorandom);output:=make([]byte,0,size);previous:=[]byte{};for counter:=byte(1);len(output)<size;counter++{expand:=hmac.New(sha256.New,pseudorandom);expand.Write(previous);expand.Write(info);expand.Write([]byte{counter});previous=expand.Sum(nil);needed:=size-len(output);if needed>len(previous){needed=len(previous)};output=append(output,previous[:needed]...)};return output}
 

@@ -133,15 +133,17 @@ func RunSourceAgent(ctx context.Context, config SourceAgentConfig, collector Col
 		if err != nil {
 			return fmt.Errorf("initialize database dumper: %w", err)
 		}
-		containerSnapshotter, err = NewSQLContainerSnapshotter(sqlCollector.database, config.MaximumArtifactBytes)
-		if err != nil {
-			return fmt.Errorf("initialize container snapshotter: %w", err)
+		containerSource, containerErr := NewSQLContainerSnapshotter(sqlCollector.database, config.MaximumArtifactBytes)
+		if containerErr != nil {
+			return fmt.Errorf("initialize container snapshotter: %w", containerErr)
 		}
+		containerSnapshotter = containerSource
+		collector = &legacyContainerSecretCollector{collector: sqlCollector, snapshotter: containerSource}
 		databaseSecrets, sourceErr := NewSQLSecretSource(sqlCollector.database)
 		if sourceErr != nil {
 			return fmt.Errorf("initialize source secret reader: %w", sourceErr)
 		}
-		secrets, err = NewCompositeSecretSource(databaseSecrets, supplemental)
+		secrets, err = NewCompositeSecretSource(databaseSecrets, supplemental, containerSource)
 		if err != nil {
 			return fmt.Errorf("initialize source secret catalog: %w", err)
 		}
