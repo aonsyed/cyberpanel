@@ -31,6 +31,8 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
+	"github.com/aonsyed/cyberpanel/platform/internal/containers"
+	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 )
 
 const hookRoot = "/var/lib/cyberpanel/installer-hooks"
@@ -62,6 +64,7 @@ func runInstallerHook(arguments []string) error {
 	// Reconcile live authority even when this release already has a receipt.
 	// A receipt cannot prove the broker still holds the matching signing key.
 	if invocation.Verb=="reconcile-services" { if _,err=reconcileMalwareApprovalTrust();err!=nil{return err} }
+	if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority" { if err=validatePackagedN8N();err!=nil{return err} }
 	if existing,loadErr:=readHookJournal(indexPath);loadErr==nil { if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority"{manifest,validateErr:=apps.ValidateLinuxApplicationCatalog(context.Background(),"",time.Now().UTC());if validateErr!=nil||manifest.ReleaseID!=invocation.Release{return errors.Join(errors.New("application catalog no longer matches installer receipt"),validateErr)}};_,err=io.WriteString(os.Stdout,existing.Response);return err } else if !errors.Is(loadErr,os.ErrNotExist){return loadErr}
 	changed,err:=applyHook(invocation);if err!=nil{return err}
 	responseValue:=struct{Version uint32 `json:"version"`;Hook,Release,Component,State string}{1,invocation.Verb,invocation.Release,invocation.Component,"applied"}
@@ -97,10 +100,19 @@ func applyHook(invocation hookInvocation)([]string,error){
 }
 
 func provisionApplicationCatalog(releaseID string)([]string,error){
+	if err:=validatePackagedN8N();err!=nil{return nil,err}
 	executable,err:=os.Executable();if err!=nil{return nil,err};executable,err=filepath.EvalSymlinks(executable);if err!=nil{return nil,err}
 	source:=filepath.Join(filepath.Dir(executable),"application-catalog")
 	receipt,err:=apps.ProvisionLinuxApplicationCatalog(context.Background(),apps.LinuxApplicationCatalogProvisionRequest{SourceRoot:source,DestinationRoot:apps.DefaultApplicationCatalogRoot,ReleaseID:releaseID});if err!=nil{return nil,err}
 	return []string{receipt.CandidateGeneration,receipt.RollbackManifest,apps.DefaultApplicationCatalogRoot},nil
+}
+
+func validatePackagedN8N() error {
+	verifier, err := containers.LoadDefaultLinuxRecipeVerifier()
+	if err != nil { return err }
+	recipe, err := containers.ReadPackagedN8NRecipe(context.Background(), verifier)
+	if err != nil { return err }
+	return integrations.ValidateN8NApplicationRecipe(recipe)
 }
 
 func initializeAuthority()([]string,error){

@@ -314,6 +314,9 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	recipeVerifier,err:=containers.LoadDefaultLinuxRecipeVerifier();if err!=nil{return apiserver.DomainServices{},fmt.Errorf("load container recipe trust: %w",err)}
 	containerIDs,err:=containers.NewDeterministicIDAllocator("local");if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize container id allocator: %w",err)}
 	containerApplications,err:=containers.NewApplicationService(containerService,repositories.Containers,recipeVerifier,containerIDs);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize container applications: %w",err)}
+	packagedN8N,err:=containers.ReadPackagedN8NRecipe(ctx,recipeVerifier);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("load packaged n8n recipe: %w",err)}
+	if err=integrations.ValidateN8NApplicationRecipe(packagedN8N);err!=nil{return apiserver.DomainServices{},fmt.Errorf("validate packaged n8n contract: %w",err)}
+	if err=containerApplications.RegisterRecipe(ctx,packagedN8N);err!=nil{return apiserver.DomainServices{},fmt.Errorf("register packaged n8n recipe: %w",err)}
 	containerConsoleEdge,err:=newContainerEdge(containerService,repositories.Containers,containerBroker);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize container console edge: %w",err)}
 	secretEnrollment, err := newSecretEnrollmentClient()
 	if err != nil {

@@ -413,6 +413,7 @@ func validateLinuxApplicationCatalogGeneration(ctx context.Context, root string,
 	recipeFiles := make(map[string]string, len(manifest.Recipes))
 	authority := &LinuxRecipeCatalogAuthority{Root: root}
 	referencedArtifacts := make(map[string]int64, len(manifest.Artifacts))
+	products := make(map[ApplicationKind]bool)
 	for _, recipe := range manifest.Recipes {
 		select {
 		case <-ctx.Done():
@@ -427,10 +428,11 @@ func validateLinuxApplicationCatalogGeneration(ctx context.Context, root string,
 		if linuxApplicationCatalogDigest(document.CanonicalPayload) != document.Reference.RecipeDigest {
 			return ErrRecipeUntrusted
 		}
-		var definition ApplicationDefinition
-		if decodeLinuxApplicationCatalogJSON(document.CanonicalPayload, &definition) != nil || definition.Validate(now) != nil || !sameLinuxApplicationCatalogRecipeReference(definition.Recipe, document.Reference) {
+		definition, definitionErr := VerifySignedRecipeDocument(ctx, document, catalogGenerationVerifier{authority, root, manifest, immutable}, now)
+		if definitionErr != nil || ValidateCertifiedProductDefinition(definition, now) != nil {
 			return ErrRecipeUntrusted
 		}
+		products[definition.Kind] = true
 		artifact, found := catalogManifestArtifact(manifest, definition.Artifact.Digest)
 		if !found || artifact.Size != definition.Artifact.Size {
 			return ErrRecipeUntrusted
@@ -439,6 +441,9 @@ func validateLinuxApplicationCatalogGeneration(ctx context.Context, root string,
 			return ErrRecipeUntrusted
 		}
 		referencedArtifacts[definition.Artifact.Digest] = definition.Artifact.Size
+	}
+	for kind := range CertifiedProductContracts() {
+		if !products[kind] { return fmt.Errorf("%w: missing %s recipe", ErrRecipeUnavailable, kind) }
 	}
 	artifactFiles := make(map[string]string, len(manifest.Artifacts))
 	for _, artifact := range manifest.Artifacts {
@@ -482,6 +487,17 @@ func validateLinuxApplicationCatalogGeneration(ctx context.Context, root string,
 		}
 	}
 	return nil
+}
+
+type catalogGenerationVerifier struct {
+	authority *LinuxRecipeCatalogAuthority
+	root string
+	manifest LinuxApplicationCatalogManifest
+	immutable bool
+}
+
+func (verifier catalogGenerationVerifier) VerifyRecipe(_ context.Context, keyID string, epoch uint64, payload, signature []byte) error {
+	return verifier.authority.verifyRecipeFrom(verifier.root, verifier.manifest, keyID, epoch, payload, signature, verifier.immutable)
 }
 
 func stageLinuxApplicationCatalogGeneration(ctx context.Context, source, candidate, generationRoot string, manifest LinuxApplicationCatalogManifest, now time.Time) (err error) {

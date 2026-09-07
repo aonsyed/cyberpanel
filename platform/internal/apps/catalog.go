@@ -1,12 +1,15 @@
 package apps
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -18,9 +21,56 @@ import (
 // verifier authenticates it before it is decoded, and the decoded definition
 // must bind to the requested ID, version, epoch, and digest.
 type SignedRecipeDocument struct {
+	SchemaVersion    uint32 `json:"schema_version"`
 	Reference        RecipeReference `json:"reference"`
 	CanonicalPayload []byte `json:"canonical_payload"`
 	Signature        []byte `json:"signature"`
+}
+
+// RecipeEnvelopeSchemaVersion deliberately rejects the original circular
+// self-hashing format. V2 signs canonical JSON with the three derived fields
+// empty; the envelope carries their authenticated, derived values.
+const RecipeEnvelopeSchemaVersion uint32 = 2
+
+func CanonicalRecipePayload(definition ApplicationDefinition) ([]byte, error) {
+	definition.Recipe.RecipeDigest = ""
+	definition.Recipe.Signature = ""
+	definition.DefinitionDigest = ""
+	return json.Marshal(definition)
+}
+
+// VerifySignedRecipeDocument is shared by offline release assembly and runtime
+// resolution. No embedded reference metadata may differ from the signed bytes.
+func VerifySignedRecipeDocument(ctx context.Context, document SignedRecipeDocument, verifier RecipeVerifier, now time.Time) (ApplicationDefinition, error) {
+	if ctx == nil || verifier == nil || document.SchemaVersion != RecipeEnvelopeSchemaVersion || len(document.CanonicalPayload) == 0 || len(document.CanonicalPayload) > 4<<20 || document.Reference.Validate(now) != nil {
+		return ApplicationDefinition{}, ErrRecipeUntrusted
+	}
+	sum := sha256.Sum256(document.CanonicalPayload)
+	if hex.EncodeToString(sum[:]) != document.Reference.RecipeDigest || document.Reference.Signature != base64.StdEncoding.EncodeToString(document.Signature) {
+		return ApplicationDefinition{}, ErrRecipeUntrusted
+	}
+	if err := verifier.VerifyRecipe(ctx, document.Reference.SigningKeyID, document.Reference.CatalogEpoch, document.CanonicalPayload, document.Signature); err != nil {
+		return ApplicationDefinition{}, fmt.Errorf("%w: %v", ErrRecipeUntrusted, err)
+	}
+	var definition ApplicationDefinition
+	decoder := json.NewDecoder(bytes.NewReader(document.CanonicalPayload))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&definition) != nil || decoder.Decode(&struct{}{}) != io.EOF || definition.Recipe.RecipeDigest != "" || definition.Recipe.Signature != "" || definition.DefinitionDigest != "" {
+		return ApplicationDefinition{}, ErrRecipeUntrusted
+	}
+	canonical, err := CanonicalRecipePayload(definition)
+	if err != nil || !bytes.Equal(canonical, document.CanonicalPayload) {
+		return ApplicationDefinition{}, ErrRecipeUntrusted
+	}
+	definition.Recipe.RecipeDigest = document.Reference.RecipeDigest
+	definition.Recipe.Signature = document.Reference.Signature
+	definition.DefinitionDigest = document.Reference.RecipeDigest
+	left, _ := json.Marshal(definition.Recipe)
+	right, _ := json.Marshal(document.Reference)
+	if !bytes.Equal(left, right) || definition.Validate(now) != nil {
+		return ApplicationDefinition{}, ErrRecipeUntrusted
+	}
+	return definition, nil
 }
 
 type RecipeSource interface {
@@ -81,7 +131,10 @@ func (catalog *PinnedCatalog) Resolve(ctx context.Context, reference RecipeRefer
 	catalog.mu.RLock()
 	cached, exists := catalog.cache[cacheKey]
 	catalog.mu.RUnlock()
-	if exists { return cached, nil }
+	if exists {
+		if !sameRecipeReference(cached.Recipe, reference) { return ApplicationDefinition{}, ErrRecipeUntrusted }
+		return cached, nil
+	}
 
 	document, err := catalog.Source.FetchRecipe(ctx, reference)
 	if err != nil { return ApplicationDefinition{}, fmt.Errorf("%w: %v", ErrRecipeUnavailable, err) }
@@ -98,14 +151,8 @@ func (catalog *PinnedCatalog) Resolve(ctx context.Context, reference RecipeRefer
 	if subtle.ConstantTimeCompare([]byte(actualDigest), []byte(reference.RecipeDigest)) != 1 {
 		return ApplicationDefinition{}, ErrRecipeUntrusted
 	}
-	if err := catalog.Verifier.VerifyRecipe(ctx, reference.SigningKeyID, reference.CatalogEpoch, document.CanonicalPayload, document.Signature); err != nil {
-		return ApplicationDefinition{}, fmt.Errorf("%w: %v", ErrRecipeUntrusted, err)
-	}
-	var definition ApplicationDefinition
-	if err := json.Unmarshal(document.CanonicalPayload, &definition); err != nil {
-		return ApplicationDefinition{}, fmt.Errorf("%w: recipe payload", ErrRecipeUntrusted)
-	}
-	if err := definition.Validate(now); err != nil { return ApplicationDefinition{}, err }
+	definition, err := VerifySignedRecipeDocument(ctx, document, catalog.Verifier, now)
+	if err != nil { return ApplicationDefinition{}, err }
 	if !sameRecipeReference(definition.Recipe, reference) || definition.DefinitionDigest == "" {
 		return ApplicationDefinition{}, ErrRecipeUntrusted
 	}
@@ -120,7 +167,9 @@ func (catalog *PinnedCatalog) Resolve(ctx context.Context, reference RecipeRefer
 }
 
 func sameRecipeReference(left, right RecipeReference) bool {
-	return left.ID == right.ID && left.DefinitionID == right.DefinitionID && left.ProductVersion == right.ProductVersion && left.RecipeDigest == right.RecipeDigest && left.SigningKeyID == right.SigningKeyID && left.CatalogEpoch == right.CatalogEpoch
+	leftPayload, leftErr := json.Marshal(left)
+	rightPayload, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftPayload, rightPayload)
 }
 
 func definitionSupports(definition ApplicationDefinition, target CatalogTarget) bool {
