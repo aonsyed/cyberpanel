@@ -35,3 +35,24 @@ func(s *Store)ContiguousEvents(ctx context.Context,maxEvents,maxBytes uint32)([]
 func(s *Store)AckEvents(ctx context.Context,through uint64)error{_,err:=s.db.ExecContext(ctx,`UPDATE federation_events SET acked_at=? WHERE sequence<=? AND acked_at IS NULL`,s.clock().UTC(),through);return err}
 func(s *Store)Cursor(ctx context.Context,peer ID)(ProjectionCursor,error){var cursor ProjectionCursor;var raw []byte;err:=s.db.QueryRowContext(ctx,`SELECT cursor_json FROM federation_cursors WHERE peer_id=?`,peer).Scan(&raw);if errors.Is(err,sql.ErrNoRows){return ProjectionCursor{PeerID:peer},nil};if err!=nil{return cursor,err};err=json.Unmarshal(raw,&cursor);return cursor,err}
 func(s *Store)PutCursor(ctx context.Context,cursor ProjectionCursor)error{cursor.UpdatedAt=s.clock().UTC();raw,_:=json.Marshal(cursor);_,err:=s.db.ExecContext(ctx,`INSERT INTO federation_cursors VALUES(?,?,?) ON CONFLICT(peer_id) DO UPDATE SET cursor_json=excluded.cursor_json,updated_at=excluded.updated_at`,cursor.PeerID,raw,cursor.UpdatedAt);return err}
+
+// ActivateEnrollment keeps the exact epoch bound into the enrollment request.
+// A concurrent local revoke or another peer activation invalidates the commit.
+func (s *Store) ActivateEnrollment(ctx context.Context, node ID, expectedEpoch uint64, peer Peer) error {
+	if s == nil || s.db == nil || ctx == nil || !node.Valid() || expectedEpoch == 0 || !peer.ID.Valid() || peer.State != "active" || peer.NodeCertificateRef == "" || peer.HPKEKeyRef == "" {
+		return ErrInvalid
+	}
+	keys, err := json.Marshal(peer.SigningKeys)
+	if err != nil { return err }
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil { return err }
+	defer tx.Rollback()
+	now := s.clock().UTC()
+	update, err := tx.ExecContext(ctx, `UPDATE federation_state SET active_peer_id=?,updated_at=? WHERE singleton_id=1 AND node_id=? AND authority_epoch=? AND active_peer_id=''`, peer.ID, now, node, expectedEpoch)
+	if err != nil { return err }
+	if affected, rowsErr := update.RowsAffected(); rowsErr != nil || affected != 1 { return ErrStale }
+	_, err = tx.ExecContext(ctx, `INSERT INTO federation_peers(id,state,ca_fingerprint,signing_keys_json,node_certificate_ref,hpke_key_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,ca_fingerprint=excluded.ca_fingerprint,signing_keys_json=excluded.signing_keys_json,node_certificate_ref=excluded.node_certificate_ref,hpke_key_ref=excluded.hpke_key_ref,updated_at=excluded.updated_at`, peer.ID, peer.State, peer.CAFingerprint, keys, peer.NodeCertificateRef, peer.HPKEKeyRef, peer.CreatedAt, now)
+	if err != nil { return err }
+	if _, err = tx.ExecContext(ctx, `UPDATE federation_grants SET state='revoked',updated_at=? WHERE authority_epoch<?`, now, expectedEpoch); err != nil { return err }
+	return tx.Commit()
+}
