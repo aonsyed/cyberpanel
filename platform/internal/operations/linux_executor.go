@@ -526,6 +526,7 @@ func cloneStrings(source map[string]string) map[string]string { result := make(m
 func (executor *LinuxOperationsExecutor) ObserveOrApply(ctx context.Context, request EffectRequest) (EffectReceipt, error) {
 	if ctx == nil || validateEffectRequest(request) != nil { return EffectReceipt{}, ErrInvalidEffect }
 	executor.mu.Lock(); defer executor.mu.Unlock()
+	if request.Kind == EffectServiceDiagnose && request.ServiceDiagnose.Reboot != nil { return executor.observeRebootServices(ctx, request) }
 	if request.Kind == EffectRebootMarkerArm || request.Kind == EffectRebootMarkerProbe || request.Kind == EffectRebootMarkerClear { return executor.observeRebootMarker(ctx, request) }
 	if record, found, err := executor.loadJournal(request.EffectID); err != nil { return EffectReceipt{}, err } else if found {
 		if record.Request.RequestDigest != request.RequestDigest { return EffectReceipt{}, ErrIdempotency }

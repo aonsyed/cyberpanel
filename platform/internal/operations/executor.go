@@ -46,6 +46,60 @@ const KindProductUpdate ResourceKind = "product_update"
 
 type ActivationStrategy string
 
+// Reboot qualification binds fresh registry health to the live systemd process.
+// Mandatory control-plane units are fixed in the privileged implementation.
+type RebootServiceBinding struct {
+	Service ServiceName `json:"service"`
+	MainPID uint32 `json:"main_pid"`
+	InvocationID string `json:"invocation_id"`
+	HealthEvidenceDigest string `json:"health_evidence_digest"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+type RebootServiceQualification struct {
+	BootID string `json:"boot_id"`
+	Required []RebootServiceBinding `json:"required"`
+}
+
+func NewControlledRebootServicesProbeRequest(node, plan ResourceID, since time.Time, qualification RebootServiceQualification) (EffectRequest, error) {
+	return finalizeEffect(EffectRequest{Scope: OperationScope{NodeID: node, Kind: KindControlledReboot, ID: plan}, Kind: EffectServiceDiagnose, ServiceDiagnose: &ServiceDiagnoseEffect{Service: ServicePanel, Depth: DiagnosticSummary, Since: since.UTC(), Reboot: &qualification}})
+}
+
+func rebootConfiguredService(service ServiceName) bool {
+	switch service {
+	case ServiceWebOpenLiteSpeed, ServiceWebEnterprise, ServiceMariaDB, ServicePostfix, ServiceDovecot, ServicePowerDNS, ServiceRedis, ServiceName("rspamd"), ServiceName("clamav"): return true
+	default: return false
+	}
+}
+
+func validateRebootServiceQualification(request EffectRequest) error {
+	effect:=request.ServiceDiagnose
+	if effect==nil || effect.Reboot==nil || request.Scope.Kind!=KindControlledReboot || request.Scope.NodeID.String()!="local" || request.Scope.TenantID.String()!="" || effect.Service!=ServicePanel || effect.Depth!=DiagnosticSummary || !validControlledRebootID(effect.Reboot.BootID) || len(effect.Reboot.Required)>9 { return ErrInvalidEffect }
+	seen:=map[ServiceName]bool{}
+	for _,binding:=range effect.Reboot.Required {
+		if !rebootConfiguredService(binding.Service) || seen[binding.Service] || binding.MainPID==0 || len(binding.InvocationID)!=32 || !validSHA256(binding.HealthEvidenceDigest) || binding.ObservedAt.IsZero() || binding.ObservedAt.Before(effect.Since.Add(-2*time.Minute)) || binding.ObservedAt.After(effect.Since) { return ErrInvalidEffect }
+		if _,err:=hex.DecodeString(binding.InvocationID);err!=nil{return ErrInvalidEffect}
+		seen[binding.Service]=true
+	}
+	return nil
+}
+
+func validateRebootServiceDiagnostics(request EffectRequest, diagnostics ServiceDiagnostics) error {
+	if validateRebootServiceQualification(request)!=nil || diagnostics.BootID!=request.ServiceDiagnose.Reboot.BootID || diagnostics.ObservedAt.Before(request.ServiceDiagnose.Since) || diagnostics.ObservedAt.After(request.ServiceDiagnose.Since.Add(2*time.Minute)) || diagnostics.ActiveState!="active" || diagnostics.SubState!="running" || len(diagnostics.Checks)!=6+len(request.ServiceDiagnose.Reboot.Required) { return ErrInvalidEffect }
+	expected:=map[string]bool{"reboot:panel_core":true,"reboot:panel_auth":true,"reboot:panel_secrets":true,"reboot:panel_executor":true,"reboot:panel_gateway":true,"reboot:panel_provider":true}
+	for _,binding:=range request.ServiceDiagnose.Reboot.Required{expected["reboot:"+string(binding.Service)]=true}
+	for _,check:=range diagnostics.Checks {
+		if !expected[check.Code] || check.Outcome!=CheckPass || !validSHA256(check.EvidenceDigest) { return ErrInvalidEffect }
+		delete(expected,check.Code)
+	}
+	if len(expected)!=0{return ErrInvalidEffect};return nil
+}
+
+func ValidateControlledRebootServicesReceipt(request EffectRequest, receipt EffectReceipt, now time.Time) error {
+	if validateRebootServiceQualification(request)!=nil{return ErrInvalidEffect}
+	if validateEffectRequest(request)!=nil || !effectReceiptMatches(request,receipt) || receipt.Outcome!=EffectConfirmed || receipt.Result.Diagnostics==nil || receipt.CompletedAt.Before(request.ServiceDiagnose.Since) || receipt.CompletedAt.After(now) || now.Sub(receipt.Result.Diagnostics.ObservedAt)>2*time.Minute || receipt.Result.Diagnostics.ObservedAt.After(now) { return ErrInvalidEffect }
+	for _,binding:=range request.ServiceDiagnose.Reboot.Required{if now.Sub(binding.ObservedAt)>2*time.Minute{return ErrInvalidEffect}}
+	return validateRebootServiceDiagnostics(request,*receipt.Result.Diagnostics)
+}
 const (
 	ActivationAtomic ActivationStrategy = "atomic_replace"
 	ActivationMakeBeforeBreak ActivationStrategy = "make_before_break"
@@ -62,7 +116,7 @@ type DeleteSSHKeyEffect struct { Key SSHKey `json:"key"` }
 type WAFPolicyEffect struct { Policy WAFPolicy `json:"policy"`; Strategy ActivationStrategy `json:"strategy"` }
 type ServicePolicyEffect struct { Policy ServicePolicy `json:"policy"` }
 type ServiceControlEffect struct { Service ServiceName `json:"service"`; Action ServiceAction `json:"action"`; PolicyGeneration uint64 `json:"policy_generation"` }
-type ServiceDiagnoseEffect struct { Service ServiceName `json:"service"`; Depth DiagnosticDepth `json:"depth"`; Since time.Time `json:"since"` }
+type ServiceDiagnoseEffect struct { Service ServiceName `json:"service"`; Depth DiagnosticDepth `json:"depth"`; Since time.Time `json:"since"`; Reboot *RebootServiceQualification `json:"reboot,omitempty"` }
 type ServiceRepairEffect struct { Service ServiceName `json:"service"`; Strategy RepairStrategy `json:"strategy"`; DiagnosticProofDigest string `json:"diagnostic_proof_digest"` }
 type MetricsQueryEffect struct { Scope EnforcementScope `json:"scope"`; Names []MetricName `json:"names"`; Start time.Time `json:"start"`; End time.Time `json:"end"`; Step time.Duration `json:"step"`; Limit uint32 `json:"limit"` }
 type LogQueryEffect struct { Source LogSource `json:"source"`; Service ServiceName `json:"service,omitempty"`; TenantID string `json:"tenant_id,omitempty"`; SiteID string `json:"site_id,omitempty"`; Start time.Time `json:"start"`; End time.Time `json:"end"`; MinimumSeverity uint8 `json:"minimum_severity"`; Cursor string `json:"cursor,omitempty"`; Limit uint32 `json:"limit"` }
@@ -283,7 +337,7 @@ const (
 	CheckWarn CheckOutcome = "warn"
 	CheckFail CheckOutcome = "fail"
 )
-type ServiceDiagnostics struct { Service ServiceName `json:"service"`; ActiveState string `json:"active_state"`; SubState string `json:"sub_state"`; RestartCount uint32 `json:"restart_count"`; Checks []DiagnosticCheck `json:"checks"`; SuggestedRepairs []RepairStrategy `json:"suggested_repairs"` }
+type ServiceDiagnostics struct { Service ServiceName `json:"service"`; ActiveState string `json:"active_state"`; SubState string `json:"sub_state"`; RestartCount uint32 `json:"restart_count"`; Checks []DiagnosticCheck `json:"checks"`; SuggestedRepairs []RepairStrategy `json:"suggested_repairs"`; ObservedAt time.Time `json:"observed_at,omitempty"`; BootID string `json:"boot_id,omitempty"` }
 
 type PackageChange struct { Name ResourceID `json:"name"`; Architecture ResourceID `json:"architecture"`; FromVersion string `json:"from_version,omitempty"`; ToVersion string `json:"to_version,omitempty"`; Action PackageAction `json:"action"` }
 type PackageTransactionResult struct { Changes []PackageChange `json:"changes"`; RebootRequired bool `json:"reboot_required"`; ServicesRestarted []ServiceName `json:"services_restarted"`; RecoveryValidated bool `json:"recovery_validated"` }
@@ -433,6 +487,7 @@ func validateEffectShape(request EffectRequest) error {
 		if request.ServiceControl == nil || !validService(request.ServiceControl.Service) || request.ServiceControl.PolicyGeneration == 0 { return ErrInvalidCommand }
 	case EffectServiceDiagnose:
 		if request.ServiceDiagnose == nil || !validService(request.ServiceDiagnose.Service) || request.ServiceDiagnose.Depth!=DiagnosticSummary&&request.ServiceDiagnose.Depth!=DiagnosticDependency&&request.ServiceDiagnose.Depth!=DiagnosticDeep || request.ServiceDiagnose.Since.IsZero() { return ErrInvalidCommand }
+		if request.ServiceDiagnose.Reboot != nil && validateRebootServiceQualification(request) != nil { return ErrInvalidCommand }
 	case EffectServiceRepair:
 		if request.ServiceRepair == nil || !validService(request.ServiceRepair.Service) || !validSHA256(request.ServiceRepair.DiagnosticProofDigest) { return ErrInvalidCommand }
 	case EffectMetricsQuery:
@@ -741,6 +796,7 @@ func validateEffectResult(request EffectRequest, result EffectResult) error {
 		for _, socket := range result.Process.Sockets { if socket.Protocol != SocketTCP && socket.Protocol != SocketUDP && socket.Protocol != SocketUnix { return ErrInvalidEffect }; if socket.Protocol != SocketUnix && !socket.LocalAddress.IsValid() { return ErrInvalidEffect }; if len(socket.State) > 64 { return ErrInvalidEffect } }
 	}
 	if result.Diagnostics != nil {
+		if request.ServiceDiagnose != nil && request.ServiceDiagnose.Reboot != nil && validateRebootServiceDiagnostics(request, *result.Diagnostics) != nil { return ErrInvalidEffect }
 		if request.ServiceDiagnose == nil || result.Diagnostics.Service != request.ServiceDiagnose.Service || len(result.Diagnostics.ActiveState) > 64 || len(result.Diagnostics.SubState) > 64 || len(result.Diagnostics.Checks) > 256 || len(result.Diagnostics.SuggestedRepairs) > 16 { return ErrInvalidEffect }
 		for _, check := range result.Diagnostics.Checks { if len(check.Code) == 0 || len(check.Code) > 128 || (check.Outcome != CheckPass && check.Outcome != CheckWarn && check.Outcome != CheckFail) || !validSHA256(check.EvidenceDigest) { return ErrInvalidEffect } }
 	}
