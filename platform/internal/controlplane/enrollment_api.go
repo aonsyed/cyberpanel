@@ -272,6 +272,7 @@ func writeEnrollmentRaw(writer http.ResponseWriter, status int, encoded []byte) 
 }
 
 func writeEnrollmentError(writer http.ResponseWriter, status int, code string) {
+	if status == http.StatusServiceUnavailable { writer.Header().Set("Retry-After", "2") }
 	encoded, _ := json.Marshal(struct{ Code string `json:"code"` }{code})
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
@@ -280,6 +281,8 @@ func writeEnrollmentError(writer http.ResponseWriter, status int, code string) {
 
 func writeEnrollmentFailure(writer http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, ErrAuthorityUnavailable):
+		writeEnrollmentError(writer, http.StatusServiceUnavailable, "authority_unavailable_retry_original_request")
 	case errors.Is(err, ErrInvalid):
 		writeEnrollmentError(writer, http.StatusBadRequest, "invalid_request")
 	case errors.Is(err, ErrForbidden):

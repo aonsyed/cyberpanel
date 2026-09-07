@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -21,6 +22,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -33,6 +35,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/controlplane"
 	"github.com/aonsyed/cyberpanel/platform/internal/federation"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -42,6 +45,8 @@ const (
 	credentialRoot              = "/run/credentials/panel-central.service"
 	postgresCredentialPath      = credentialRoot + "/postgresql.dsn"
 	postgresCAPath              = credentialRoot + "/postgresql-ca.pem"
+	readinessDirectory          = "/run/cyberpanel-central"
+	readinessSocketPath         = readinessDirectory + "/readiness.sock"
 	serverCertificatePath       = credentialRoot + "/server.crt"
 	serverPrivateKeyPath        = credentialRoot + "/server.key"
 	clientCAPath                = credentialRoot + "/client-ca.pem"
@@ -280,6 +285,10 @@ func run(config configuration) error {
 		defer enrollmentListener.Close()
 		listeners = append(listeners, centralListener{listener: enrollmentListener, serve: enrollmentServer.Serve})
 	}
+	readiness, err := newReadinessListener(store)
+	if err != nil { return err }
+	defer readiness.listener.Close()
+	listeners = append(listeners, readiness)
 	return serveCentralListeners(ctx, cancel, listeners)
 }
 
@@ -390,42 +399,33 @@ func openDatabase(path string) (*sql.DB, error) {
 	content, err := readProtectedFile(path, 16<<10, true)
 	if err != nil { return nil, errors.New("cannot read protected PostgreSQL DSN credential") }
 	defer clear(content)
-	uri, err := url.Parse(strings.TrimSpace(string(content)))
-	if err != nil || uri == nil || uri.Scheme != "postgresql" && uri.Scheme != "postgres" || uri.Opaque != "" || uri.User == nil || uri.Hostname() == "" || uri.Fragment != "" {
-		return nil, errors.New("PostgreSQL credential must be a complete postgres URI with explicit user, password, host and database")
-	}
-	password, present := uri.User.Password()
-	databaseName := strings.TrimPrefix(uri.Path, "/")
-	if !present || password == "" || uri.User.Username() == "" || databaseName == "" || strings.Contains(databaseName, "/") || strings.ContainsAny(uri.Hostname(), " ,\t\r\n") {
-		return nil, errors.New("incomplete PostgreSQL credential")
-	}
-	query, err := url.ParseQuery(uri.RawQuery)
-	if err != nil || query.Get("sslmode") != "verify-full" {
-		return nil, errors.New("PostgreSQL credential must require sslmode=verify-full")
-	}
-	for key, values := range query {
-		if len(values) != 1 || key != "sslmode" && key != "sslrootcert" { return nil, errors.New("unsupported PostgreSQL credential option") }
-	}
+	credential, err := parsePostgresCredential(content)
+	if err != nil { return nil, err }
+	defer func() { credential.Password = "" }()
 	roots, err := x509.SystemCertPool()
 	if err != nil { roots = x509.NewCertPool() }
-	if rootPath := query.Get("sslrootcert"); rootPath != "" {
-		if rootPath != postgresCAPath { return nil, errors.New("unregistered PostgreSQL CA credential") }
-		ca, readErr := readProtectedFile(rootPath, maximumCertificateBytes, false)
-		if readErr != nil || !roots.AppendCertsFromPEM(ca) { return nil, errors.New("invalid PostgreSQL CA credential") }
+	if credential.CA != "" {
+		ca, readErr := readProtectedFile(credential.CA, maximumCertificateBytes, false)
+		if readErr != nil { return nil, errors.New("invalid PostgreSQL CA credential") }
+		// An explicit private trust bundle narrows trust to that bundle.
+		roots = x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(ca) { return nil, errors.New("invalid PostgreSQL CA credential") }
 	}
-	port := uint64(5432)
-	if uri.Port() != "" {
-		port, err = strconv.ParseUint(uri.Port(), 10, 16)
-		if err != nil || port == 0 { return nil, errors.New("invalid PostgreSQL port") }
-	}
-	// A constant seed ensures pgx parse errors cannot contain the secret URI.
+	// A constant seed avoids exposing credential contents in parse errors and
+	// retains pgx target_session_attrs=read-write validation for every fallback.
 	config, err := pgx.ParseConfig("postgres://unused:unused@127.0.0.1:5432/unused?sslmode=disable&target_session_attrs=read-write")
 	if err != nil { return nil, errors.New("cannot initialize PostgreSQL driver policy") }
-	config.Host, config.Port, config.Database = uri.Hostname(), uint16(port), databaseName
-	config.User, config.Password = uri.User.Username(), password
-	config.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: uri.Hostname(), RootCAs: roots}
+	config.Database, config.User, config.Password = credential.Database, credential.User, credential.Password
 	config.Fallbacks = nil
-	config.ConnectTimeout = 10*time.Second
+	for index, endpoint := range credential.Endpoints {
+		host, portText, _ := net.SplitHostPort(endpoint)
+		port, _ := strconv.ParseUint(portText, 10, 16)
+		tlsPolicy := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host, RootCAs: roots}
+		if index == 0 { config.Host, config.Port, config.TLSConfig = host, uint16(port), tlsPolicy } else {
+			config.Fallbacks = append(config.Fallbacks, &pgconn.FallbackConfig{Host: host, Port: uint16(port), TLSConfig: tlsPolicy})
+		}
+	}
+	config.ConnectTimeout = 3*time.Second
 	config.RuntimeParams = map[string]string{
 		"application_name": "panel-central",
 		"search_path": "cyberpanel_authority,pg_catalog",
@@ -436,12 +436,22 @@ func openDatabase(path string) (*sql.DB, error) {
 		"lock_timeout": "5000",
 		"idle_in_transaction_session_timeout": "15000",
 	}
-	database := stdlib.OpenDB(*config)
+	database := stdlib.OpenDB(*config, stdlib.OptionResetSession(func(ctx context.Context, connection *pgx.Conn) error {
+		// A pooled connection can survive demotion. Discard it before a new
+		// operation, never in the middle of an operation or an uncertain commit.
+		probe, stop := context.WithTimeout(ctx, 2*time.Second)
+		defer stop()
+		var writable bool
+		if err := connection.QueryRow(probe, `SELECT NOT pg_catalog.pg_is_in_recovery() AND current_setting('transaction_read_only')='off'`).Scan(&writable); err != nil || !writable {
+			return driver.ErrBadConn
+		}
+		return nil
+	}))
 	database.SetMaxOpenConns(16)
 	database.SetMaxIdleConns(4)
 	database.SetConnMaxLifetime(30*time.Minute)
 	database.SetConnMaxIdleTime(5*time.Minute)
-	pingContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pingContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err = database.PingContext(pingContext); err != nil {
 		_ = database.Close()
@@ -453,6 +463,89 @@ func openDatabase(path string) (*sql.DB, error) {
 		return nil, errors.New("PostgreSQL authority requires a writable durable serializable primary and provisioned cyberpanel_authority schema")
 	}
 	return database, nil
+}
+
+type postgresCredential struct {
+	Version uint32 `json:"version"`
+	Endpoints []string `json:"endpoints"`
+	Database string `json:"database"`
+	User string `json:"user"`
+	Password string `json:"password"`
+	CA string `json:"ca"`
+}
+
+func parsePostgresCredential(content []byte) (postgresCredential, error) {
+	var credential postgresCredential
+	invalid := errors.New("invalid PostgreSQL credential; require protected version-1 JSON with 2-5 explicit endpoints or the registered single-host verified-TLS URI")
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 { return credential, invalid }
+	if trimmed[0] == '{' {
+		decoder := json.NewDecoder(bytes.NewReader(trimmed))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&credential) != nil || decoder.Decode(&struct{}{}) != io.EOF || credential.Version != 1 || len(credential.Endpoints) < 2 || len(credential.Endpoints) > 5 || credential.CA != postgresCAPath { return postgresCredential{}, invalid }
+	} else {
+		// Retain the prior single-host credential contract for non-HA installs.
+		uri, err := url.Parse(string(trimmed))
+		if err != nil || uri == nil || uri.Scheme != "postgresql" && uri.Scheme != "postgres" || uri.Opaque != "" || uri.User == nil || uri.Hostname() == "" || uri.Fragment != "" { return credential, invalid }
+		query, err := url.ParseQuery(uri.RawQuery)
+		if err != nil || query.Get("sslmode") != "verify-full" { return credential, invalid }
+		for key, values := range query { if len(values) != 1 || key != "sslmode" && key != "sslrootcert" { return credential, invalid } }
+		port := uri.Port()
+		if port == "" { port = "5432" }
+		credential = postgresCredential{Version: 1, Endpoints: []string{net.JoinHostPort(uri.Hostname(), port)}, Database: strings.TrimPrefix(uri.Path, "/"), User: uri.User.Username(), CA: query.Get("sslrootcert")}
+		credential.Password, _ = uri.User.Password()
+	}
+	if credential.Database == "" || credential.User == "" || credential.Password == "" || strings.ContainsAny(credential.Database, "/\\\x00") || strings.ContainsRune(credential.User, 0) || strings.ContainsRune(credential.Password, 0) || credential.CA != "" && credential.CA != postgresCAPath { return postgresCredential{}, invalid }
+	seen := make(map[string]struct{}, len(credential.Endpoints))
+	for index, endpoint := range credential.Endpoints {
+		host, portText, err := net.SplitHostPort(endpoint)
+		port, portErr := strconv.ParseUint(portText, 10, 16)
+		if err != nil || host == "" || strings.ContainsAny(host, " ,/\\\t\r\n") || portErr != nil || port == 0 { return postgresCredential{}, invalid }
+		canonical := net.JoinHostPort(strings.ToLower(host), strconv.FormatUint(port, 10))
+		if _, duplicate := seen[canonical]; duplicate { return postgresCredential{}, invalid }
+		seen[canonical] = struct{}{}
+		credential.Endpoints[index] = canonical
+	}
+	return credential, nil
+}
+
+func newReadinessListener(store *controlplane.Store) (centralListener, error) {
+	var empty centralListener
+	info, err := os.Lstat(readinessDirectory)
+	if err != nil { return empty, errors.New("central readiness runtime directory is unavailable") }
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || int(stat.Uid) != os.Geteuid() { return empty, errors.New("unsafe central readiness runtime directory") }
+	// systemd owns runtime-directory cleanup. Never unlink another live socket.
+	listener, err := net.Listen("unix", readinessSocketPath)
+	if err != nil { return empty, errors.New("cannot bind central readiness socket") }
+	if err = os.Chmod(readinessSocketPath, 0600); err != nil { _ = listener.Close(); return empty, errors.New("cannot protect central readiness socket") }
+	return centralListener{listener: listener, serve: func(ctx context.Context, current net.Listener) error {
+		server := &http.Server{
+			ReadHeaderTimeout: 3*time.Second, ReadTimeout: 5*time.Second, WriteTimeout: 25*time.Second, IdleTimeout: 5*time.Second, MaxHeaderBytes: 4096,
+			BaseContext: func(net.Listener) context.Context { return ctx },
+			Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				writer.Header().Set("Cache-Control", "no-store")
+				if request.Method != http.MethodGet || request.URL.Path != "/readyz" || request.URL.RawPath != "" || request.URL.RawQuery != "" || request.URL.ForceQuery { http.Error(writer, "not found", http.StatusNotFound); return }
+				probe, stop := context.WithTimeout(request.Context(), 20*time.Second)
+				defer stop()
+				if store.AuthorityReadiness(probe) != nil {
+					writer.Header().Set("Retry-After", "2")
+					writer.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = io.WriteString(writer, "{\"ready\":false}\n")
+					return
+				}
+				_, _ = io.WriteString(writer, "{\"ready\":true}\n")
+			}),
+		}
+		server.SetKeepAlivesEnabled(false)
+		defer server.Close()
+		stop := context.AfterFunc(ctx, func() { _ = server.Close() })
+		defer stop()
+		err := server.Serve(current)
+		if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil { return ctx.Err() }
+		return err
+	}}, nil
 }
 
 func loadEnrollmentBundle() (enrollmentBundle, error) {

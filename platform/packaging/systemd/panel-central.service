@@ -19,10 +19,13 @@ LoadCredential=intent-signing.key:/etc/cyberpanel/central/intent-signing.key
 LoadCredential=revocation-signing.key:/etc/cyberpanel/central/revocation-signing.key
 LoadCredential=enrollments.json:/etc/cyberpanel/central/enrollments.json
 LoadCredential=postgresql.dsn:/etc/cyberpanel/central/postgresql.dsn
+# postgresql.dsn also accepts protected HA JSON with 2-5 ordered TCP endpoints.
 # Provision the PostgreSQL trust bundle here; use its credential path as sslrootcert in the DSN.
 LoadCredential=postgresql-ca.pem:/etc/cyberpanel/central/postgresql-ca.pem
 StateDirectory=cyberpanel-central
 StateDirectoryMode=0700
+RuntimeDirectory=cyberpanel-central
+RuntimeDirectoryMode=0700
 UMask=0077
 Restart=on-failure
 RestartSec=2s
@@ -45,7 +48,7 @@ RestrictNamespaces=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-RestrictAddressFamilies=AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
 AmbientCapabilities=
 ReadOnlyPaths=/etc/cyberpanel

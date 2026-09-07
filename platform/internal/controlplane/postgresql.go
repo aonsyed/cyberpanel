@@ -3,8 +3,10 @@ package controlplane
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
-	"fmt"
+	"io"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -19,8 +21,17 @@ import (
 type authorityDB struct { raw *sql.DB }
 type authorityTx struct { raw *sql.Tx }
 type authorityRow struct { raw *sql.Row }
+type authorityRows struct { raw *sql.Rows }
+
+// ErrAuthorityUnavailable never implies that a submitted operation did not
+// commit. It authorizes only a whole-request retry with the original identity.
+var ErrAuthorityUnavailable = errors.New("central authority temporarily unavailable; retry the original request")
 
 func (row *authorityRow) Scan(dest ...any) error { return authorityError(row.raw.Scan(dest...)) }
+func (rows *authorityRows) Next() bool { return rows.raw.Next() }
+func (rows *authorityRows) Scan(dest ...any) error { return authorityError(rows.raw.Scan(dest...)) }
+func (rows *authorityRows) Err() error { return authorityError(rows.raw.Err()) }
+func (rows *authorityRows) Close() error { return authorityError(rows.raw.Close()) }
 
 func newAuthorityDB(database *sql.DB) (*authorityDB, error) {
 	if database == nil { return nil, ErrInvalid }
@@ -34,9 +45,10 @@ func (db *authorityDB) ExecContext(ctx context.Context, query string, args ...an
 	result, err := db.raw.ExecContext(ctx, postgresBind(query), args...)
 	return result, authorityError(err)
 }
-func (db *authorityDB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+func (db *authorityDB) QueryContext(ctx context.Context, query string, args ...any) (*authorityRows, error) {
 	rows, err := db.raw.QueryContext(ctx, postgresBind(query), args...)
-	return rows, authorityError(err)
+	if err != nil { return nil, authorityError(err) }
+	return &authorityRows{raw: rows}, nil
 }
 func (db *authorityDB) QueryRowContext(ctx context.Context, query string, args ...any) *authorityRow {
 	return &authorityRow{raw: db.raw.QueryRowContext(ctx, postgresBind(query), args...)}
@@ -53,9 +65,10 @@ func (tx *authorityTx) ExecContext(ctx context.Context, query string, args ...an
 	result, err := tx.raw.ExecContext(ctx, postgresBind(query), args...)
 	return result, authorityError(err)
 }
-func (tx *authorityTx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+func (tx *authorityTx) QueryContext(ctx context.Context, query string, args ...any) (*authorityRows, error) {
 	rows, err := tx.raw.QueryContext(ctx, postgresBind(query), args...)
-	return rows, authorityError(err)
+	if err != nil { return nil, authorityError(err) }
+	return &authorityRows{raw: rows}, nil
 }
 func (tx *authorityTx) QueryRowContext(ctx context.Context, query string, args ...any) *authorityRow {
 	return &authorityRow{raw: tx.raw.QueryRowContext(ctx, postgresBind(query), args...)}
@@ -67,16 +80,36 @@ func (tx *authorityTx) Rollback() error { return authorityError(tx.raw.Rollback(
 // Callers retry the whole operation with its original idempotency/request digest;
 // committed responses remain byte-for-byte replayable after an uncertain commit.
 func authorityError(err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) { return err }
 	var postgres *pgconn.PgError
 	if errors.As(err, &postgres) {
 		switch postgres.Code {
-		case "40001", "40P01":
-			return fmt.Errorf("central transaction contention; retry original request: %w", ErrConflict)
+		case "40001", "40P01", "25006", "57P01", "57P02", "57P03", "53300", "53400", "55P03":
+			return ErrAuthorityUnavailable
 		case "23505":
 			return ErrConflict
 		}
+		if strings.HasPrefix(postgres.Code, "08") { return ErrAuthorityUnavailable }
 	}
+	var connectionError *pgconn.ConnectError
+	var networkError net.Error
+	if errors.As(err, &connectionError) || errors.As(err, &networkError) || errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) { return ErrAuthorityUnavailable }
 	return err
+}
+
+// AuthorityReadiness checks the live, pooled authority connection, not a cached
+// process flag. A row lock proves primary write eligibility and update rights
+// without modifying authority data. It does not prove backup currency, synchronous
+// replication, or exclusive writer fencing; those require external evidence.
+func (s *Store) AuthorityReadiness(ctx context.Context) error {
+	if s == nil || s.db == nil || ctx == nil { return ErrInvalid }
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil { return err }
+	defer tx.Rollback()
+	var ready bool
+	if err = tx.QueryRowContext(ctx, `SELECT identity='cyberpanel-central-postgresql' AND version=1 AND current_schema()='cyberpanel_authority' AND NOT pg_catalog.pg_is_in_recovery() AND current_setting('transaction_read_only')='off' AND current_setting('transaction_isolation')='serializable' AND current_setting('synchronous_commit')='on' FROM cyberpanel_authority.authority_postgresql_v1 WHERE singleton=1 FOR UPDATE`).Scan(&ready); err != nil { return err }
+	if !ready { return ErrAuthorityUnavailable }
+	return tx.Commit()
 }
 
 // Only SQL parameters are rebound: literals, quoted identifiers, comments and

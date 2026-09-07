@@ -60,6 +60,7 @@ func (api *OperatorAPI) serveHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	operator, err := api.operator(request)
 	if err != nil {
+		if errors.Is(err, ErrAuthorityUnavailable) { writeOperatorFailure(writer, err); return }
 		writeOperatorError(writer, http.StatusForbidden, "client_grant_rejected")
 		return
 	}
@@ -109,8 +110,12 @@ func (api *OperatorAPI) operator(request *http.Request) (Operator, error) {
 }
 
 func (api *OperatorAPI) listNodes(writer http.ResponseWriter, request *http.Request, operator Operator) {
-	if !emptyOperatorBody(request) || !validNodeListQuery(request) || api.authority.authorizePermission(request.Context(), operator, "node.list") != nil {
+	if !emptyOperatorBody(request) || !validNodeListQuery(request) {
 		api.reject(writer, request, operator, "node.list", "fleet", operator.TenantID, ErrForbidden)
+		return
+	}
+	if permissionErr := api.authority.authorizePermission(request.Context(), operator, "node.list"); permissionErr != nil {
+		api.reject(writer, request, operator, "node.list", "fleet", operator.TenantID, permissionErr)
 		return
 	}
 	limit := uint32(20)
@@ -132,8 +137,12 @@ func (api *OperatorAPI) listNodes(writer http.ResponseWriter, request *http.Requ
 
 func (api *OperatorAPI) inspectNode(writer http.ResponseWriter, request *http.Request, operator Operator, rawID string) {
 	id, err := federation.NewID(rawID)
-	if err != nil || !emptyOperatorBody(request) || api.authority.authorizePermission(request.Context(), operator, "node.inspect") != nil {
+	if err != nil || !emptyOperatorBody(request) {
 		api.reject(writer, request, operator, "node.inspect", "node", rawID, ErrForbidden)
+		return
+	}
+	if permissionErr := api.authority.authorizePermission(request.Context(), operator, "node.inspect"); permissionErr != nil {
+		api.reject(writer, request, operator, "node.inspect", "node", rawID, permissionErr)
 		return
 	}
 	if !api.admit(writer, request, operator, "node.inspect", "node", rawID) {
@@ -244,6 +253,7 @@ func (api *OperatorAPI) authorizeNodeLifecycle(ctx context.Context, operator Ope
 		return err
 	}
 	node, err := api.store.Node(ctx, nodeID)
+	if errors.Is(err, ErrAuthorityUnavailable) { return err }
 	if err != nil || node.OwnerTenantID.String() != operator.TenantID {
 		return ErrForbidden
 	}
@@ -278,8 +288,12 @@ func (api *OperatorAPI) createIntent(writer http.ResponseWriter, request *http.R
 
 func (api *OperatorAPI) inspectIntent(writer http.ResponseWriter, request *http.Request, operator Operator, rawID string) {
 	id, err := federation.NewID(rawID)
-	if err != nil || !emptyOperatorBody(request) || api.authority.authorizePermission(request.Context(), operator, "intent.inspect") != nil {
+	if err != nil || !emptyOperatorBody(request) {
 		api.reject(writer, request, operator, "intent.inspect", "intent", rawID, ErrForbidden)
+		return
+	}
+	if permissionErr := api.authority.authorizePermission(request.Context(), operator, "intent.inspect"); permissionErr != nil {
+		api.reject(writer, request, operator, "intent.inspect", "intent", rawID, permissionErr)
 		return
 	}
 	if !api.admit(writer, request, operator, "intent.inspect", "intent", rawID) {
@@ -294,8 +308,12 @@ func (api *OperatorAPI) inspectIntent(writer http.ResponseWriter, request *http.
 
 func (api *OperatorAPI) inspectGrant(writer http.ResponseWriter, request *http.Request, operator Operator, rawID string) {
 	id, err := federation.NewID(rawID)
-	if err != nil || !emptyOperatorBody(request) || api.authority.authorizePermission(request.Context(), operator, "grant.inspect") != nil {
+	if err != nil || !emptyOperatorBody(request) {
 		api.reject(writer, request, operator, "grant.inspect", "grant", rawID, ErrForbidden)
+		return
+	}
+	if permissionErr := api.authority.authorizePermission(request.Context(), operator, "grant.inspect"); permissionErr != nil {
+		api.reject(writer, request, operator, "grant.inspect", "grant", rawID, permissionErr)
 		return
 	}
 	if !api.admit(writer, request, operator, "grant.inspect", "grant", rawID) {
@@ -325,8 +343,12 @@ func (api *OperatorAPI) revokeNode(writer http.ResponseWriter, request *http.Req
 
 func (api *OperatorAPI) inspectSaga(writer http.ResponseWriter, request *http.Request, operator Operator, rawID string) {
 	id, err := federation.NewID(rawID)
-	if err != nil || !emptyOperatorBody(request) || api.authority.authorizePermission(request.Context(), operator, "saga.inspect") != nil {
+	if err != nil || !emptyOperatorBody(request) {
 		api.reject(writer, request, operator, "saga.inspect", "saga", rawID, ErrForbidden)
+		return
+	}
+	if permissionErr := api.authority.authorizePermission(request.Context(), operator, "saga.inspect"); permissionErr != nil {
+		api.reject(writer, request, operator, "saga.inspect", "saga", rawID, permissionErr)
 		return
 	}
 	if !api.admit(writer, request, operator, "saga.inspect", "saga", rawID) {
@@ -431,6 +453,8 @@ func writeOperatorJSON(writer http.ResponseWriter, status int, value any) {
 
 func writeOperatorFailure(writer http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, ErrAuthorityUnavailable):
+		writeOperatorError(writer, http.StatusServiceUnavailable, "authority_unavailable_retry_original_request")
 	case errors.Is(err, ErrInvalid):
 		writeOperatorError(writer, http.StatusBadRequest, "invalid_request")
 	case errors.Is(err, ErrForbidden):
@@ -447,6 +471,7 @@ func writeOperatorFailure(writer http.ResponseWriter, err error) {
 }
 
 func writeOperatorError(writer http.ResponseWriter, status int, code string) {
+	if status == http.StatusServiceUnavailable { writer.Header().Set("Retry-After", "2") }
 	writeOperatorJSON(writer, status, struct{ Code string `json:"code"` }{code})
 }
 

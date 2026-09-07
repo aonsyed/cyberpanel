@@ -317,6 +317,7 @@ func (authority *OperatorAuthority) authorizePermission(ctx context.Context, ope
 	}
 	fingerprint := strings.TrimPrefix(operator.SessionID, operatorSessionPrefix)
 	grant, err := authority.store.operatorGrantByFingerprint(ctx, fingerprint)
+	if errors.Is(err, ErrAuthorityUnavailable) { return err }
 	if err != nil || grant.PrincipalID != operator.PrincipalID || grant.TenantID != operator.TenantID || grant.Assurance != operator.Assurance || grant.AuthzEpoch != operator.AuthzEpoch {
 		return ErrForbidden
 	}
@@ -335,11 +336,13 @@ func (authority *OperatorAuthority) Authorize(ctx context.Context, operator Oper
 	switch permission {
 	case "node.intent.create", "node.revoke":
 		node, err := authority.store.Node(ctx, target)
+		if errors.Is(err, ErrAuthorityUnavailable) { return err }
 		if err != nil || node.OwnerTenantID.String() != operator.TenantID {
 			return ErrForbidden
 		}
 	case "saga.advance":
 		saga, err := authority.store.Saga(ctx, target)
+		if errors.Is(err, ErrAuthorityUnavailable) { return err }
 		if err != nil || saga.OwnerTenantID.String() != operator.TenantID {
 			return ErrForbidden
 		}
