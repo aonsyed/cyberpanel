@@ -218,6 +218,7 @@ type DomainServices struct {
 	ApplicationAutologinBridge *apps.AutologinBridgeManager
 	Containers *containers.Service
 	ContainerApplications *containers.ApplicationService
+	N8N *integrations.N8NRuntime
 	WebEngine *management.Service
 	Audit *audit.Service
 	DashboardEdge DashboardEdgeService

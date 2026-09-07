@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/netip"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/containers"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
+	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 )
 
 type ContainerImagePayload struct{RegistryCredentialID containers.ID `json:"registry_credential_id,omitempty"`;Registry string `json:"registry"`;Repository string `json:"repository"`;Tag string `json:"tag"`;Platform string `json:"platform"`}
@@ -22,6 +24,13 @@ type ContainerDeletePayload struct{}
 type ContainerApplicationDeployPayload struct{SiteID containers.ID `json:"site_id"`;RecipeID containers.ID `json:"recipe_id"`;RecipeVersion string `json:"recipe_version"`}
 type ContainerApplicationUpdatePayload struct{RecipeID containers.ID `json:"recipe_id"`;RecipeVersion string `json:"recipe_version"`;BackwardCompatibleData bool `json:"backward_compatible_data"`}
 type ContainerExecExchangePayload struct{GrantID containers.ID `json:"grant_id"`;Token string `json:"token"`}
+
+type N8NActionPayload struct {
+ Installation integrations.N8NInstallation `json:"installation"`
+ InstallationID integrations.ID `json:"installation_id"`
+ Definition *integrations.N8NDefinition `json:"definition,omitempty"`
+ ExpectedGeneration uint64 `json:"expected_generation,omitempty"`
+}
 
 func registerContainerContracts(registry *Registry)error{
 	operations:=[]Operation{
@@ -38,13 +47,46 @@ func registerContainerContracts(registry *Registry)error{
 		{Name:"container.application.update",Permission:identity.MustPermission("container:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &ContainerApplicationUpdatePayload{}},ResolveScope:tenantScope},
 		{Name:"container.exec.exchange",Auth:AuthNone,Mutating:true,MaximumBodyBytes:16<<10,NewPayload:func()any{return &ContainerExecExchangePayload{}},ValidatePayload:func(value any)error{payload:=value.(*ContainerExecExchangePayload);if !payload.GrantID.Valid()||len(payload.Token)<32||len(payload.Token)>512{return invalid("container exec exchange")};return nil},ResolveScope:globalScope},
 	}
-	for _,operation:=range operations{if err:=register(registry,operation);err!=nil{return err}}
+	for _, action := range []string{"install","observe","update","suspend","resume","remove"} {
+ operations=append(operations,Operation{Name:"integration.n8n."+action,Permission:identity.MustPermission("container:expose"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:action!="observe",MaximumBodyBytes:64<<10,NewPayload:func()any{return &N8NActionPayload{}},ResolveScope:tenantScope})
+}
+for _,operation:=range operations{if err:=register(registry,operation);err!=nil{return err}}
 	return nil
 }
 
 func containerMeta(inv Invocation,operation string,resource containers.ID)containers.CommandMeta{tenant,_:=containers.NewID(inv.Request.TenantID);sum:=sha256.Sum256([]byte(inv.Actor.PrincipalID.String()+"\x00"+operation+"\x00"+resource.String()+"\x00"+inv.IdempotencyKey));grant:=containers.Grant{TenantID:tenant,ResourceID:resource,Operation:operation,AuthzEpoch:inv.Actor.AuthzEpoch,ExpiresAt:time.Now().UTC().Add(30*time.Second),Digest:hex.EncodeToString(sum[:])};fence:=inv.Request.ExpectedGeneration+1;if fence==0{fence=1};return containers.CommandMeta{CommandID:commandID(inv),Grant:grant,ExpectedGeneration:inv.Request.ExpectedGeneration,Fence:containers.FenceToken(fence)}}
 
 func bindContainers(registry *Registry,services DomainServices)error{
+ if services.N8N != nil {
+  for _, action := range []string{"install","observe","update","suspend","resume","remove"} {
+   action:=action
+   if err:=registry.Bind("integration.n8n."+action,func(ctx context.Context,inv Invocation,value any)(OperationResult,error){
+    payload:=value.(*N8NActionPayload)
+    id:=payload.InstallationID
+    if action=="install"{id=payload.Installation.ID}
+    if id==""{id=integrations.ID(inv.Request.ResourceID)}
+    resource,err:=containers.NewID(string(id));if err!=nil{return OperationResult{},ErrInvalidRequest}
+    if inv.Request.ResourceID!=""&&inv.Request.ResourceID!=string(id){return OperationResult{},ErrInvalidRequest}
+    generation:=inv.Request.ExpectedGeneration
+    if payload.ExpectedGeneration!=0{if generation!=0&&generation!=payload.ExpectedGeneration{return OperationResult{},ErrInvalidRequest};generation=payload.ExpectedGeneration}
+    inv.Request.ExpectedGeneration=generation
+    meta:=containerMeta(inv,"application.deploy",resource)
+    if action=="observe"{receipt,err:=services.N8N.Observe(ctx,meta,id);if err!=nil{return OperationResult{},n8nAPIError(err)};return OperationResult{Status:http.StatusOK,Value:receipt,Generation:receipt.ObservedGeneration},nil}
+    installation:=payload.Installation
+    if action!="install"{
+     current,err:=services.N8N.Store.LoadN8NInstallation(ctx,id);if err!=nil{return OperationResult{},n8nAPIError(err)}
+     if string(current.TenantID)!=inv.Request.TenantID{return OperationResult{},ErrNotFound}
+     installation=current
+     if action=="update"{if payload.Definition==nil{return OperationResult{},ErrInvalidRequest};installation.Definition=*payload.Definition}
+    }
+    if action=="install"{installation.TenantID=integrations.TenantID(inv.Request.TenantID)}
+    receipt,err:=services.N8N.Apply(ctx,meta,installation,action);if err!=nil{return OperationResult{},n8nAPIError(err)}
+    status:=http.StatusOK;if action=="install"{status=http.StatusCreated}
+    return OperationResult{Status:status,Value:receipt,Generation:receipt.ObservedGeneration},nil
+   });err!=nil{return err}
+  }
+ }
+
 	if services.Containers!=nil{
 		if err:=registry.Bind("container.image.pull",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){resource,err:=containers.NewID(inv.Request.ResourceID);if err!=nil{return OperationResult{},ErrInvalidRequest};p:=value.(*ContainerImagePayload);image,result,err:=services.Containers.PullImage(ctx,containers.PullImageCommand{Meta:containerMeta(inv,"image.pull",resource),ImageID:resource,RegistryCredentialID:p.RegistryCredentialID,Registry:p.Registry,Repository:p.Repository,Tag:p.Tag,Platform:p.Platform});if err!=nil{return OperationResult{},mapDomainError(err)};return OperationResult{Status:http.StatusOK,Value:struct{Image containers.Image `json:"image"`;Operation containers.Result `json:"operation"`}{image,result},Generation:image.Generation},nil});err!=nil{return err}
 			if err:=registry.Bind("container.volume.ensure",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){resource,err:=containers.NewID(inv.Request.ResourceID);if err!=nil{return OperationResult{},ErrInvalidRequest};p:=value.(*ContainerVolumePayload);volume,result,err:=services.Containers.EnsureVolume(ctx,containers.EnsureVolumeCommand{Meta:containerMeta(inv,"volume.ensure",resource),VolumeID:resource,Name:p.Name,Class:p.Class,QuotaBytes:p.QuotaBytes,InodeLimit:p.InodeLimit});if err!=nil{return OperationResult{},mapDomainError(err)};return OperationResult{Status:http.StatusOK,Value:struct{Volume containers.Volume `json:"volume"`;Operation containers.Result `json:"operation"`}{volume,result},Generation:volume.Generation},nil});err!=nil{return err}
@@ -62,4 +104,16 @@ func bindContainers(registry *Registry,services DomainServices)error{
 	}
 	if services.Containers!=nil{if err:=registry.Bind("container.exec.exchange",func(ctx context.Context,_ Invocation,value any)(OperationResult,error){payload:=value.(*ContainerExecExchangePayload);receipt,err:=services.Containers.ExchangeExec(ctx,payload.GrantID,payload.Token);payload.Token="";if err!=nil{return OperationResult{},mapDomainError(err)};return OperationResult{Status:http.StatusOK,Value:receipt},nil});err!=nil{return err}}
 	return nil
+}
+
+// Retain actionable release/trust/recovery diagnostics instead of reporting a
+// successful deployment or swallowing the prerequisite behind a generic 500.
+type n8nPrerequisiteError struct{ cause error; detail string }
+func (err *n8nPrerequisiteError) Error() string{return err.detail}
+func (err *n8nPrerequisiteError) Unwrap() error{return err.cause}
+func n8nAPIError(err error) error {
+ if errors.Is(err,integrations.ErrN8NRecipeUnavailable){return &n8nPrerequisiteError{ErrUnavailable,"The requested signed n8n recipe is not installed. Provision the approved offline container catalog and retry."}}
+ if errors.Is(err,integrations.ErrN8NRecipeTrust){return &n8nPrerequisiteError{ErrForbidden,"The n8n recipe signature is invalid or its release signing key is not trusted on this node."}}
+ if errors.Is(err,integrations.ErrIntegrity)||errors.Is(err,containers.ErrPolicy){return &n8nPrerequisiteError{ErrInvalidRequest,"The n8n definition, workload graph, or secret bindings do not match the signed release contract."}}
+ return mapDomainError(err)
 }

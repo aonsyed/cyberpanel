@@ -39,6 +39,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/webactivation"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/preview"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/provisioning"
+	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	hostingservice "github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
@@ -443,6 +444,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		Malware:          malwareService,
 		Containers:       containerService,
 		ContainerApplications: containerApplications,
+		N8N: &integrations.N8NRuntime{Applications:containerApplications,Containers:containerService,Repository:repositories.Containers,Store:repositories.Integrations,Verifier:recipeVerifier,Allocator:containerIDs,AuthorizeSite:func(ctx context.Context,tenantID,siteID string)error{tenant,err:=site.NewTenantID(tenantID);if err!=nil{return err};resource,err:=site.NewSiteID(siteID);if err!=nil{return err};_,err=repositories.Hosting.Load(ctx,tenant,resource);return err}},
 		ContainerEdge:    containerConsoleEdge,
 		DNSRepository:    &repositories.DNS,
 		CertificateStore: &repositories.CertificateIssuance,
