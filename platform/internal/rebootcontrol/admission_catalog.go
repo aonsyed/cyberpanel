@@ -14,6 +14,7 @@ type admissionSource struct {
 }
 
 var admissionSources=[]admissionSource{
+	{"reboot_execution_effects",[]string{"id","boundary","method","effect_id","request_digest","caller","resource","binding_digest","epoch","classification"},"status","'completed'","@classification='reboot_control'"},
 	{"reboot_api_invocations",[]string{"id"},"status","'completed'",""},
 	{"panel_database_operations",[]string{"scope_tenant_id","scope_kind","scope_id","command_id","json_extract(@receipt_json,'$.request.effect_id')"},"status","'applied','rejected','compensated'",""},
 	{"database_transfer_state_v1",[]string{"job_id"},"status","'succeeded','completed','failed','canceled','cancelled'",""},

@@ -2,12 +2,14 @@ package webactivation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 type PeerAuthorizer interface { Authorize(net.Conn) error }
@@ -16,6 +18,7 @@ type RequestHandler interface { Execute(context.Context, Request) (Response, err
 type Server struct {
 	Authorizer PeerAuthorizer
 	Handler RequestHandler
+	Admission rebootcontrol.ExecutionAdmission
 	MaximumConcurrent uint32
 	Now func() time.Time
 	once sync.Once
@@ -54,6 +57,14 @@ func (server *Server) serveConnection(connection net.Conn) {
 	_ = connection.SetDeadline(request.Deadline)
 	ctx, cancel := context.WithDeadline(context.Background(), request.Deadline)
 	defer cancel()
+	if server.Admission==nil{return}
+	binding:=rebootcontrol.ExecutionBinding{Boundary:"webactivation",Method:"activate",EffectID:request.EffectID,RequestDigest:request.Digest(),Caller:"authenticated-panel-core",Resource:"local:webengine"}
+	lease,err:=server.Admission.AdmitExecution(ctx,binding);if err!=nil{return}
+	if len(lease.Cached)!=0 {
+		var cached Response
+		if json.Unmarshal(lease.Cached,&cached)==nil && cached.Validate(request,time.Now().UTC())==nil{_=writeFrame(connection,cached)};return
+	}
+	defer func(){_=rebootcontrol.SettleExecution(server.Admission,lease,false,nil)}()
 	response, err := server.Handler.Execute(ctx, request)
 	if err != nil {
 		response = Response{
@@ -65,5 +76,7 @@ func (server *Server) serveConnection(connection net.Conn) {
 	completed := time.Now().UTC()
 	if server.Now != nil { completed = server.Now().UTC() }
 	if err = response.Validate(request, completed); err != nil { return }
+	terminal:=response.Receipt.Status==activation.Applied || response.Receipt.Status==activation.RolledBack
+	if rebootcontrol.SettleExecution(server.Admission,lease,terminal,response)!=nil{return}
 	_ = writeFrame(connection, response)
 }

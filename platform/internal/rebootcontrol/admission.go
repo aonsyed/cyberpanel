@@ -19,6 +19,7 @@ func NewAdmissionGate(ctx context.Context,db *sql.DB,bootID string,now func()tim
 	gate:=&AdmissionGate{db:db,bootID:bootID,now:now}
 	tx,err:=db.BeginTx(ctx,nil);if err!=nil{return nil,err};defer tx.Rollback()
 	for _,statement:=range []string{
+		executionSchema,
 		`CREATE TABLE IF NOT EXISTS reboot_admission_gate(singleton INTEGER PRIMARY KEY CHECK(singleton=1),epoch INTEGER NOT NULL,closed INTEGER NOT NULL,plan_id TEXT NOT NULL,fence INTEGER NOT NULL,boot_id TEXT NOT NULL)`,
 		`INSERT OR IGNORE INTO reboot_admission_gate VALUES(1,0,0,'',0,'')`,
 		`CREATE TABLE IF NOT EXISTS reboot_api_invocations(id TEXT PRIMARY KEY,operation TEXT NOT NULL,request_id TEXT NOT NULL,idempotency_digest TEXT NOT NULL,boot_id TEXT NOT NULL,epoch INTEGER NOT NULL,status TEXT NOT NULL,admitted_at TEXT NOT NULL,completed_at TEXT NOT NULL)`,
@@ -42,6 +43,7 @@ func NewAdmissionGate(ctx context.Context,db *sql.DB,bootID string,now func()tim
 	// A dead process cannot still own an invocation. Preserve it as ambiguous;
 	// there may have been an effect before the domain repository was linked.
 	if _,err=tx.ExecContext(ctx,`UPDATE reboot_api_invocations SET status='ambiguous' WHERE boot_id<>? AND status='active'`,bootID);err!=nil{return nil,err}
+	if _,err=tx.ExecContext(ctx,`UPDATE reboot_execution_effects SET status='ambiguous' WHERE boot_id<>? AND status='active'`,bootID);err!=nil{return nil,err}
 	if err=tx.Commit();err!=nil{return nil,err};return gate,nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/provisioning"
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 type Transport interface { RoundTrip(context.Context, Request) (Response, error) }
@@ -112,6 +113,7 @@ type RequestHandler interface { Execute(context.Context, Request) (Response, err
 type Server struct {
 	Authorizer PeerAuthorizer
 	Handler    RequestHandler
+	Admission  rebootcontrol.ExecutionAdmission
 	MaximumConcurrent uint32
 	Now        func() time.Time
 	semaphore  chan struct{}
@@ -141,8 +143,17 @@ func (server *Server) serveConnection(connection net.Conn) {
 	if err := request.Validate(now); err != nil { _ = writeFrame(connection, wireReply{ProtocolError: "invalid_request"}); return }
 	_ = connection.SetDeadline(request.Deadline)
 	ctx, cancel := context.WithDeadline(context.Background(), request.Deadline); defer cancel()
+	if server.Admission==nil{return}
+	binding:=rebootcontrol.ExecutionBinding{Boundary:"siteops",Method:string(request.Operation),EffectID:string(request.EffectKey),RequestDigest:request.Digest(),Caller:"authenticated-panel-core",Resource:string(request.RuntimeKey)}
+	lease,err:=server.Admission.AdmitExecution(ctx,binding);if err!=nil{return}
+	if len(lease.Cached)!=0 {
+		var cached Response
+		if json.Unmarshal(lease.Cached,&cached)==nil { cached.RequestID=request.RequestID;if cached.Validate(request,time.Now().UTC())==nil{_=writeFrame(connection,wireReply{Response:cached})} };return
+	}
+	defer func(){_=rebootcontrol.SettleExecution(server.Admission,lease,false,nil)}()
 	response, err := server.Handler.Execute(ctx, request)
 	if err != nil { _ = writeFrame(connection, wireReply{ProtocolError: errorCode(err)}); return }
 	if err = response.Validate(request, time.Now().UTC()); err != nil { _ = writeFrame(connection, wireReply{ProtocolError: "invalid_response"}); return }
+	if rebootcontrol.SettleExecution(server.Admission,lease,response.Succeeded,response)!=nil{return}
 	_ = writeFrame(connection, wireReply{Response: response})
 }

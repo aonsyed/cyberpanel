@@ -12,6 +12,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 const AccessBrokerMaximumFrameBytes = 64 << 20
@@ -152,9 +154,38 @@ func(client *AccessBrokerClient)ReleaseSyncSnapshot(ctx context.Context,s SyncSn
 type AccessBrokerPeerAuthorizer interface { Authorize(net.Conn) error }
 type AccessReceiptJournal interface { Lookup(ExecutorEnvelope)(ExecutorResult,bool,error); Commit(ExecutorEnvelope,ExecutorResult)error }
 
-type AccessBrokerServer struct { Authorizer AccessBrokerPeerAuthorizer; Handler ExecutorHandler; Journal AccessReceiptJournal; MaximumConcurrent uint32 }
+type AccessBrokerServer struct { Authorizer AccessBrokerPeerAuthorizer; Handler ExecutorHandler; Journal AccessReceiptJournal; Admission rebootcontrol.ExecutionAdmission; MaximumConcurrent uint32 }
 func(server *AccessBrokerServer)Serve(listener net.Listener)error{if server==nil||listener==nil||server.Authorizer==nil||server.Handler==nil||server.Journal==nil{return ErrAccessBrokerProtocol};maximum:=server.MaximumConcurrent;if maximum==0{maximum=64};gate:=make(chan struct{},maximum);var group sync.WaitGroup;defer group.Wait();for{connection,err:=listener.Accept();if err!=nil{return err};gate<-struct{}{};group.Add(1);go func(){defer func(){<-gate;group.Done();connection.Close()}();server.serve(connection)}()}}
-func(server *AccessBrokerServer)serve(connection net.Conn){if server.Authorizer.Authorize(connection)!=nil{return};now:=time.Now().UTC();_ = connection.SetDeadline(now.Add(10*time.Minute));var request ExecutorEnvelope;if readAccessFrame(connection,&request)!=nil||request.Validate(now)!=nil||!validAccessBrokerOperation(request.Operation){return};_ = connection.SetDeadline(request.Deadline);ctx,cancel:=context.WithDeadline(context.Background(),request.Deadline);defer cancel();if cached,found,err:=server.Journal.Lookup(request);err==nil&&found{_ = writeAccessFrame(connection,cached);return};response,err:=server.Handler.Handle(ctx,request);if err!=nil{response=failedExecutorResult(request,err)};if response.Validate(request,time.Now().UTC())!=nil{return};if server.Journal.Commit(request,response)!=nil{return};_ = writeAccessFrame(connection,response)}
+func(server *AccessBrokerServer)serve(connection net.Conn){
+	if server.Authorizer.Authorize(connection)!=nil{return}
+	now:=time.Now().UTC();_=connection.SetDeadline(now.Add(10*time.Minute))
+	var request ExecutorEnvelope
+	if readAccessFrame(connection,&request)!=nil||request.Validate(now)!=nil||!validAccessBrokerOperation(request.Operation){return}
+	_=connection.SetDeadline(request.Deadline);ctx,cancel:=context.WithDeadline(context.Background(),request.Deadline);defer cancel()
+	// Do not reuse isAccessReadOperation: it controls request-ID randomness and
+	// includes cron execution and terminal issuance, both genuine mutations.
+	mutation:=true
+	switch request.Operation { case ExecutorFileList,ExecutorFileStat,ExecutorFileRead,ExecutorDownloadRead,ExecutorGitLog: mutation=false }
+	var lease rebootcontrol.ExecutionLease
+	if mutation {
+		if server.Admission==nil{return}
+		binding:=rebootcontrol.ExecutionBinding{Boundary:"access",Method:string(request.Operation),EffectID:request.RequestID,RequestDigest:request.PayloadHash,Caller:"authenticated-panel-core",Resource:"site:"+string(request.SiteID)}
+		var err error;lease,err=server.Admission.AdmitExecution(ctx,binding);if err!=nil{return}
+		if len(lease.Cached)!=0 {
+			var cached ExecutorResult
+			if json.Unmarshal(lease.Cached,&cached)==nil && cached.Validate(request,time.Now().UTC())==nil{_=writeAccessFrame(connection,cached)};return
+		}
+		defer func(){_=rebootcontrol.SettleExecution(server.Admission,lease,false,nil)}()
+	}
+	// A journal lookup error is not evidence that an effect has never run.
+	cached,found,err:=server.Journal.Lookup(request);if err!=nil{return}
+	response:=cached
+	if !found { response,err=server.Handler.Handle(ctx,request);if err!=nil{response=failedExecutorResult(request,err)} }
+	if response.Validate(request,time.Now().UTC())!=nil{return}
+	if !found && server.Journal.Commit(request,response)!=nil{return}
+	if mutation && rebootcontrol.SettleExecution(server.Admission,lease,response.Succeeded,response)!=nil{return}
+	_=writeAccessFrame(connection,response)
+}
 
 func succeededExecutorResult(request ExecutorEnvelope,value any)(ExecutorResult,error){payload,err:=json.Marshal(value);if err!=nil{return ExecutorResult{},err};return ExecutorResult{Version:ExecutorProtocolVersion,RequestID:request.RequestID,Operation:request.Operation,Succeeded:true,Payload:payload,PayloadHash:deploymentPayloadDigest(payload),Receipt:deploymentPayloadDigest(append([]byte(string(request.Operation)+"\x00"),payload...)),CompletedAt:time.Now().UTC()},nil}
 func failedExecutorResult(request ExecutorEnvelope,err error)ExecutorResult{return ExecutorResult{Version:ExecutorProtocolVersion,RequestID:request.RequestID,Operation:request.Operation,Succeeded:false,ErrorCode:classifyAccessBrokerFailure(err),Receipt:deploymentPayloadDigest([]byte(request.RequestID+"\x00"+classifyAccessBrokerFailure(err))),CompletedAt:time.Now().UTC()}}

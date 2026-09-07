@@ -8,12 +8,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/ha"
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 const (
@@ -463,6 +465,7 @@ type DatabaseBrokerAuthorizer interface{ Authorize(net.Conn) error }
 type DatabaseBrokerServer struct {
 	Authorizer        DatabaseBrokerAuthorizer
 	Executor          MariaDBExecutor
+	Admission         rebootcontrol.ExecutionAdmission
 	MaximumConcurrent uint32
 	Now               func() time.Time
 	once              sync.Once
@@ -507,6 +510,49 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		_, _ = connection.Read(probe[:])
 		cancel()
 	}()
+	// Metadata and fixed SHOW/DESCRIBE grammar cannot carry an effect payload.
+	// SELECT/EXPLAIN remain conservatively gated: expressions may invoke stored
+	// functions, so a leading SELECT alone is not a read-only guarantee.
+	mutation:=request.Operation!=BrokerWorkspaceMetadata
+	if request.Operation==BrokerWorkspaceQuery {
+		_,kind,_:=ParseWorkspaceStatement(request.Workspace.Statement)
+		mutation=kind!=WorkspaceStatementShow && kind!=WorkspaceStatementDescribe
+	}
+	if request.Operation==BrokerMigrationRestore && request.MigrationRestore.Action=="observe" { mutation=false }
+	if request.Operation==BrokerMariaDBHA && request.MariaDBHA.Action==MariaDBHAObserve { mutation=false }
+	var lease rebootcontrol.ExecutionLease
+	if mutation {
+		if server.Admission==nil{return}
+		binding:=rebootcontrol.ExecutionBinding{Boundary:"database",Method:string(request.Operation),Caller:"authenticated-panel-core"}
+		switch request.Operation {
+		case BrokerObserveOrApply:
+			binding.EffectID=request.Effect.EffectID;binding.RequestDigest=rebootcontrol.ExecutionDigest(request.Effect);binding.Resource=rebootcontrol.ExecutionResource(request.Effect.Scope)
+		case BrokerCompensate:
+			binding.EffectID=request.Compensation.EffectID;binding.RequestDigest=rebootcontrol.ExecutionDigest(request.Compensation);binding.Resource=rebootcontrol.ExecutionResource(request.Compensation.Scope)
+		case BrokerWorkspaceQuery:
+			binding.EffectID=request.RequestID;binding.RequestDigest=rebootcontrol.ExecutionDigest(request.Workspace);binding.Resource=rebootcontrol.ExecutionResource(request.Workspace.Access)
+		case BrokerMigrationRestore:
+			restore:=request.MigrationRestore
+			binding.EffectID="migration-restore:"+restore.ID.String()+":"+restore.Action+":"+fmt.Sprint(restore.Offset)
+			binding.RequestDigest=rebootcontrol.ExecutionDigest(restore)
+			binding.Resource=rebootcontrol.ExecutionResource(struct{Tenant,Site,Database,Principal,Restore string}{restore.TenantID.String(),restore.SiteID.String(),restore.DatabaseID.String(),restore.PrincipalID.String(),restore.ID.String()})
+		case BrokerMariaDBHA:
+			haRequest:=request.MariaDBHA
+			binding.RequestDigest=rebootcontrol.ExecutionDigest(haRequest)
+			binding.EffectID="mariadb-ha:"+binding.RequestDigest
+			channel,checkpoint,leaseID:="","",""
+			if haRequest.Channel!=nil{channel=string(haRequest.Channel.ID)}
+			if haRequest.Checkpoint!=nil{checkpoint=string(haRequest.Checkpoint.ID)}
+			if haRequest.Lease!=nil{leaseID=string(haRequest.Lease.ID)}
+			binding.Resource=rebootcontrol.ExecutionResource(struct{Action MariaDBHAAction;Cluster string;Node ha.NodeID;Channel,Checkpoint,Lease string;Fence,Epoch uint64}{haRequest.Action,string(haRequest.Cluster.ID),haRequest.NodeID,channel,checkpoint,leaseID,haRequest.FencingToken,haRequest.AuthorityEpoch})
+		}
+		var admissionErr error;lease,admissionErr=server.Admission.AdmitExecution(ctx,binding);if admissionErr!=nil{return}
+		if len(lease.Cached)!=0 {
+			var cached BrokerResponse
+			if json.Unmarshal(lease.Cached,&cached)==nil { cached.RequestID=request.RequestID;if cached.validate(request)==nil{_=writeDatabaseBrokerFrameLimit(connection,cached,databaseBrokerMaximumResponseFrame)} };return
+		}
+		defer func(){_=rebootcontrol.SettleExecution(server.Admission,lease,false,nil)}()
+	}
 	response := BrokerResponse{Version: DatabaseBrokerProtocolVersion, RequestID: request.RequestID, Operation: request.Operation}
 	var err error
 	switch request.Operation {
@@ -575,6 +621,14 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 	}
 	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil && response.MariaDBHA == nil && response.MigrationRestore == nil {
 		response.FailureCode = classifyBrokerFailure(err)
+	}
+	if response.validate(request)!=nil{return}
+	if mutation {
+		terminal:=err==nil && response.Query!=nil
+		if response.Effect!=nil{terminal=response.Effect.Outcome==EffectConfirmed || response.Effect.Outcome==EffectRejected && !response.Effect.MutationObserved}
+		if response.Compensation!=nil{terminal=response.Compensation.Outcome==EffectConfirmed}
+		if response.MigrationRestore!=nil || response.MariaDBHA!=nil { terminal=err==nil }
+		if rebootcontrol.SettleExecution(server.Admission,lease,terminal,response)!=nil{return}
 	}
 	_ = writeDatabaseBrokerFrameLimit(connection, response, databaseBrokerMaximumResponseFrame)
 }

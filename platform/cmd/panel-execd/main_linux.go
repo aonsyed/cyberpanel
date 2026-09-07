@@ -4,11 +4,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,6 +27,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/malwarescan"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	"github.com/aonsyed/cyberpanel/platform/internal/packagemaint"
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
 	"github.com/aonsyed/cyberpanel/platform/internal/dns"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
@@ -31,6 +35,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation/fsstore"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/lswsruntime"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/management"
+	_ "modernc.org/sqlite"
 )
 
 const webEngineConfigurationRoot = "/usr/local/lsws/conf"
@@ -51,6 +56,7 @@ func main() {
 	if os.Geteuid() != 0 { log.Fatal("panel-execd must run as root") }
 	edition, err := siteops.LoadEngineEdition(); if err != nil { log.Fatalf("load web-engine edition: %v", err) }
 	controlUID, controlGID, err := siteops.LookupControlIdentity(); if err != nil { log.Fatalf("resolve control-plane identity: %v", err) }
+	executionAdmission, err := openExecutionAdmission(controlUID); if err != nil { log.Fatalf("configure reboot execution admission: %v", err) }; defer executionAdmission.DB.Close()
 	backend, err := siteops.NewLinuxStateBackend(); if err != nil { log.Fatalf("open durable registry backend: %v", err) }; defer backend.Close()
 	registry, err := siteops.NewDurableRegistryWithUIDAvailability(backend, siteops.DefaultUIDMinimum, siteops.DefaultUIDMaximum, siteops.LinuxUIDAvailable); if err != nil { log.Fatalf("open durable site registry: %v", err) }
 	malwareResolver := malwarescan.LinuxMalwareSiteResolverFunc(func(_ context.Context, target malwarescan.TargetLocator) (malwarescan.LinuxMalwareSiteRegistration, error) {
@@ -66,7 +72,7 @@ func main() {
 	executor, err := siteops.NewExecutor(registry, host, siteops.InstalledPHPResolver{}, siteops.Config{Edition: edition, Retention: siteops.DefaultRetention}); if err != nil { log.Fatalf("initialize site executor: %v", err) }
 	policy, err := siteops.NewPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize peer policy: %v", err) }
 	listener, err := siteops.ListenDefault(controlGID); if err != nil { log.Fatalf("listen on privileged siteops socket: %v", err) }; defer listener.Close()
-	server := &siteops.Server{Authorizer: policy, Handler: executor, MaximumConcurrent: 128}
+	server := &siteops.Server{Authorizer: policy, Handler: executor, Admission: executionAdmission, MaximumConcurrent: 128}
 	installedEdition := webengine.Edition(edition)
 	configurationStore, err := fsstore.New(webEngineConfigurationRoot, installedEdition); if err != nil { log.Fatalf("open web-engine configuration store: %v", err) }
 	journal, err := webactivation.NewJournal(webactivation.DefaultJournalRoot); if err != nil { log.Fatalf("open web-engine activation journal: %v", err) }; defer journal.Close()
@@ -75,7 +81,7 @@ func main() {
 	activationBroker, err := webactivation.NewBroker(installedEdition, configurationStore, runtimeEngine, probeTransport, journal); if err != nil { log.Fatalf("initialize web-engine activation broker: %v", err) }
 	activationPolicy, err := webactivation.NewPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize web-engine activation peer policy: %v", err) }
 	activationListener, err := webactivation.ListenDefault(controlGID); if err != nil { log.Fatalf("listen on web-engine activation socket: %v", err) }; defer activationListener.Close()
-	activationServer := &webactivation.Server{Authorizer: activationPolicy, Handler: activationBroker, MaximumConcurrent: 32}
+	activationServer := &webactivation.Server{Authorizer: activationPolicy, Handler: activationBroker, Admission: executionAdmission, MaximumConcurrent: 32}
 	managementHost,err:=management.NewLinuxLifecycleHost();if err!=nil{log.Fatalf("initialize web-engine management host: %v",err)}
 	managementPolicy,err:=management.NewLinuxManagementPeerPolicy(controlUID);if err!=nil{log.Fatalf("initialize web-engine management peer policy: %v",err)}
 	managementListener,err:=management.ListenLinuxManagementBroker(controlGID);if err!=nil{log.Fatalf("listen on web-engine management socket: %v",err)};defer managementListener.Close()
@@ -90,7 +96,7 @@ func main() {
 	databaseExecutor.VerifyReplicationAuthority=replicationAuthority.VerifyStaticHAReplication
 	databasePolicy, err := database.NewDatabaseBrokerPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize database peer policy: %v", err) }
 	databaseListener, err := database.ListenDatabaseBroker(controlGID); if err != nil { log.Fatalf("listen on database broker socket: %v", err) }; defer databaseListener.Close()
-	databaseServer := &database.DatabaseBrokerServer{Authorizer:databasePolicy,Executor:databaseExecutor,MaximumConcurrent:64}
+	databaseServer := &database.DatabaseBrokerServer{Authorizer:databasePolicy,Executor:databaseExecutor,Admission:executionAdmission,MaximumConcurrent:64}
 	operationsSecrets, err := operations.NewLinuxOperationsSecretBrokerSource(materialClient, installationOwner); if err != nil { log.Fatalf("initialize operations secret source: %v", err) }
 	operationsConfig := operations.DefaultLinuxOperationsConfig(); operationsConfig.Secrets = operationsSecrets
 	productUpdates, productUpdateErr := operations.NewLocalProductUpdateClient(); if productUpdateErr != nil { log.Printf("product updater unavailable: %v", productUpdateErr) } else { operationsConfig.ProductUpdates = productUpdates }
@@ -100,7 +106,7 @@ func main() {
 	if err = operationsExecutor.ResumeWAFTransactions(context.Background()); err != nil { log.Fatalf("recover unconfirmed WAF transaction: %v", err) }
 	operationsPolicy, err := operations.NewOperationsBrokerPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize operations peer policy: %v", err) }
 	operationsListener, err := operations.ListenOperationsBroker(controlGID); if err != nil { log.Fatalf("listen on operations broker socket: %v", err) }; defer operationsListener.Close()
-	operationsServer := &operations.OperationsBrokerServer{Authorizer:operationsPolicy,Handler:operationsExecutor,MaximumConcurrent:64}
+	operationsServer := &operations.OperationsBrokerServer{Authorizer:operationsPolicy,Handler:operationsExecutor,Admission:executionAdmission,MaximumConcurrent:64}
 	managementClient, err := secrets.NewLocalManagementClient(); if err != nil { log.Fatalf("connect protected secret management broker: %v", err) }
 	accessSecrets, err := access.NewLinuxAccessSecretSourceWithManagement(materialClient, managementClient, installationOwner); if err != nil { log.Fatalf("initialize access secret source: %v", err) }
 	accessResolver := access.LinuxSiteResolverFunc(func(ctx context.Context, siteID access.SiteID) (access.LinuxSiteBinding, error) {
@@ -112,7 +118,7 @@ func main() {
 	accessPolicy, err := access.NewAccessBrokerPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize access peer policy: %v", err) }
 	accessListener, err := access.ListenAccessBroker(controlGID); if err != nil { log.Fatalf("listen on access broker socket: %v", err) }; defer accessListener.Close()
 	accessJournal, err := access.NewLinuxAccessReceiptJournal(access.DefaultAccessJournalRoot); if err != nil { log.Fatalf("open access receipt journal: %v", err) }; defer accessJournal.Close()
-	accessServer := &access.AccessBrokerServer{Authorizer:accessPolicy,Handler:accessRuntime.Handler,Journal:accessJournal,MaximumConcurrent:64}
+	accessServer := &access.AccessBrokerServer{Authorizer:accessPolicy,Handler:accessRuntime.Handler,Journal:accessJournal,Admission:executionAdmission,MaximumConcurrent:64}
 	applicationResolver:=apps.LinuxApplicationSiteResolverFunc(func(ctx context.Context,siteID apps.SiteID)(apps.LinuxApplicationSiteBinding,error){binding,found,resolveErr:=registry.BindingForSite(string(siteID));if resolveErr!=nil{return apps.LinuxApplicationSiteBinding{},resolveErr};if !found{return apps.LinuxApplicationSiteBinding{},apps.ErrNotFound};generation:=binding.RootGeneration;if generation==0{generation=binding.Fence};return apps.LinuxApplicationSiteBinding{SiteKey:binding.SiteKey,UID:binding.UID,GID:binding.GID,Generation:generation},nil})
 	applicationSecrets,err:=apps.NewLinuxApplicationMaterialSource(materialClient);if err!=nil{log.Fatalf("initialize application secret source: %v",err)}
 	applicationRuntime,err:=apps.NewLinuxApplicationRuntime(applicationResolver,applicationSecrets);if err!=nil{log.Fatalf("initialize application runtime: %v",err)}
@@ -216,6 +222,29 @@ func main() {
 		if result.err != nil && !errors.Is(result.err, net.ErrClosed) { log.Fatalf("%s server failed: %v", result.name, result.err) }
 		log.Fatalf("%s server stopped unexpectedly", result.name)
 	}
+}
+
+// The root daemon must never initialize, migrate, or repair the core database.
+// sql.Open is lazy: before core bootstrap, fixed observations remain available
+// but every mutation fails its store validation/schema query closed.
+func openExecutionAdmission(controlUID uint32) (*rebootcontrol.SQLExecutionAdmission,error) {
+	const controlPath="/var/lib/cyberpanel/control/control.db"
+	boot,err:=os.ReadFile("/proc/sys/kernel/random/boot_id");if err!=nil{return nil,err}
+	dsn:="file:"+controlPath+"?mode=rw&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=trusted_schema(0)"
+	db,err:=sql.Open("sqlite",dsn);if err!=nil{return nil,err}
+	db.SetMaxOpenConns(1);db.SetMaxIdleConns(1);db.SetConnMaxLifetime(0)
+	var identity os.FileInfo;var identityMu sync.Mutex
+	validate:=func()error{
+		identityMu.Lock();defer identityMu.Unlock()
+		parent,err:=os.Lstat("/var/lib/cyberpanel/control");if err!=nil{return err}
+		parentStat,ok:=parent.Sys().(*syscall.Stat_t)
+		if !ok || !parent.IsDir() || parent.Mode()&os.ModeSymlink!=0 || parentStat.Uid!=controlUID || parent.Mode().Perm()&0022!=0{return rebootcontrol.ErrIntegrity}
+		info,err:=os.Lstat(controlPath);if err!=nil{return err};stat,ok:=info.Sys().(*syscall.Stat_t)
+		if !ok || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink!=0 || info.Mode().Perm()!=0600 || stat.Uid!=controlUID || stat.Nlink!=1{return rebootcontrol.ErrIntegrity}
+		if identity!=nil && !os.SameFile(identity,info){return rebootcontrol.ErrIntegrity};identity=info
+		return nil
+	}
+	return &rebootcontrol.SQLExecutionAdmission{DB:db,BootID:strings.TrimSpace(string(boot)),ValidateStore:validate},nil
 }
 
 func collectTombstones(ctx context.Context, executor *siteops.Executor) {

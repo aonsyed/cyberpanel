@@ -10,6 +10,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 const (
@@ -155,6 +157,7 @@ type OperationsBrokerPeerAuthorizer interface { Authorize(net.Conn) error }
 type OperationsBrokerServer struct {
 	Authorizer OperationsBrokerPeerAuthorizer
 	Handler HostExecutor
+	Admission rebootcontrol.ExecutionAdmission
 	MaximumConcurrent uint32
 }
 
@@ -178,6 +181,34 @@ func (server *OperationsBrokerServer) serve(connection net.Conn) {
 	var request BrokerRequest
 	if err := readOperationsFrame(connection, &request); err != nil || request.Validate(time.Now().UTC()) != nil { return }
 	ctx, cancel := context.WithDeadline(context.Background(), request.Deadline); defer cancel()
+	var lease rebootcontrol.ExecutionLease
+	mutation := request.Method==BrokerCompensate || effectIsMutation(request.Effect.Kind)
+	if mutation {
+		if server.Admission==nil { return }
+		binding:=rebootcontrol.ExecutionBinding{Boundary:"operations",Method:string(request.Method),Caller:"authenticated-panel-core"}
+		if request.Effect!=nil {
+			effect:=request.Effect
+			binding.EffectID=effect.EffectID;binding.RequestDigest=rebootcontrol.ExecutionDigest(effect);binding.Resource=rebootcontrol.ExecutionResource(effect.Scope)
+			switch effect.Kind {
+			case EffectRebootMarkerArm:
+				marker:=effect.RebootMarker.Marker
+				binding.Control=&rebootcontrol.ExecutionControl{Action:"arm",PlanID:marker.PlanID,Fence:marker.Fence,MarkerDigest:marker.Digest}
+			case EffectRebootMarkerClear:
+				binding.Control=&rebootcontrol.ExecutionControl{Action:"clear",MarkerDigest:effect.RebootMarker.ExactDigest}
+			case EffectControlledReboot:
+				control:=effect.ControlledReboot
+				binding.Control=&rebootcontrol.ExecutionControl{Action:"dispatch",PlanID:control.PlanID.String(),Fence:control.Fence,MarkerDigest:control.MarkerDigest}
+			}
+		} else {
+			binding.EffectID=request.Compensation.EffectID;binding.RequestDigest=rebootcontrol.ExecutionDigest(request.Compensation);binding.Resource=rebootcontrol.ExecutionResource(request.Compensation.Scope)
+		}
+		var err error;lease,err=server.Admission.AdmitExecution(ctx,binding);if err!=nil{return}
+		if len(lease.Cached)!=0 {
+			var cached BrokerResponse
+			if json.Unmarshal(lease.Cached,&cached)==nil && cached.Validate(request,time.Now().UTC())==nil { _=writeOperationsFrame(connection,cached) };return
+		}
+		defer func(){ _=rebootcontrol.SettleExecution(server.Admission,lease,false,nil) }()
+	}
 	response := BrokerResponse{Version: OperationsBrokerProtocolVersion, Method: request.Method, CompletedAt: time.Now().UTC()}
 	switch request.Method {
 	case BrokerObserveOrApply:
@@ -186,7 +217,14 @@ func (server *OperationsBrokerServer) serve(connection net.Conn) {
 		receipt, err := server.Handler.Compensate(ctx, *request.Compensation); response.Compensation = &receipt; response.ErrorCode = brokerCode(err, receipt.Outcome)
 	}
 	response.CompletedAt = time.Now().UTC()
-	if response.Validate(request, time.Now().UTC()) == nil { _ = writeOperationsFrame(connection, response) }
+	if response.Validate(request, time.Now().UTC()) != nil { return }
+	if mutation {
+		terminal:=false
+		if response.Effect!=nil { terminal=response.Effect.Outcome==EffectConfirmed || response.Effect.Outcome==EffectRejected && !response.Effect.MutationObserved }
+		if response.Compensation!=nil { terminal=response.Compensation.Outcome==EffectConfirmed }
+		if rebootcontrol.SettleExecution(server.Admission,lease,terminal,response)!=nil{return}
+	}
+	_ = writeOperationsFrame(connection, response)
 }
 
 func brokerCode(err error, outcome EffectOutcome) string {
