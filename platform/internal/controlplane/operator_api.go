@@ -29,6 +29,7 @@ type OperatorAPI struct {
 	store     *Store
 	authority *OperatorAuthority
 	audit     *OperatorAudit
+	issuer    *EnrollmentIssuer
 }
 
 func NewOperatorAPI(service *Service, store *Store, authority *OperatorAuthority, audit *OperatorAudit) (*OperatorAPI, error) {
@@ -39,6 +40,15 @@ func NewOperatorAPI(service *Service, store *Store, authority *OperatorAuthority
 }
 
 func (api *OperatorAPI) Handler() http.Handler { return http.HandlerFunc(api.serveHTTP) }
+
+// WithEnrollmentIssuer is configured before the operator listener starts.
+func (api *OperatorAPI) WithEnrollmentIssuer(issuer *EnrollmentIssuer) error {
+	if api == nil || issuer == nil || issuer.ca == nil || issuer.peer != api.service.peerID {
+		return ErrInvalid
+	}
+	api.issuer = issuer
+	return nil
+}
 
 func (api *OperatorAPI) serveHTTP(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
@@ -64,6 +74,10 @@ func (api *OperatorAPI) serveHTTP(writer http.ResponseWriter, request *http.Requ
 		api.inspectNode(writer, request, operator, segments[2])
 	case len(segments) == 4 && segments[1] == "nodes" && segments[3] == "revoke" && request.Method == http.MethodPost:
 		api.revokeNode(writer, request, operator, segments[2])
+	case len(segments) == 4 && segments[1] == "nodes" && segments[3] == "detach" && request.Method == http.MethodPost:
+		api.detachNode(writer, request, operator, segments[2])
+	case len(segments) == 5 && segments[1] == "nodes" && segments[3] == "certificate" && segments[4] == "rotate" && request.Method == http.MethodPost:
+		api.rotateNodeCertificate(writer, request, operator, segments[2])
 	case len(segments) == 2 && segments[1] == "intents" && request.Method == http.MethodPost:
 		api.createIntent(writer, request, operator)
 	case len(segments) == 3 && segments[1] == "intents" && request.Method == http.MethodGet:
@@ -126,7 +140,103 @@ func (api *OperatorAPI) inspectNode(writer http.ResponseWriter, request *http.Re
 	if err == nil && node.OwnerTenantID.String() != operator.TenantID {
 		err = ErrForbidden
 	}
-	api.complete(writer, request, operator, "node.inspect", "node", rawID, node, err)
+	var generation uint64
+	if err == nil {
+		generation, err = api.store.NodeLifecycleGeneration(request.Context(), node.ID)
+	}
+	api.complete(writer, request, operator, "node.inspect", "node", rawID, struct {
+		Node
+		Generation uint64 `json:"generation"`
+	}{node, generation}, err)
+}
+
+func (api *OperatorAPI) rotateNodeCertificate(writer http.ResponseWriter, request *http.Request, operator Operator, rawID string) {
+	const permission = "node.certificate.rotate"
+	id, idErr := federation.NewID(rawID)
+	tenant, tenantErr := federation.NewID(operator.TenantID)
+	var payload struct {
+		ExpectedGeneration uint64 `json:"expected_generation"`
+		ExpectedAuthorityEpoch uint64 `json:"expected_authority_epoch"`
+		IdempotencyKey string `json:"idempotency_key"`
+		SigningPublicKey []byte `json:"signing_public_key"`
+	}
+	decodeErr := decodeOperatorJSON(request, &payload)
+	rotation := NodeCertificateRotationRequest{NodeID: id, TenantID: tenant, ExpectedGeneration: payload.ExpectedGeneration, ExpectedAuthorityEpoch: payload.ExpectedAuthorityEpoch, IdempotencyKey: payload.IdempotencyKey, SigningPublicKey: payload.SigningPublicKey}
+	if idErr != nil || tenantErr != nil || decodeErr != nil || rotation.validate() != nil {
+		api.reject(writer, request, operator, permission, "node", rawID, ErrInvalid)
+		return
+	}
+	if api.issuer == nil || api.authorizeNodeLifecycle(request.Context(), operator, permission, id) != nil {
+		api.reject(writer, request, operator, permission, "node", rawID, ErrForbidden)
+		return
+	}
+	if !api.admit(writer, request, operator, permission, "node", rawID) {
+		return
+	}
+	reservation, err := api.store.ReserveNodeCertificateRotation(request.Context(), rotation)
+	var result NodeCertificateRotationResult
+	if err == nil && reservation.Result != nil {
+		result = *reservation.Result
+	} else if err == nil {
+		var issued IssuedEnrollmentCertificate
+		issued, err = api.issuer.Issue(id, rotation.SigningPublicKey, reservation.RequestDigest, reservation.IssuedAt)
+		if err == nil {
+			result = NodeCertificateRotationResult{NodeID: id, Generation: reservation.ResultGeneration, AuthorityEpoch: rotation.ExpectedAuthorityEpoch, EvidenceKeyID: "fedcert_"+issued.Fingerprint[:48], CertificateFingerprint: issued.Fingerprint, NodeCertificate: issued.PEM, CertificateExpiresAt: issued.ExpiresAt}
+			if err = api.authorizeNodeLifecycle(request.Context(), operator, permission, id); err == nil {
+				result, err = api.store.CompleteNodeCertificateRotation(request.Context(), rotation, reservation, issued, result)
+			}
+		}
+	}
+	api.complete(writer, request, operator, permission, "node", rawID, result, err)
+}
+
+func (api *OperatorAPI) detachNode(writer http.ResponseWriter, request *http.Request, operator Operator, rawID string) {
+	const permission = "node.detach"
+	id, idErr := federation.NewID(rawID)
+	tenant, tenantErr := federation.NewID(operator.TenantID)
+	var payload struct {
+		ExpectedGeneration uint64 `json:"expected_generation"`
+		ExpectedAuthorityEpoch uint64 `json:"expected_authority_epoch"`
+		IdempotencyKey string `json:"idempotency_key"`
+		Reason string `json:"reason"`
+	}
+	decodeErr := decodeOperatorJSON(request, &payload)
+	detach := NodeDetachRequest{NodeID: id, TenantID: tenant, ExpectedGeneration: payload.ExpectedGeneration, ExpectedAuthorityEpoch: payload.ExpectedAuthorityEpoch, IdempotencyKey: payload.IdempotencyKey, Reason: payload.Reason}
+	if idErr != nil || tenantErr != nil || decodeErr != nil || detach.validate() != nil {
+		api.reject(writer, request, operator, permission, "node", rawID, ErrInvalid)
+		return
+	}
+	if api.authorizeNodeLifecycle(request.Context(), operator, permission, id) != nil {
+		api.reject(writer, request, operator, permission, "node", rawID, ErrForbidden)
+		return
+	}
+	if !api.admit(writer, request, operator, permission, "node", rawID) {
+		return
+	}
+	revocation := federation.Revocation{PeerID: api.service.peerID, NodeID: id, NewAuthorityEpoch: detach.ExpectedAuthorityEpoch+1, Reason: detach.Reason, IssuedAt: api.service.clock().UTC()}
+	var result NodeDetachResult
+	key, err := api.service.signer.RevocationKeyID(request.Context())
+	if err == nil {
+		revocation.SigningKeyID = key
+		revocation.Signature, err = api.service.signer.SignRevocation(request.Context(), key, revocationStructure(revocation))
+	}
+	if err == nil {
+		if err = api.authorizeNodeLifecycle(request.Context(), operator, permission, id); err == nil {
+			result, err = api.store.DetachNode(request.Context(), detach, revocation)
+		}
+	}
+	api.complete(writer, request, operator, permission, "node", rawID, result, err)
+}
+
+func (api *OperatorAPI) authorizeNodeLifecycle(ctx context.Context, operator Operator, permission string, nodeID federation.ID) error {
+	if err := api.authority.authorizePermission(ctx, operator, permission); err != nil {
+		return err
+	}
+	node, err := api.store.Node(ctx, nodeID)
+	if err != nil || node.OwnerTenantID.String() != operator.TenantID {
+		return ErrForbidden
+	}
+	return nil
 }
 
 func (api *OperatorAPI) createIntent(writer http.ResponseWriter, request *http.Request, operator Operator) {

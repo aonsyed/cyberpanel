@@ -91,12 +91,12 @@ func (issuer *EnrollmentIssuer) PublicSigningKeys() map[string][]byte {
 	return keys
 }
 
-func (issuer *EnrollmentIssuer) Issue(node federation.ID, signingPublicKey []byte) (IssuedEnrollmentCertificate, error) {
+func (issuer *EnrollmentIssuer) Issue(node federation.ID, signingPublicKey []byte, requestDigest string, issuedAt time.Time) (IssuedEnrollmentCertificate, error) {
 	var issued IssuedEnrollmentCertificate
-	if issuer == nil || issuer.ca == nil || !node.Valid() || len(signingPublicKey) != ed25519.PublicKeySize || len(issuer.privateKey) != ed25519.PrivateKeySize {
+	if issuer == nil || issuer.ca == nil || !node.Valid() || len(signingPublicKey) != ed25519.PublicKeySize || len(issuer.privateKey) != ed25519.PrivateKeySize || !validSHA256(requestDigest) || issuedAt.IsZero() || issuedAt.After(issuer.clock().UTC().Add(5*time.Minute)) {
 		return issued, ErrInvalid
 	}
-	now := issuer.clock().UTC()
+	now := issuedAt.UTC()
 	expiresAt := now.Add(issuer.certificateTTL)
 	if issuer.ca.NotAfter.Before(expiresAt) {
 		expiresAt = issuer.ca.NotAfter.UTC()
@@ -104,10 +104,8 @@ func (issuer *EnrollmentIssuer) Issue(node federation.ID, signingPublicKey []byt
 	if !expiresAt.After(now.Add(5 * time.Minute)) {
 		return issued, ErrForbidden
 	}
-	serialBytes := make([]byte, 20)
-	if _, err := io.ReadFull(rand.Reader, serialBytes); err != nil {
-		return issued, err
-	}
+	serialDigest := sha256.Sum256([]byte("cyberpanel-enrollment-certificate-v1\x00" + requestDigest))
+	serialBytes := append([]byte(nil), serialDigest[:20]...)
 	serialBytes[0] &= 0x7f
 	serial := new(big.Int).SetBytes(serialBytes)
 	if serial.Sign() == 0 {
@@ -149,6 +147,16 @@ func (issuer *EnrollmentIssuer) Issue(node federation.ID, signingPublicKey []byt
 type EnrollmentAPI struct {
 	store  *Store
 	issuer *EnrollmentIssuer
+}
+
+type enrollmentHTTPResponse struct {
+	ProtocolVersion       uint32            `json:"protocol_version"`
+	NodeID                federation.ID     `json:"node_id"`
+	PeerID                federation.ID     `json:"peer_id"`
+	PeerSigningKeys       map[string][]byte `json:"peer_signing_keys"`
+	NodeCertificate       []byte            `json:"node_certificate"`
+	CertificateExpiresAt time.Time         `json:"certificate_expires_at"`
+	AuthorityEpoch       uint64            `json:"authority_epoch"`
 }
 
 func NewEnrollmentAPI(store *Store, issuer *EnrollmentIssuer) (*EnrollmentAPI, error) {
@@ -195,38 +203,38 @@ func (api *EnrollmentAPI) serveHTTP(writer http.ResponseWriter, request *http.Re
 	defer clear(payload.Token)
 	tokenDigest := sha256.Sum256(payload.Token)
 	attempt := EnrollmentAttempt{TokenID: payload.TokenID, TokenDigest: hex.EncodeToString(tokenDigest[:]), NodeID: payload.NodeID, PeerID: payload.PeerID, CAFingerprint: payload.CAFingerprint, CapabilityDigest: payload.CapabilityDigest, SigningPublicKey: payload.SigningPublicKey, HPKEPublicKey: payload.HPKEPublicKey}
-	enrollment, err := api.store.ConsumeEnrollmentToken(request.Context(), attempt)
+	consumption, err := api.store.ConsumeEnrollmentToken(request.Context(), attempt)
 	if err != nil {
 		writeEnrollmentFailure(writer, err)
 		return
 	}
-	issued, err := api.issuer.Issue(payload.NodeID, payload.SigningPublicKey)
+	if len(consumption.IssuedResponse) != 0 {
+		writeEnrollmentRaw(writer, http.StatusCreated, consumption.IssuedResponse)
+		return
+	}
+	issued, err := api.issuer.Issue(payload.NodeID, payload.SigningPublicKey, consumption.RequestDigest, consumption.ConsumedAt)
 	if err != nil {
-		_ = api.store.RecordEnrollmentResult(request.Context(), payload.TokenID, "issuance_failed", "")
+		_ = api.store.RecordEnrollmentFailure(request.Context(), payload.TokenID, "issuance_failed")
 		writeEnrollmentFailure(writer, err)
 		return
 	}
+	enrollment := consumption.Enrollment
 	enrollment.Node.CertificateFingerprint = issued.Fingerprint
 	enrollment.Node.State = NodeEnrolling
 	enrollment.EvidenceKeys = []NodeEvidenceKey{{KeyID: "fedcert_" + issued.Fingerprint[:48], PublicKey: append([]byte(nil), payload.SigningPublicKey...), State: "current", NotBefore: issued.NotBefore, ExpiresAt: issued.ExpiresAt}}
-	if err = api.store.ProvisionEnrollment(request.Context(), enrollment); err != nil {
-		_ = api.store.RecordEnrollmentResult(request.Context(), payload.TokenID, "persistence_failed", "")
+	response := enrollmentHTTPResponse{enrollmentProtocolVersion, payload.NodeID, api.issuer.peer, api.issuer.PublicSigningKeys(), issued.PEM, issued.ExpiresAt, enrollment.Node.AuthorityEpoch}
+	encodedResponse, err := json.Marshal(response)
+	if err != nil || len(encodedResponse) > enrollmentMaximumResponseBytes {
+		_ = api.store.RecordEnrollmentFailure(request.Context(), payload.TokenID, "persistence_failed")
+		writeEnrollmentError(writer, http.StatusInternalServerError, "response_unavailable")
+		return
+	}
+	encodedResponse, err = api.store.CompleteEnrollment(request.Context(), attempt, enrollment, encodedResponse)
+	if err != nil {
 		writeEnrollmentFailure(writer, err)
 		return
 	}
-	if err = api.store.RecordEnrollmentResult(request.Context(), payload.TokenID, "issued", issued.Fingerprint); err != nil {
-		writeEnrollmentFailure(writer, err)
-		return
-	}
-	writeEnrollmentJSON(writer, http.StatusCreated, struct {
-		ProtocolVersion       uint32            `json:"protocol_version"`
-		NodeID                federation.ID     `json:"node_id"`
-		PeerID                federation.ID     `json:"peer_id"`
-		PeerSigningKeys       map[string][]byte `json:"peer_signing_keys"`
-		NodeCertificate       []byte            `json:"node_certificate"`
-		CertificateExpiresAt time.Time         `json:"certificate_expires_at"`
-		AuthorityEpoch       uint64            `json:"authority_epoch"`
-	}{enrollmentProtocolVersion, payload.NodeID, api.issuer.peer, api.issuer.PublicSigningKeys(), issued.PEM, issued.ExpiresAt, enrollment.Node.AuthorityEpoch})
+	writeEnrollmentRaw(writer, http.StatusCreated, encodedResponse)
 }
 
 func decodeEnrollmentRequest(request *http.Request, target any) error {
@@ -245,6 +253,16 @@ func decodeEnrollmentRequest(request *http.Request, target any) error {
 func writeEnrollmentJSON(writer http.ResponseWriter, status int, value any) {
 	encoded, err := json.Marshal(value)
 	if err != nil || len(encoded) > enrollmentMaximumResponseBytes {
+		writeEnrollmentError(writer, http.StatusInternalServerError, "response_unavailable")
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_, _ = writer.Write(encoded)
+}
+
+func writeEnrollmentRaw(writer http.ResponseWriter, status int, encoded []byte) {
+	if len(encoded) == 0 || len(encoded) > enrollmentMaximumResponseBytes || !json.Valid(encoded) {
 		writeEnrollmentError(writer, http.StatusInternalServerError, "response_unavailable")
 		return
 	}

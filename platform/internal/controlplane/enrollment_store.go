@@ -36,6 +36,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS fleet_enrollment_node_pending
  ON fleet_enrollment_tokens(node_id) WHERE state='pending';
 CREATE INDEX IF NOT EXISTS fleet_enrollment_token_state
  ON fleet_enrollment_tokens(state,expires_at);
+CREATE TABLE IF NOT EXISTS fleet_enrollment_results(
+ token_id TEXT PRIMARY KEY,
+ request_digest TEXT NOT NULL UNIQUE,
+ hpke_public_key BLOB NOT NULL,
+ response_json BLOB NOT NULL,
+ certificate_fingerprint TEXT NOT NULL UNIQUE,
+ created_at TIMESTAMP NOT NULL
+);
 CREATE TABLE IF NOT EXISTS fleet_enrollment_audit(
  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
  event_id TEXT NOT NULL UNIQUE,
@@ -74,6 +82,13 @@ type EnrollmentAttempt struct {
 	CapabilityDigest string
 	SigningPublicKey []byte
 	HPKEPublicKey    []byte
+}
+
+type EnrollmentConsumption struct {
+	Enrollment     ProvisionedEnrollment
+	RequestDigest  string
+	ConsumedAt     time.Time
+	IssuedResponse json.RawMessage
 }
 
 func (token ProvisionedEnrollmentToken) validate(now time.Time, peer federation.ID, caFingerprint string) error {
@@ -164,7 +179,7 @@ func (s *Store) ProvisionEnrollmentTokens(ctx context.Context, tokens []Provisio
 		if marshalErr != nil {
 			return marshalErr
 		}
-		result, execErr := tx.ExecContext(ctx, `INSERT INTO fleet_enrollment_tokens(id,token_digest,node_id,tenant_id,peer_id,ca_fingerprint,capability_digest,authority_epoch,expires_at,enrollment_json,state,request_digest,certificate_fingerprint,provisioned_at,consumed_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,'pending','','',?,NULL,NULL) ON CONFLICT(id) DO UPDATE SET state=CASE WHEN fleet_enrollment_tokens.state='staged' THEN 'pending' ELSE fleet_enrollment_tokens.state END,provisioned_at=excluded.provisioned_at WHERE fleet_enrollment_tokens.token_digest=excluded.token_digest AND fleet_enrollment_tokens.node_id=excluded.node_id AND fleet_enrollment_tokens.tenant_id=excluded.tenant_id AND fleet_enrollment_tokens.peer_id=excluded.peer_id AND fleet_enrollment_tokens.ca_fingerprint=excluded.ca_fingerprint AND fleet_enrollment_tokens.capability_digest=excluded.capability_digest AND fleet_enrollment_tokens.authority_epoch=excluded.authority_epoch AND fleet_enrollment_tokens.expires_at=excluded.expires_at AND fleet_enrollment_tokens.enrollment_json=excluded.enrollment_json AND fleet_enrollment_tokens.state IN ('staged','pending','consumed','issued','failed')`, token.ID, token.TokenDigest, token.NodeID, token.TenantID, token.PeerID, token.CAFingerprint, token.CapabilityDigest, token.AuthorityEpoch, token.ExpiresAt.UTC(), enrollmentJSON, now)
+		result, execErr := tx.ExecContext(ctx, `INSERT INTO fleet_enrollment_tokens(id,token_digest,node_id,tenant_id,peer_id,ca_fingerprint,capability_digest,authority_epoch,expires_at,enrollment_json,state,request_digest,certificate_fingerprint,provisioned_at,consumed_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,'pending','','',?,NULL,NULL) ON CONFLICT(id) DO UPDATE SET state=CASE WHEN fleet_enrollment_tokens.state='staged' THEN 'pending' ELSE fleet_enrollment_tokens.state END,provisioned_at=excluded.provisioned_at WHERE fleet_enrollment_tokens.token_digest=excluded.token_digest AND fleet_enrollment_tokens.node_id=excluded.node_id AND fleet_enrollment_tokens.tenant_id=excluded.tenant_id AND fleet_enrollment_tokens.peer_id=excluded.peer_id AND fleet_enrollment_tokens.ca_fingerprint=excluded.ca_fingerprint AND fleet_enrollment_tokens.capability_digest=excluded.capability_digest AND fleet_enrollment_tokens.authority_epoch=excluded.authority_epoch AND fleet_enrollment_tokens.expires_at=excluded.expires_at AND fleet_enrollment_tokens.enrollment_json=excluded.enrollment_json AND fleet_enrollment_tokens.state IN ('staged','pending','consumed','issued','failed','revoked')`, token.ID, token.TokenDigest, token.NodeID, token.TenantID, token.PeerID, token.CAFingerprint, token.CapabilityDigest, token.AuthorityEpoch, token.ExpiresAt.UTC(), enrollmentJSON, now)
 		if execErr != nil {
 			return execErr
 		}
@@ -178,49 +193,81 @@ func (s *Store) ProvisionEnrollmentTokens(ctx context.Context, tokens []Provisio
 	return tx.Commit()
 }
 
-func (s *Store) ConsumeEnrollmentToken(ctx context.Context, attempt EnrollmentAttempt) (ProvisionedEnrollment, error) {
-	var enrollment ProvisionedEnrollment
+func (s *Store) ConsumeEnrollmentToken(ctx context.Context, attempt EnrollmentAttempt) (EnrollmentConsumption, error) {
+	var consumption EnrollmentConsumption
 	if s == nil || s.db == nil || ctx == nil || attempt.validate() != nil {
-		return enrollment, ErrInvalid
+		return consumption, ErrInvalid
 	}
 	requestDigest := attempt.requestDigest()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return enrollment, err
+		return consumption, err
 	}
 	defer tx.Rollback()
 	var stored ProvisionedEnrollmentToken
 	var enrollmentJSON []byte
-	var state string
-	err = tx.QueryRowContext(ctx, `SELECT id,token_digest,node_id,tenant_id,peer_id,ca_fingerprint,capability_digest,authority_epoch,expires_at,enrollment_json,state FROM fleet_enrollment_tokens WHERE id=?`, attempt.TokenID).Scan(&stored.ID, &stored.TokenDigest, &stored.NodeID, &stored.TenantID, &stored.PeerID, &stored.CAFingerprint, &stored.CapabilityDigest, &stored.AuthorityEpoch, &stored.ExpiresAt, &enrollmentJSON, &state)
+	var state, storedRequestDigest string
+	var consumedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT id,token_digest,node_id,tenant_id,peer_id,ca_fingerprint,capability_digest,authority_epoch,expires_at,enrollment_json,state,request_digest,consumed_at FROM fleet_enrollment_tokens WHERE id=?`, attempt.TokenID).Scan(&stored.ID, &stored.TokenDigest, &stored.NodeID, &stored.TenantID, &stored.PeerID, &stored.CAFingerprint, &stored.CapabilityDigest, &stored.AuthorityEpoch, &stored.ExpiresAt, &enrollmentJSON, &state, &storedRequestDigest, &consumedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return enrollment, ErrForbidden
+		return consumption, ErrForbidden
 	}
 	if err != nil {
-		return enrollment, err
+		return consumption, err
 	}
-	reject := func(outcome string, cause error) (ProvisionedEnrollment, error) {
+	reject := func(outcome string, cause error) (EnrollmentConsumption, error) {
 		if auditErr := s.appendEnrollmentAuditTx(ctx, tx, stored, outcome, requestDigest, cause.Error()); auditErr != nil {
-			return enrollment, auditErr
+			return consumption, auditErr
 		}
 		if commitErr := tx.Commit(); commitErr != nil {
-			return enrollment, commitErr
+			return consumption, commitErr
 		}
-		return enrollment, cause
+		return consumption, cause
 	}
-	if state != "pending" {
-		if state == "consumed" || state == "issued" || state == "failed" {
-			return reject("replay", federation.ErrReplay)
-		}
+	if state != "pending" && state != "consumed" && state != "issued" {
 		if state == "expired" {
 			return reject("expired", federation.ErrExpired)
 		}
+		if state == "failed" {
+			return reject("unrecoverable_replay", federation.ErrReplay)
+		}
 		return reject("revoked", ErrForbidden)
+	}
+	if state == "consumed" || state == "issued" {
+		if !consumedAt.Valid || subtle.ConstantTimeCompare([]byte(storedRequestDigest), []byte(requestDigest)) != 1 {
+			return reject("changed_replay", federation.ErrReplay)
+		}
+		if err = json.Unmarshal(enrollmentJSON, &consumption.Enrollment); err != nil {
+			return EnrollmentConsumption{}, err
+		}
+		consumption.RequestDigest = requestDigest
+		consumption.ConsumedAt = consumedAt.Time.UTC()
+		outcome := "issuance_resumed"
+		detail := "exact consumed request resumed"
+		if state == "issued" {
+			var hpkePublicKey, responseJSON []byte
+			if err = tx.QueryRowContext(ctx, `SELECT hpke_public_key,response_json FROM fleet_enrollment_results WHERE token_id=? AND request_digest=?`, stored.ID, requestDigest).Scan(&hpkePublicKey, &responseJSON); err != nil {
+				return EnrollmentConsumption{}, err
+			}
+			if subtle.ConstantTimeCompare(hpkePublicKey, attempt.HPKEPublicKey) != 1 {
+				return reject("changed_replay", federation.ErrReplay)
+			}
+			consumption.IssuedResponse = append(json.RawMessage(nil), responseJSON...)
+			outcome = "response_replayed"
+			detail = "exact issued response replayed"
+		}
+		if err = s.appendEnrollmentAuditTx(ctx, tx, stored, outcome, requestDigest, detail); err != nil {
+			return EnrollmentConsumption{}, err
+		}
+		if err = tx.Commit(); err != nil {
+			return EnrollmentConsumption{}, err
+		}
+		return consumption, nil
 	}
 	now := s.clock().UTC()
 	if !now.Before(stored.ExpiresAt) {
 		if _, err = tx.ExecContext(ctx, `UPDATE fleet_enrollment_tokens SET state='expired',completed_at=? WHERE id=? AND state='pending'`, now, stored.ID); err != nil {
-			return enrollment, err
+			return consumption, err
 		}
 		return reject("expired", federation.ErrExpired)
 	}
@@ -228,32 +275,96 @@ func (s *Store) ConsumeEnrollmentToken(ctx context.Context, attempt EnrollmentAt
 	if !bindingsMatch {
 		return reject("binding_rejected", ErrForbidden)
 	}
-	if err = json.Unmarshal(enrollmentJSON, &enrollment); err != nil {
-		return ProvisionedEnrollment{}, err
+	if err = json.Unmarshal(enrollmentJSON, &consumption.Enrollment); err != nil {
+		return EnrollmentConsumption{}, err
 	}
-	stored.Enrollment = enrollment
+	stored.Enrollment = consumption.Enrollment
 	if err = stored.validate(now, attempt.PeerID, attempt.CAFingerprint); err != nil {
-		return ProvisionedEnrollment{}, err
+		return EnrollmentConsumption{}, err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE fleet_enrollment_tokens SET state='consumed',request_digest=?,consumed_at=? WHERE id=? AND state='pending'`, requestDigest, now, stored.ID)
 	if err != nil {
-		return ProvisionedEnrollment{}, err
+		return EnrollmentConsumption{}, err
 	}
 	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
 		return reject("replay", federation.ErrReplay)
 	}
 	if err = s.appendEnrollmentAuditTx(ctx, tx, stored, "consumed", requestDigest, "token consumed before certificate issuance"); err != nil {
-		return ProvisionedEnrollment{}, err
+		return EnrollmentConsumption{}, err
 	}
 	if err = tx.Commit(); err != nil {
-		return ProvisionedEnrollment{}, err
+		return EnrollmentConsumption{}, err
 	}
-	return enrollment, nil
+	consumption.RequestDigest = requestDigest
+	consumption.ConsumedAt = now
+	return consumption, nil
 }
 
-func (s *Store) RecordEnrollmentResult(ctx context.Context, tokenID federation.ID, outcome, certificateFingerprint string) error {
-	validOutcome := outcome == "issued" || outcome == "issuance_failed" || outcome == "persistence_failed"
-	if s == nil || s.db == nil || ctx == nil || !tokenID.Valid() || !validOutcome || outcome == "issued" && !validSHA256(certificateFingerprint) || outcome != "issued" && certificateFingerprint != "" {
+func (s *Store) CompleteEnrollment(ctx context.Context, attempt EnrollmentAttempt, enrollment ProvisionedEnrollment, responseJSON []byte) ([]byte, error) {
+	if s == nil || s.db == nil || ctx == nil || attempt.validate() != nil || len(responseJSON) == 0 || len(responseJSON) > enrollmentMaximumResponseBytes || !json.Valid(responseJSON) || !validSHA256(enrollment.Node.CertificateFingerprint) {
+		return nil, ErrInvalid
+	}
+	tokenID, requestDigest := attempt.TokenID, attempt.requestDigest()
+	certificateFingerprint := enrollment.Node.CertificateFingerprint
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var token ProvisionedEnrollmentToken
+	var state, storedRequestDigest string
+	err = tx.QueryRowContext(ctx, `SELECT id,node_id,tenant_id,peer_id,authority_epoch,state,request_digest FROM fleet_enrollment_tokens WHERE id=?`, tokenID).Scan(&token.ID, &token.NodeID, &token.TenantID, &token.PeerID, &token.AuthorityEpoch, &state, &storedRequestDigest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if subtle.ConstantTimeCompare([]byte(storedRequestDigest), []byte(requestDigest)) != 1 || token.NodeID != enrollment.Node.ID || token.TenantID != enrollment.Node.OwnerTenantID || token.AuthorityEpoch != enrollment.Node.AuthorityEpoch || token.PeerID != enrollment.Grant.PeerID {
+		return nil, ErrConflict
+	}
+	if state == "issued" {
+		var storedResponse, storedHPKE []byte
+		if err = tx.QueryRowContext(ctx, `SELECT response_json,hpke_public_key FROM fleet_enrollment_results WHERE token_id=? AND request_digest=?`, tokenID, requestDigest).Scan(&storedResponse, &storedHPKE); err != nil {
+			return nil, err
+		}
+		if subtle.ConstantTimeCompare(storedHPKE, attempt.HPKEPublicKey) != 1 {
+			return nil, ErrConflict
+		}
+		return storedResponse, tx.Commit()
+	}
+	if state != "consumed" {
+		return nil, ErrConflict
+	}
+	existing, lookupErr := loadNodeTx(ctx, tx, token.NodeID)
+	if lookupErr != nil && !errors.Is(lookupErr, ErrNotFound) {
+		return nil, lookupErr
+	}
+	if lookupErr == nil && (existing.State == NodeRevoked || existing.State == NodeRevoking || existing.CertificateFingerprint != certificateFingerprint || existing.AuthorityEpoch != token.AuthorityEpoch) {
+		return nil, ErrStale
+	}
+	if err = s.provisionEnrollmentTx(ctx, tx, enrollment); err != nil {
+		return nil, err
+	}
+	now := s.clock().UTC()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO fleet_enrollment_results(token_id,request_digest,hpke_public_key,response_json,certificate_fingerprint,created_at) VALUES(?,?,?,?,?,?)`, tokenID, requestDigest, attempt.HPKEPublicKey, responseJSON, certificateFingerprint, now); err != nil {
+		return nil, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE fleet_enrollment_tokens SET state='issued',certificate_fingerprint=?,completed_at=? WHERE id=? AND state='consumed' AND request_digest=?`, certificateFingerprint, now, tokenID, requestDigest)
+	if err != nil {
+		return nil, err
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		return nil, ErrStale
+	}
+	if err = s.appendEnrollmentAuditTx(ctx, tx, token, "issued", requestDigest, certificateFingerprint); err != nil {
+		return nil, err
+	}
+	return responseJSON, tx.Commit()
+}
+
+func (s *Store) RecordEnrollmentFailure(ctx context.Context, tokenID federation.ID, outcome string) error {
+	if s == nil || s.db == nil || ctx == nil || !tokenID.Valid() || outcome != "issuance_failed" && outcome != "persistence_failed" {
 		return ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -262,30 +373,14 @@ func (s *Store) RecordEnrollmentResult(ctx context.Context, tokenID federation.I
 	}
 	defer tx.Rollback()
 	var token ProvisionedEnrollmentToken
-	var state, requestDigest string
-	err = tx.QueryRowContext(ctx, `SELECT id,node_id,tenant_id,peer_id,state,request_digest FROM fleet_enrollment_tokens WHERE id=?`, tokenID).Scan(&token.ID, &token.NodeID, &token.TenantID, &token.PeerID, &state, &requestDigest)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
+	var requestDigest, state string
+	if err = tx.QueryRowContext(ctx, `SELECT id,node_id,tenant_id,peer_id,request_digest,state FROM fleet_enrollment_tokens WHERE id=?`, tokenID).Scan(&token.ID, &token.NodeID, &token.TenantID, &token.PeerID, &requestDigest, &state); err != nil {
 		return err
 	}
-	if state != "consumed" {
+	if state != "consumed" || !validSHA256(requestDigest) {
 		return ErrConflict
 	}
-	completedState := "failed"
-	if outcome == "issued" {
-		completedState = "issued"
-	}
-	now := s.clock().UTC()
-	result, err := tx.ExecContext(ctx, `UPDATE fleet_enrollment_tokens SET state=?,certificate_fingerprint=?,completed_at=? WHERE id=? AND state='consumed'`, completedState, certificateFingerprint, now, tokenID)
-	if err != nil {
-		return err
-	}
-	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
-		return ErrStale
-	}
-	if err = s.appendEnrollmentAuditTx(ctx, tx, token, outcome, requestDigest, certificateFingerprint); err != nil {
+	if err = s.appendEnrollmentAuditTx(ctx, tx, token, outcome, requestDigest, outcome); err != nil {
 		return err
 	}
 	return tx.Commit()

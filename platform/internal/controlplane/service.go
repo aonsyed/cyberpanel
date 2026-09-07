@@ -537,6 +537,13 @@ func (n *NodeSession) negotiate(ctx context.Context) error {
 }
 
 func (n *NodeSession) flush(ctx context.Context) error {
+	node, err := n.store.Node(ctx, n.nodeID)
+	if err != nil {
+		return err
+	}
+	if !certificateFingerprintMatches(node.CertificateFingerprint, n.certificateFingerprint) || node.State == NodeRevoked {
+		return ErrForbidden
+	}
 	revocations, err := n.store.QueuedRevocations(ctx, n.nodeID, 20)
 	if err != nil {
 		return err
@@ -552,9 +559,12 @@ func (n *NodeSession) flush(ctx context.Context) error {
 	if len(revocations) > 0 {
 		return nil
 	}
-	node, err := n.store.Node(ctx, n.nodeID)
+	node, err = n.store.Node(ctx, n.nodeID)
 	if err != nil {
 		return err
+	}
+	if !certificateFingerprintMatches(node.CertificateFingerprint, n.certificateFingerprint) {
+		return ErrForbidden
 	}
 	if node.State == NodeRevoking || node.State == NodeRevoked {
 		return nil
@@ -575,6 +585,13 @@ func (n *NodeSession) flush(ctx context.Context) error {
 }
 
 func (n *NodeSession) handle(ctx context.Context, frame federation.Frame) error {
+	node, err := n.store.Node(ctx, n.nodeID)
+	if err != nil {
+		return err
+	}
+	if !certificateFingerprintMatches(node.CertificateFingerprint, n.certificateFingerprint) || node.State == NodeRevoked || node.State == NodeRevoking && frame.Type != federation.FrameRevocationAck {
+		return ErrForbidden
+	}
 	switch frame.Type {
 	case federation.FrameReceipt:
 		var receipt federation.Receipt
@@ -619,7 +636,7 @@ func (n *NodeSession) handle(ctx context.Context, frame federation.Frame) error 
 		if err != nil {
 			return err
 		}
-		if node.State == NodeRevoked || node.AuthorityEpoch != value.AuthorityEpoch || node.Capabilities.Digest != value.CapabilityDigest {
+		if node.State == NodeRevoked || !certificateFingerprintMatches(node.CertificateFingerprint, n.certificateFingerprint) || node.AuthorityEpoch != value.AuthorityEpoch || node.Capabilities.Digest != value.CapabilityDigest {
 			return ErrForbidden
 		}
 		if node.State != NodeRevoking && node.State != NodeDegraded {

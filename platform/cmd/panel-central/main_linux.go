@@ -216,12 +216,14 @@ func run(config configuration) error {
 	}
 	defer listener.Close()
 	listeners := []centralListener{{listener: listener, serve: server.Serve}}
+	var operatorAPI *controlplane.OperatorAPI
 	if config.OperatorEnabled {
 		operatorTLS, loadErr := loadTLSConfiguration(operatorCAPath, config.OperatorCAFingerprintSHA256, time.Now().UTC())
 		if loadErr != nil {
 			return fmt.Errorf("load operator TLS policy: %w", loadErr)
 		}
-		operatorAPI, apiErr := controlplane.NewOperatorAPI(service, store, operatorAuthority, operatorAudit)
+		var apiErr error
+		operatorAPI, apiErr = controlplane.NewOperatorAPI(service, store, operatorAuthority, operatorAudit)
 		if apiErr != nil {
 			return fmt.Errorf("assemble operator API: %w", apiErr)
 		}
@@ -253,6 +255,11 @@ func run(config configuration) error {
 			return fmt.Errorf("assemble enrollment certificate issuer: %w", issuerErr)
 		}
 		defer issuer.Close()
+		if operatorAPI != nil {
+			if err = operatorAPI.WithEnrollmentIssuer(issuer); err != nil {
+				return fmt.Errorf("assemble node certificate rotation issuer: %w", err)
+			}
+		}
 		enrollmentAPI, apiErr := controlplane.NewEnrollmentAPI(store, issuer)
 		if apiErr != nil {
 			return fmt.Errorf("assemble enrollment API: %w", apiErr)
