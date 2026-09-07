@@ -422,13 +422,7 @@ type eventAcknowledgement struct {
 	Through uint64 `json:"through"`
 }
 
-type resyncRequest struct {
-	NodeID             federation.ID `json:"nodeId"`
-	ExpectedSequence   uint64        `json:"expectedSequence"`
-	ReceivedSequence   uint64        `json:"receivedSequence"`
-	SnapshotGeneration uint64        `json:"snapshotGeneration"`
-	Reason             string        `json:"reason"`
-}
+type resyncRequest = federation.ProjectionSnapshotRequest
 
 func (n *NodeSession) Run(ctx context.Context) error {
 	if n == nil || ctx == nil || n.service == nil || n.store == nil || n.session == nil {
@@ -569,6 +563,16 @@ func (n *NodeSession) flush(ctx context.Context) error {
 	if node.State == NodeRevoking || node.State == NodeRevoked {
 		return nil
 	}
+	if pending, found, pendingErr := n.store.PendingProjectionSnapshot(ctx, n.nodeID, n.service.peerID, node.AuthorityEpoch); pendingErr != nil {
+		return pendingErr
+	} else if found {
+		return sendFrame(ctx, n.session, federation.FrameSnapshotRequest, pending)
+	}
+	if node.State == NodeDegraded {
+		request, beginErr := n.store.BeginProjectionSnapshot(ctx,n.nodeID,n.service.peerID,node.AuthorityEpoch,node.ProjectionSequence+1)
+		if beginErr != nil { return beginErr }
+		return sendFrame(ctx,n.session,federation.FrameSnapshotRequest,request)
+	}
 	intents, err := n.store.QueuedIntents(ctx, n.nodeID, 50)
 	if err != nil {
 		return err
@@ -609,6 +613,11 @@ func (n *NodeSession) handle(ctx context.Context, frame federation.Frame) error 
 		}
 		return n.store.AckRevocation(ctx, n.nodeID, acknowledgement.AuthorityEpoch)
 	case federation.FrameEventBatch:
+		if pending, found, pendingErr := n.store.PendingProjectionSnapshot(ctx, n.nodeID, n.service.peerID, node.AuthorityEpoch); pendingErr != nil {
+			return pendingErr
+		} else if found {
+			return sendFrame(ctx, n.session, federation.FrameSnapshotRequest, pending)
+		}
 		var events []federation.NodeEvent
 		if err := decodeControlPayload(frame.Payload, &events); err != nil {
 			return err
@@ -618,12 +627,23 @@ func (n *NodeSession) handle(ctx context.Context, frame federation.Frame) error 
 			return err
 		}
 		if result.Resync {
-			return sendFrame(ctx, n.session, federation.FrameSnapshotRequest, resyncRequest{NodeID: n.nodeID, ExpectedSequence: result.ExpectedSequence, ReceivedSequence: result.ReceivedSequence, SnapshotGeneration: result.SnapshotGeneration, Reason: "event_sequence_gap"})
+			request, beginErr := n.store.BeginProjectionSnapshot(ctx, n.nodeID, n.service.peerID, n.authorityEpoch, result.ReceivedSequence)
+			if beginErr != nil { return beginErr }
+			return sendFrame(ctx, n.session, federation.FrameSnapshotRequest, request)
 		}
 		if result.AckThrough == 0 {
 			return ErrInvalid
 		}
 		return sendFrame(ctx, n.session, federation.FrameEventAck, eventAcknowledgement{Through: result.AckThrough})
+	case federation.FrameSnapshotChunk:
+		var chunk federation.ProjectionSnapshotChunk
+		if err := decodeControlPayload(frame.Payload, &chunk); err != nil { return err }
+		if chunk.NodeID != n.nodeID || chunk.PeerID != n.service.peerID || chunk.AuthorityEpoch != n.authorityEpoch || n.service.eventVerifier == nil || chunk.SignatureKeyID == "" || len(chunk.SignatureKeyID)>256 || len(chunk.Signature)!=64 { return ErrForbidden }
+		if err := n.service.eventVerifier.VerifyNodeEvent(ctx,n.nodeID,chunk.SignatureKeyID,chunk.SigStructure(),chunk.Signature); err != nil { return ErrForbidden }
+		request, complete, err := n.store.ReceiveProjectionSnapshot(ctx, chunk, hex.EncodeToString(n.certificateFingerprint[:]))
+		if err != nil { return err }
+		if complete { return sendFrame(ctx,n.session,federation.FrameEventAck,eventAcknowledgement{Through:chunk.Watermark}) }
+		return sendFrame(ctx,n.session,federation.FrameSnapshotRequest,request)
 	case federation.FrameHeartbeat:
 		var value heartbeat
 		if err := decodeControlPayload(frame.Payload, &value); err != nil {

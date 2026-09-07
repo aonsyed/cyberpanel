@@ -26,6 +26,7 @@ type OutboundRunner struct {
 	ReceiveTimeout   time.Duration
 	eventMutex       sync.Mutex
 	sentEventThrough uint64
+	snapshotThrough uint64
 }
 
 type outboundHelloAcknowledgement struct {
@@ -107,6 +108,7 @@ func (runner *OutboundRunner) runSession(ctx context.Context, session Session) e
 	}
 	runner.eventMutex.Lock()
 	runner.sentEventThrough = 0
+	runner.snapshotThrough = 0
 	runner.eventMutex.Unlock()
 	receipts, err := runner.Runner.Agent.ReconcilePending(ctx, 1000)
 	if err != nil {
@@ -249,6 +251,24 @@ func (runner *OutboundRunner) handleFrame(ctx context.Context, session Session, 
 			return err
 		}
 		return ErrStale
+	case FrameSnapshotRequest:
+		var request ProjectionSnapshotRequest
+		if err := decodeOutboundPayload(frame.Payload, &request); err != nil { return err }
+		if request.PeerID != runner.PeerID { return ErrForbidden }
+		chunk, err := runner.Runner.Store.ProjectionSnapshotChunk(ctx, request)
+		if err != nil { return err }
+		chunk.SignatureKeyID, err = runner.EventSigner.EventKeyID(ctx)
+		if err != nil { return err }
+		chunk.Signature, err = runner.EventSigner.SignEvent(ctx, chunk.SignatureKeyID, chunk.SigStructure())
+		if err != nil { return err }
+		// Send one requested chunk at a time so revocation can preempt between
+		// chunks. Persisted content is reused on reconnect and duplicate asks.
+		if err = sendPayload(ctx, session, FrameSnapshotChunk, chunk); err != nil { return err }
+		runner.eventMutex.Lock()
+		runner.snapshotThrough = chunk.Watermark
+		if chunk.Index+1 == chunk.Total && chunk.Watermark > runner.sentEventThrough { runner.sentEventThrough = chunk.Watermark }
+		runner.eventMutex.Unlock()
+		return nil
 	case FrameEventAck:
 		var acknowledgement struct {
 			Through uint64 `json:"through"`
@@ -262,7 +282,11 @@ func (runner *OutboundRunner) handleFrame(ctx context.Context, session Session, 
 		if acknowledgement.Through == 0 || acknowledgement.Through > maximum {
 			return ErrForbidden
 		}
-		return runner.Runner.Store.AckEvents(ctx, acknowledgement.Through)
+		if err := runner.Runner.Store.AckEvents(ctx, acknowledgement.Through); err != nil { return err }
+		runner.eventMutex.Lock()
+		if acknowledgement.Through >= runner.snapshotThrough { runner.snapshotThrough = 0 }
+		runner.eventMutex.Unlock()
+		return nil
 	case FrameHeartbeat:
 		return nil
 	default:
@@ -291,6 +315,10 @@ func (runner *OutboundRunner) deliverReceipt(ctx context.Context, session Sessio
 }
 
 func (runner *OutboundRunner) flushEvents(ctx context.Context, session Session) error {
+	runner.eventMutex.Lock()
+	snapshotPending := runner.snapshotThrough != 0
+	runner.eventMutex.Unlock()
+	if snapshotPending { return nil }
 	events, err := runner.Runner.Store.ContiguousEvents(ctx, 200, 3<<20)
 	if err != nil || len(events) == 0 {
 		return err
@@ -314,7 +342,7 @@ func (runner *OutboundRunner) flushEvents(ctx context.Context, session Session) 
 		return err
 	}
 	runner.eventMutex.Lock()
-	runner.sentEventThrough = events[len(events)-1].Sequence
+	if events[len(events)-1].Sequence > runner.sentEventThrough { runner.sentEventThrough = events[len(events)-1].Sequence }
 	runner.eventMutex.Unlock()
 	return nil
 }
