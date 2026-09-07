@@ -1,0 +1,48 @@
+[Unit]
+Description=Disposable CyberPanel backup converter
+After=local-fs.target
+ConditionPathExists=/etc/cyberpanel/cyberpanel-backup-convert.json
+
+[Service]
+Type=simple
+User=cyberpanel
+Group=cyberpanel
+ExecStart=/usr/local/libexec/cyberpanel/cyberpanel-backup-convert
+LoadCredential=manifest-signing.key:/etc/cyberpanel/secrets/backup-converter-signing.key
+LoadCredential=target-sealing-public.key:/etc/cyberpanel/secrets/migration-target-public.key
+RuntimeDirectory=cyberpanel-backup-convert
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/cyberpanel /var/lib/cyberpanel/migration/cyberpanel-backup-raw /var/lib/cyberpanel/migration/cyberpanel-backup-quarantine
+ReadWritePaths=/var/lib/cyberpanel/migration/cyberpanel-backup-converter /var/lib/cyberpanel/migration/cyberpanel-backup-intake /run/cyberpanel-backup-convert
+InaccessiblePaths=/run/docker.sock /var/run/docker.sock /var/lib/cyberpanel/sites /var/lib/cyberpanel-auth /var/lib/cyberpanel/siteops
+MemoryMax=768M
+CPUQuota=100%
+TasksMax=32
+LimitNOFILE=128
+
+# Operator-started for a conversion window; intentionally no Install section.

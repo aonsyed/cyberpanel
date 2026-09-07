@@ -1,0 +1,27 @@
+{
+  "schema_version": 2,
+  "component_id": "cyberpanel_backup_convert",
+  "format": "tar_gzip",
+  "disposable": true,
+  "members": [
+    {
+      "path_id": "cyberpanel_backup_convert",
+      "command": "./cmd/cyberpanel-backup-convert",
+      "archive_path": "cyberpanel-backup-convert",
+      "install_path": "/usr/local/libexec/cyberpanel/cyberpanel-backup-convert",
+      "mode": "0755"
+    }
+  ],
+  "operator_assets": [
+    {"source": "packaging/systemd/cyberpanel-backup-convert.service", "install_path": "/etc/systemd/system/cyberpanel-backup-convert.service", "mode": "0644"},
+    {"source": "packaging/tmpfiles/cyberpanel-backup-convert.conf", "install_path": "/etc/tmpfiles.d/cyberpanel-backup-convert.conf", "mode": "0644"},
+    {"source": "packaging/config/cyberpanel-backup-convert.json", "install_path": "/etc/cyberpanel/cyberpanel-backup-convert.json", "mode": "0640"}
+  ],
+  "provisioning": {
+    "raw_artifacts": "Root stages <artifact_id>.tar.gz under the fixed raw inbox as root:cyberpanel 0440; no symlinks or hardlinks.",
+    "keys": "Provision a dedicated hex Ed25519 private key and target X25519 public key through the service credentials. Pin the matching manifest public key and canonical schema hash in target migration trust; never reuse core signing keys.",
+    "request": "Root invokes cyberpanel-backup-convert convert with strict JSON on stdin: version=1, request_id, artifact_id, tenant_id, target_installation_id, deadline (UTC, at most 15 minutes). Reuse request_id on an uncertain response.",
+    "handoff": "Submit the returned bundle_endpoint to the existing CyberPanel backup admission API for the same tenant. Conversion never creates target resources or initiates import.",
+    "cleanup": "After target cleanup evidence, stop the service and remove its binary, unit, configuration, credentials and private scratch/receipts. Do not remove admitted quarantine bundles until normal migration cleanup authorizes removal."
+  }
+}

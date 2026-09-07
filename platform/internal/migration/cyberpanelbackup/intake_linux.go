@@ -70,6 +70,7 @@ type fileEvidence struct { digest string; size uint64 }
 type archiveIndex struct {
 	files map[string]fileEvidence
 	directories map[string]struct{}
+	links map[string]string
 	metadata map[string][]byte
 	digest string
 	generation uint64
@@ -107,6 +108,11 @@ func (intake *Intake) Ready() bool { return intake != nil && intake.verifier != 
 
 func (intake *Intake) Admit(ctx context.Context, tenantID, endpoint string) (Admission, error) {
 	if !intake.Ready() || ctx == nil || !scopeText(tenantID) { return Admission{}, migration.ErrInvalid }
+	if intake.OwnsEndpoint(endpoint) {
+		value,err:=parseFileEndpoint(endpoint);if err!=nil{return Admission{},err};receipt,err:=readReceipt(filepath.Join(filepath.Dir(value),"admission.json"));if err!=nil{return Admission{},err}
+		bundle,err:=intake.bundle(ctx,migration.RuntimeScope{TenantID:tenantID,MigrationID:receipt.MigrationID,SourceEndpoint:endpoint});if err!=nil{return Admission{},err}
+		return Admission{Manifest:bundle.manifest,SourceEndpoint:endpoint},nil
+	}
 	bundlePath, err := intakePath(endpoint); if err != nil { return Admission{}, err }
 	verified, err := intake.verifyBundle(ctx, bundlePath); if err != nil { return Admission{}, err }
 	receipt := admissionReceipt{Version:1, TenantID:tenantID, MigrationID:verified.manifest.MigrationID, ManifestRoot:verified.manifest.MerkleRoot, SourcePathDigest:pathDigest(bundlePath), AdmittedAt:intake.clock().UTC()}
@@ -215,17 +221,17 @@ func (reader *boundedExpandedReader) Read(value []byte) (int, error) {
 func (index archiveIndex) clearMetadata(){for name,value:=range index.metadata{wipe(value);delete(index.metadata,name)}}
 
 func auditArchive(ctx context.Context, archivePath string) (archiveIndex, backupMetadata, error) {
-	index := archiveIndex{files:map[string]fileEvidence{}, directories:map[string]struct{}{}, metadata:map[string][]byte{}}
+	index := archiveIndex{files:map[string]fileEvidence{}, directories:map[string]struct{}{}, links:map[string]string{}, metadata:map[string][]byte{}}
 	accepted:=false;defer func(){if !accepted{index.clearMetadata()}}()
 	before, err := os.Lstat(archivePath)
-	if err != nil || !ownedFile(before) || before.Size() < 1 || before.Size() > maximumCompressedBytes { return index, backupMetadata{}, errors.Join(migration.ErrBlocked, err) }
+	if err != nil || !trustedArchiveFile(before) || before.Size() < 1 || before.Size() > maximumCompressedBytes { return index, backupMetadata{}, errors.Join(migration.ErrBlocked, err) }
 	file, err := os.Open(archivePath); if err != nil { return index, backupMetadata{}, err }; defer file.Close()
-	opened, err := file.Stat(); if err != nil || !sameFile(before, opened) { return index, backupMetadata{}, errors.Join(migration.ErrConflict, err) }
+	opened, err := file.Stat(); if err != nil || !sameArchiveFile(before, opened) { return index, backupMetadata{}, errors.Join(migration.ErrConflict, err) }
 	rawHash := sha256.New(); buffered := bufio.NewReader(io.TeeReader(file, rawHash))
 	gzipReader, err := gzip.NewReader(buffered); if err != nil { return index, backupMetadata{}, migration.ErrInvalid }
 	if gzipReader.Name != "" || gzipReader.Comment != "" || len(gzipReader.Extra) != 0 { gzipReader.Close(); return index, backupMetadata{}, migration.ErrInvalid }
 	gzipReader.Multistream(false); expanded := &boundedExpandedReader{source:gzipReader}; reader := tar.NewReader(expanded)
-	seen := map[string]struct{}{}; entries := 0
+	seen := map[string]struct{}{}; entries := 0; capturedBytes := int64(0)
 	for {
 		if err = ctx.Err(); err != nil { gzipReader.Close(); return index, backupMetadata{}, err }
 		header, nextErr := reader.Next(); if errors.Is(nextErr, io.EOF) { break }; if nextErr != nil { gzipReader.Close(); return index, backupMetadata{}, migration.ErrInvalid }
@@ -238,21 +244,21 @@ func auditArchive(ctx context.Context, archivePath string) (archiveIndex, backup
 		case tar.TypeReg, tar.TypeRegA:
 			if name == "." || uint64(header.Size) > maximumExpandedBytes { gzipReader.Close(); return index, backupMetadata{}, migration.ErrCapacity }
 			hash := sha256.New(); var capture bytes.Buffer; destination := io.Writer(hash)
-			if captureMember(name) { if header.Size > maximumMetadataBytes { gzipReader.Close(); return index, backupMetadata{}, migration.ErrCapacity }; destination = io.MultiWriter(hash, &capture) }
-			written, copyErr := io.CopyBuffer(destination, reader, make([]byte, 128<<10))
+			if captureMember(name) { capturedBytes+=header.Size; if header.Size > maximumMetadataBytes || capturedBytes > 64<<20 { gzipReader.Close(); return index, backupMetadata{}, migration.ErrCapacity }; destination = io.MultiWriter(hash, &capture) }
+			written, copyErr := copyContext(ctx, destination, reader)
 			if copyErr != nil || written != header.Size { gzipReader.Close(); return index, backupMetadata{}, errors.Join(migration.ErrInvalid, copyErr) }
 			index.files[name] = fileEvidence{digest:hex.EncodeToString(hash.Sum(nil)), size:uint64(written)}
-			if captureMember(name) { index.metadata[name] = append([]byte(nil), capture.Bytes()...) }
+			if captureMember(name) { index.metadata[name] = append([]byte(nil), capture.Bytes()...); wipe(capture.Bytes()) }
 		case tar.TypeSymlink:
-			if header.Size != 0 || !safeArchiveLink(name, header.Linkname) { gzipReader.Close(); return index, backupMetadata{}, migration.ErrBlocked }
+			if header.Size != 0 || !safeArchiveLink(name, header.Linkname) { gzipReader.Close(); return index, backupMetadata{}, migration.ErrBlocked }; index.links[name]=header.Linkname
 		default:
 			gzipReader.Close(); return index, backupMetadata{}, migration.ErrBlocked
 		}
 	}
-	_, drainErr := io.CopyBuffer(io.Discard, expanded, make([]byte, 128<<10)); closeErr := gzipReader.Close()
+	_, drainErr := copyContext(ctx, io.Discard, expanded); closeErr := gzipReader.Close()
 	_, trailingErr := buffered.Peek(1); if !errors.Is(trailingErr, io.EOF) { trailingErr = migration.ErrInvalid } else { trailingErr = nil }
 	final, statErr := file.Stat()
-	if drainErr != nil || closeErr != nil || trailingErr != nil || statErr != nil || !sameFile(opened, final) { return index, backupMetadata{}, errors.Join(migration.ErrConflict, drainErr, closeErr, trailingErr, statErr) }
+	if drainErr != nil || closeErr != nil || trailingErr != nil || statErr != nil || !sameArchiveFile(opened, final) { return index, backupMetadata{}, errors.Join(migration.ErrConflict, drainErr, closeErr, trailingErr, statErr) }
 	compressed := uint64(before.Size()); if expanded.count > maximumExpandedBytes || compressed == 0 || expanded.count > compressed*maximumExpansionRatio { return index, backupMetadata{}, migration.ErrCapacity }
 	if _, found := index.files["meta.xml"]; !found { return index, backupMetadata{}, migration.ErrInvalid }
 	if _, found := index.directories["public_html"]; !found { return index, backupMetadata{}, migration.ErrInvalid }
@@ -459,8 +465,8 @@ func firstCertificate(raw []byte)(*x509.Certificate,error){block,rest:=pem.Decod
 func childRelativePath(host,value string)string{value=filepath.ToSlash(strings.TrimSpace(value));prefix:="/home/"+host+"/";if strings.HasPrefix(value,"/"){if !strings.HasPrefix(value,prefix){return ""};value=strings.TrimPrefix(value,prefix)};if value==""||path.Clean(value)!=value||value==".."||strings.HasPrefix(value,"../")||strings.Contains(value,"\\"){return ""};return value}
 func normalizeHost(value string)string{return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)),".")}
 func normalizeDNS(value string)string{return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)),".")}
-func validHost(value string)bool{value=normalizeHost(value);if value==""||len(value)>253||netip.ParseAddr(value).IsValid(){return false};labels:=strings.Split(value,".");if len(labels)<2{return false};for _,label:=range labels{if len(label)<1||len(label)>63||label[0]=='-'||label[len(label)-1]=='-'{return false};for _,character:=range label{if(character<'a'||character>'z')&&(character<'0'||character>'9')&&character!='-'{return false}}};return true}
-func validDNSName(value string)bool{value=normalizeDNS(value);if value=="@"||value=="*"{return true};if value==""||len(value)>253||netip.ParseAddr(value).IsValid(){return false};for index,label:=range strings.Split(value,"."){if label=="*"&&index==0{continue};if len(label)<1||len(label)>63||label[0]=='-'||label[len(label)-1]=='-'{return false};for _,character:=range label{if(character<'a'||character>'z')&&(character<'0'||character>'9')&&character!='-'&&character!='_'{return false}}};return true}
+func validHost(value string)bool{value=normalizeHost(value);_,addressErr:=netip.ParseAddr(value);if value==""||len(value)>253||addressErr==nil{return false};labels:=strings.Split(value,".");if len(labels)<2{return false};for _,label:=range labels{if len(label)<1||len(label)>63||label[0]=='-'||label[len(label)-1]=='-'{return false};for _,character:=range label{if(character<'a'||character>'z')&&(character<'0'||character>'9')&&character!='-'{return false}}};return true}
+func validDNSName(value string)bool{value=normalizeDNS(value);if value=="@"||value=="*"{return true};_,addressErr:=netip.ParseAddr(value);if value==""||len(value)>253||addressErr==nil{return false};for index,label:=range strings.Split(value,"."){if label=="*"&&index==0{continue};if len(label)<1||len(label)>63||label[0]=='-'||label[len(label)-1]=='-'{return false};for _,character:=range label{if(character<'a'||character>'z')&&(character<'0'||character>'9')&&character!='-'&&character!='_'{return false}}};return true}
 func validEmail(value string)bool{parts:=strings.Split(value,"@");return plainText(value,320)&&len(parts)==2&&parts[0]!=""&&len(parts[0])<=64&&validHost(parts[1])}
 func knownDNS(value string)bool{switch value{case"A","AAAA","CAA","CNAME","MX","NS","PTR","SOA","SRV","TXT":return true};return false}
 func safeIdentity(value string)bool{if !plainText(value,128){return false};for _,character:=range value{if(character<'a'||character>'z')&&(character<'A'||character>'Z')&&(character<'0'||character>'9')&&character!='_'&&character!='-'{return false}};return true}
@@ -489,8 +495,10 @@ func scopeText(value string)bool{return value!=""&&len(value)<=128&&!strings.Con
 func readOwnedFile(value string,maximum int64)([]byte,os.FileInfo,error){before,err:=os.Lstat(value);if err!=nil||maximum<1||!ownedFile(before)||before.Size()<1||before.Size()>maximum{return nil,nil,errors.Join(migration.ErrBlocked,err)};file,err:=os.Open(value);if err!=nil{return nil,nil,err};defer file.Close();opened,err:=file.Stat();if err!=nil||!sameFile(before,opened){return nil,nil,errors.Join(migration.ErrConflict,err)};raw,err:=io.ReadAll(io.LimitReader(file,maximum+1));if err!=nil||int64(len(raw))!=opened.Size()||int64(len(raw))>maximum{return nil,nil,errors.Join(migration.ErrInvalid,err)};final,err:=file.Stat();if err!=nil||!sameFile(opened,final){return nil,nil,errors.Join(migration.ErrConflict,err)};return raw,final,nil}
 func ownedDirectory(info os.FileInfo)bool{stat,ok:=fileStat(info);return ok&&info.IsDir()&&info.Mode()&os.ModeSymlink==0&&info.Mode().Perm()==0o700&&int(stat.Uid)==os.Geteuid()}
 func ownedFile(info os.FileInfo)bool{stat,ok:=fileStat(info);return ok&&info.Mode().IsRegular()&&info.Mode()&os.ModeSymlink==0&&info.Mode().Perm()==0o400&&stat.Nlink==1&&int(stat.Uid)==os.Geteuid()}
+func trustedArchiveFile(info os.FileInfo)bool{if ownedFile(info){return true};stat,ok:=fileStat(info);return ok&&info.Mode().IsRegular()&&info.Mode()&os.ModeSymlink==0&&info.Mode().Perm()==0o440&&stat.Nlink==1&&stat.Uid==0&&int(stat.Gid)==os.Getegid()}
 func sameDirectory(left,right os.FileInfo)bool{return ownedDirectory(left)&&ownedDirectory(right)&&os.SameFile(left,right)&&left.ModTime().Equal(right.ModTime())}
 func sameFile(left,right os.FileInfo)bool{return ownedFile(left)&&ownedFile(right)&&os.SameFile(left,right)&&left.Size()==right.Size()&&left.ModTime().Equal(right.ModTime())}
+func sameArchiveFile(left,right os.FileInfo)bool{return trustedArchiveFile(left)&&trustedArchiveFile(right)&&os.SameFile(left,right)&&left.Size()==right.Size()&&left.ModTime().Equal(right.ModTime())}
 func sameFilesystem(left,right os.FileInfo)bool{leftStat,leftOK:=fileStat(left);rightStat,rightOK:=fileStat(right);return leftOK&&rightOK&&leftStat.Dev==rightStat.Dev}
 func fileStat(info os.FileInfo)(*syscall.Stat_t,bool){if info==nil{return nil,false};value,ok:=info.Sys().(*syscall.Stat_t);return value,ok}
 func writeAll(writer io.Writer,value []byte)error{for len(value)>0{count,err:=writer.Write(value);if err!=nil{return err};if count==0{return io.ErrNoProgress};value=value[count:]};return nil}

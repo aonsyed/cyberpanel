@@ -1,0 +1,6 @@
+{
+  "target_installation_id": "PROVISION_TARGET_INSTALLATION_ID",
+  "manifest_signing_key_id": "cyberpanel_backup_converter_v1",
+  "target_sealing_key_id": "migration_target_v1",
+  "maximum_concurrent": 1
+}
