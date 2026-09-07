@@ -97,7 +97,7 @@ func newHAFederatedSender(ctx context.Context, db *sql.DB, now func() time.Time)
 	client := &http.Client{Transport: transport, Timeout: 15*time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if now == nil { now = time.Now }
 	// An insert is committed before any POST. A crash or lost POST response is
-	// never retried: only a successfully recorded central ID permits observation.
+	// recovered by authenticated GET lookup, never by another mutation request.
 	_, err = db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS ha_federated_dispatch_v1 (
 	 dispatch_key TEXT PRIMARY KEY, request_digest TEXT NOT NULL,
 	 bound_intent BLOB, claimed_at TIMESTAMP NOT NULL
@@ -116,6 +116,7 @@ func (sender *haFederatedSender) BindAndSend(ctx context.Context, draft federati
 	// Replay checks precede approval expiry checks: observing an already submitted
 	// effect must remain possible after approval expiry, without new authority.
 	if bound, found, loadErr := sender.loadClaim(ctx, key, plan); found || loadErr != nil {
+		if found && errors.Is(loadErr, ha.ErrReconciliationRequired) { return sender.recoverClaim(ctx, draft, grantID, key, plan) }
 		if loadErr != nil { return bound, federation.Receipt{}, loadErr }
 		if err = sender.validateBound(draft, bound, grantID, plan, false); err != nil { return bound, federation.Receipt{}, err }
 		receipt, observeErr := sender.Observe(ctx, bound)
@@ -147,7 +148,7 @@ func (sender *haFederatedSender) BindAndSend(ctx context.Context, draft federati
 	count, err := result.RowsAffected()
 	if err != nil || count != 1 { return federation.Intent{}, federation.Receipt{}, errors.Join(ha.ErrReconciliationRequired, err) }
 	var bound federation.Intent
-	if err = sender.request(ctx, http.MethodPost, "/v1/intents", raw, &bound); err != nil { return federation.Intent{}, federation.Receipt{}, errors.Join(ha.ErrReconciliationRequired, err) }
+	if err = sender.request(ctx, http.MethodPost, "/v1/intents", raw, &bound); err != nil { return sender.recoverClaim(ctx, draft, grantID, key, plan) }
 	if err = sender.validateBound(draft, bound, grantID, plan, true); err != nil { return federation.Intent{}, federation.Receipt{}, errors.Join(ha.ErrReconciliationRequired, err) }
 	expectedApproval, _ := json.Marshal(approval)
 	actualApproval, _ := json.Marshal(bound.Approval)
@@ -177,6 +178,29 @@ func (sender *haFederatedSender) loadClaim(ctx context.Context, key, plan string
 	var bound federation.Intent
 	if err = decodeHAFederationJSON(raw, &bound); err != nil { return bound, true, err }
 	return bound, true, nil
+}
+
+func (sender *haFederatedSender) recoverClaim(ctx context.Context, draft federation.Intent, grant federation.ID, key, plan string) (federation.Intent, federation.Receipt, error) {
+	query := url.Values{"tenant_id": {sender.config.TenantID}, "node_id": {draft.NodeID.String()}, "grant_id": {grant.String()}, "idempotency_key": {draft.IdempotencyKey}, "request_digest": {plan}}
+	var bound federation.Intent
+	if err := sender.request(ctx, http.MethodGet, "/v1/intents/lookup?"+query.Encode(), nil, &bound); err != nil { return bound, federation.Receipt{}, errors.Join(ha.ErrReconciliationRequired, err) }
+	if err := sender.validateBound(draft, bound, grant, plan, false); err != nil { return federation.Intent{}, federation.Receipt{}, err }
+	encoded, err := json.Marshal(bound)
+	if err != nil { return federation.Intent{}, federation.Receipt{}, ha.ErrReconciliationRequired }
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	result, err := sender.db.ExecContext(saveCtx, `UPDATE ha_federated_dispatch_v1 SET bound_intent=? WHERE dispatch_key=? AND request_digest=? AND bound_intent IS NULL`, encoded, key, plan)
+	if err != nil { return bound, federation.Receipt{}, errors.Join(ha.ErrReconciliationRequired, err) }
+	count, err := result.RowsAffected()
+	if err != nil { return bound, federation.Receipt{}, ha.ErrReconciliationRequired }
+	if count != 1 {
+		// Concurrent observation may have saved the same result. Conflicting
+		// intent IDs/signatures must not be silently adopted.
+		stored, found, loadErr := sender.loadClaim(saveCtx, key, plan)
+		if loadErr != nil || !found || !bytes.Equal(stored.SigStructure(), bound.SigStructure()) || !bytes.Equal(stored.Signature, bound.Signature) { return federation.Intent{}, federation.Receipt{}, ha.ErrReconciliationRequired }
+	}
+	receipt, err := sender.Observe(ctx, bound)
+	return bound, receipt, err
 }
 
 func (sender *haFederatedSender) approvalFor(draft federation.Intent, grant federation.ID, plan string) (federation.Approval, error) {
@@ -255,10 +279,13 @@ func (sender *haFederatedSender) request(ctx context.Context, method, path strin
 	response, err := sender.client.Do(request)
 	if err != nil { return errors.Join(ha.ErrReconciliationRequired, err) }
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict || response.StatusCode == http.StatusForbidden { return ha.ErrForbidden }
 	if response.StatusCode != http.StatusOK { return ha.ErrReconciliationRequired }
 	raw, err := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))
 	if err != nil || len(raw) > 4<<20 { return ha.ErrInvalid }
-	return decodeHAFederationJSON(raw, target)
+	var envelope struct { Version uint32 `json:"version"`; Data json.RawMessage `json:"data"` }
+	if decodeHAFederationJSON(raw, &envelope) != nil || envelope.Version != 1 || len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) { return ha.ErrInvalid }
+	return decodeHAFederationJSON(envelope.Data, target)
 }
 
 func readHAFederationProtectedFile(path string, secret bool) ([]byte, error) {

@@ -57,9 +57,17 @@ central enrollment evidence record returned by GET `/v1/intents/{id}`, including
 node/key identity, key state and validity times, and the Ed25519 signature.
 
 A crash or lost response after the POST claim but before saving the central
-intent ID remains reconciliation-required. The current central API has no
-idempotency-key lookup endpoint; operators must investigate central durable state.
-Do not delete the claim or retry the mutation to resolve uncertainty. Provisioning
+intent ID is recovered using GET `/v1/intents/lookup` with the original tenant,
+node, grant, idempotency key and request digest. The authenticated operator must
+have `intent.inspect` and `grant.inspect`; central checks exact grant ownership
+and the signed durable intent's plan digest. Multiple matches or changed semantics
+are conflicts, not a choice of which effect to adopt. Lookup remains available
+for an expired/revoked grant because it cannot authorize new execution.
+
+If central has no matching durable intent (including a crash before POST), the
+claim stays reconciliation-required. Later invocations repeat GET lookup only;
+they never retry POST or synthesize a receipt. Do not delete the claim or retry
+the mutation to resolve uncertainty. Provisioning
 the external signed approvals and node authority verifier remains an explicit
 deployment prerequisite. Runtime verification is deferred to the requested QEMU
 phase; no tests or builds were performed for this coding slice.

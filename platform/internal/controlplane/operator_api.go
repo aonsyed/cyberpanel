@@ -80,6 +80,8 @@ func (api *OperatorAPI) serveHTTP(writer http.ResponseWriter, request *http.Requ
 		api.rotateNodeCertificate(writer, request, operator, segments[2])
 	case len(segments) == 2 && segments[1] == "intents" && request.Method == http.MethodPost:
 		api.createIntent(writer, request, operator)
+	case len(segments) == 3 && segments[1] == "intents" && segments[2] == "lookup" && request.Method == http.MethodGet:
+		api.lookupHAIntent(writer, request, operator)
 	case len(segments) == 3 && segments[1] == "intents" && request.Method == http.MethodGet:
 		api.inspectIntent(writer, request, operator, segments[2])
 	case len(segments) == 3 && segments[1] == "grants" && request.Method == http.MethodGet:
