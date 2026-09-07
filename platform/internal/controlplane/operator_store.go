@@ -22,21 +22,21 @@ CREATE TABLE IF NOT EXISTS fleet_operator_grants(
  certificate_fingerprint TEXT NOT NULL UNIQUE,
  tenant_id TEXT NOT NULL,
  principal_id TEXT NOT NULL,
- permissions_json TEXT NOT NULL,
+ permissions_json BYTEA NOT NULL,
  assurance TEXT NOT NULL,
- authz_epoch BIGINT NOT NULL,
+ authz_epoch BIGINT NOT NULL CHECK(authz_epoch>0),
  state TEXT NOT NULL,
- issued_at TIMESTAMP NOT NULL,
- expires_at TIMESTAMP NOT NULL,
- revoked_at TIMESTAMP,
- updated_at TIMESTAMP NOT NULL
+ issued_at TIMESTAMPTZ NOT NULL,
+ expires_at TIMESTAMPTZ NOT NULL,
+ revoked_at TIMESTAMPTZ,
+ updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS fleet_operator_grants_active
  ON fleet_operator_grants(certificate_fingerprint,state,expires_at);
 CREATE TABLE IF NOT EXISTS fleet_operator_audit(
- sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+ sequence BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
  event_id TEXT NOT NULL UNIQUE,
- occurred_at TIMESTAMP NOT NULL,
+ occurred_at TIMESTAMPTZ NOT NULL,
  certificate_fingerprint TEXT NOT NULL,
  tenant_id TEXT NOT NULL,
  principal_id TEXT NOT NULL,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS fleet_operator_audit(
  target_id TEXT NOT NULL,
  outcome TEXT NOT NULL,
  detail_digest TEXT NOT NULL,
- previous_digest TEXT NOT NULL,
+ previous_digest TEXT NOT NULL UNIQUE,
  event_digest TEXT NOT NULL UNIQUE
 );
 `
@@ -124,8 +124,7 @@ func (s *Store) BootstrapOperator(ctx context.Context) error {
 	if s == nil || s.db == nil || ctx == nil {
 		return ErrInvalid
 	}
-	_, err := s.db.ExecContext(ctx, operatorSchema)
-	return err
+	return s.bootstrapPostgreSQL(ctx)
 }
 
 func (s *Store) ProvisionOperatorGrants(ctx context.Context, grants []OperatorGrant) error {

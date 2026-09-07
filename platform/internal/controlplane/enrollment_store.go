@@ -22,15 +22,15 @@ CREATE TABLE IF NOT EXISTS fleet_enrollment_tokens(
  peer_id TEXT NOT NULL,
  ca_fingerprint TEXT NOT NULL,
  capability_digest TEXT NOT NULL,
- authority_epoch BIGINT NOT NULL,
- expires_at TIMESTAMP NOT NULL,
- enrollment_json TEXT NOT NULL,
+ authority_epoch BIGINT NOT NULL CHECK(authority_epoch>0),
+ expires_at TIMESTAMPTZ NOT NULL,
+ enrollment_json BYTEA NOT NULL,
  state TEXT NOT NULL,
  request_digest TEXT NOT NULL,
  certificate_fingerprint TEXT NOT NULL,
- provisioned_at TIMESTAMP NOT NULL,
- consumed_at TIMESTAMP,
- completed_at TIMESTAMP
+ provisioned_at TIMESTAMPTZ NOT NULL,
+ consumed_at TIMESTAMPTZ,
+ completed_at TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS fleet_enrollment_node_pending
  ON fleet_enrollment_tokens(node_id) WHERE state='pending';
@@ -39,15 +39,15 @@ CREATE INDEX IF NOT EXISTS fleet_enrollment_token_state
 CREATE TABLE IF NOT EXISTS fleet_enrollment_results(
  token_id TEXT PRIMARY KEY,
  request_digest TEXT NOT NULL UNIQUE,
- hpke_public_key BLOB NOT NULL,
- response_json BLOB NOT NULL,
+ hpke_public_key BYTEA NOT NULL CHECK(octet_length(hpke_public_key)=32),
+ response_json BYTEA NOT NULL,
  certificate_fingerprint TEXT NOT NULL UNIQUE,
- created_at TIMESTAMP NOT NULL
+ created_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS fleet_enrollment_audit(
- sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+ sequence BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
  event_id TEXT NOT NULL UNIQUE,
- occurred_at TIMESTAMP NOT NULL,
+ occurred_at TIMESTAMPTZ NOT NULL,
  token_id TEXT NOT NULL,
  node_id TEXT NOT NULL,
  tenant_id TEXT NOT NULL,
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS fleet_enrollment_audit(
  outcome TEXT NOT NULL,
  request_digest TEXT NOT NULL,
  detail_digest TEXT NOT NULL,
- previous_digest TEXT NOT NULL,
+ previous_digest TEXT NOT NULL UNIQUE,
  event_digest TEXT NOT NULL UNIQUE
 );
 `
@@ -129,8 +129,7 @@ func (s *Store) BootstrapEnrollment(ctx context.Context) error {
 	if s == nil || s.db == nil || ctx == nil {
 		return ErrInvalid
 	}
-	_, err := s.db.ExecContext(ctx, enrollmentSchema)
-	return err
+	return s.bootstrapPostgreSQL(ctx)
 }
 
 func (s *Store) ProvisionEnrollmentTokens(ctx context.Context, tokens []ProvisionedEnrollmentToken, peer federation.ID, caFingerprint string) error {
@@ -386,7 +385,7 @@ func (s *Store) RecordEnrollmentFailure(ctx context.Context, tokenID federation.
 	return tx.Commit()
 }
 
-func (s *Store) appendEnrollmentAuditTx(ctx context.Context, tx *sql.Tx, token ProvisionedEnrollmentToken, outcome, requestDigest, detail string) error {
+func (s *Store) appendEnrollmentAuditTx(ctx context.Context, tx *authorityTx, token ProvisionedEnrollmentToken, outcome, requestDigest, detail string) error {
 	previous := strings.Repeat("0", 64)
 	err := tx.QueryRowContext(ctx, `SELECT event_digest FROM fleet_enrollment_audit ORDER BY sequence DESC LIMIT 1`).Scan(&previous)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {

@@ -12,9 +12,9 @@ import (
 )
 
 const projectionSnapshotSchema = `
-CREATE TABLE IF NOT EXISTS fleet_projection_snapshots_v1(node_id TEXT PRIMARY KEY,request_json BLOB NOT NULL,state TEXT NOT NULL,next_chunk INTEGER NOT NULL,total_chunks INTEGER NOT NULL,watermark BIGINT NOT NULL,manifest_digest TEXT NOT NULL,received_bytes BIGINT NOT NULL);
-CREATE TABLE IF NOT EXISTS fleet_projection_snapshot_chunks_v1(node_id TEXT NOT NULL,chunk_index INTEGER NOT NULL,chunk_json BLOB NOT NULL,PRIMARY KEY(node_id,chunk_index));
-CREATE TABLE IF NOT EXISTS fleet_projection_snapshot_receipts_v1(node_id TEXT PRIMARY KEY,generation BIGINT NOT NULL,watermark BIGINT NOT NULL,manifest_digest TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS fleet_projection_snapshots_v1(node_id TEXT PRIMARY KEY,request_json BYTEA NOT NULL,state TEXT NOT NULL,next_chunk INTEGER NOT NULL CHECK(next_chunk>=0),total_chunks INTEGER NOT NULL CHECK(total_chunks>=0),watermark BIGINT NOT NULL CHECK(watermark>=0),manifest_digest TEXT NOT NULL,received_bytes BIGINT NOT NULL CHECK(received_bytes>=0));
+CREATE TABLE IF NOT EXISTS fleet_projection_snapshot_chunks_v1(node_id TEXT NOT NULL,chunk_index INTEGER NOT NULL CHECK(chunk_index>=0),chunk_json BYTEA NOT NULL,PRIMARY KEY(node_id,chunk_index));
+CREATE TABLE IF NOT EXISTS fleet_projection_snapshot_receipts_v1(node_id TEXT PRIMARY KEY,generation BIGINT NOT NULL CHECK(generation>0),watermark BIGINT NOT NULL CHECK(watermark>=0),manifest_digest TEXT NOT NULL);
 `
 
 func (s *Store) BeginProjectionSnapshot(ctx context.Context, nodeID, peerID federation.ID, epoch, received uint64) (federation.ProjectionSnapshotRequest,error) {

@@ -17,8 +17,8 @@ import (
 const lifecycleSchema = `
 CREATE TABLE IF NOT EXISTS fleet_node_lifecycle(
  node_id TEXT PRIMARY KEY,
- generation BIGINT NOT NULL,
- updated_at TIMESTAMP NOT NULL
+ generation BIGINT NOT NULL CHECK(generation>0),
+ updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS fleet_lifecycle_operations(
  tenant_id TEXT NOT NULL,
@@ -26,31 +26,31 @@ CREATE TABLE IF NOT EXISTS fleet_lifecycle_operations(
  idempotency_key TEXT NOT NULL,
  node_id TEXT NOT NULL,
  request_digest TEXT NOT NULL,
- expected_generation BIGINT NOT NULL,
- result_generation BIGINT NOT NULL,
- authority_epoch BIGINT NOT NULL,
+ expected_generation BIGINT NOT NULL CHECK(expected_generation>0),
+ result_generation BIGINT NOT NULL CHECK(result_generation>0),
+ authority_epoch BIGINT NOT NULL CHECK(authority_epoch>0),
  state TEXT NOT NULL,
- issued_at TIMESTAMP NOT NULL,
- response_json BLOB NOT NULL,
- updated_at TIMESTAMP NOT NULL,
+ issued_at TIMESTAMPTZ NOT NULL,
+ response_json BYTEA NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(tenant_id,operation,idempotency_key)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS fleet_lifecycle_node_generation
  ON fleet_lifecycle_operations(node_id,operation,result_generation) WHERE state IN ('reserved','applied');
 CREATE TABLE IF NOT EXISTS fleet_lifecycle_evidence(
- sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+ sequence BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
  event_id TEXT NOT NULL UNIQUE,
- occurred_at TIMESTAMP NOT NULL,
+ occurred_at TIMESTAMPTZ NOT NULL,
  tenant_id TEXT NOT NULL,
  node_id TEXT NOT NULL,
  operation TEXT NOT NULL,
- generation BIGINT NOT NULL,
- authority_epoch BIGINT NOT NULL,
+ generation BIGINT NOT NULL CHECK(generation>0),
+ authority_epoch BIGINT NOT NULL CHECK(authority_epoch>0),
  request_digest TEXT NOT NULL,
  previous_fingerprint TEXT NOT NULL,
  current_fingerprint TEXT NOT NULL,
  detail_digest TEXT NOT NULL,
- previous_digest TEXT NOT NULL,
+ previous_digest TEXT NOT NULL UNIQUE,
  event_digest TEXT NOT NULL UNIQUE
 );
 `
@@ -401,7 +401,7 @@ func (s *Store) DetachNode(ctx context.Context, request NodeDetachRequest, revoc
 	return detached, tx.Commit()
 }
 
-func (s *Store) appendLifecycleEvidenceTx(ctx context.Context, tx *sql.Tx, tenant, node federation.ID, operation string, generation, authorityEpoch uint64, requestDigest, previousFingerprint, currentFingerprint, detail string) error {
+func (s *Store) appendLifecycleEvidenceTx(ctx context.Context, tx *authorityTx, tenant, node federation.ID, operation string, generation, authorityEpoch uint64, requestDigest, previousFingerprint, currentFingerprint, detail string) error {
 	previous := strings.Repeat("0", 64)
 	err := tx.QueryRowContext(ctx, `SELECT event_digest FROM fleet_lifecycle_evidence ORDER BY sequence DESC LIMIT 1`).Scan(&previous)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {

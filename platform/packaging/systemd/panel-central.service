@@ -18,6 +18,9 @@ LoadCredential=enrollment-ca.key:/etc/cyberpanel/central/enrollment-ca.key
 LoadCredential=intent-signing.key:/etc/cyberpanel/central/intent-signing.key
 LoadCredential=revocation-signing.key:/etc/cyberpanel/central/revocation-signing.key
 LoadCredential=enrollments.json:/etc/cyberpanel/central/enrollments.json
+LoadCredential=postgresql.dsn:/etc/cyberpanel/central/postgresql.dsn
+# Provision the PostgreSQL trust bundle here; use its credential path as sslrootcert in the DSN.
+LoadCredential=postgresql-ca.pem:/etc/cyberpanel/central/postgresql-ca.pem
 StateDirectory=cyberpanel-central
 StateDirectoryMode=0700
 UMask=0077

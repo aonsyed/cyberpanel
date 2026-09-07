@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,13 +32,16 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/controlplane"
 	"github.com/aonsyed/cyberpanel/platform/internal/federation"
-	_ "modernc.org/sqlite"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
 	configPath                  = "/etc/cyberpanel/panel-central.json"
-	databasePath                = "/var/lib/cyberpanel-central/controlplane.db"
+	databasePath                = "/var/lib/cyberpanel-central/controlplane.db" // Legacy detection only; never opened.
 	credentialRoot              = "/run/credentials/panel-central.service"
+	postgresCredentialPath      = credentialRoot + "/postgresql.dsn"
+	postgresCAPath              = credentialRoot + "/postgresql-ca.pem"
 	serverCertificatePath       = credentialRoot + "/server.crt"
 	serverPrivateKeyPath        = credentialRoot + "/server.key"
 	clientCAPath                = credentialRoot + "/client-ca.pem"
@@ -54,7 +58,8 @@ const (
 type configuration struct {
 	Enabled                    bool   `json:"enabled"`
 	Listen                     string `json:"listen"`
-	DatabasePath               string `json:"database_path"`
+	DatabaseCredential         string `json:"database_credential"`
+	DatabasePath               string `json:"database_path,omitempty"` // Rejected legacy configuration.
 	PeerID                     string `json:"peer_id"`
 	IntentSigningKeyID         string `json:"intent_signing_key_id"`
 	RevocationSigningKeyID     string `json:"revocation_signing_key_id"`
@@ -99,7 +104,7 @@ func run(config configuration) error {
 	if os.Geteuid() == 0 {
 		return errors.New("panel-central refuses to run as root")
 	}
-	database, err := openDatabase(config.DatabasePath)
+	database, err := openDatabase(config.DatabaseCredential)
 	if err != nil {
 		return fmt.Errorf("open central database: %w", err)
 	}
@@ -292,7 +297,10 @@ func loadConfiguration(path string) (configuration, error) {
 	if err = decoder.Decode(&config); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return configuration{}, errors.New("invalid central configuration")
 	}
-	if config.DatabasePath != databasePath || config.Listen == "" || config.Listen != strings.TrimSpace(config.Listen) {
+	if config.DatabasePath != "" {
+		return configuration{}, errors.New("SQLite central configuration is unsupported; explicitly export/reconcile legacy authority and provision PostgreSQL credentials")
+	}
+	if config.DatabaseCredential != postgresCredentialPath || config.Listen == "" || config.Listen != strings.TrimSpace(config.Listen) {
 		return configuration{}, errors.New("central configuration contains an unregistered path or listener")
 	}
 	host, port, err := net.SplitHostPort(config.Listen)
@@ -371,55 +379,78 @@ func serveCentralListeners(ctx context.Context, cancel context.CancelFunc, liste
 	return first
 }
 
+// The DSN is delivered only through systemd credentials, never argv or JSON
+// configuration. TLS and connection policy are built explicitly rather than
+// inheriting libpq environment variables or allowing a plaintext fallback.
 func openDatabase(path string) (*sql.DB, error) {
-	if path != databasePath {
-		return nil, errors.New("unregistered central database path")
+	if path != postgresCredentialPath { return nil, errors.New("unregistered PostgreSQL credential") }
+	if _, err := os.Lstat(databasePath); err == nil {
+		return nil, errors.New("legacy SQLite central authority exists; explicit export/reconciliation and operator archival are required before PostgreSQL startup")
+	} else if !errors.Is(err, os.ErrNotExist) { return nil, errors.New("cannot establish absence of legacy SQLite central authority") }
+	content, err := readProtectedFile(path, 16<<10, true)
+	if err != nil { return nil, errors.New("cannot read protected PostgreSQL DSN credential") }
+	defer clear(content)
+	uri, err := url.Parse(strings.TrimSpace(string(content)))
+	if err != nil || uri == nil || uri.Scheme != "postgresql" && uri.Scheme != "postgres" || uri.Opaque != "" || uri.User == nil || uri.Hostname() == "" || uri.Fragment != "" {
+		return nil, errors.New("PostgreSQL credential must be a complete postgres URI with explicit user, password, host and database")
 	}
-	directory := filepath.Dir(path)
-	directoryInfo, err := os.Lstat(directory)
-	if err != nil {
-		return nil, err
+	password, present := uri.User.Password()
+	databaseName := strings.TrimPrefix(uri.Path, "/")
+	if !present || password == "" || uri.User.Username() == "" || databaseName == "" || strings.Contains(databaseName, "/") || strings.ContainsAny(uri.Hostname(), " ,\t\r\n") {
+		return nil, errors.New("incomplete PostgreSQL credential")
 	}
-	directoryStat, ok := directoryInfo.Sys().(*syscall.Stat_t)
-	if !ok || !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 || directoryInfo.Mode().Perm() != 0700 || int(directoryStat.Uid) != os.Geteuid() {
-		return nil, errors.New("unsafe central state directory")
+	query, err := url.ParseQuery(uri.RawQuery)
+	if err != nil || query.Get("sslmode") != "verify-full" {
+		return nil, errors.New("PostgreSQL credential must require sslmode=verify-full")
 	}
-	before, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		file, createErr := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
-		if createErr != nil {
-			return nil, createErr
-		}
-		if closeErr := file.Close(); closeErr != nil {
-			return nil, closeErr
-		}
-		before, err = os.Lstat(path)
+	for key, values := range query {
+		if len(values) != 1 || key != "sslmode" && key != "sslrootcert" { return nil, errors.New("unsupported PostgreSQL credential option") }
 	}
-	if err != nil {
-		return nil, err
+	roots, err := x509.SystemCertPool()
+	if err != nil { roots = x509.NewCertPool() }
+	if rootPath := query.Get("sslrootcert"); rootPath != "" {
+		if rootPath != postgresCAPath { return nil, errors.New("unregistered PostgreSQL CA credential") }
+		ca, readErr := readProtectedFile(rootPath, maximumCertificateBytes, false)
+		if readErr != nil || !roots.AppendCertsFromPEM(ca) { return nil, errors.New("invalid PostgreSQL CA credential") }
 	}
-	stat, ok := before.Sys().(*syscall.Stat_t)
-	if !ok || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Mode().Perm() != 0600 || int(stat.Uid) != os.Geteuid() {
-		return nil, errors.New("unsafe central database")
+	port := uint64(5432)
+	if uri.Port() != "" {
+		port, err = strconv.ParseUint(uri.Port(), 10, 16)
+		if err != nil || port == 0 { return nil, errors.New("invalid PostgreSQL port") }
 	}
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=trusted_schema(0)"
-	database, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, err
+	// A constant seed ensures pgx parse errors cannot contain the secret URI.
+	config, err := pgx.ParseConfig("postgres://unused:unused@127.0.0.1:5432/unused?sslmode=disable&target_session_attrs=read-write")
+	if err != nil { return nil, errors.New("cannot initialize PostgreSQL driver policy") }
+	config.Host, config.Port, config.Database = uri.Hostname(), uint16(port), databaseName
+	config.User, config.Password = uri.User.Username(), password
+	config.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: uri.Hostname(), RootCAs: roots}
+	config.Fallbacks = nil
+	config.ConnectTimeout = 10*time.Second
+	config.RuntimeParams = map[string]string{
+		"application_name": "panel-central",
+		"search_path": "cyberpanel_authority,pg_catalog",
+		"timezone": "UTC",
+		"default_transaction_isolation": "serializable",
+		"synchronous_commit": "on",
+		"statement_timeout": "15000",
+		"lock_timeout": "5000",
+		"idle_in_transaction_session_timeout": "15000",
 	}
-	database.SetMaxOpenConns(4)
+	database := stdlib.OpenDB(*config)
+	database.SetMaxOpenConns(16)
 	database.SetMaxIdleConns(4)
-	database.SetConnMaxLifetime(0)
+	database.SetConnMaxLifetime(30*time.Minute)
+	database.SetConnMaxIdleTime(5*time.Minute)
 	pingContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err = database.PingContext(pingContext); err != nil {
 		_ = database.Close()
-		return nil, err
+		return nil, errors.New("PostgreSQL authority connection failed; check credential, verified TLS, role and database availability")
 	}
-	opened, err := os.Stat(path)
-	if err != nil || !os.SameFile(before, opened) {
+	var readOnly, durability, isolation, schema string
+	if err = database.QueryRowContext(pingContext, `SELECT current_setting('transaction_read_only'),current_setting('synchronous_commit'),current_setting('transaction_isolation'),current_schema()`).Scan(&readOnly, &durability, &isolation, &schema); err != nil || readOnly != "off" || durability != "on" || isolation != "serializable" || schema != "cyberpanel_authority" {
 		_ = database.Close()
-		return nil, errors.New("central database changed while opening")
+		return nil, errors.New("PostgreSQL authority requires a writable durable serializable primary and provisioned cyberpanel_authority schema")
 	}
 	return database, nil
 }
@@ -513,7 +544,7 @@ func loadTLSConfiguration(caPath, expectedFingerprint string, now time.Time) (*t
 }
 
 func readProtectedFile(path string, maximum int64, secret bool) ([]byte, error) {
-	registered := path == configPath || path == serverCertificatePath || path == serverPrivateKeyPath || path == clientCAPath || path == operatorCAPath || path == enrollmentCAKeyPath || path == intentSigningKeyPath || path == revocationSigningKeyPath || path == enrollmentBundlePath
+	registered := path == configPath || path == serverCertificatePath || path == serverPrivateKeyPath || path == clientCAPath || path == operatorCAPath || path == enrollmentCAKeyPath || path == intentSigningKeyPath || path == revocationSigningKeyPath || path == enrollmentBundlePath || path == postgresCredentialPath || path == postgresCAPath
 	if !registered || maximum <= 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errors.New("unregistered protected file")
 	}
