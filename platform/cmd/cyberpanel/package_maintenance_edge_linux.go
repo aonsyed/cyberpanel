@@ -105,7 +105,8 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 	if err = rebootRepository.Bootstrap(ctx); err != nil {
 		return nil, err
 	}
-	rebootRequirements := &packageRebootRequirementPublisher{repository: rebootRepository, nodeID: catalog.NodeID}
+	if _,err = database.ExecContext(ctx,`CREATE TABLE IF NOT EXISTS package_operation_boot_bindings(operation_id TEXT PRIMARY KEY,node_id TEXT NOT NULL,boot_id TEXT NOT NULL,kernel_release TEXT NOT NULL,kernel_digest TEXT NOT NULL,binding_digest TEXT NOT NULL)`); err != nil { return nil,err }
+	rebootRequirements := &packageRebootRequirementPublisher{repository: rebootRepository, database: database, nodeID: catalog.NodeID}
 	maintenanceRepository, err := maintenance.NewRepository(database)
 	if err != nil {
 		return nil, err

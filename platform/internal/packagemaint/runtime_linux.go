@@ -2190,7 +2190,7 @@ func (service Service) ReconcileRestart(ctx context.Context, operationID string)
 	if err != nil {
 		return operation, err
 	}
-	rebootBoot, err := service.rebootBootIdentity(ctx, plan)
+	rebootBoot, err := service.rebootBootIdentity(ctx, plan, operation.ID, false)
 	if err != nil {
 		return operation, err
 	}

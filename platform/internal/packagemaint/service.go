@@ -78,6 +78,7 @@ type RebootRequirementPublication struct {
 // execute a reboot.
 type RebootRequirementPublisher interface {
 	CurrentBootIdentity(context.Context, string) (RebootBootIdentity, error)
+	BootIdentityForOperation(context.Context, string, string, bool) (RebootBootIdentity, error)
 	PublishRebootRequirement(context.Context, RebootRequirement) (RebootRequirementPublication, error)
 }
 
@@ -190,7 +191,7 @@ func (service Service) Apply(ctx context.Context, operationID, actorID string) (
 	if inventory.Generation != operation.InventoryGeneration || inventory.ContentDigest != operation.InventoryDigest {
 		return MaintenanceOperation{}, ErrStaleInventory
 	}
-	rebootBoot, err := service.rebootBootIdentity(ctx, plan)
+	rebootBoot, err := service.rebootBootIdentity(ctx, plan, operation.ID, true)
 	if err != nil {
 		return operation, err
 	}
@@ -288,14 +289,14 @@ func (service Service) Apply(ctx context.Context, operationID, actorID string) (
 	return operation, nil
 }
 
-func (service Service) rebootBootIdentity(ctx context.Context, plan MaintenancePlan) (RebootBootIdentity, error) {
+func (service Service) rebootBootIdentity(ctx context.Context, plan MaintenancePlan, operationID string, allowCreate bool) (RebootBootIdentity, error) {
 	if plan.Reboot != RebootRequired {
 		return RebootBootIdentity{}, nil
 	}
 	if service.RebootRequirements == nil {
 		return RebootBootIdentity{}, ErrUnsupported
 	}
-	identity, err := service.RebootRequirements.CurrentBootIdentity(ctx, plan.NodeID)
+	identity, err := service.RebootRequirements.BootIdentityForOperation(ctx, plan.NodeID, operationID, allowCreate)
 	if err != nil || identity.Validate() != nil {
 		return RebootBootIdentity{}, ErrUnsupported
 	}
