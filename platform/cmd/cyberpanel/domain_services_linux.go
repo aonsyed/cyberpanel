@@ -389,7 +389,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	}
 	migrationScopes,err:=migration.NewRuntimeScopeStore(repositories.ControlDB);if err!=nil{return apiserver.DomainServices{},err}
 	migrationProbe:=&migrationApplicationProbe{catalog:catalog,runtime:webManagementRuntime,installations:repositories.WebEngine,scopes:migrationScopes}
-	migrationFactory:=migrationTargetFactory(hostingCoordinator,repositories.Hosting,fileService,dnsAuthority,repositories.Migrations,migrationProbe,migrationSecretFactory,migrationDatabaseFactory,migrationAuxiliaryServices{git:gitService,cron:cronService,backup:backupRuntime})
+	migrationCertificateFactory:=func(ctx context.Context,db *sql.DB,chunks *migration.ChunkStore,scopes *migration.RuntimeScopeStore)(*migrationCertificateTarget,error){value,createErr:=newMigrationCertificateTarget(ctx,db,chunks,scopes,certificateMaterials,certificateRuntime.Secrets,certificateDeployment,migrationSecrets,nil);if createErr!=nil{return nil,createErr};if createErr=bindMigrationCertificateSiteTLS(value,catalog,activationClient);createErr!=nil{return nil,createErr};return value,nil}
+	migrationFactory:=migrationTargetFactory(hostingCoordinator,repositories.Hosting,fileService,dnsAuthority,repositories.Migrations,migrationProbe,migrationSecretFactory,migrationDatabaseFactory,migrationAuxiliaryServices{git:gitService,cron:cronService,backup:backupRuntime},migrationCertificateFactory)
 	migrationRuntime,err:=localmigration.New(ctx,repositories.ControlDB,repositories.Migrations,migrationFactory);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration runtime: %w",err)}
 	migrationConsoleEdge,err:=newMigrationEdge(migrationRuntime,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize migration console edge: %w",err)}
 	haApprovalAuthority,_:=newHAPromotionApprovalAuthority(&repositories.HA,identityStore,runtimeClock{}.Now)

@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,9 @@ type migrationCertificateBinding interface {
 	Activate(context.Context, migration.ImportIntent, string, string, uint64, []string) (string, error)
 	Observe(context.Context, migration.ImportIntent, string, string, uint64, []string) (string, error)
 }
+
+func (host *migrationHostTarget) observeCertificate(ctx context.Context,intent migration.ImportIntent)(migration.ImportEffect,error){origin,err:=host.auxiliaryOrigin(ctx,intent);if err!=nil||host.certificate==nil{return migration.ImportEffect{},errors.Join(migration.ErrBlocked,err)};return host.certificate.Observe(ctx,origin)}
+func (host *migrationHostTarget) certificateProofs(ctx context.Context,entries []migration.ImportIntent)([]string,error){proofs:=[]string{};for _,intent:=range entries{if intent.Kind!=migration.ImportCertificate{continue};effect,err:=host.observeCertificate(ctx,intent);if err!=nil||effect.Status!=migration.ImportEffectApplied||effect.EvidenceDigest==""{return nil,errors.Join(migration.ErrBlocked,err)};proofs=append(proofs,effect.EvidenceDigest)};return proofs,nil}
 
 type migrationCertificateTarget struct {
 	db *sql.DB
@@ -111,6 +115,7 @@ type migrationCertificateAdmission struct {
 
 func (target *migrationCertificateTarget) admit(ctx context.Context, intent migration.ImportIntent, cleanup bool) (migrationCertificateAdmission, error) {
 	var admission migrationCertificateAdmission
+	if err:=migration.ValidateCanonicalImportIntent(intent);err!=nil{return admission,err}
 	if !intent.MigrationID.Valid() || !intent.TargetID.Valid() || intent.Kind != migration.ImportCertificate || intent.Disposition != migration.DispositionCreate || !intent.Dark || len(intent.InputDigest) != 64 || len(intent.EffectID) < 8 { return admission, migration.ErrBlocked }
 	if len(intent.Payload) > 1<<20 || json.Unmarshal(intent.Payload, &admission.value) != nil || admission.value.SourceID != intent.SourceID || len(intent.SecretIDs) != 1 || intent.SecretIDs[0] != admission.value.PrivateKeySecretID { return admission, migration.ErrInvalid }
 	current, err := target.secrets.repository.Migration(ctx, intent.MigrationID)
@@ -142,9 +147,10 @@ func (target *migrationCertificateTarget) admit(ctx context.Context, intent migr
 		mapped, mappingErr := migrationCertificateMapping(verified, plan, value)
 		if found || !bytes.Equal(expected, actual) || mappingErr != nil || mapped != intent.TargetID { return admission, migration.ErrBlocked }; found = true
 	}
-	if !found || current.SourceGeneration != intent.SourceGeneration { return admission, migration.ErrConflict }
+	if !found || verified.SourceGeneration != intent.SourceGeneration || current.SourceGeneration < intent.SourceGeneration || current.Fence < intent.Fence { return admission, migration.ErrConflict }
 	allChunks := append(append([]migration.Chunk(nil), admission.value.Certificate...), admission.value.Chain...)
-	expected, _ := json.Marshal(allChunks); actual, _ := json.Marshal(intent.Chunks)
+	canonicalChunks:=append([]migration.Chunk(nil),allChunks...);sort.Slice(canonicalChunks,func(i,j int)bool{return canonicalChunks[i].Digest<canonicalChunks[j].Digest})
+	expected, _ := json.Marshal(canonicalChunks); actual, _ := json.Marshal(intent.Chunks)
 	if !bytes.Equal(expected, actual) || len(allChunks) == 0 || len(allChunks) > 64 { return admission, migration.ErrInvalid }
 	for _, chunk := range allChunks {
 		if chunk.Compression != "" && chunk.Compression != "none" || chunk.Size == 0 || chunk.Size > 1<<20 || len(admission.chain)+int(chunk.Size) > 1<<20 || chunk.MediaType != "application/pem-certificate-chain" || chunk.EncryptionDomain != "certificate-public" { return admission, migration.ErrBlocked }
@@ -256,10 +262,13 @@ func (target *migrationCertificateTarget) observe(ctx context.Context, intent mi
 func (target *migrationCertificateTarget) fence(ctx context.Context, intent migration.ImportIntent) error {
 	value, err := target.secrets.repository.Migration(ctx, intent.MigrationID)
 	if err != nil { return err }
-	if (value.Phase != migration.PhaseFinalSync && value.Phase != migration.PhaseCutoverCommitting) || value.SourceGeneration != intent.SourceGeneration || value.Fence != intent.Fence || intent.Fence == 0 { return migration.ErrBlocked }
+	if (value.Phase != migration.PhaseFinalSync && value.Phase != migration.PhaseCutoverCommitting) || value.SourceGeneration < intent.SourceGeneration || value.Fence < intent.Fence || value.Fence == 0 { return migration.ErrBlocked }
 	var fence migration.SourceFence
 	if err := target.secrets.repository.Receipt(ctx, intent.MigrationID, "source_fence", &fence); err != nil { return err }
-	if fence.MigrationID != intent.MigrationID || fence.Generation != intent.SourceGeneration || fence.Fence != intent.Fence || len(fence.Digest) != 64 || !fence.ExpiresAt.After(time.Now().UTC()) { return migration.ErrBlocked }
+	decoded,err:=hex.DecodeString(fence.Digest);if err!=nil||len(decoded)!=sha256.Size||fence.MigrationID != intent.MigrationID || fence.Generation != value.SourceGeneration || fence.Fence != value.Fence || !fence.ExpiresAt.After(time.Now().UTC()) { return migration.ErrBlocked }
+	// The host journal preserves the admitted create intent but rebinds only
+	// byte-identical payload/chunks/secrets to the current fenced final delta.
+	var currentRaw,originRaw []byte;if err=target.db.QueryRowContext(ctx,`SELECT intent_json,domain_intent_json FROM panel_migration_host_effects WHERE migration_id=? AND kind=? AND source_id=? AND target_id=?`,intent.MigrationID.String(),string(intent.Kind),intent.SourceID.String(),intent.TargetID.String()).Scan(&currentRaw,&originRaw);err!=nil{return err};var currentIntent,origin migration.ImportIntent;if json.Unmarshal(currentRaw,&currentIntent)!=nil||json.Unmarshal(originRaw,&origin)!=nil||migration.ValidateCanonicalImportIntent(currentIntent)!=nil||migration.ValidateCanonicalImportIntent(origin)!=nil||origin.InputDigest!=intent.InputDigest||origin.EffectID!=intent.EffectID||currentIntent.SourceGeneration!=value.SourceGeneration||currentIntent.Fence!=value.Fence||migrationHostDigest(currentIntent.Payload)!=migrationHostDigest(origin.Payload)||migrationHostDigest(currentIntent.Chunks)!=migrationHostDigest(origin.Chunks)||migrationHostDigest(currentIntent.SecretIDs)!=migrationHostDigest(origin.SecretIDs){return migration.ErrConflict}
 	return nil
 }
 
