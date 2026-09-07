@@ -37,6 +37,9 @@ const (
 	EffectManagedService EffectKind = "reconcile_managed_service"
 	EffectProductUpdate EffectKind = "execute_product_update"
 	EffectControlledReboot EffectKind = "controlled_reboot"
+	EffectRebootMarkerArm EffectKind = "arm_reboot_marker"
+	EffectRebootMarkerProbe EffectKind = "probe_reboot_marker"
+	EffectRebootMarkerClear EffectKind = "clear_reboot_marker"
 )
 
 const KindProductUpdate ResourceKind = "product_update"
@@ -206,6 +209,7 @@ type EffectRequest struct {
 	ManagedService *ManagedServiceEffect `json:"managed_service,omitempty"`
 	ProductUpdate *ProductUpdateEffect `json:"product_update,omitempty"`
 	ControlledReboot *ControlledRebootEffect `json:"controlled_reboot,omitempty"`
+	RebootMarker *RebootMarkerEffect `json:"reboot_marker,omitempty"`
 }
 
 type EffectOutcome string
@@ -294,6 +298,7 @@ type EffectResult struct {
 	Packages *PackageTransactionResult `json:"packages,omitempty"`
 	ManagedRedisData *ManagedRedisDataResult `json:"managed_redis_data,omitempty"`
 	ProductUpdate *ProductUpdateResult `json:"product_update,omitempty"`
+	RebootMarker *RebootMarkerResult `json:"reboot_marker,omitempty"`
 }
 
 type ManagedRedisDataResult struct {
@@ -402,7 +407,7 @@ func validateEffectShape(request EffectRequest) error {
 		request.PutSSHKey != nil, request.DeleteSSHKey != nil, request.WAFPolicy != nil, request.ServicePolicy != nil,
 		request.ServiceControl != nil, request.ServiceDiagnose != nil, request.ServiceRepair != nil, request.MetricsQuery != nil,
 		request.LogQuery != nil, request.SSHLoginQuery != nil, request.SSHSessionQuery != nil, request.ProcessInvestigate != nil,
-		request.ProcessTerminate != nil, request.PackageTransaction != nil, request.ManagedService != nil, request.ProductUpdate != nil, request.ControlledReboot != nil,
+		request.ProcessTerminate != nil, request.PackageTransaction != nil, request.ManagedService != nil, request.ProductUpdate != nil, request.ControlledReboot != nil, request.RebootMarker != nil,
 	} { if present { count++ } }
 	if count != 1 { return ErrInvalidCommand }
 	switch request.Kind {
@@ -448,9 +453,11 @@ func validateEffectShape(request EffectRequest) error {
 		if request.ManagedService == nil || request.ManagedService.Service.Validate() != nil || validateManagedRedisData(request.ManagedService.Service, request.ManagedService.RedisData) != nil { return ErrInvalidCommand }
 	case EffectProductUpdate:
 		if request.ProductUpdate == nil || request.Scope.Kind != KindProductUpdate || validateProductUpdateEffect(*request.ProductUpdate) != nil { return ErrInvalidCommand }
+	case EffectRebootMarkerArm, EffectRebootMarkerProbe, EffectRebootMarkerClear:
+		if validateRebootMarkerEffect(request) != nil { return ErrInvalidCommand }
 	case EffectControlledReboot:
 		effect:=request.ControlledReboot
-		if effect==nil||request.Scope.Kind!=KindControlledReboot||request.Scope.ID!=effect.PlanID||effect.PlanID.IsZero()||effect.SourceBootID.IsZero()||!validControlledRebootID(effect.ApprovalReference)||!validSHA256(effect.PlanDigest)||!validSHA256(effect.ApprovalDigest)||!validSHA256(effect.MarkerDigest)||!validSHA256(effect.WriterAuthorityDigest)||!validSHA256(effect.OperationDigest)||effect.Fence==0||effect.Fence>1<<63-1||effect.DispatchBy.IsZero(){return ErrInvalidCommand}
+		if effect==nil||request.Scope.NodeID.String()!="local"||request.Scope.TenantID.String()!=""||request.Scope.Kind!=KindControlledReboot||request.Scope.ID!=effect.PlanID||effect.PlanID.IsZero()||effect.SourceBootID.IsZero()||!validControlledRebootID(effect.ApprovalReference)||!validSHA256(effect.PlanDigest)||!validSHA256(effect.ApprovalDigest)||!validSHA256(effect.MarkerDigest)||!validSHA256(effect.WriterAuthorityDigest)||!validSHA256(effect.OperationDigest)||effect.Fence==0||effect.Fence>1<<63-1||effect.DispatchBy.IsZero(){return ErrInvalidCommand}
 	default:
 		return ErrInvalidCommand
 	}
@@ -603,7 +610,7 @@ func validControlledRebootID(value string) bool { if value==""||len(value)>128{r
 
 func effectIsMutation(kind EffectKind) bool {
 	switch kind {
-	case EffectTransferSample, EffectMetricsQuery, EffectLogQuery, EffectSSHLoginQuery, EffectSSHSessionQuery, EffectProcessInvestigate, EffectServiceDiagnose:
+	case EffectRebootMarkerProbe, EffectTransferSample, EffectMetricsQuery, EffectLogQuery, EffectSSHLoginQuery, EffectSSHSessionQuery, EffectProcessInvestigate, EffectServiceDiagnose:
 		return false
 	default:
 		return true
@@ -669,7 +676,7 @@ func activationCandidateDigest(request EffectRequest) (string, bool) {
 }
 
 func emptyEffectResult(result EffectResult) bool {
-	return result.Metrics == nil && result.Logs == nil && result.SSHLogins == nil && result.SSHSessions == nil && result.Process == nil && result.Diagnostics == nil && result.Packages == nil && result.ManagedRedisData == nil && result.ProductUpdate == nil
+	return result.Metrics == nil && result.Logs == nil && result.SSHLogins == nil && result.SSHSessions == nil && result.Process == nil && result.Diagnostics == nil && result.Packages == nil && result.ManagedRedisData == nil && result.ProductUpdate == nil && result.RebootMarker == nil
 }
 
 func compensationReceiptMatches(request CompensationRequest, receipt CompensationReceipt) bool {
@@ -688,8 +695,10 @@ func validateEffectResult(request EffectRequest, result EffectResult) error {
 	if result.Packages != nil { count++ }
 	if result.ManagedRedisData != nil { count++ }
 	if result.ProductUpdate != nil { count++ }
+	if result.RebootMarker != nil { count++ }
 	expected := false
 	switch request.Kind {
+	case EffectRebootMarkerArm, EffectRebootMarkerProbe, EffectRebootMarkerClear: expected = result.RebootMarker != nil && validateRebootMarkerResult(request, *result.RebootMarker) == nil
 	case EffectMetricsQuery: expected = result.Metrics != nil
 	case EffectLogQuery: expected = result.Logs != nil
 	case EffectSSHLoginQuery: expected = result.SSHLogins != nil

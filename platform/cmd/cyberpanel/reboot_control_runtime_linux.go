@@ -3,12 +3,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,8 +23,6 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/packagemaint"
 	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
-
-const rebootMarkerPath="/var/lib/cyberpanel/control/reboot-control.marker"
 
 type rebootControlLocalRuntime struct{db *sql.DB;windows *maintenance.Repository;evaluator *maintenance.Evaluator;packages *packagemaint.SQLRepository;reboots *rebootcontrol.Repository;executor operations.HostExecutor;ha ha.SQLRepository;now func()time.Time}
 
@@ -68,13 +64,61 @@ func(runtime *rebootControlLocalRuntime)CheckpointOrRecordResumable(ctx context.
 func(runtime *rebootControlLocalRuntime)CheckpointSQLite(ctx context.Context,operation rebootcontrol.SQLiteOperation)(rebootcontrol.SQLiteResult,error){if operation.DatabaseID!="control"{return rebootcontrol.SQLiteResult{},rebootcontrol.ErrInvalid};var busy,logged,checkpointed int;if err:=runtime.db.QueryRowContext(ctx,"PRAGMA wal_checkpoint(FULL)").Scan(&busy,&logged,&checkpointed);err!=nil{return rebootcontrol.SQLiteResult{},err};complete:=busy==0;artifact:=rebootRuntimeDigest(operation.OperationDigest,strconv.Itoa(logged),strconv.Itoa(checkpointed));return rebootcontrol.SQLiteResult{OperationID:operation.ID,Fence:operation.Fence,DatabaseID:operation.DatabaseID,Complete:complete,ArtifactDigest:artifact,EvidenceDigest:rebootRuntimeDigest(artifact,strconv.Itoa(busy))},nil}
 func(runtime *rebootControlLocalRuntime)OnlineBackupSQLite(ctx context.Context,operation rebootcontrol.SQLiteOperation)(rebootcontrol.SQLiteResult,error){if operation.DatabaseID!="control"{return rebootcontrol.SQLiteResult{},rebootcontrol.ErrInvalid};directory:="/var/lib/cyberpanel/control/reboot-backups";if err:=ensureRebootDirectory(directory);err!=nil{return rebootcontrol.SQLiteResult{},err};path:=filepath.Join(directory,operation.PlanID+".db");if _,err:=os.Lstat(path);errors.Is(err,os.ErrNotExist){if _,err=runtime.db.ExecContext(ctx,"VACUUM INTO ?",path);err!=nil{return rebootcontrol.SQLiteResult{},err};if err=os.Chmod(path,0600);err!=nil{return rebootcontrol.SQLiteResult{},err}}else if err!=nil{return rebootcontrol.SQLiteResult{},err};artifact,err:=rebootFileDigest(path);if err!=nil{return rebootcontrol.SQLiteResult{},err};return rebootcontrol.SQLiteResult{OperationID:operation.ID,Fence:operation.Fence,DatabaseID:operation.DatabaseID,Complete:true,ArtifactDigest:artifact,EvidenceDigest:rebootRuntimeDigest(operation.OperationDigest,artifact)},nil}
 
-func(runtime *rebootControlLocalRuntime)AtomicArm(ctx context.Context,marker rebootcontrol.RecoveryMarker)(rebootcontrol.MarkerArmResult,error){if marker.Validate()!=nil{return rebootcontrol.MarkerArmResult{},rebootcontrol.ErrInvalid};probe,probeErr:=runtime.Probe(ctx,marker.NodeID);if probeErr!=nil{return rebootcontrol.MarkerArmResult{Partial:true,ExactDigest:probe.ExactDigest,EvidenceDigest:probe.EvidenceDigest},probeErr};if probe.Present{if probe.ExactDigest==marker.Digest{if err:=syncRebootDirectory(filepath.Dir(rebootMarkerPath));err!=nil{return rebootcontrol.MarkerArmResult{Partial:true,ExactDigest:marker.Digest,EvidenceDigest:probe.EvidenceDigest},err};return rebootcontrol.MarkerArmResult{Committed:true,ExactDigest:marker.Digest,EvidenceDigest:probe.EvidenceDigest},nil};return rebootcontrol.MarkerArmResult{Partial:true,ExactDigest:probe.ExactDigest,EvidenceDigest:probe.EvidenceDigest},rebootcontrol.ErrPartialArm};if err:=ensureRebootDirectory(filepath.Dir(rebootMarkerPath));err!=nil{return rebootcontrol.MarkerArmResult{},err};raw,err:=json.Marshal(marker);if err!=nil{return rebootcontrol.MarkerArmResult{},err};temporary:=rebootMarkerPath+".new";file,err:=os.OpenFile(temporary,os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW,0600);if err!=nil{return rebootcontrol.MarkerArmResult{Partial:true},err};if _,err=file.Write(raw);err==nil{err=file.Sync()};closeErr:=file.Close();if err==nil{err=closeErr};if err==nil{err=os.Link(temporary,rebootMarkerPath)};_ = os.Remove(temporary);if err!=nil{return rebootcontrol.MarkerArmResult{Partial:true},err};if err=syncRebootDirectory(filepath.Dir(rebootMarkerPath));err!=nil{return rebootcontrol.MarkerArmResult{Partial:true,ExactDigest:marker.Digest},err};return rebootcontrol.MarkerArmResult{Committed:true,ExactDigest:marker.Digest,EvidenceDigest:rebootRuntimeDigest(marker.Digest,"armed")},nil}
-func(runtime *rebootControlLocalRuntime)Probe(_ context.Context,node string)(rebootcontrol.MarkerProbe,error){marker,present,err:=runtime.loadRecoveryMarker(node);if err!=nil{return rebootcontrol.MarkerProbe{Present:present,Partial:present,EvidenceDigest:rebootRuntimeDigest(node,"invalid")},err};if !present{return rebootcontrol.MarkerProbe{EvidenceDigest:rebootRuntimeDigest(node,"absent")},nil};return rebootcontrol.MarkerProbe{Present:true,ExactDigest:marker.Digest,EvidenceDigest:rebootRuntimeDigest(marker.Digest,"present")},nil}
-func(runtime *rebootControlLocalRuntime)ClearExact(ctx context.Context,node,digest string)(rebootcontrol.MarkerClearResult,error){probe,err:=runtime.Probe(ctx,node);if err!=nil{return rebootcontrol.MarkerClearResult{},err};if !probe.Present||probe.Partial||probe.ExactDigest!=digest{return rebootcontrol.MarkerClearResult{},rebootcontrol.ErrIntegrity};if err=os.Remove(rebootMarkerPath);err!=nil{return rebootcontrol.MarkerClearResult{},err};if err=syncRebootDirectory(filepath.Dir(rebootMarkerPath));err!=nil{return rebootcontrol.MarkerClearResult{},err};if err=runtime.releaseDrain(ctx,node);err!=nil{return rebootcontrol.MarkerClearResult{},err};return rebootcontrol.MarkerClearResult{Cleared:true,ExactDigest:digest,EvidenceDigest:rebootRuntimeDigest(digest,"cleared")},nil}
+func(runtime *rebootControlLocalRuntime)AtomicArm(ctx context.Context,marker rebootcontrol.RecoveryMarker)(rebootcontrol.MarkerArmResult,error){
+	request,err:=operations.NewRebootMarkerArmRequest(marker);if err!=nil{return rebootcontrol.MarkerArmResult{},err}
+	receipt,err:=runtime.executeMarkerEffect(ctx,request);if err!=nil{return rebootcontrol.MarkerArmResult{Partial:true},err}
+	result:=receipt.Result.RebootMarker
+	return rebootcontrol.MarkerArmResult{Committed:result.Committed,ExactDigest:result.ExactDigest,EvidenceDigest:receipt.ProofDigest},nil
+}
+func(runtime *rebootControlLocalRuntime)Probe(ctx context.Context,node string)(rebootcontrol.MarkerProbe,error){
+	request,err:=operations.NewRebootMarkerProbeRequest(node);if err!=nil{return rebootcontrol.MarkerProbe{},err}
+	receipt,err:=runtime.executeMarkerEffect(ctx,request);if err!=nil{return rebootcontrol.MarkerProbe{Partial:true},err}
+	result:=receipt.Result.RebootMarker
+	return rebootcontrol.MarkerProbe{Present:result.Present,ExactDigest:result.ExactDigest,EvidenceDigest:receipt.ProofDigest},nil
+}
+func(runtime *rebootControlLocalRuntime)ClearExact(ctx context.Context,node,digest string)(rebootcontrol.MarkerClearResult,error){
+	request,err:=operations.NewRebootMarkerClearRequest(node,digest);if err!=nil{return rebootcontrol.MarkerClearResult{},err}
+	receipt,err:=runtime.executeMarkerEffect(ctx,request);if err!=nil{return rebootcontrol.MarkerClearResult{},err}
+	if err=runtime.releaseDrain(ctx,node);err!=nil{return rebootcontrol.MarkerClearResult{},err}
+	result:=receipt.Result.RebootMarker
+	return rebootcontrol.MarkerClearResult{Cleared:result.Cleared,ExactDigest:result.ExactDigest,EvidenceDigest:receipt.ProofDigest},nil
+}
 
-func(runtime *rebootControlLocalRuntime)loadRecoveryMarker(node string)(rebootcontrol.RecoveryMarker,bool,error){if runtime==nil||node!="local"{return rebootcontrol.RecoveryMarker{},false,rebootcontrol.ErrInvalid};file,err:=os.OpenFile(rebootMarkerPath,os.O_RDONLY|syscall.O_NOFOLLOW,0);if errors.Is(err,os.ErrNotExist){return rebootcontrol.RecoveryMarker{},false,nil};if err!=nil{return rebootcontrol.RecoveryMarker{},true,fmt.Errorf("%w: open recovery marker: %v",rebootcontrol.ErrPartialArm,err)};defer file.Close();info,err:=file.Stat();if err!=nil{return rebootcontrol.RecoveryMarker{},true,err};stat,owned:=info.Sys().(*syscall.Stat_t);if !owned||int(stat.Uid)!=os.Geteuid()||!info.Mode().IsRegular()||info.Mode().Perm()!=0600||info.Size()>64<<10{return rebootcontrol.RecoveryMarker{},true,rebootcontrol.ErrPartialArm};raw,err:=io.ReadAll(io.LimitReader(file,(64<<10)+1));if err!=nil||len(raw)>64<<10{if err!=nil{return rebootcontrol.RecoveryMarker{},true,err};return rebootcontrol.RecoveryMarker{},true,rebootcontrol.ErrPartialArm};decoder:=json.NewDecoder(bytes.NewReader(raw));decoder.DisallowUnknownFields();var marker rebootcontrol.RecoveryMarker;if decoder.Decode(&marker)!=nil||decoder.Decode(&struct{}{})!=io.EOF||marker.Validate()!=nil||marker.NodeID!=node{return rebootcontrol.RecoveryMarker{},true,rebootcontrol.ErrPartialArm};canonical,err:=json.Marshal(marker);if err!=nil||!bytes.Equal(raw,canonical){return rebootcontrol.RecoveryMarker{},true,rebootcontrol.ErrPartialArm};return marker,true,nil}
+func(runtime *rebootControlLocalRuntime)executeMarkerEffect(ctx context.Context,request operations.EffectRequest)(operations.EffectReceipt,error){
+	if runtime==nil||runtime.executor==nil||ctx==nil{return operations.EffectReceipt{},rebootcontrol.ErrInvalid}
+	receipt,err:=runtime.executor.ObserveOrApply(ctx,request)
+	if err!=nil{return receipt,fmt.Errorf("%w: privileged marker operation: %v",rebootcontrol.ErrPartialArm,err)}
+	if operations.ValidateRebootMarkerReceipt(request,receipt)!=nil{return receipt,rebootcontrol.ErrIntegrity}
+	return receipt,nil
+}
 
-func(runtime *rebootControlLocalRuntime)recoverRebootAtStartup(ctx context.Context,coordinator *rebootcontrol.Coordinator)error{if runtime==nil||ctx==nil||coordinator==nil{return rebootcontrol.ErrInvalid};marker,present,err:=runtime.loadRecoveryMarker("local");if err!=nil||!present{return err};plan,err:=runtime.reboots.LoadPlan(ctx,marker.PlanID);if err!=nil{return err};state,err:=runtime.reboots.LoadState(ctx,marker.PlanID);if err!=nil{return err};if err=marker.ValidateBinding(plan,state);err!=nil{return err};if state.Phase==rebootcontrol.PhaseUncertain{return nil};actual,err:=runtime.CurrentBootIdentity(ctx,marker.NodeID);if err!=nil{return err};if actual.BootID==marker.SourceBootID{return nil};switch state.Phase{case rebootcontrol.PhaseRebootDispatched:state,_,err=coordinator.BeginReconcile(ctx,runtime.startupReconcileCommand(state,marker,"reconcile:begin"));if err!=nil{return err};case rebootcontrol.PhaseReconciling:default:return nil};_,_,err=coordinator.CompleteReconcile(ctx,runtime.startupReconcileCommand(state,marker,"reconcile:complete"));return err}
+func(runtime *rebootControlLocalRuntime)loadRecoveryMarker(ctx context.Context,node string)(rebootcontrol.RecoveryMarker,bool,error){
+	request,err:=operations.NewRebootMarkerProbeRequest(node);if err!=nil{return rebootcontrol.RecoveryMarker{},false,err}
+	receipt,err:=runtime.executeMarkerEffect(ctx,request);if err!=nil{return rebootcontrol.RecoveryMarker{},false,err}
+	result:=receipt.Result.RebootMarker
+	if !result.Present{return rebootcontrol.RecoveryMarker{},false,nil}
+	return *result.Marker,true,nil
+}
+
+func(runtime *rebootControlLocalRuntime)recoverRebootAtStartup(ctx context.Context,coordinator *rebootcontrol.Coordinator)error{
+	if runtime==nil||ctx==nil||coordinator==nil{return rebootcontrol.ErrInvalid}
+	marker,present,err:=runtime.loadRecoveryMarker(ctx,"local");if err!=nil||!present{return err}
+	plan,err:=runtime.reboots.LoadPlan(ctx,marker.PlanID);if err!=nil{return err}
+	state,err:=runtime.reboots.LoadState(ctx,marker.PlanID);if err!=nil{return err}
+	if err=marker.ValidateBinding(plan,state);err!=nil{return err}
+	// Uncertain is a durable operator-recovery state, never an automatic retry.
+	if state.Phase==rebootcontrol.PhaseUncertain{return nil}
+	actual,err:=runtime.CurrentBootIdentity(ctx,marker.NodeID);if err!=nil{return err}
+	if actual.BootID==marker.SourceBootID{return nil}
+	switch state.Phase{
+	case rebootcontrol.PhaseRebootDispatched:
+		state,_,err=coordinator.BeginReconcile(ctx,runtime.startupReconcileCommand(state,marker,"reconcile:begin"));if err!=nil{return err}
+	case rebootcontrol.PhaseReconciling:
+	default:return rebootcontrol.ErrIntegrity
+	}
+	_,_,err=coordinator.CompleteReconcile(ctx,runtime.startupReconcileCommand(state,marker,"reconcile:complete"))
+	return err
+}
 
 func(runtime *rebootControlLocalRuntime)startupReconcileCommand(state rebootcontrol.State,marker rebootcontrol.RecoveryMarker,step string)rebootcontrol.StepCommand{at:=runtime.now().UTC();if at.Before(state.UpdatedAt){at=state.UpdatedAt};seed:=rebootRuntimeDigest("startup_reconcile",marker.Digest,state.ControllerID,strconv.FormatUint(state.Fence,10),strconv.FormatUint(state.Generation,10));return rebootcontrol.StepCommand{PlanID:state.PlanID,ExpectedGeneration:state.Generation,Fence:state.Fence,ControllerID:state.ControllerID,IdempotencyKey:rebootControlStepKey(seed,step),At:at}}
 
@@ -90,7 +134,6 @@ func(runtime *rebootControlLocalRuntime)nextKernel(reason rebootcontrol.PlanReas
 func rebootRuntimeDigest(parts ...string)string{hash:=sha256.New();for _,part:=range parts{_,_=hash.Write([]byte(part));_,_=hash.Write([]byte{0})};return hex.EncodeToString(hash.Sum(nil))}
 func rebootRuntimeID(value string)string{value=strings.TrimSpace(value);var result strings.Builder;for _,character:=range value{if character>='a'&&character<='z'||character>='A'&&character<='Z'||character>='0'&&character<='9'||character=='-'||character=='_'||character=='.'||character==':'{result.WriteRune(character)}else{result.WriteByte('_')}};normalized:=result.String();if normalized==""||normalized[0]<'0'||normalized[0]>'9'&&normalized[0]<'A'||normalized[0]>'Z'&&normalized[0]<'a'||normalized[0]>'z'{normalized="id_"+normalized};if len(normalized)>128{normalized=normalized[:128]};return normalized}
 func ensureRebootDirectory(path string)error{if err:=os.MkdirAll(path,0700);err!=nil{return err};info,err:=os.Lstat(path);if err!=nil{return err};stat,owned:=info.Sys().(*syscall.Stat_t);if !owned||int(stat.Uid)!=os.Geteuid()||!info.IsDir()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()&0077!=0{return rebootcontrol.ErrIntegrity};return nil}
-func syncRebootDirectory(path string)error{directory,err:=os.Open(path);if err!=nil{return err};defer directory.Close();return directory.Sync()}
 func rebootFileDigest(path string)(string,error){info,err:=os.Lstat(path);if err!=nil{return "",err};stat,owned:=info.Sys().(*syscall.Stat_t);if !owned||int(stat.Uid)!=os.Geteuid()||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()&0022!=0{return "",rebootcontrol.ErrIntegrity};file,err:=os.Open(path);if err!=nil{return "",err};defer file.Close();hash:=sha256.New();if _,err=io.Copy(hash,file);err!=nil{return "",err};return hex.EncodeToString(hash.Sum(nil)),nil}
 
 var _ rebootControlLinuxAuthority=(*rebootControlLocalRuntime)(nil)

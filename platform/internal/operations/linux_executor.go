@@ -526,6 +526,7 @@ func cloneStrings(source map[string]string) map[string]string { result := make(m
 func (executor *LinuxOperationsExecutor) ObserveOrApply(ctx context.Context, request EffectRequest) (EffectReceipt, error) {
 	if ctx == nil || validateEffectRequest(request) != nil { return EffectReceipt{}, ErrInvalidEffect }
 	executor.mu.Lock(); defer executor.mu.Unlock()
+	if request.Kind == EffectRebootMarkerArm || request.Kind == EffectRebootMarkerProbe || request.Kind == EffectRebootMarkerClear { return executor.observeRebootMarker(ctx, request) }
 	if record, found, err := executor.loadJournal(request.EffectID); err != nil { return EffectReceipt{}, err } else if found {
 		if record.Request.RequestDigest != request.RequestDigest { return EffectReceipt{}, ErrIdempotency }
 		return record.Receipt, receiptError(record.Receipt)
@@ -607,9 +608,7 @@ func (executor *LinuxOperationsExecutor) apply(ctx context.Context, request Effe
 	case EffectManagedService: return executor.applyManagedService(ctx, *request.ManagedService)
 	case EffectProductUpdate: return executor.applyProductUpdate(ctx, *request.ProductUpdate)
 	case EffectControlledReboot:
-		if !executor.clock.Now().UTC().Before(request.ControlledReboot.DispatchBy){return linuxEffectResult{},ErrInvalidEffect}
-		_,err:=executor.runner.Run(ctx,"/usr/bin/systemctl","reboot","--no-block")
-		return linuxEffectResult{MutationObserved:true,ExecutionEvidenceDigest:request.RequestDigest},err
+		return executor.dispatchMarkedReboot(ctx, request)
 	default: return linuxEffectResult{}, ErrInvalidEffect
 	}
 }
