@@ -74,14 +74,14 @@ into fewer files does not bypass the line limits.
   tenant-scoped inventory, signed-recipe install/update, recovery-guarded
   removal, malware scanning, and LSCache purge to those runtimes. Bootstrap
   administrator material is held in a durable broker-lease record and revoked
-  after use; browser autologin remains unadvertised until origin and CSRF
-  attestations reach the edge call. Database, access/file/credential,
+  after use; the autologin API binding is now present, with its runtime behavior
+  still awaiting QEMU verification. Database, access/file/credential,
   container, and host-operations console adapters are also concrete.
 - Identity tenancy/entitlement projections and mutations are now connected to
   the authenticated actor context and composed at startup. Migration
   list/create/inventory/plan and security finding/scan/remediation/suppression
-  console adapters are concrete; migration sync/cutover remain capability-off
-  until their execution authorities are bound.
+  console adapters are concrete; migration sync/cutover are now advertised by
+  the concrete migration edge. Their end-to-end behavior is not yet qualified.
 - Integration binding list/create/rotate/health/delete now has a concrete,
   tenant-scoped console edge and write-only secret-broker enrollment,
   digest-bound rotation, and revocation plumbing. Cloudflare, AWS S3, Wasabi,
@@ -89,9 +89,13 @@ into fewer files does not bypass the line limits.
   public-network-only transports and executable-digest-bound secret leases.
   The provider executable and hardened systemd unit are part of the closed,
   signed installer bundle; schema-only provider kinds are not advertised.
-- In progress: the remaining capability-off console journeys and certified
-  application recipe packaging/runtimes beyond the currently concrete
-  WordPress runtime.
+- Production runtime code also exists for Joomla, PrestaShop, Magento and
+  Mautic. Signed release recipe/artifact packaging and actual lifecycle
+  qualification remain outstanding; runtime source alone is not certification.
+- In progress: remaining runtime connections, installer provisioning, package
+  maintenance outcomes, optional federation lifecycle, migration conversion,
+  and application release packaging. The n8n model/coordinator exists but its
+  concrete container adapter and product entry points still need implementation.
 - QEMU qualification is deliberately deferred until the production surface is
   coded, per the hard execution rule above.
 
@@ -102,3 +106,18 @@ first-site slice. It is not yet a completed or qualified parity release:
 remaining work is the final concrete-adapter and process composition pass,
 frontend journey completion, and then the deferred QEMU-only
 compile/test/review/hardening program.
+
+## Resumed implementation, 2026-09-07
+
+- The pre-pause integration head was `436e964a`: source extractor packaging,
+  signed product-update feed ingestion and protected malware approval issuance
+  had been integrated. No QEMU release qualification had been performed.
+- Package reboot-requirement publication is now connected to the durable reboot
+  repository (`ae6a8534`); this records evidence, not an instruction to reboot.
+- Eight bounded workers resumed the saved worktrees: central enrollment and
+  lifecycle; HA remote dispatch; legacy backup conversion; package maintenance;
+  privileged reboot markers; malware authority bootstrap; offline update import;
+  and source container export. Workers commit production changes separately for
+  integration. Partial changes remain unqualified until the QEMU phase.
+- Earlier percentage figures were rough planning estimates, not measured parity
+  coverage. Commits and source line counts do not establish a working release.
