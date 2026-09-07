@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/migration"
+	"github.com/aonsyed/cyberpanel/platform/internal/certificates"
 	"github.com/aonsyed/cyberpanel/platform/internal/database"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 )
@@ -76,7 +77,7 @@ func newMigrationSecretTarget(ctx context.Context, db *sql.DB, scopes *migration
 	if err != nil { return nil, err }
 	if _, err := db.ExecContext(ctx, migrationTargetSecretSchema); err != nil { return nil, err }
 	target := &migrationSecretTarget{db: db, scopes: scopes, repository: repository, management: management, material: material}
-	target.audienceResolver = target.databaseAudience
+	target.audienceResolver = target.resourceAudience
 	return target, nil
 }
 
@@ -279,6 +280,10 @@ func migrationPasswordIsHash(value []byte) bool {
 }
 
 func migrationSecretMaterial(source, purpose string, value []byte, authority migrationSecretAuthority) (migrationSecretAuthority, []byte, error) {
+	if purpose == "tls-private-key" {
+		if authority.Purpose != secrets.PurposeTLSKey || authority.Audience.ResourceKind != "migration_certificate_key" || certificates.ValidateMigrationPrivateKey(value) != nil { return authority, nil, migration.ErrBlocked }
+		return authority, append([]byte(nil), value...), nil
+	}
 	if purpose != "database-principal" { return authority, append([]byte(nil), value...), nil }
 	if authority.Purpose != secrets.PurposeDatabase || authority.Audience.AdapterID != database.MariaDBSecretAdapterID || authority.Audience.AdapterVersion != database.MariaDBSecretAdapterVersion || (authority.Audience.ResourceKind != "database_principal" && authority.Audience.ResourceKind != "database_principal_native_hash") { return authority, nil, migration.ErrBlocked }
 	// Only the sealed typed marker attests plugin selection. A raw '*hash'
