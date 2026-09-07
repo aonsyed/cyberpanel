@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type migrationRestoreState struct {
@@ -29,7 +31,7 @@ type migrationRestoreState struct {
 func (executor *LinuxMariaDBExecutor) RestoreMigrationDatabase(ctx context.Context, request MigrationRestoreRequest) (MigrationRestoreReceipt,error) {
 	if executor==nil || os.Geteuid()!=0 || request.validate()!=nil { return MigrationRestoreReceipt{},ErrUnauthorized }
 	executor.mu.Lock(); defer executor.mu.Unlock()
-	if request.Action=="discard" { return executor.discardMigrationRestore(request) }
+	if request.Action=="discard" { return executor.discardMigrationRestore(ctx,request) }
 	var target Database
 	var principal DatabasePrincipal
 	var grants GrantSet
@@ -53,6 +55,7 @@ func (executor *LinuxMariaDBExecutor) RestoreMigrationDatabase(ctx context.Conte
 	} else if err!=nil { return MigrationRestoreReceipt{},err }
 	left,_:=json.Marshal(identity); right,_:=json.Marshal(state.Request)
 	if !bytes.Equal(left,right) { return MigrationRestoreReceipt{},ErrConflict }
+	if err=executor.cleanupMigrationLoader(ctx,target.ID);err!=nil{return MigrationRestoreReceipt{},err}
 	if state.Receipt.State=="ambiguous" || state.Receipt.State=="discarded" { return state.Receipt,nil }
 	if state.Receipt.State=="applied" {
 		proof,probeErr:=executor.probeMigrationRestore(ctx,target,principal)
@@ -96,7 +99,8 @@ func (executor *LinuxMariaDBExecutor) RestoreMigrationDatabase(ctx context.Conte
 	command:=exec.CommandContext(ctx,mariaDBClientBinary,migrationClientArguments(config.Path,target.Name)...)
 	command.Env=transferEnvironment(); command.Stdin=stream; command.Stdout=output; command.Stderr=stderr
 	runErr:=command.Run()
-	if runErr!=nil || stream.Error()!=nil { return state.Receipt,nil }
+	cleanupErr:=config.Release();config.Release=nil
+	if runErr!=nil || stream.Error()!=nil || cleanupErr!=nil { return state.Receipt,nil }
 	proof,err:=executor.probeMigrationRestore(ctx,target,principal)
 	if err!=nil { return state.Receipt,nil }
 	process:=SealTransferProcessReceipt(TransferProcessReceipt{ExitCode:0,BytesProcessed:request.DumpBytes,InputVerified:true,StderrDigest:stderr.Digest(),StderrBytes:stderr.Size(),StderrTruncated:stderr.Truncated(),CompletedAt:executor.now().UTC()})
@@ -109,12 +113,13 @@ func (executor *LinuxMariaDBExecutor) RestoreMigrationDatabase(ctx context.Conte
 	return state.Receipt,nil
 }
 
-func (executor *LinuxMariaDBExecutor) discardMigrationRestore(request MigrationRestoreRequest)(MigrationRestoreReceipt,error) {
+func (executor *LinuxMariaDBExecutor) discardMigrationRestore(ctx context.Context,request MigrationRestoreRequest)(MigrationRestoreReceipt,error) {
 	var state migrationRestoreState
 	if err:=executor.readResource("migration-restores",request.DatabaseID,&state); err!=nil { return MigrationRestoreReceipt{},err }
 	identity:=request; identity.Action="begin"; identity.Offset=0; identity.Data=nil
 	left,_:=json.Marshal(identity); right,_:=json.Marshal(state.Request)
 	if !bytes.Equal(left,right) { return MigrationRestoreReceipt{},ErrUnauthorized }
+	if err:=executor.cleanupMigrationLoader(ctx,request.DatabaseID);err!=nil{return MigrationRestoreReceipt{},err}
 	// Persist the terminal fence before unlinking. A lost response can only
 	// repeat this exact cleanup, never return the target to the apply path.
 	state.Receipt.State="discarded"; state.Receipt.Process=nil; state.Receipt.ProofDigest=""; state.Receipt.ObservedAt=executor.now().UTC()
@@ -147,11 +152,25 @@ func migrationClientArguments(path string,name SQLIdentifier) []string {
 
 func (executor *LinuxMariaDBExecutor) migrationTransferConfig(ctx context.Context,target Database,principal DatabasePrincipal)(TransferClientConfigDescriptor,error) {
 	if err:=ensureRootDirectory(strings.TrimSuffix(transferConfigDirectory,"/"),0700); err!=nil { return TransferClientConfigDescriptor{},err }
-	password,err:=executor.secrets.PrincipalPassword(ctx,principal.CredentialSecretRef,principal.ID,target.TenantID.String(),target.SiteID.String())
+	var password []byte
+	var err error
+	cleanupLoader:=func()error{return nil}
+	if principal.CredentialFormat==CredentialFormatNativeHash {
+		// A verifier is not a client password. Read and verify the preserved
+		// target hash through the fixed privileged observer, then use a distinct
+		// random, local-only account granted access to this database alone.
+		hash,readErr:=executor.principalCredential(ctx,principal);if readErr!=nil{return TransferClientConfigDescriptor{},readErr}
+		instance,instanceErr:=executor.instance(target.InstanceID);if instanceErr!=nil{wipeBytes(hash);return TransferClientConfigDescriptor{},instanceErr}
+		connection,closeConnection,connectionErr:=executor.connection(ctx,instance);if connectionErr!=nil{wipeBytes(hash);return TransferClientConfigDescriptor{},connectionErr}
+		_,verifyErr:=observeNativePrincipal(ctx,connection,principal,hash);wipeBytes(hash);closeConnection();if verifyErr!=nil{return TransferClientConfigDescriptor{},verifyErr}
+		principal,password,err=executor.createMigrationLoader(ctx,target)
+		if err==nil{cleanupLoader=func()error{cleanupCtx,cancel:=context.WithTimeout(context.WithoutCancel(ctx),20*time.Second);defer cancel();return executor.cleanupMigrationLoader(cleanupCtx,target.ID)}}
+	} else { password,err=executor.secrets.PrincipalPassword(ctx,principal.CredentialSecretRef,principal.ID,target.TenantID.String(),target.SiteID.String()) }
 	if err!=nil { return TransferClientConfigDescriptor{},err }; defer wipeBytes(password)
-	value,err:=optionFileValue(password); if err!=nil { return TransferClientConfigDescriptor{},err }
-	file,err:=os.CreateTemp(transferConfigDirectory,"migration-*.cnf"); if err!=nil { return TransferClientConfigDescriptor{},err }
-	path:=file.Name(); release:=func()error{return os.Remove(path)}
+	value,err:=optionFileValue(password); if err!=nil { _=cleanupLoader();return TransferClientConfigDescriptor{},err }
+	file,err:=os.CreateTemp(transferConfigDirectory,"migration-*.cnf"); if err!=nil { _=cleanupLoader();return TransferClientConfigDescriptor{},err }
+	path:=file.Name(); released:=false
+	release:=func()error{if released{return nil};removeErr:=os.Remove(path);if errors.Is(removeErr,os.ErrNotExist){removeErr=nil};loaderErr:=cleanupLoader();if removeErr==nil&&loaderErr==nil{released=true};return errors.Join(removeErr,loaderErr)}
 	payload:=[]byte("[client]\nuser="+principal.Name.String()+"\npassword=\""+value+"\"\nlocal-infile=0\n")
 	_,err=file.Write(payload); wipeBytes(payload); if err==nil { err=file.Sync() }; closeErr:=file.Close(); if err==nil { err=closeErr }
 	if err!=nil { _=release(); return TransferClientConfigDescriptor{},err }
@@ -167,7 +186,57 @@ func (executor *LinuxMariaDBExecutor) probeMigrationRestore(ctx context.Context,
 	command.Stdout=newTransferBoundedWriter(&output,4<<20,nil); command.Stderr=newTransferLimitedBuffer(MaximumTransferStderrBytes)
 	if err=command.Run(); err!=nil { return nil,err }
 	if !strings.HasPrefix(output.String(),"1\n") { return nil,ErrInvalidReceipt }
+	if err=config.Release();err!=nil{return nil,err};config.Release=nil
 	return output.Bytes(),nil
+}
+
+type migrationLoaderRecord struct {
+	Target Database `json:"target"`
+	Principal DatabasePrincipal `json:"principal"`
+	State string `json:"state"`
+}
+
+// The loader has no reusable plaintext secret: its password exists only in
+// memory and a root-only runtime client file. The journal records ownership,
+// not credentials, and makes failed cleanup visible on the next request.
+func(executor *LinuxMariaDBExecutor)createMigrationLoader(ctx context.Context,target Database)(DatabasePrincipal,[]byte,error){
+	if err:=executor.cleanupMigrationLoader(ctx,target.ID);err!=nil{return DatabasePrincipal{},nil,err}
+	seed:=make([]byte,32);if _,err:=io.ReadFull(rand.Reader,seed);err!=nil{return DatabasePrincipal{},nil,err};defer wipeBytes(seed)
+	token:=hex.EncodeToString(seed[:12]);password:=[]byte(hex.EncodeToString(seed))
+	id,_:=NewResourceID("migloader-"+token);name,_:=ParseSQLIdentifier("cpmig_"+token);ref,_:=NewSecretRef("ephemeral-"+token)
+	meta:=target.Metadata;meta.ID=id
+	principal:=DatabasePrincipal{Metadata:meta,InstanceID:target.InstanceID,Name:name,HostScope:HostScopeLoopback,CredentialSecretRef:ref}
+	instance,err:=executor.instance(target.InstanceID);if err!=nil{wipeBytes(password);return DatabasePrincipal{},nil,err}
+	connection,closeConnection,err:=executor.connection(ctx,instance);if err!=nil{wipeBytes(password);return DatabasePrincipal{},nil,err};defer closeConnection()
+	observed,err:=connection.query(ctx,sqlObservePrincipal,principal);if err!=nil||len(strings.TrimSpace(string(observed)))!=0{wipeBytes(password);return DatabasePrincipal{},nil,ErrConflict}
+	recordID,_:=NewResourceID("loader-"+target.ID.String())
+	record:=migrationLoaderRecord{Target:target,Principal:principal,State:"creating"}
+	if err=executor.writeResource("migration-restores",recordID,record);err!=nil{wipeBytes(password);return DatabasePrincipal{},nil,err}
+	if _,err=connection.query(ctx,sqlCreatePrincipal,principalMutation{Principal:principal,Password:password});err!=nil{wipeBytes(password);return DatabasePrincipal{},nil,ErrAmbiguous}
+	record.State="created"
+	if err=executor.writeResource("migration-restores",recordID,record);err!=nil{wipeBytes(password);return DatabasePrincipal{},nil,err}
+	grantID,_:=NewResourceID("migloader-grants-"+token);meta.ID=grantID
+	grant:=GrantSet{Metadata:meta,InstanceID:target.InstanceID,DatabaseID:target.ID,PrincipalID:principal.ID,Grants:[]Grant{{Scope:GrantScopeDatabase,Privileges:[]Privilege{PrivilegeSelect,PrivilegeInsert,PrivilegeUpdate,PrivilegeDelete,PrivilegeCreate,PrivilegeAlter,PrivilegeIndex,PrivilegeDrop,PrivilegeCreateTemporary}}}}
+	if _,err=connection.query(ctx,sqlReplaceGrants,grantMutation{Database:target,Principal:principal,GrantSet:grant});err!=nil{wipeBytes(password);return DatabasePrincipal{},nil,ErrAmbiguous}
+	return principal,password,nil
+}
+
+func(executor *LinuxMariaDBExecutor)cleanupMigrationLoader(ctx context.Context,targetID ResourceID)error{
+	recordID,err:=NewResourceID("loader-"+targetID.String());if err!=nil{return err}
+	var record migrationLoaderRecord
+	if err=executor.readResource("migration-restores",recordID,&record);errors.Is(err,ErrNotFound){return nil}else if err!=nil{return err}
+	p:=record.Principal
+	if record.Target.ID!=targetID||record.Target.Validate()!=nil||p.Validate()!=nil||p.InstanceID!=record.Target.InstanceID||p.TenantID!=record.Target.TenantID||p.SiteID!=record.Target.SiteID||p.HostScope!=HostScopeLoopback||p.CredentialFormat!=""||!strings.HasPrefix(p.ID.String(),"migloader-")||p.Name.String()!="cpmig_"+strings.TrimPrefix(p.ID.String(),"migloader-"){return ErrUnauthorized}
+	instance,err:=executor.instance(record.Target.InstanceID);if err!=nil{return err}
+	connection,closeConnection,err:=executor.connection(ctx,instance);if err!=nil{return err};defer closeConnection()
+	observed,err:=connection.query(ctx,sqlObservePrincipal,p);if err!=nil{return err}
+	if len(strings.TrimSpace(string(observed)))==0{return executor.removeResource("migration-restores",recordID)}
+	// A crash before creation acknowledgement does not establish ownership.
+	// Keep the import ambiguous rather than deleting an unproven account.
+	if record.State!="created"{return ErrAmbiguous}
+	if _,err=connection.query(ctx,sqlDropPrincipal,p);err!=nil{return err}
+	observed,err=connection.query(ctx,sqlObservePrincipal,p);if err!=nil{return err};if len(strings.TrimSpace(string(observed)))!=0{return ErrAmbiguous}
+	return executor.removeResource("migration-restores",recordID)
 }
 
 var _ MigrationRestoreExecutor=(*LinuxMariaDBExecutor)(nil)

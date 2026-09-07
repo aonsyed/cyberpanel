@@ -29,7 +29,14 @@ type externalAdministratorMaterial struct{Username string `json:"username"`;Pass
 type serverTLSMaterial struct{CertificateAuthorityPEM []byte `json:"certificate_authority_pem"`;CertificatePEM []byte `json:"certificate_pem"`;KeyPEM []byte `json:"key_pem"`}
 
 func(source *LinuxSecretBrokerSource)PrincipalPassword(ctx context.Context,ref SecretRef,principalID ResourceID,tenantID,siteID string)([]byte,error){
-	if source==nil||ref.IsZero()||principalID.IsZero()||tenantID==""||siteID==""{return nil,ErrInvalidResource};owner:=DatabaseTenantOwnerID(tenantID);response,err:=source.read(ctx,DatabaseSecretRecordID(ref.String()),owner,DatabaseAudienceID(principalID.String()),secrets.OperationAuthenticate);if err!=nil{return nil,err};if len(response.Material)>maximumSecretBytes{wipeBytes(response.Material);return nil,ErrInvalidResource};return response.Material,nil
+	if source==nil||ref.IsZero()||principalID.IsZero()||tenantID==""||siteID==""{return nil,ErrInvalidResource};owner:=DatabaseTenantOwnerID(tenantID);response,err:=source.read(ctx,DatabaseSecretRecordID(ref.String()),owner,DatabaseAudienceID(principalID.String()),secrets.OperationAuthenticate);if err!=nil{return nil,err};if len(response.Material)>maximumSecretBytes||bytes.HasPrefix(response.Material,[]byte(nativeHashCredentialPrefix)){wipeBytes(response.Material);return nil,ErrInvalidResource};return response.Material,nil
+}
+
+func(source *LinuxSecretBrokerSource)PrincipalNativePasswordHash(ctx context.Context,ref SecretRef,principalID ResourceID,tenantID,siteID string)([]byte,error){
+	if source==nil||ref.IsZero()||principalID.IsZero()||tenantID==""||siteID==""{return nil,ErrInvalidResource}
+	response,err:=source.read(ctx,DatabaseSecretRecordID(ref.String()),DatabaseTenantOwnerID(tenantID),DatabaseAudienceID(principalID.String()),secrets.OperationAuthenticate)
+	if err!=nil{return nil,err};defer wipeBytes(response.Material)
+	return DecodeNativePasswordHashCredential(response.Material)
 }
 
 func(source *LinuxSecretBrokerSource)ExternalAdministrator(ctx context.Context,ref SecretRef,audience ResourceID,instanceID ResourceID)(MariaDBAdministrator,error){

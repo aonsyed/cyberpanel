@@ -48,6 +48,7 @@ const (
 	sqlObserveHA
 	sqlFreezeHA
 	sqlPromoteHA
+	sqlObserveNativePrincipal
 )
 
 type principalMutation struct {
@@ -233,12 +234,17 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 			return "", ErrInvalidResource
 		}
 		return principalObservation(principal), nil
+	case sqlObserveNativePrincipal:
+		mutation,ok:=oneValue[principalMutation](values)
+		if !ok||mutation.Principal.Validate()!=nil||mutation.Principal.CredentialFormat!=CredentialFormatNativeHash||!validNativePasswordHash(mutation.Password){return "",ErrInvalidResource}
+		return "SELECT User,Host,plugin FROM mysql.user WHERE User='"+mutation.Principal.Name.String()+"' AND Host='"+principalHost(mutation.Principal)+"' AND plugin='mysql_native_password' AND authentication_string='"+string(mutation.Password)+"';\n",nil
 	case sqlCreatePrincipal:
 		mutation, ok := oneValue[principalMutation](values)
 		if !ok || mutation.Principal.Validate() != nil || len(mutation.Password) == 0 {
 			return "", ErrInvalidResource
 		}
-		return "CREATE USER " + quotedAccount(mutation.Principal) + " IDENTIFIED VIA mysql_native_password USING '" + nativePasswordHash(mutation.Password) + "'" + principalRequirements(mutation.Principal, mutation.TLS) + ";\n" + principalObservation(mutation.Principal), nil
+		hash,err:=principalAuthenticationHash(mutation);if err!=nil{return "",err}
+		return "CREATE USER " + quotedAccount(mutation.Principal) + " IDENTIFIED VIA mysql_native_password USING '" + hash + "'" + principalRequirements(mutation.Principal, mutation.TLS) + ";\n" + principalObservation(mutation.Principal), nil
 	case sqlDropPrincipal:
 		principal, ok := oneValue[DatabasePrincipal](values)
 		if !ok || principal.Validate() != nil {
@@ -250,7 +256,8 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 		if !ok || mutation.Principal.Validate() != nil || len(mutation.Password) == 0 {
 			return "", ErrInvalidResource
 		}
-		return "ALTER USER " + quotedAccount(mutation.Principal) + " IDENTIFIED VIA mysql_native_password USING '" + nativePasswordHash(mutation.Password) + "'" + principalRequirements(mutation.Principal, mutation.TLS) + ";\n" + principalObservation(mutation.Principal), nil
+		hash,err:=principalAuthenticationHash(mutation);if err!=nil{return "",err}
+		return "ALTER USER " + quotedAccount(mutation.Principal) + " IDENTIFIED VIA mysql_native_password USING '" + hash + "'" + principalRequirements(mutation.Principal, mutation.TLS) + ";\n" + principalObservation(mutation.Principal), nil
 	case sqlReplaceGrants:
 		mutation, ok := oneValue[grantMutation](values)
 		if !ok || mutation.Database.Validate() != nil || mutation.Principal.Validate() != nil || mutation.GrantSet.Validate() != nil {
@@ -357,6 +364,17 @@ func nativePasswordHash(password []byte) string {
 	first := sha1.Sum(password)
 	second := sha1.Sum(first[:])
 	return "*" + strings.ToUpper(hex.EncodeToString(second[:]))
+}
+
+func principalAuthenticationHash(mutation principalMutation)(string,error){
+	switch mutation.Principal.CredentialFormat {
+	case "":
+		if bytes.HasPrefix(mutation.Password,[]byte(nativeHashCredentialPrefix)){return "",ErrInvalidResource}
+		return nativePasswordHash(mutation.Password),nil
+	case CredentialFormatNativeHash:
+		if !validNativePasswordHash(mutation.Password){return "",ErrInvalidResource};return string(mutation.Password),nil
+	default:return "",ErrInvalidResource
+	}
 }
 
 func grantStatements(mutation grantMutation) (string, error) {

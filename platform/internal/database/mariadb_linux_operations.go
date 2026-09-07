@@ -117,7 +117,7 @@ func (executor *LinuxMariaDBExecutor) applyCreatePrincipal(ctx context.Context, 
 	if err != nil {
 		return effectApplication{failureCode: "precondition_failed"}, err
 	}
-	password, err := executor.secrets.PrincipalPassword(ctx, principal.CredentialSecretRef, principal.ID, principal.TenantID.String(), principal.SiteID.String())
+	password, err := executor.principalCredential(ctx,principal)
 	if err != nil {
 		return effectApplication{failureCode: "credential_unavailable"}, err
 	}
@@ -137,6 +137,7 @@ func (executor *LinuxMariaDBExecutor) applyCreatePrincipal(ctx context.Context, 
 	if len(strings.TrimSpace(string(observed))) != 0 {
 		var stored DatabasePrincipal
 		if stateErr := executor.readResource("principals", principal.ID, &stored); stateErr == nil && samePrincipalIdentity(stored, principal) {
+			if principal.CredentialFormat==CredentialFormatNativeHash { proof,verifyErr:=observeNativePrincipal(ctx,connection,principal,password);if verifyErr!=nil{return effectApplication{failureCode:"credential_observation_failed",ambiguous:true},verifyErr};observed=proof }
 			return effectApplication{proof: observed, mutated: true}, nil
 		}
 		return effectApplication{failureCode: "principal_conflict"}, ErrConflict
@@ -157,6 +158,7 @@ func (executor *LinuxMariaDBExecutor) applyCreatePrincipal(ctx context.Context, 
 		}
 		proof = observed
 	}
+	if principal.CredentialFormat==CredentialFormatNativeHash { verified,verifyErr:=observeNativePrincipal(ctx,connection,principal,password);if verifyErr!=nil{return effectApplication{mutated:true,compensation:compensation,failureCode:"credential_observation_failed",ambiguous:true},verifyErr};proof=verified }
 	if err := executor.writeResource("principals", principal.ID, principal); err != nil {
 		return effectApplication{mutated: true, compensation: compensation, failureCode: "state_persistence_failed"}, err
 	}
@@ -218,7 +220,8 @@ func (executor *LinuxMariaDBExecutor) applyRotatePassword(ctx context.Context, r
 	if err != nil {
 		return effectApplication{failureCode: "precondition_failed"}, err
 	}
-	password, err := executor.secrets.PrincipalPassword(ctx, effect.NewSecretRef, principal.ID, principal.TenantID.String(), principal.SiteID.String())
+	if principal.CredentialSecretRef!=effect.NewSecretRef { return effectApplication{failureCode:"credential_unavailable"},ErrInvalidResource }
+	password, err := executor.principalCredential(ctx,principal)
 	if err != nil {
 		return effectApplication{failureCode: "credential_unavailable"}, err
 	}
@@ -236,6 +239,7 @@ func (executor *LinuxMariaDBExecutor) applyRotatePassword(ctx context.Context, r
 	if err != nil {
 		return effectApplication{mutated: true, compensation: compensation, failureCode: "principal_apply_failed"}, err
 	}
+	if principal.CredentialFormat==CredentialFormatNativeHash { verified,verifyErr:=observeNativePrincipal(ctx,connection,principal,password);if verifyErr!=nil{return effectApplication{mutated:true,compensation:compensation,failureCode:"credential_observation_failed",ambiguous:true},verifyErr};proof=verified }
 	if err := executor.writeResource("principals", principal.ID, principal); err != nil {
 		return effectApplication{mutated: true, compensation: compensation, failureCode: "state_persistence_failed"}, err
 	}
@@ -434,7 +438,7 @@ func (executor *LinuxMariaDBExecutor) applyCompensation(ctx context.Context, com
 		principal := *compensation.Principal
 		instance, err := executor.instance(compensation.InstanceID)
 		if err != nil { return nil, err }
-		password, err := executor.secrets.PrincipalPassword(ctx, principal.CredentialSecretRef, principal.ID, principal.TenantID.String(), principal.SiteID.String())
+		password, err := executor.principalCredential(ctx,principal)
 		if err != nil { return nil, err }
 		defer wipeBytes(password)
 		mode, err := executor.principalTLS(instance, principal)
@@ -443,6 +447,7 @@ func (executor *LinuxMariaDBExecutor) applyCompensation(ctx context.Context, com
 		if err != nil { return nil, err }
 		defer cleanup()
 		proof, err := connection.query(ctx, sqlRotatePrincipal, principalMutation{Principal: principal, Password: password, TLS: mode})
+		if err==nil && principal.CredentialFormat==CredentialFormatNativeHash { proof,err=observeNativePrincipal(ctx,connection,principal,password) }
 		if err == nil { err = executor.writeResource("principals", principal.ID, principal) }
 		return proof, err
 	case EffectReplaceGrants:
@@ -487,7 +492,21 @@ func sameDatabaseIdentity(left, right Database) bool {
 }
 
 func samePrincipalIdentity(left, right DatabasePrincipal) bool {
-	return left.ID == right.ID && left.InstanceID == right.InstanceID && left.Name == right.Name && left.HostScope == right.HostScope && left.NetworkPolicyID == right.NetworkPolicyID && left.TenantID == right.TenantID && left.SiteID == right.SiteID
+	return left.ID == right.ID && left.InstanceID == right.InstanceID && left.Name == right.Name && left.HostScope == right.HostScope && left.NetworkPolicyID == right.NetworkPolicyID && left.TenantID == right.TenantID && left.SiteID == right.SiteID && left.CredentialFormat == right.CredentialFormat
+}
+
+func(executor *LinuxMariaDBExecutor)principalCredential(ctx context.Context,principal DatabasePrincipal)([]byte,error){
+	if principal.CredentialFormat==""{return executor.secrets.PrincipalPassword(ctx,principal.CredentialSecretRef,principal.ID,principal.TenantID.String(),principal.SiteID.String())}
+	if principal.CredentialFormat!=CredentialFormatNativeHash{return nil,ErrInvalidResource}
+	source,ok:=executor.secrets.(interface{PrincipalNativePasswordHash(context.Context,SecretRef,ResourceID,string,string)([]byte,error)})
+	if !ok{return nil,ErrUnauthorized}
+	value,err:=source.PrincipalNativePasswordHash(ctx,principal.CredentialSecretRef,principal.ID,principal.TenantID.String(),principal.SiteID.String())
+	if err!=nil{return nil,err};if !validNativePasswordHash(value){wipeBytes(value);return nil,ErrInvalidResource};return value,nil
+}
+
+func observeNativePrincipal(ctx context.Context,connection *mariaDBConnection,principal DatabasePrincipal,hash []byte)([]byte,error){
+	proof,err:=connection.query(ctx,sqlObserveNativePrincipal,principalMutation{Principal:principal,Password:hash})
+	if err!=nil{return nil,err};if len(strings.TrimSpace(string(proof)))==0{return nil,ErrInvalidEffect};return proof,nil
 }
 
 func sameInstanceIdentity(left, right DatabaseInstance) bool {

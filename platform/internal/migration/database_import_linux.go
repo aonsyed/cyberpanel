@@ -18,6 +18,11 @@ import (
 
 type DatabaseImportCommands interface { Handle(context.Context,database.Command)(database.OperationReceipt,error) }
 
+type DatabaseImportCredential struct {
+	SecretRef database.SecretRef
+	Format database.PrincipalCredentialFormat
+}
+
 type DatabaseImportHandler struct {
 	db *sql.DB
 	chunks *ChunkStore
@@ -25,12 +30,12 @@ type DatabaseImportHandler struct {
 	commands DatabaseImportCommands
 	repository database.Repository
 	broker database.MigrationRestoreExecutor
-	secret func(context.Context,ID,string)(database.SecretRef,error)
+	secret func(context.Context,ID,string)(DatabaseImportCredential,error)
 	siteTarget func(context.Context,ID,ID)(site.SiteID,error)
 	mu sync.Mutex
 }
 
-func NewDatabaseImportHandler(ctx context.Context,db *sql.DB,chunks *ChunkStore,scopes *RuntimeScopeStore,commands DatabaseImportCommands,repository database.Repository,broker database.MigrationRestoreExecutor,secret func(context.Context,ID,string)(database.SecretRef,error),siteTarget func(context.Context,ID,ID)(site.SiteID,error))(*DatabaseImportHandler,error) {
+func NewDatabaseImportHandler(ctx context.Context,db *sql.DB,chunks *ChunkStore,scopes *RuntimeScopeStore,commands DatabaseImportCommands,repository database.Repository,broker database.MigrationRestoreExecutor,secret func(context.Context,ID,string)(DatabaseImportCredential,error),siteTarget func(context.Context,ID,ID)(site.SiteID,error))(*DatabaseImportHandler,error) {
 	if db==nil || chunks==nil || scopes==nil || commands==nil || repository==nil || broker==nil || secret==nil || siteTarget==nil { return nil,ErrInvalid }
 	_,err:=db.ExecContext(ctx,`CREATE TABLE IF NOT EXISTS panel_migration_database_imports(migration_id TEXT NOT NULL,target_id TEXT NOT NULL,effect_id TEXT NOT NULL,input_digest TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(migration_id,target_id),UNIQUE(effect_id))`)
 	if err!=nil { return nil,err }
@@ -64,7 +69,7 @@ func (handler *DatabaseImportHandler) plan(ctx context.Context,intent ImportInte
 	scope,err:=handler.scopes.LoadByMigration(ctx,intent.MigrationID); if err!=nil { return databaseImportPlan{},err }
 	tenant,err:=site.NewTenantID(scope.TenantID); if err!=nil { return databaseImportPlan{},err }
 	siteID,err:=handler.siteTarget(ctx,intent.MigrationID,payload.SiteID); if err!=nil { return databaseImportPlan{},err }
-	ref,err:=handler.secret(ctx,intent.MigrationID,credential.SecretID); if err!=nil || ref.IsZero() { return databaseImportPlan{},ErrBlocked }
+	material,err:=handler.secret(ctx,intent.MigrationID,credential.SecretID); if err!=nil || material.SecretRef.IsZero() || material.Format!="" && material.Format!=database.CredentialFormatNativeHash { return databaseImportPlan{},ErrBlocked }
 	sum:=sha256.Sum256([]byte(intent.MigrationID.String()+"\x00"+intent.TargetID.String())); token:=hex.EncodeToString(sum[:])[:32]
 	databaseID,_:=database.NewResourceID("migdb-"+token)
 	principalID,_:=database.NewResourceID(DatabaseImportPrincipalID(intent.MigrationID,intent.TargetID,credential.Name))
@@ -79,7 +84,7 @@ func (handler *DatabaseImportHandler) plan(ctx context.Context,intent ImportInte
 	meta:=database.Metadata{ID:databaseID,TenantID:tenant,SiteID:siteID,Generation:1,Status:status}
 	target:=database.Database{Metadata:meta,InstanceID:instance.ID,Name:name,Charset:charset,Collation:collation,QuotaBytes:64<<30}
 	meta.ID=principalID
-	principal:=database.DatabasePrincipal{Metadata:meta,InstanceID:instance.ID,Name:principalName,HostScope:database.HostScopeLoopback,CredentialSecretRef:ref}
+	principal:=database.DatabasePrincipal{Metadata:meta,InstanceID:instance.ID,Name:principalName,HostScope:database.HostScopeLoopback,CredentialSecretRef:material.SecretRef,CredentialFormat:material.Format}
 	meta.ID=grantID
 	grants:=database.GrantSet{Metadata:meta,InstanceID:instance.ID,DatabaseID:databaseID,PrincipalID:principalID,Grants:[]database.Grant{{Scope:database.GrantScopeDatabase,Privileges:[]database.Privilege{database.PrivilegeSelect,database.PrivilegeInsert,database.PrivilegeUpdate,database.PrivilegeDelete,database.PrivilegeCreate,database.PrivilegeAlter,database.PrivilegeIndex,database.PrivilegeDrop,database.PrivilegeCreateTemporary,database.PrivilegeExecute,database.PrivilegeCreateView,database.PrivilegeShowView,database.PrivilegeTrigger,database.PrivilegeEvent}}}}
 	header:=database.CommandHeader{Actor:database.Actor{TenantID:tenant,Capability:database.CapabilityTenantManage},TenantID:tenant}

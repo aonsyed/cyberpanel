@@ -258,6 +258,7 @@ type DatabasePrincipal struct {
 	HostScope          HostScope     `json:"host_scope"`
 	NetworkPolicyID    ResourceID    `json:"network_policy_id,omitempty"`
 	CredentialSecretRef SecretRef    `json:"credential_secret_ref"`
+	CredentialFormat PrincipalCredentialFormat `json:"credential_format,omitempty"`
 	Disabled           bool         `json:"disabled"`
 }
 
@@ -265,6 +266,7 @@ func (resource DatabasePrincipal) Kind() ResourceKind { return KindPrincipal }
 func (resource DatabasePrincipal) Meta() Metadata     { return resource.Metadata }
 func (resource DatabasePrincipal) Validate() error {
 	if err := validateMetadata(resource.Metadata, true); err != nil { return err }
+	if resource.CredentialFormat!="" && resource.CredentialFormat!=CredentialFormatNativeHash { return ErrInvalidResource }
 	if resource.InstanceID.IsZero() || resource.Name.IsZero() || resource.CredentialSecretRef.IsZero() { return ErrInvalidResource }
 	switch resource.HostScope {
 	case HostScopeLoopback:
