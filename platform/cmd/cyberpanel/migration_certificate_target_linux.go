@@ -277,6 +277,7 @@ func (target *migrationCertificateTarget) Activate(ctx context.Context, intent m
 	previous, candidate, err := target.deployment.Target.StageCertificate(ctx, consumer, material, intent.EffectID)
 	if err != nil { return migration.ImportEffect{}, err }
 	if state == "staged" && previous != "" { return migration.ImportEffect{}, migration.ErrConflict }
+	if state == "activating" && previous != "" && previous != candidate { return migration.ImportEffect{}, migration.ErrConflict }
 	if _, err := target.db.ExecContext(ctx, `UPDATE panel_migration_certificate_targets SET state='activating' WHERE migration_id=? AND target_id=? AND state='staged'`, intent.MigrationID.String(), intent.TargetID.String()); err != nil { return migration.ImportEffect{}, err }
 	if err := target.fence(ctx, intent); err != nil { return migration.ImportEffect{}, err }
 	activation, err := target.deployment.Target.ActivateCertificate(ctx, consumer, candidate, intent.EffectID)

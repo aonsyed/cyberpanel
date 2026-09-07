@@ -327,6 +327,9 @@ func (catalog *SQLCatalog) Prepare(ctx context.Context, request service.SiteEffe
 		return controller.PreparedPlan{}, err
 	}
 
+	if err := preserveOwnedSiteTLS(ctx, tx, &input); err != nil {
+		return controller.PreparedPlan{}, err
+	}
 	configuration, snapshotGeneration, err := loadConfiguration(ctx, tx)
 	if err != nil {
 		return controller.PreparedPlan{}, err
