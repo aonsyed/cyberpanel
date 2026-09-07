@@ -396,6 +396,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	haApprovalAuthority,_:=newHAPromotionApprovalAuthority(&repositories.HA,identityStore,runtimeClock{}.Now)
 	haRemoteSender,err:=newHAFederatedSender(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize federated HA sender: %w",err)}
 	localHAProviders,err:=newLocalMariaDBHAProviders(ctx,&repositories.HA,databaseExecutor,databaseExecutor,catalog,activationClient,configuration.Engine.Listeners,haApprovalAuthority,haRemoteSender,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize local MariaDB HA providers: %w",err)}
+	if err=startHAPeerVoting(ctx,repositories.ControlDB,localHAProviders,runtimeClock{}.Now);err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize protected HA peer voting: %w",err)}
 	fleetHAConsoleEdge,err:=newFleetHAEdge(&repositories.HA,localHAProviders,haApprovalAuthority,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize fleet and HA console edge: %w",err)}
 	federationConsoleEdge,err:=newFederationEdge(ctx,repositories.ControlDB,runtimeClock{}.Now);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize federation console edge: %w",err)}
 	maintenanceRepository,err:=maintenance.NewRepository(repositories.ControlDB);if err!=nil{return apiserver.DomainServices{},fmt.Errorf("open maintenance-window repository: %w",err)}

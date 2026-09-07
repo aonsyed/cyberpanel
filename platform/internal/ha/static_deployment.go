@@ -49,6 +49,7 @@ type StaticDeployment struct {
 	Cluster DatabaseCluster `json:"cluster"`
 	Grants []federation.MutationGrant `json:"grants"`
 	ReplicationBindings []StaticReplicationBinding `json:"replication_bindings,omitempty"`
+	PeerControl *PeerControl `json:"peer_control,omitempty"`
 	Signature []byte `json:"signature"`
 }
 
@@ -102,7 +103,8 @@ func VerifyStaticDeployment(bundle StaticDeployment, now time.Time) error {
 	raw, err := StaticDeploymentSignaturePayload(bundle)
 	if err != nil || len(raw) > 1<<20 || !ed25519.Verify(ed25519.PublicKey(key), raw, bundle.Signature) { return ErrForbidden }
 	t := bundle.Trust
-	if bundle.Version != 1 || !bundle.ID.Valid() || bundle.DeploymentEpoch == 0 || bundle.AuthorityEpoch == 0 || !federation.ID(bundle.SigningKeyID).Valid() || bundle.IssuedAt.IsZero() || bundle.IssuedAt.After(now) || !now.Before(bundle.ExpiresAt) || !bundle.ExpiresAt.After(bundle.IssuedAt) || bundle.ExpiresAt.Sub(bundle.IssuedAt) > 365*24*time.Hour || t.TenantID != "system" || !t.NodeID.Valid() || !t.PeerID.Valid() || t.GroupID != bundle.Group.ID { return ErrForbidden }
+	standalone := bundle.PeerControl != nil && t.PeerID == ""
+	if bundle.Version != 1 || !bundle.ID.Valid() || bundle.DeploymentEpoch == 0 || bundle.AuthorityEpoch == 0 || !federation.ID(bundle.SigningKeyID).Valid() || bundle.IssuedAt.IsZero() || bundle.IssuedAt.After(now) || !now.Before(bundle.ExpiresAt) || !bundle.ExpiresAt.After(bundle.IssuedAt) || bundle.ExpiresAt.Sub(bundle.IssuedAt) > 365*24*time.Hour || t.TenantID != "system" || !t.NodeID.Valid() || !standalone && !t.PeerID.Valid() || t.GroupID != bundle.Group.ID { return ErrForbidden }
 	if bundle.Group.Validate() != nil || bundle.Group.Generation != 1 || bundle.Group.AutomaticFailover || bundle.Group.State != "forming" || len(bundle.Nodes) < 2 || len(bundle.Nodes) > 128 || bundle.Cluster.Validate() != nil || bundle.Cluster.ID != ID(LocalMariaDBResourceID) || bundle.Cluster.GroupID != bundle.Group.ID || bundle.Cluster.Topology != DatabasePrimaryReplica || bundle.Cluster.Generation != 1 || bundle.Cluster.State != "unobserved" || bundle.Cluster.WriterNodeID != "" || bundle.Cluster.WriterLeaseID != "" || bundle.Cluster.PrimaryComponentDigest != "" { return ErrForbidden }
 	nodes := map[NodeID]bool{}
 	for _, node := range bundle.Nodes {
@@ -119,7 +121,13 @@ func VerifyStaticDeployment(bundle StaticDeployment, now time.Time) error {
 		members[identity] = true
 	}
 	if !members[NodeID(t.NodeID)] || len(members) != len(nodes) || int(bundle.Cluster.DesiredVotingMembers) != len(members) { return ErrForbidden }
-	if len(t.GrantKeys) == 0 || len(t.GrantKeys) > 16 || len(t.ApprovalKeys) == 0 || len(t.ApprovalKeys) > 16 || len(t.GrantIDs) == 0 || len(t.GrantIDs) > 128 || len(bundle.Grants) != len(t.GrantIDs) { return ErrForbidden }
+	if !standalone && (len(t.GrantKeys) == 0 || len(t.ApprovalKeys) == 0 || len(t.GrantIDs) == 0) || len(t.GrantKeys) > 16 || len(t.ApprovalKeys) > 16 || len(t.GrantIDs) > 128 || len(bundle.Grants) != len(t.GrantIDs) || standalone && len(bundle.Grants) != 0 { return ErrForbidden }
+	if bundle.PeerControl != nil {
+		if bundle.PeerControl.Validate(bundle.Group,bundle.Nodes) != nil || bundle.PeerControl.TopologyDigest != PeerStaticTopologyDigest(bundle) { return ErrNoQuorum }
+		local := false
+		for _, voter := range bundle.PeerControl.Voters { if voter.NodeID == NodeID(t.NodeID) { local = true } }
+		if !local { return ErrNoQuorum }
+	}
 	for _, keys := range []map[string][]byte{t.GrantKeys, t.ApprovalKeys} { for id, key := range keys { if !federation.ID(id).Valid() || len(key) != ed25519.PublicKeySize { return ErrForbidden } } }
 	ids := map[federation.ID]bool{}
 	for _, id := range t.GrantIDs { if !id.Valid() || ids[id] { return ErrForbidden }; ids[id] = true }
@@ -221,15 +229,30 @@ func (service *StaticDeploymentService) Admit(ctx context.Context, bundle Static
 	if err != nil { return receipt, err }
 	topologyDigest := federatedHADigest(topology)
 	if _, err = service.DB.ExecContext(ctx, staticDeploymentSchema); err != nil { return receipt, err }
+	if _, err = service.DB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS ha_peer_topology_admissions_v1(group_id TEXT PRIMARY KEY,topology_epoch INTEGER NOT NULL,membership_digest TEXT NOT NULL)`); err != nil { return receipt, err }
 	tx, err := service.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil { return receipt, err }
 	defer tx.Rollback()
 	var node, peer federation.ID
 	var epoch uint64
-	if err = tx.QueryRowContext(ctx, `SELECT node_id,authority_epoch,active_peer_id FROM federation_state WHERE singleton_id=1`).Scan(&node, &epoch, &peer); err != nil { return receipt, err }
-	if node != bundle.Trust.NodeID || peer != bundle.Trust.PeerID || epoch != bundle.AuthorityEpoch { return receipt, ErrForbidden }
-	var peerState string
-	if err = tx.QueryRowContext(ctx, `SELECT state FROM federation_peers WHERE id=?`, peer).Scan(&peerState); err != nil || peerState != "active" { return receipt, ErrForbidden }
+	if bundle.PeerControl != nil && bundle.Trust.PeerID == "" {
+		node,epoch = bundle.Trust.NodeID,bundle.AuthorityEpoch
+	} else {
+		if err = tx.QueryRowContext(ctx, `SELECT node_id,authority_epoch,active_peer_id FROM federation_state WHERE singleton_id=1`).Scan(&node, &epoch, &peer); err != nil { return receipt, err }
+		if node != bundle.Trust.NodeID || peer != bundle.Trust.PeerID || epoch != bundle.AuthorityEpoch { return receipt, ErrForbidden }
+		var peerState string
+		if err = tx.QueryRowContext(ctx, `SELECT state FROM federation_peers WHERE id=?`, peer).Scan(&peerState); err != nil || peerState != "active" { return receipt, ErrForbidden }
+	}
+	if bundle.PeerControl != nil {
+		membership := PeerMembershipDigest(bundle.Group.ID,*bundle.PeerControl)
+		var existing string
+		err = tx.QueryRowContext(ctx,`SELECT membership_digest FROM ha_peer_topology_admissions_v1 WHERE group_id=?`,bundle.Group.ID).Scan(&existing)
+		if err == nil && existing != membership { return receipt,ErrConflict }
+		if err != nil && !errors.Is(err,sql.ErrNoRows) { return receipt,err }
+		if errors.Is(err,sql.ErrNoRows) { if _,err=tx.ExecContext(ctx,`INSERT INTO ha_peer_topology_admissions_v1(group_id,topology_epoch,membership_digest) VALUES(?,?,?)`,bundle.Group.ID,bundle.PeerControl.TopologyEpoch,membership);err!=nil{return receipt,err} }
+		// Membership changes require a future joint-quorum reconfiguration,
+		// never an unilateral replacement by a new static deployment epoch.
+	}
 	var previousID, previousDigest, previousTopology string
 	var previousEpoch uint64
 	err = tx.QueryRowContext(ctx, `SELECT bundle_id,deployment_epoch,bundle_digest,topology_digest FROM ha_static_deployments_v1 WHERE node_id=?`, node).Scan(&previousID, &previousEpoch, &previousDigest, &previousTopology)
@@ -290,9 +313,26 @@ func AdmittedStaticDeploymentTrust(ctx context.Context, db *sql.DB, bundle Stati
 	digest, err := StaticDeploymentDigest(bundle)
 	if err != nil { return FederatedIngressTrust{}, err }
 	var stored string
+	if bundle.PeerControl != nil && bundle.Trust.PeerID == "" {
+		err=db.QueryRowContext(ctx,`SELECT bundle_digest FROM ha_static_deployments_v1 WHERE node_id=? AND bundle_id=? AND deployment_epoch=? AND authority_epoch=?`,bundle.Trust.NodeID,bundle.ID,bundle.DeploymentEpoch,bundle.AuthorityEpoch).Scan(&stored)
+		if err!=nil||stored!=digest{return FederatedIngressTrust{},ErrForbidden};return bundle.Trust,nil
+	}
 	err = db.QueryRowContext(ctx, `SELECT d.bundle_digest FROM ha_static_deployments_v1 d JOIN federation_state s ON s.node_id=d.node_id JOIN federation_peers p ON p.id=s.active_peer_id AND p.state='active' WHERE d.node_id=? AND d.bundle_id=? AND d.deployment_epoch=? AND d.authority_epoch=? AND s.authority_epoch=d.authority_epoch AND s.active_peer_id=?`, bundle.Trust.NodeID, bundle.ID, bundle.DeploymentEpoch, bundle.AuthorityEpoch, bundle.Trust.PeerID).Scan(&stored)
 	if err != nil || stored != digest { return FederatedIngressTrust{}, ErrForbidden }
 	return bundle.Trust, nil
+}
+
+// Peer HA authority survives loss of the optional central connection. Its
+// committed deployment and voter membership are local root-admitted authority.
+func LoadAdmittedPeerDeployment(ctx context.Context,db *sql.DB)(StaticDeployment,error){
+	file,err:=readSignedStaticDeployment();if err!=nil{return StaticDeployment{},err}
+	bundle:=file.Deployment
+	if ctx==nil||db==nil||bundle.PeerControl==nil{return StaticDeployment{},ErrUnsupported}
+	digest,err:=StaticDeploymentDigest(bundle);if err!=nil{return StaticDeployment{},err}
+	var stored,membership string
+	err=db.QueryRowContext(ctx,`SELECT d.bundle_digest,t.membership_digest FROM ha_static_deployments_v1 d JOIN ha_peer_topology_admissions_v1 t ON t.group_id=? WHERE d.node_id=? AND d.bundle_id=? AND d.deployment_epoch=? AND t.topology_epoch=?`,bundle.Group.ID,bundle.Trust.NodeID,bundle.ID,bundle.DeploymentEpoch,bundle.PeerControl.TopologyEpoch).Scan(&stored,&membership)
+	if err!=nil||stored!=digest||membership!=PeerMembershipDigest(bundle.Group.ID,*bundle.PeerControl){return StaticDeployment{},ErrForbidden}
+	return bundle,nil
 }
 
 func (service *StaticDeploymentService) Status(ctx context.Context) (StaticDeploymentReceipt, error) {

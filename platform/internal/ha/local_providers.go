@@ -41,6 +41,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ha_local_lease_authority_one_active
 type LocalSQLLeaseAuthority struct {
 	db  *sql.DB
 	now func() time.Time
+	Transfers LeaseTransferVerifier
 }
 
 func NewLocalSQLLeaseAuthority(ctx context.Context, repository *SQLRepository, now func() time.Time) (*LocalSQLLeaseAuthority, error) {
@@ -52,6 +53,7 @@ func NewLocalSQLLeaseAuthority(ctx context.Context, repository *SQLRepository, n
 }
 
 func (authority *LocalSQLLeaseAuthority) AcquireWriterLease(ctx context.Context, proposed WriterLease, quorum QuorumObservation) (WriterLease, error) {
+	if authority == nil || authority.Transfers == nil || authority.Transfers.VerifyLeaseTransfer(ctx,proposed,quorum) != nil { return WriterLease{},ErrNoQuorum }
 	now := authority.current()
 	if authority == nil || authority.db == nil || ctx == nil || proposed.State != LeasePending || proposed.Generation != 1 || proposed.ResourceID != LocalMariaDBResourceID || proposed.GroupID != quorum.GroupID || proposed.AuthorityEpoch != quorum.Epoch || proposed.QuorumDigest != quorum.Digest || quorum.Validate(now) != nil || proposed.Validate(now) != nil || !now.Before(proposed.ExpiresAt) {
 		return WriterLease{}, ErrNoQuorum
@@ -80,6 +82,7 @@ func (authority *LocalSQLLeaseAuthority) AcquireWriterLease(ctx context.Context,
 }
 
 func (authority *LocalSQLLeaseAuthority) RenewWriterLease(ctx context.Context, lease WriterLease, quorum QuorumObservation) (WriterLease, error) {
+	if authority == nil || authority.Transfers == nil || authority.Transfers.VerifyLeaseTransfer(ctx,lease,quorum) != nil { return WriterLease{},ErrNoQuorum }
 	now := authority.current()
 	if authority == nil || authority.db == nil || ctx == nil || lease.State != LeaseActive || lease.ResourceID != LocalMariaDBResourceID || lease.GroupID != quorum.GroupID || lease.AuthorityEpoch != quorum.Epoch || lease.QuorumDigest != quorum.Digest || quorum.Validate(now) != nil || lease.Validate(now) != nil {
 		return WriterLease{}, ErrLeaseLost

@@ -17,17 +17,23 @@ import (
 
 func haDeployment(arguments []string) error {
 	if os.Geteuid() != 0 { return errors.New("HA deployment requires local root") }
-	if len(arguments) == 0 { return errors.New("HA deployment requires trust, provision, or status") }
-	if arguments[0] != "trust" && arguments[0] != "provision" && arguments[0] != "status" { return errors.New("HA deployment permits only trust, provision, and status") }
+	if len(arguments) == 0 { return errors.New("HA deployment requires trust, provision, status, or quorum") }
+	if arguments[0] != "trust" && arguments[0] != "provision" && arguments[0] != "status" && arguments[0] != "quorum" { return errors.New("HA deployment permits only trust, provision, status, and quorum") }
 	flags := flag.NewFlagSet("ha "+arguments[0],flag.ContinueOnError)
 	keyPath := flags.String("public-key","","root-owned raw Ed25519 deployment public-key file")
 	bundlePath := flags.String("bundle","","root-owned signed static deployment JSON file")
+	promotionID := flags.String("promotion","","locally persisted promotion ID for signed prepare voting; does not activate a writer")
 	if err := flags.Parse(arguments[1:]); err != nil { return err }
 	if flags.NArg() != 0 { return errors.New("unexpected HA deployment arguments") }
 	client, err := apiserver.NewRecoveryClient("/run/cyberpanel-core/recovery.sock")
 	if err != nil { return err }
 	ctx, cancel := context.WithTimeout(context.Background(),30*time.Second)
 	defer cancel()
+	if arguments[0] == "quorum" {
+		if *keyPath!=""||*bundlePath!=""||*promotionID==""{return errors.New("quorum requires only --promotion")}
+		proof,err:=client.CollectHAPeerVotes(ctx,ha.PromotionID(*promotionID));if err!=nil{return err};return printJSON(proof)
+	}
+	if *promotionID!=""{return errors.New("--promotion is valid only for quorum")}
 	if arguments[0] == "status" {
 		if *keyPath != "" || *bundlePath != "" { return errors.New("status accepts no file flags") }
 		status, err := client.StaticHAStatus(ctx)

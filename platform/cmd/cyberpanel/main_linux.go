@@ -117,7 +117,7 @@ func runCore(configuration coreConfiguration) error {
 	if err != nil { return err }
 	claimStore, err := apiserver.NewFileClaimTokenStore(configuration.ClaimTokenPath)
 	if err != nil { return err }
-	recovery := &apiserver.RecoveryServer{Controller:&apiserver.RecoveryController{Identity:identityService,Claims:claimStore,Core:coreTransport,TrustPaths:apiserver.TrustPaths{SignerPath:configuration.SignerPath,TrustPath:configuration.TrustPath},StaticHA:&ha.StaticDeploymentService{DB:database}},MaximumBodyBytes:1<<20}
+	recovery := &apiserver.RecoveryServer{Controller:&apiserver.RecoveryController{Identity:identityService,Claims:claimStore,Core:coreTransport,TrustPaths:apiserver.TrustPaths{SignerPath:configuration.SignerPath,TrustPath:configuration.TrustPath},StaticHA:&ha.StaticDeploymentService{DB:database},PeerVotes:localPeerVoteRuntime},MaximumBodyBytes:1<<20}
 	process := &apiserver.CoreProcess{Core:core,Recovery:recovery,Config:apiserver.CoreProcessConfig{
 		CoreSocket:apiserver.SocketOptions{Path:configuration.CoreSocket,DirectoryMode:0750,SocketMode:0660,UID:-1,GID:controlGID},
 		RecoverySocket:apiserver.SocketOptions{Path:configuration.RecoverySocket,DirectoryMode:0750,SocketMode:0600,UID:-1,GID:-1},

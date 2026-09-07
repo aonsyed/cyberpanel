@@ -31,9 +31,9 @@ func (request PromotionExecutionRequest) Validate(now time.Time) error {
 	if !validID(string(request.Approval.CommandID)) || !validID(request.Approval.ActorID) || !validID(request.Approval.CredentialID) || request.Approval.SessionID != "" && !validID(request.Approval.SessionID) || request.Approval.AuthzEpoch == 0 || !validDigest(request.Approval.PlanDigest) || !request.Approval.PhishingResistant || request.Approval.ApprovedAt.IsZero() || request.Approval.ApprovedAt.After(now.Add(time.Minute)) || now.Sub(request.Approval.ApprovedAt) > 5*time.Minute {
 		return ErrDataLossApproval
 	}
-	if err := request.Quorum.Validate(now); err != nil {
-		return err
-	}
+	// Quorum is resolved from durable node-owned authority after validation;
+	// callers may no longer supply health/voter assertions as execution authority.
+	if request.Quorum.GroupID != "" || request.Quorum.Digest != "" || request.Quorum.Achieved || len(request.Quorum.Voters) != 0 || len(request.Quorum.HealthyVoters) != 0 || request.Quorum.Epoch != 0 || request.Quorum.Required != 0 || !request.Quorum.ObservedAt.IsZero() || !request.Quorum.ValidUntil.IsZero() { return ErrNoQuorum }
 	for class, binding := range request.FenceProviderBindings {
 		if !validFenceClass(class) || !validID(binding) {
 			return ErrInvalid
@@ -53,6 +53,7 @@ type FailoverCoordinator struct {
 	Executor       PromotionExecutor
 	Database       DatabaseReplicationExecutor
 	Backup         BackupConsistency
+	QuorumAuthority PromotionQuorumAuthority
 	Now            func() time.Time
 }
 
@@ -119,6 +120,9 @@ func (coordinator FailoverCoordinator) Execute(ctx context.Context, request Prom
 	if request.ExpectedLeaseGeneration != promotion.ExpectedGeneration || authority.Generation != request.ExpectedLeaseGeneration || promotion.LeaseID != authority.ID {
 		return Promotion{}, FailoverRun{}, ErrStaleGeneration
 	}
+	if coordinator.QuorumAuthority == nil { return Promotion{},FailoverRun{},ErrNoQuorum }
+	request.Quorum,err=coordinator.QuorumAuthority.PromotionQuorum(ctx,promotion)
+	if err!=nil||request.Quorum.Validate(now)!=nil{return Promotion{},FailoverRun{},ErrNoQuorum}
 	checkpoint, err := coordinator.Store.LoadCheckpoint(ctx, promotion.CheckpointID)
 	if err != nil {
 		return Promotion{}, FailoverRun{}, err

@@ -60,6 +60,7 @@ type localMariaDBHAProviders struct {
 	traffic        ha.TrafficProvider
 	fences         map[ha.FenceClass]ha.FenceProvider
 	manualFence    ha.ManualFenceConfirmer
+	quorum         ha.PromotionQuorumAuthority
 }
 
 func newLocalMariaDBHAProviders(ctx context.Context, repository *ha.SQLRepository, database ha.DatabaseReplicationExecutor, signer ha.WritePermitSigner, catalog *webcatalog.SQLCatalog, activator *webactivation.Client, listeners []composer.ListenerInput, approvalVerifier ha.AdministrativeApprovalVerifier, sender ha.FederatedHAIntentSender, now func() time.Time) (*localMariaDBHAProviders, error) {
@@ -107,7 +108,7 @@ func (providers *localMariaDBHAProviders) coordinator(store ha.Store, group ha.N
 		provider := providers.fences[class]
 		if provider == nil || provider.Class() != class { return ha.FailoverCoordinator{}, fmt.Errorf("%w: %s fence provider", ha.ErrUnsupported, class) }
 	}
-	return ha.FailoverCoordinator{Store:store,Leases:providers.leases,Gate:providers.gate,FenceProviders:providers.fences,ManualFence:providers.manualFence,Traffic:providers.traffic,Executor:providers.promotion,Now:now},nil
+	return ha.FailoverCoordinator{Store:store,Leases:providers.leases,Gate:providers.gate,FenceProviders:providers.fences,ManualFence:providers.manualFence,Traffic:providers.traffic,Executor:providers.promotion,QuorumAuthority:providers.quorum,Now:now},nil
 }
 
 type localOLSListenerTrafficProvider struct {
@@ -577,10 +578,7 @@ func (edge *fleetHAEdge) ExecutePromotion(ctx context.Context, call apiserver.Ed
 	if promotion.PreviousWriter != selectedWriter.ID || promotion.GroupID != selectedWriter.GroupID {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrConflict
 	}
-	var quorum ha.QuorumObservation
-	if err = json.Unmarshal([]byte(payload.QuorumEvidence), &quorum); err != nil {
-		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, ha.ErrInvalid
-	}
+	if strings.TrimSpace(payload.QuorumEvidence) != "" { return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{},ha.ErrNoQuorum }
 	bindings, err := parsePromotionFenceBindings(payload.FenceProviderBindings)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.HAPromotionProjection]{}, err
@@ -593,7 +591,7 @@ func (edge *fleetHAEdge) ExecutePromotion(ctx context.Context, call apiserver.Ed
 			SessionID:call.SessionID, AuthzEpoch:call.AuthzEpoch, PlanDigest:payload.PlanDigest,
 			PhishingResistant:call.Assurance >= identity.AssurancePhishingResistant, ApprovedAt:edge.now().UTC(),
 		},
-		Quorum:quorum, FenceProviderBindings:bindings,
+		FenceProviderBindings:bindings,
 	}
 	coordinator:=edge.failover
 	if edge.providers!=nil{
