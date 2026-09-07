@@ -360,7 +360,7 @@ func (executor *LinuxMariaDBExecutor) initializeRoots() error {
 			return err
 		}
 	}
-	for _, name := range []string{"instances", "databases", "principals", "grants", "policies", "sessions", "tuning", "upgrades", "effects", "compensations"} {
+	for _, name := range []string{"instances", "databases", "principals", "grants", "policies", "sessions", "tuning", "upgrades", "effects", "compensations", "migration-restores"} {
 		if err := ensureRootDirectory(filepath.Join(mariaDBStateRoot, name), 0700); err != nil {
 			return err
 		}
@@ -511,7 +511,7 @@ func verifyRootDirectory(path string) error {
 
 func safeStateComponent(value string) bool {
 	switch value {
-	case "instances", "databases", "principals", "grants", "policies", "sessions", "tuning", "upgrades", "effects", "compensations":
+	case "instances", "databases", "principals", "grants", "policies", "sessions", "tuning", "upgrades", "effects", "compensations", "migration-restores":
 		return true
 	default:
 		return false
