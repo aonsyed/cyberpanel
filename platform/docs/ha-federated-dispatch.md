@@ -114,3 +114,96 @@ success. Replay reads that result and never calls a mutation provider again.
 A crash after the local effect but before its result is saved remains ambiguous;
 the adapter does not infer effect attribution from a generally healthy database
 or rerun a write. This coding slice has not been built or runtime-verified.
+
+## Root-only static provisioning
+
+Transport enrollment must already have established the node ID, active peer and
+authority epoch. On that node, use the actual protected recovery socket at
+`/run/cyberpanel-core/recovery.sock`; the new commands use that fixed socket and
+the server enforces Unix peer UID 0. Database admission runs as the panel service
+account, so the root CLI never opens or changes ownership of the control database.
+
+1. Obtain an independently generated Ed25519 deployment authority public key and
+   verify its fingerprint out of band. Keep its private key off the node. Stage
+   the raw 32-byte public key in a root-owned protected file, for example
+   `/root/ha-deployment.pub`, then run
+   `sudo panelctl ha trust --public-key /root/ha-deployment.pub`.
+   The command prints the installed SHA-256 fingerprint; a different existing
+   trust key is rejected rather than silently replaced.
+2. Have that authority sign a `ha.StaticDeployment` using
+   `ha.StaticDeploymentSignaturePayload`; wrap it as `{"deployment": ...}`.
+   Its fields are `version` (1), `id`, `deployment_epoch` (initially 1), the exact
+   enrolled `authority_epoch`, `issued_at`, `expires_at`, `signing_key_id`, `trust`,
+   `group`, `nodes`, `cluster`, `grants`, optional `replication_bindings`, and
+   base64 `signature`. The trust object
+   uses the ingress keys described above. Each mutation grant must independently
+   carry a valid grant-authority signature; the deployment signature does not
+   substitute for it. Neither command accepts a private key or signs a bundle.
+3. Stage the signed JSON as `/root/ha-static-deployment.json`, owned by root and
+   not writable by group/other, then run
+   `sudo panelctl ha provision --bundle /root/ha-static-deployment.json`.
+   The service verifies signature, exact current enrolled identity/epoch, and
+   replay state before atomically admitting the static rows and grant bindings.
+   The CLI then atomically publishes the signed bundle, not an unsigned trust
+   projection, to `/etc/cyberpanel/ha/federated-ingress.json`.
+4. Run `sudo panelctl ha status`. `published` means the protected file's digest
+   exactly matches the committed admission, not that failover is ready. Restart
+   `panel-core.service` after first provisioning so its outbound runner loads
+   the optional ingress factory. Provisioning never restarts services itself.
+
+Static topology is intentionally conservative: group generation 1, state
+`forming`, automatic failover disabled; node generation 1 and state `offline`;
+cluster generation 1, state `unobserved`, primary/replica topology, no writer or
+lease; members `joining` with `Unknown` cluster status, no GTID/frontier/public
+listener, and read-only desired state. Schema-required observation timestamps
+are descriptive bundle data, not proof of health or successful fencing. The
+local executor's `local` database-member alias represents only the enrolled
+owning node; fleet node membership retains the real enrolled ID. Other aliases,
+duplicate identities, unknown topology members and existing conflicting rows
+are rejected. This path never overwrites an operational topology.
+
+Exact same-bundle replay repairs interruption between database admission and
+file publication. Same epoch with changed content, older epochs, reused current
+IDs, revoked-grant reinstatement and static-topology changes fail closed. A new
+signed deployment epoch may rotate the trust/grant selection while retaining
+the originally admitted static topology. Publication is accepted by ingress only
+when the signed bundle digest, admitted deployment epoch, and current federation
+authority epoch agree. A partial publication therefore disables authorization;
+it does not authorize a partially installed bundle. Root files are atomically
+renamed and fsynced; concurrent root provisioning is locked.
+
+Optional `replication_bindings` authorize only static per-channel transport and
+key references. Each binding has `channel_id`, `channel_generation`, `local_role`
+(`source` or `target`), `peer_node_id`, `peer_address` (literal private IP and port
+3306), `peer_cidrs` (canonical private prefixes containing that IP), `peer_spki`
+(SHA-256 hex), `tls_ca_path` (fixed
+`/etc/cyberpanel/ha/replication-ca.pem`), `purpose_key_ref`, and
+`encryption_profile`. The peer must be a different signed topology member. Stage
+the independently authenticated CA at that fixed root-owned protected path
+before provisioning a bundle with channel bindings. No passwords or dynamic
+fence/checkpoint proof belong in this bundle.
+
+`ha.ReadStaticReplicationBinding` reads the signed protected binding and returns
+its local node, authority epoch, and deployment digest. This is not a live-epoch
+proof by itself. The root executor's injected
+`RecoveryClient.VerifyStaticHAReplication` callback checks the current published
+binding against the core's committed deployment digest, active peer and current
+federation epoch through the root-only recovery socket. Missing callback/core,
+changed binding, stale epoch or revoked peer fails closed. Each executor action
+must additionally check the actual channel generation and independently obtained
+dynamic fence/checkpoint authority. Neither this read-only callback nor a signed
+deployment authorizes writes without those separate checks.
+
+### Remaining multi-node authority gap
+
+There is no implemented distributed HA voter-signature/majority-commit protocol,
+node-owned cross-node lease transfer, or authenticated promotion/fence/traffic
+state synchronization. The existing `QuorumObservation` accepts claimed voter
+IDs, an `Achieved` boolean and a digest; the local SQL lease authority enforces
+only local-store exclusivity and shape/expiry checks. That is not proof of an
+independent quorum on another node. Consequently the static bundle cannot contain
+or import quorum votes, leases, promotions, fence receipts, health evidence, or
+traffic activations. Existing ingress checks for exactly admitted dynamic records
+remain in force, and multi-node promotion is not advertised as operational by
+successful static provisioning. This needs a separate node-owned signed/quorum
+admission protocol before cross-node automatic failover can be claimed.

@@ -20,15 +20,7 @@ import (
 
 const haFederationIngressPath = "/etc/cyberpanel/ha/federated-ingress.json"
 
-type haIngressTrust struct {
-	TenantID string `json:"tenant_id"`
-	NodeID federation.ID `json:"node_id"`
-	PeerID federation.ID `json:"peer_id"`
-	GroupID ha.NodeGroupID `json:"group_id"`
-	GrantKeys map[string][]byte `json:"grant_keys"`
-	ApprovalKeys map[string][]byte `json:"approval_keys"`
-	GrantIDs []federation.ID `json:"grant_ids"`
-}
+type haIngressTrust = ha.FederatedIngressTrust
 
 type haIngressPayload struct {
 	kind string
@@ -111,7 +103,12 @@ func (ingress *federatedHAIngress) trust(ctx context.Context) (haIngressTrust, e
 	var trust haIngressTrust
 	if ingress == nil || ctx == nil { return trust, ha.ErrInvalid }
 	raw, err := readHAFederationProtectedFile(haFederationIngressPath, false)
-	if err != nil || decodeHAFederationJSON(raw, &trust) != nil { return trust, ha.ErrForbidden }
+	if err != nil { return trust, ha.ErrForbidden }
+	var deployment ha.StaticDeploymentFile
+	if decodeHAFederationJSON(raw, &deployment) == nil && deployment.Deployment.ID.Valid() {
+		trust, err = ha.AdmittedStaticDeploymentTrust(ctx,ingress.db,deployment.Deployment)
+		if err != nil { return trust, err }
+	} else if decodeHAFederationJSON(raw, &trust) != nil { return trust, ha.ErrForbidden }
 	node, _, peer, err := ingress.store.State(ctx)
 	if err != nil || node != ingress.nodeID || peer != ingress.peerID || trust.NodeID != node || trust.PeerID != peer || trust.TenantID != "system" || trust.GroupID == "" || len(trust.GrantIDs) == 0 || len(trust.GrantIDs) > 128 || len(trust.GrantKeys) == 0 || len(trust.GrantKeys) > 16 || len(trust.ApprovalKeys) == 0 || len(trust.ApprovalKeys) > 16 { return trust, ha.ErrForbidden }
 	for _, keys := range []map[string][]byte{trust.GrantKeys, trust.ApprovalKeys} { for id, key := range keys { if !federation.ID(id).Valid() || len(key) != ed25519.PublicKeySize { return trust, ha.ErrForbidden } } }
