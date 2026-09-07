@@ -16,6 +16,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/maintenance"
 	"github.com/aonsyed/cyberpanel/platform/internal/packagemaint"
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 )
 
@@ -48,10 +49,11 @@ const packageMaintenanceMaximumGeneration = uint64(1<<63 - 1)
 
 func newPackageMaintenanceLinuxEdge(repository *packagemaint.SQLRepository, inventory packagemaint.InventoryProvider,
 	resolver packageMaintenancePlanResolver, authorizer packagemaint.Authorizer, executor packagemaint.MaintenanceExecutor,
-	maintenanceGate packagemaint.MaintenanceGate, nodeID string, manager packagemaint.Manager, now func() time.Time) (*packageMaintenanceLinuxEdge, error) {
+	maintenanceGate packagemaint.MaintenanceGate, rebootRequirements packagemaint.RebootRequirementPublisher,
+	nodeID string, manager packagemaint.Manager, now func() time.Time) (*packageMaintenanceLinuxEdge, error) {
 	holds, supportsHolds := executor.(packagemaint.PackageHoldExecutor)
 	if repository == nil || inventory == nil || resolver == nil || authorizer == nil || executor == nil || !supportsHolds ||
-		maintenanceGate == nil || !validPackageMaintenanceRuntimeID(nodeID) || manager != packagemaint.ManagerAPT && manager != packagemaint.ManagerDNF {
+		maintenanceGate == nil || rebootRequirements == nil || !validPackageMaintenanceRuntimeID(nodeID) || manager != packagemaint.ManagerAPT && manager != packagemaint.ManagerDNF {
 		return nil, packagemaint.ErrInvalid
 	}
 	if now == nil {
@@ -59,7 +61,7 @@ func newPackageMaintenanceLinuxEdge(repository *packagemaint.SQLRepository, inve
 	}
 	edge := &packageMaintenanceLinuxEdge{repository: repository, inventory: inventory, resolver: resolver,
 		nodeID: nodeID, manager: manager, holds: holds, now: now}
-	edge.service = packagemaint.Service{Store: repository, Authorizer: authorizer, Executor: executor, Maintenance: maintenanceGate, Now: now}
+	edge.service = packagemaint.Service{Store: repository, Authorizer: authorizer, Executor: executor, Maintenance: maintenanceGate, RebootRequirements: rebootRequirements, Now: now}
 	return edge, nil
 }
 
@@ -92,6 +94,14 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 	if err = repository.Bootstrap(ctx); err != nil {
 		return nil, err
 	}
+	rebootRepository, err := rebootcontrol.NewRepository(database)
+	if err != nil {
+		return nil, err
+	}
+	if err = rebootRepository.Bootstrap(ctx); err != nil {
+		return nil, err
+	}
+	rebootRequirements := &packageRebootRequirementPublisher{repository: rebootRepository, nodeID: catalog.NodeID}
 	maintenanceRepository, err := maintenance.NewRepository(database)
 	if err != nil {
 		return nil, err
@@ -117,7 +127,7 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 	}
 	maintenanceGate := &packageMaintenanceWindowAdmission{evaluator: maintenanceEvaluator, occurrences: maintenanceRepository,
 		nodeID: catalog.NodeID, manager: catalog.Manager}
-	edge, err := newPackageMaintenanceLinuxEdge(repository, client, client, authorizer, client, maintenanceGate,
+	edge, err := newPackageMaintenanceLinuxEdge(repository, client, client, authorizer, client, maintenanceGate, rebootRequirements,
 		catalog.NodeID, catalog.Manager, now)
 	if err != nil {
 		return nil, err
