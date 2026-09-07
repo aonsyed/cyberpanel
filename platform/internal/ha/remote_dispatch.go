@@ -1,6 +1,7 @@
 package ha
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,6 +23,7 @@ const (
 	FederatedMariaDBPromotionDemoteCommand   = "ha.mariadb.promotion.demote"
 	FederatedMariaDBPromotionProbeCommand    = "ha.mariadb.promotion.probe"
 	FederatedOLSListenerApplyCommand         = "ha.webengine.ols_lse_listener.apply"
+	FederatedHAApprovalPolicyVersion         = "cyberpanel.ha.federated-dispatch.v1"
 )
 
 const federatedHAProtocolVersion uint32 = 1
@@ -102,6 +104,13 @@ func (dispatcher *FederatedHADispatcher) dispatch(ctx context.Context, node Node
 	if err != nil || len(encoded) == 0 || len(encoded) > federation.MaxFrameBytes {
 		return federation.Receipt{}, errors.Join(ErrInvalid, err)
 	}
+	// Match the central intent encoder before binding payload and approval digests.
+	var canonical any
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err = decoder.Decode(&canonical); err != nil { return federation.Receipt{}, ErrInvalid }
+	encoded, err = json.Marshal(canonical)
+	if err != nil { return federation.Receipt{}, ErrInvalid }
 	payloadDigest := federatedHADigest(encoded)
 	effectDigest := federatedHADigest([]byte("cyberpanel-ha-federated-effect-v1\x00" + command + "\x00" + target.String() + "\x00" + resource + "\x00" + payloadDigest))
 	draft := federation.Intent{
@@ -467,13 +476,43 @@ func orderRemoteTrafficNodes(change TrafficChange, nodes []NodeID) ([]NodeID, []
 }
 
 func validateBoundFederatedHAIntent(draft, bound federation.Intent, now time.Time) error {
-	if bound.ID != draft.ID || bound.NodeID != draft.NodeID || bound.ProtocolVersion != draft.ProtocolVersion || bound.CommandType != draft.CommandType || bound.SchemaHash != draft.SchemaHash || bound.PayloadDigest != draft.PayloadDigest || string(bound.Payload) != string(draft.Payload) || bound.TenantID != draft.TenantID || bound.ResourceKind != draft.ResourceKind || bound.ResourceID != draft.ResourceID || bound.ExpectedGeneration != draft.ExpectedGeneration || bound.IdempotencyKey != draft.IdempotencyKey || bound.EffectID != draft.EffectID || bound.Risk != draft.Risk {
+	if bound.NodeID != draft.NodeID || bound.ProtocolVersion != draft.ProtocolVersion || bound.CommandType != draft.CommandType || bound.SchemaHash != draft.SchemaHash || bound.PayloadDigest != draft.PayloadDigest || string(bound.Payload) != string(draft.Payload) || bound.TenantID != draft.TenantID || bound.ResourceKind != draft.ResourceKind || bound.ResourceID != draft.ResourceID || bound.ExpectedGeneration != draft.ExpectedGeneration || bound.IdempotencyKey != draft.IdempotencyKey || bound.Risk != draft.Risk {
 		return ErrForbidden
 	}
-	if !bound.PeerID.Valid() || !bound.GrantID.Valid() || bound.AuthorityEpoch == 0 || len(bound.ActorChain) == 0 || bound.Approval == nil || bound.Validate(now) != nil {
+	// An expired submitted intent may still have a durable terminal receipt.
+	// Validate its original envelope without extending its execution authority.
+	if !bound.ID.Valid() || !bound.PeerID.Valid() || !bound.GrantID.Valid() || bound.AuthorityEpoch == 0 || bound.EffectID == "" || len(bound.ActorChain) != 1 || bound.Approval == nil || bound.IssuedAt.After(now.Add(time.Minute)) || bound.Validate(bound.IssuedAt) != nil {
 		return ErrForbidden
 	}
 	return nil
+}
+
+// FederatedHAApprovalPlanDigest is the closed transaction bound by the
+// independent approval source. Central may assign the intent and effect IDs,
+// so this digest covers the immutable requested semantics and fixed grant.
+func FederatedHAApprovalPlanDigest(draft federation.Intent, tenant string, grant federation.ID) (string, error) {
+	if !draft.NodeID.Valid() || !grant.Valid() || tenant == "" || draft.TenantID != tenant || draft.ProtocolVersion == 0 || draft.CommandType == "" || !validDigest(draft.SchemaHash) || len(draft.Payload) == 0 || len(draft.Payload) > federation.MaxFrameBytes || draft.PayloadDigest != federatedHADigest(draft.Payload) || draft.ResourceKind != "ha" || draft.ResourceID == "" || draft.ExpectedGeneration == 0 || draft.IdempotencyKey == "" || draft.Risk != federation.RiskHigh && draft.Risk != federation.RiskCritical {
+		return "", ErrInvalid
+	}
+	payload, err := json.Marshal(struct {
+		Domain              string        `json:"domain"`
+		NodeID              federation.ID `json:"node_id"`
+		GrantID             federation.ID `json:"grant_id"`
+		ProtocolVersion     uint32        `json:"protocol_version"`
+		CommandType         string        `json:"command_type"`
+		SchemaHash          string        `json:"schema_hash"`
+		PayloadDigest       string        `json:"payload_digest"`
+		TenantID            string        `json:"tenant_id"`
+		ResourceKind        string        `json:"resource_kind"`
+		ResourceID          string        `json:"resource_id"`
+		ExpectedGeneration uint64        `json:"expected_generation"`
+		IdempotencyKey      string        `json:"idempotency_key"`
+		Risk                federation.Risk `json:"risk"`
+	}{FederatedHAApprovalPolicyVersion, draft.NodeID, grant, draft.ProtocolVersion, draft.CommandType, draft.SchemaHash, draft.PayloadDigest, tenant, draft.ResourceKind, draft.ResourceID, draft.ExpectedGeneration, draft.IdempotencyKey, draft.Risk})
+	if err != nil {
+		return "", err
+	}
+	return federatedHADigest(payload), nil
 }
 
 func federatedHAReceiptError(receipt federation.Receipt) error {

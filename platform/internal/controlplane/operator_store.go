@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -68,10 +69,20 @@ type OperatorGrant struct {
 }
 
 type IntentRecord struct {
-	OwnerTenantID federation.ID       `json:"owner_tenant_id"`
-	Status        string              `json:"status"`
-	Intent        federation.Intent   `json:"intent"`
-	Receipt       *federation.Receipt `json:"receipt,omitempty"`
+	OwnerTenantID  federation.ID              `json:"owner_tenant_id"`
+	Status         string                     `json:"status"`
+	Intent         federation.Intent          `json:"intent"`
+	Receipt        *federation.Receipt        `json:"receipt,omitempty"`
+	ReceiptEvidence *NodeReceiptEvidenceRecord `json:"receipt_evidence,omitempty"`
+}
+
+type NodeReceiptEvidenceRecord struct {
+	NodeID     federation.ID `json:"node_id"`
+	KeyID      string        `json:"key_id"`
+	PublicKey  []byte        `json:"public_key"`
+	State      string        `json:"state"`
+	NotBefore  time.Time     `json:"not_before"`
+	ExpiresAt  time.Time     `json:"expires_at"`
 }
 
 type MutationGrantRecord struct {
@@ -226,8 +237,35 @@ func (s *Store) InspectIntent(ctx context.Context, id federation.ID) (IntentReco
 			return IntentRecord{}, err
 		}
 		record.Receipt = &receipt
+		evidence, evidenceErr := s.inspectNodeReceiptEvidence(ctx, receipt.NodeID, receipt.SignatureKeyID)
+		if evidenceErr != nil {
+			return IntentRecord{}, evidenceErr
+		}
+		record.ReceiptEvidence = &evidence
 	}
 	return record, nil
+}
+
+func (s *Store) inspectNodeReceiptEvidence(ctx context.Context, nodeID federation.ID, keyID string) (NodeReceiptEvidenceRecord, error) {
+	var evidence NodeReceiptEvidenceRecord
+	if s == nil || s.db == nil || ctx == nil || !nodeID.Valid() {
+		return evidence, ErrInvalid
+	}
+	if _, err := federation.NewID(keyID); err != nil {
+		return evidence, ErrInvalid
+	}
+	err := s.db.QueryRowContext(ctx, `SELECT node_id,key_id,public_key,state,not_before,expires_at FROM fleet_node_evidence_keys WHERE node_id=? AND key_id=?`, nodeID, keyID).Scan(&evidence.NodeID, &evidence.KeyID, &evidence.PublicKey, &evidence.State, &evidence.NotBefore, &evidence.ExpiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return evidence, ErrNotFound
+	}
+	if err != nil {
+		return evidence, err
+	}
+	now := s.clock().UTC()
+	if evidence.NodeID != nodeID || evidence.KeyID != keyID || len(evidence.PublicKey) != ed25519.PublicKeySize || evidence.State != "current" && evidence.State != "historical" || evidence.NotBefore.IsZero() || evidence.ExpiresAt.IsZero() || now.Before(evidence.NotBefore) || !now.Before(evidence.ExpiresAt) {
+		return NodeReceiptEvidenceRecord{}, ErrForbidden
+	}
+	return evidence, nil
 }
 
 func (s *Store) InspectMutationGrant(ctx context.Context, id federation.ID) (MutationGrantRecord, error) {
