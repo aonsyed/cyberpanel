@@ -122,6 +122,7 @@ func RunSourceAgent(ctx context.Context, config SourceAgentConfig, collector Col
 	}
 	defer joinSourceAgentClose(&err, supplemental.Close)
 	var databaseDumper DatabaseDumper
+	var containerSnapshotter ContainerSnapshotter
 	var secrets SecretSource = supplemental
 	if sqlCollector, ok := collector.(*SQLCollector); ok {
 		if sqlCollector.database == nil || sqlCollector.installationID != config.SourceInstallationID || sqlCollector.supplemental != nil {
@@ -131,6 +132,10 @@ func RunSourceAgent(ctx context.Context, config SourceAgentConfig, collector Col
 		databaseDumper, err = NewSQLLogicalDumper(sqlCollector.database, 0, 0, 0)
 		if err != nil {
 			return fmt.Errorf("initialize database dumper: %w", err)
+		}
+		containerSnapshotter, err = NewSQLContainerSnapshotter(sqlCollector.database, config.MaximumArtifactBytes)
+		if err != nil {
+			return fmt.Errorf("initialize container snapshotter: %w", err)
 		}
 		databaseSecrets, sourceErr := NewSQLSecretSource(sqlCollector.database)
 		if sourceErr != nil {
@@ -147,6 +152,7 @@ func RunSourceAgent(ctx context.Context, config SourceAgentConfig, collector Col
 		HomeRoot: config.HomeRoot,
 		MailRoot: config.MailRoot,
 		DatabaseDumper: databaseDumper,
+		ContainerSnapshotter: containerSnapshotter,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize source collector: %w", err)
