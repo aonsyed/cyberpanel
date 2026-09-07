@@ -167,8 +167,9 @@ func (target *migrationSecretTarget) ImportMigrationSecret(ctx context.Context, 
 	// pending enrollment journal can require cancellation reconciliation.
 	preflight, err := target.decrypt(ctx, id, manifest.TargetInstallationID, envelope)
 	if err != nil { return err }
-	err = migrationSecretMaterialAllowed(string(manifest.Source), envelope.Purpose, preflight)
+	authority, checkedMaterial, err := migrationSecretMaterial(string(manifest.Source), envelope.Purpose, preflight, authority)
 	wipeBytes(preflight)
+	wipeBytes(checkedMaterial)
 	if err != nil { return err }
 	digest, encodedEnvelope, err := migrationSecretDigest(envelope)
 	if err != nil { return err }
@@ -212,8 +213,11 @@ func (target *migrationSecretTarget) enroll(ctx context.Context, id migration.ID
 	plaintext, err := target.decrypt(ctx, id, row.targetInstallation, envelope)
 	if err != nil { return secrets.Metadata{}, err }
 	defer wipeBytes(plaintext)
-	if err := migrationSecretMaterialAllowed(row.source, envelope.Purpose, plaintext); err != nil { return secrets.Metadata{}, err }
-	metadata, err := target.management.PutExact(ctx, secrets.PutRequest{ID: authority.ID, OwnerTenantID: authority.Owner, Purpose: authority.Purpose, Audience: authority.Audience, Plaintext: plaintext})
+	preparedAuthority, prepared, err := migrationSecretMaterial(row.source, envelope.Purpose, plaintext, authority)
+	defer wipeBytes(prepared)
+	if err != nil { return secrets.Metadata{}, err }
+	if preparedAuthority.Audience.ResourceKind != authority.Audience.ResourceKind { return secrets.Metadata{}, migration.ErrConflict }
+	metadata, err := target.management.PutExact(ctx, secrets.PutRequest{ID: authority.ID, OwnerTenantID: authority.Owner, Purpose: authority.Purpose, Audience: authority.Audience, Plaintext: prepared})
 	if err != nil { return secrets.Metadata{}, err }
 	if metadata.Validate() != nil || metadata.ID != authority.ID || metadata.OwnerTenantID != authority.Owner || metadata.Purpose != authority.Purpose || metadata.Version != 1 || metadata.State != secrets.StateActive { return secrets.Metadata{}, migration.ErrConflict }
 	_, actual, err := migrationSecretDigest(metadata.Audience)
@@ -239,19 +243,24 @@ func (target *migrationSecretTarget) Resolve(ctx context.Context, id migration.I
 	row, err := target.load(ctx, id, envelopeID)
 	if err != nil { return secrets.Metadata{}, err }
 	if row.state != "enrolled" { return secrets.Metadata{}, migration.ErrBlocked }
+	var metadata secrets.Metadata
+	if json.Unmarshal(row.metadata, &metadata) != nil || metadata.Validate() != nil { return secrets.Metadata{}, migration.ErrConflict }
 	var envelope migration.SecretEnvelope
 	if err := json.Unmarshal(row.envelope, &envelope); err != nil { return secrets.Metadata{}, migration.ErrInvalid }
 	digest, _, err := migrationSecretDigest(envelope)
 	if err != nil || digest != row.digest || envelope.SecretID != envelopeID { return secrets.Metadata{}, migration.ErrConflict }
 	manifest, scope, authority, err := target.approved(ctx, id, envelope)
 	if err != nil { return secrets.Metadata{}, err }
+	if metadata.Audience.ResourceKind == "database_principal_native_hash" {
+		if envelope.Purpose != "database-principal" || authority.Audience.ResourceKind != "database_principal" { return secrets.Metadata{}, migration.ErrBlocked }
+		authority.Audience.ResourceKind = "database_principal_native_hash"
+	}
 	_, encodedAuthority, err := migrationSecretDigest(authority)
 	if err != nil || row.tenant != scope.TenantID || row.source != string(manifest.Source) || row.sourceInstallation != manifest.SourceInstallationID || row.targetInstallation != manifest.TargetInstallationID || !bytes.Equal(row.authority, encodedAuthority) { return secrets.Metadata{}, migration.ErrConflict }
 	var canceled int
 	if err := target.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM panel_migration_secret_cancellations WHERE migration_id=?`, id.String()).Scan(&canceled); err != nil { return secrets.Metadata{}, err }
 	if canceled != 0 { return secrets.Metadata{}, migration.ErrBlocked }
-	var metadata secrets.Metadata
-	if err := json.Unmarshal(row.metadata, &metadata); err != nil || metadata.Validate() != nil || metadata.ID != authority.ID || metadata.OwnerTenantID != authority.Owner || metadata.Purpose != authority.Purpose || metadata.State != secrets.StateActive || metadata.Version != 1 { return secrets.Metadata{}, migration.ErrConflict }
+	if metadata.ID != authority.ID || metadata.OwnerTenantID != authority.Owner || metadata.Purpose != authority.Purpose || metadata.State != secrets.StateActive || metadata.Version != 1 { return secrets.Metadata{}, migration.ErrConflict }
 	_, actualAudience, err := migrationSecretDigest(metadata.Audience)
 	_, expectedAudience, expectedErr := migrationSecretDigest(authority.Audience)
 	if err != nil || expectedErr != nil || !bytes.Equal(actualAudience, expectedAudience) { return secrets.Metadata{}, migration.ErrConflict }
@@ -269,14 +278,23 @@ func migrationPasswordIsHash(value []byte) bool {
 	return false
 }
 
-func migrationSecretMaterialAllowed(source, purpose string, value []byte) error {
-	// The current CyberPanel SQL producer exports authentication_string, not
-	// a password. A future typed hash-import/reset contract must opt in rather
-	// than guessing and double-hashing it through CreatePrincipal.
-	if purpose == "database-principal" && (source == string(migration.SourceCyberPanel) || migrationPasswordIsHash(value)) {
-		return errors.Join(migration.ErrBlocked, errors.New("database credential requires typed hash import or explicit reset; not a plaintext password"))
+func migrationSecretMaterial(source, purpose string, value []byte, authority migrationSecretAuthority) (migrationSecretAuthority, []byte, error) {
+	if purpose != "database-principal" { return authority, append([]byte(nil), value...), nil }
+	if authority.Purpose != secrets.PurposeDatabase || authority.Audience.AdapterID != database.MariaDBSecretAdapterID || authority.Audience.AdapterVersion != database.MariaDBSecretAdapterVersion || (authority.Audience.ResourceKind != "database_principal" && authority.Audience.ResourceKind != "database_principal_native_hash") { return authority, nil, migration.ErrBlocked }
+	// Only the sealed typed marker attests plugin selection. A raw '*hash'
+	// never becomes a credential merely because it resembles MySQL syntax.
+	hash, err := database.DecodeNativePasswordHashCredential(value)
+	defer wipeBytes(hash)
+	if err == nil {
+		encoded, err := database.EncodeNativePasswordHashCredential(hash)
+		if err != nil { wipeBytes(encoded); return authority, nil, migration.ErrBlocked }
+		authority.Audience.ResourceKind = "database_principal_native_hash"
+		return authority, encoded, nil
 	}
-	return nil
+	if source == string(migration.SourceCyberPanel) || authority.Audience.ResourceKind == "database_principal_native_hash" || migrationPasswordIsHash(value) || bytes.IndexByte(value, 0) >= 0 {
+		return authority, nil, errors.Join(migration.ErrBlocked, errors.New("database credential lacks a supported plugin-attested type; explicit reset required"))
+	}
+	return authority, append([]byte(nil), value...), nil
 }
 
 func migrationSecretRevokeRequest(metadata secrets.Metadata) secrets.RevokeRequest {

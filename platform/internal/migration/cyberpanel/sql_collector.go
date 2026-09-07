@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/database"
 )
 
 // SupplementalCollector owns host-only discovery that is not represented in
@@ -444,7 +446,58 @@ func mailboxFormat(value string)string{if strings.HasPrefix(strings.ToLower(stri
 
 type SQLSecretSource struct{database *sql.DB}
 func NewSQLSecretSource(database *sql.DB)(*SQLSecretSource,error){if database==nil{return nil,ErrInvalid};return &SQLSecretSource{database:database},nil}
-func(s *SQLSecretSource)ReadSecret(ctx context.Context,ref SecretRef)([]byte,error){if s==nil||s.database==nil||ctx==nil||!ref.Valid(){return nil,ErrInvalid};value:=string(ref);var query,argument string;var err error;switch{case strings.HasPrefix(value,"mailbox-password:"):query=`SELECT password FROM e_users WHERE BINARY email=BINARY ?`;argument,err=decodeLookupSecretRef(value,"mailbox-password");case strings.HasPrefix(value,"ftp-password:"):query=`SELECT Password FROM users WHERE BINARY User=BINARY ?`;argument,err=decodeLookupSecretRef(value,"ftp-password");case strings.HasPrefix(value,"database-password:"):query=`SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(Priv,'$.authentication_string')),'') FROM mysql.global_priv WHERE BINARY User=BINARY ? AND Host IN ('localhost','127.0.0.1','::1','%') ORDER BY CASE Host WHEN 'localhost' THEN 0 WHEN '127.0.0.1' THEN 1 WHEN '::1' THEN 2 ELSE 3 END LIMIT 1`;argument,err=decodeLookupSecretRef(value,"database-password");case strings.HasPrefix(value,"backup-normal-destination:"):query=`SELECT config FROM websiteFunctions_normalbackupdests WHERE id=?`;argument=strings.TrimPrefix(value,"backup-normal-destination:");case strings.HasPrefix(value,"backup-google-drive-auth:"):query=`SELECT auth FROM websiteFunctions_gdrive WHERE id=?`;argument=strings.TrimPrefix(value,"backup-google-drive-auth:");case strings.HasPrefix(value,"backup-remote-config:"):query=`SELECT config FROM websiteFunctions_remotebackupconfig WHERE id=?`;argument=strings.TrimPrefix(value,"backup-remote-config:");default:return nil,ErrDenied};if err!=nil{return nil,ErrDenied};var secret []byte;err=s.database.QueryRowContext(ctx,query,argument).Scan(&secret);if err!=nil{if errors.Is(err,sql.ErrNoRows){return nil,ErrDenied};return nil,err};if len(secret)==0{return nil,ErrDenied};valueCopy:=append([]byte(nil),secret...);wipe(secret);return valueCopy,nil}
+func (s *SQLSecretSource) ReadSecret(ctx context.Context, ref SecretRef) ([]byte, error) {
+	if s == nil || s.database == nil || ctx == nil || !ref.Valid() { return nil, ErrInvalid }
+	value := string(ref)
+	var query, argument string
+	var err error
+	switch {
+	case strings.HasPrefix(value, "database-password:"):
+		return s.readNativeDatabaseCredential(ctx, value)
+	case strings.HasPrefix(value, "mailbox-password:"):
+		query = `SELECT password FROM e_users WHERE BINARY email=BINARY ?`
+		argument, err = decodeLookupSecretRef(value, "mailbox-password")
+	case strings.HasPrefix(value, "ftp-password:"):
+		query = `SELECT Password FROM users WHERE BINARY User=BINARY ?`
+		argument, err = decodeLookupSecretRef(value, "ftp-password")
+	case strings.HasPrefix(value, "backup-normal-destination:"):
+		query = `SELECT config FROM websiteFunctions_normalbackupdests WHERE id=?`
+		argument = strings.TrimPrefix(value, "backup-normal-destination:")
+	case strings.HasPrefix(value, "backup-google-drive-auth:"):
+		query = `SELECT auth FROM websiteFunctions_gdrive WHERE id=?`
+		argument = strings.TrimPrefix(value, "backup-google-drive-auth:")
+	case strings.HasPrefix(value, "backup-remote-config:"):
+		query = `SELECT config FROM websiteFunctions_remotebackupconfig WHERE id=?`
+		argument = strings.TrimPrefix(value, "backup-remote-config:")
+	default:
+		return nil, ErrDenied
+	}
+	if err != nil { return nil, ErrDenied }
+	var secret []byte
+	err = s.database.QueryRowContext(ctx, query, argument).Scan(&secret)
+	defer wipe(secret)
+	if err != nil { if errors.Is(err, sql.ErrNoRows) { return nil, ErrDenied }; return nil, err }
+	if len(secret) == 0 { return nil, ErrDenied }
+	return append([]byte(nil), secret...), nil
+}
+
+// Plugin and hash are read from the same authoritative MariaDB row. The typed
+// marker is sealed by Extractor; no caller-supplied plugin or hash-shape guess
+// can promote another authentication scheme into mysql_native_password.
+func (s *SQLSecretSource) readNativeDatabaseCredential(ctx context.Context, ref string) ([]byte, error) {
+	username, err := decodeLookupSecretRef(ref, "database-password")
+	if err != nil { return nil, ErrDenied }
+	var plugin string
+	var hash []byte
+	err = s.database.QueryRowContext(ctx, `SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(Priv,'$.plugin')),''),COALESCE(JSON_UNQUOTE(JSON_EXTRACT(Priv,'$.authentication_string')),'') FROM mysql.global_priv WHERE BINARY User=BINARY ? AND Host IN ('localhost','127.0.0.1','::1','%') ORDER BY CASE Host WHEN 'localhost' THEN 0 WHEN '127.0.0.1' THEN 1 WHEN '::1' THEN 2 ELSE 3 END LIMIT 1`, username).Scan(&plugin, &hash)
+	defer wipe(hash)
+	if errors.Is(err, sql.ErrNoRows) { return nil, ErrDenied }
+	if err != nil { return nil, err }
+	if plugin != "mysql_native_password" { return nil, ErrDenied }
+	encoded, err := database.EncodeNativePasswordHashCredential(hash)
+	if err != nil { wipe(encoded); return nil, ErrDenied }
+	return encoded, nil
+}
 func lookupSecretRef(kind,value string)SecretRef{return SecretRef(kind+":"+hex.EncodeToString([]byte(strings.TrimSpace(value))))}
 func decodeLookupSecretRef(value,kind string)(string,error){encoded:=strings.TrimPrefix(value,kind+":");if encoded==value||encoded==""||len(encoded)%2!=0{return "",ErrInvalid};raw,err:=hex.DecodeString(encoded);if err!=nil||len(raw)==0||strings.ContainsRune(string(raw),'\x00'){return "",ErrInvalid};return string(raw),nil}
 
