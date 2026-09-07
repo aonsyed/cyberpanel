@@ -15,7 +15,7 @@ type admissionSource struct {
 
 var admissionSources=[]admissionSource{
 	{"reboot_api_invocations",[]string{"id"},"status","'completed'",""},
-	{"panel_database_operations",[]string{"scope_tenant_id","scope_kind","scope_id","command_id"},"status","'applied','rejected','compensated'",""},
+	{"panel_database_operations",[]string{"scope_tenant_id","scope_kind","scope_id","command_id","json_extract(@receipt_json,'$.request.effect_id')"},"status","'applied','rejected','compensated'",""},
 	{"database_transfer_state_v1",[]string{"job_id"},"status","'succeeded','completed','failed','canceled','cancelled'",""},
 	{"hosting_commands",[]string{"command_id","effect_id"},"status","'applied'",""},
 	{"mail_operations_v2",[]string{"command_id"},"status","'applied','rejected','compensated'",""},
@@ -35,14 +35,14 @@ var admissionSources=[]admissionSource{
 	{"package_maintenance_operations",[]string{"id"},"state","'succeeded','failed','recovered'",""},
 	{"product_update_states",[]string{"manifest_id","node_id"},"phase","'committed','rolled_back','failed'",""},
 	{"panel_migrations",[]string{"id","attempt_id"},"phase","'committed','failed_terminal','rolled_back','canceled'",""},
-	{"panel_operation_receipts",[]string{"node_id","tenant_id","scope_kind","scope_id","command_id"},"status","'applied','rejected','compensated'","COALESCE(json_extract(@receipt_json,'$.request.kind'),'') IN ('query_metrics','query_logs','query_ssh_logins','query_ssh_sessions','investigate_process','diagnose_service','record_transfer_sample')"},
+	{"panel_operation_receipts",[]string{"node_id","tenant_id","scope_kind","scope_id","command_id","json_extract(@receipt_json,'$.request.effect_id')"},"status","'applied','rejected','compensated'","COALESCE(json_extract(@receipt_json,'$.request.kind'),'') IN ('query_metrics','query_logs','query_ssh_logins','query_ssh_sessions','investigate_process','diagnose_service','record_transfer_sample')"},
 }
 
 func(source admissionSource)stateSQL(prefix string)string{
 	if strings.Contains(source.state,"@"){return strings.ReplaceAll(source.state,"@",prefix)}
 	return prefix+source.state
 }
-func(source admissionSource)idSQL(prefix string)string{parts:=make([]string,len(source.ids));for i,id:=range source.ids{parts[i]=prefix+id};return "json_array("+strings.Join(parts,",")+")"}
+func(source admissionSource)idSQL(prefix string)string{parts:=make([]string,len(source.ids));for i,id:=range source.ids{if strings.Contains(id,"@"){parts[i]=strings.ReplaceAll(id,"@",prefix)}else{parts[i]=prefix+id}};return "json_array("+strings.Join(parts,",")+")"}
 func(source admissionSource)nonterminal(prefix string)string{return "COALESCE("+source.stateSQL(prefix)+",'unknown') NOT IN ("+source.terminal+")"}
 func(source admissionSource)mutation(prefix string)string{if source.observe==""{return "1"};return "NOT ("+strings.ReplaceAll(source.observe,"@",prefix)+")"}
 
