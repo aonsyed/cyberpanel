@@ -41,6 +41,9 @@ const (
 	MariaDBHAPromote    MariaDBHAAction = "promote"
 	MariaDBHADemote     MariaDBHAAction = "demote"
 	MariaDBHASignPermit MariaDBHAAction = "sign_permit"
+	MariaDBHACheckpoint MariaDBHAAction = "checkpoint"
+	MariaDBHACatchUp MariaDBHAAction = "catch_up"
+	MariaDBHARejoin MariaDBHAAction = "rejoin"
 )
 
 // MariaDBHARequest is the closed privileged surface used by the local HA
@@ -53,6 +56,10 @@ type MariaDBHARequest struct {
 	FencingToken uint64             `json:"fencing_token,omitempty"`
 	Lease        *ha.WriterLease    `json:"lease,omitempty"`
 	Permit       *ha.WritePermit    `json:"permit,omitempty"`
+	Channel *ha.ReplicationChannel `json:"channel,omitempty"`
+	Checkpoint *ha.ReplicationCheckpoint `json:"checkpoint,omitempty"`
+	SourceGeneration uint64 `json:"source_generation,omitempty"`
+	AuthorityEpoch uint64 `json:"authority_epoch,omitempty"`
 }
 
 type MariaDBHAResult struct {
@@ -60,6 +67,8 @@ type MariaDBHAResult struct {
 	Receipt  string              `json:"receipt,omitempty"`
 	Frontier uint64              `json:"frontier,omitempty"`
 	Permit   *ha.WritePermit     `json:"permit,omitempty"`
+	Checkpoint *ha.ReplicationCheckpoint `json:"checkpoint,omitempty"`
+	Replication *ha.ReplicationReceipt `json:"replication,omitempty"`
 }
 
 type WorkspaceBrokerRequest struct {
@@ -172,6 +181,8 @@ func (response BrokerResponse) validate(request BrokerRequest) error {
 }
 
 func validateMariaDBHARequest(request MariaDBHARequest, now time.Time) error {
+	if request.Action==MariaDBHACheckpoint || request.Action==MariaDBHACatchUp || request.Action==MariaDBHARejoin { return validateMariaDBReplicationRequest(request) }
+	if request.Channel!=nil || request.Checkpoint!=nil || request.SourceGeneration!=0 || request.AuthorityEpoch!=0 { return ErrInvalidCommand }
 	const localResource = ha.ID("mariadb-local")
 	const localNode = ha.NodeID("local")
 	if request.Action == MariaDBHASignPermit {
@@ -205,6 +216,8 @@ func validateMariaDBHARequest(request MariaDBHARequest, now time.Time) error {
 }
 
 func validateMariaDBHAResult(request MariaDBHARequest, result MariaDBHAResult) error {
+	if request.Action==MariaDBHACheckpoint || request.Action==MariaDBHACatchUp || request.Action==MariaDBHARejoin { return validateMariaDBReplicationResult(request,result) }
+	if result.Checkpoint!=nil || result.Replication!=nil { return ErrInvalidReceipt }
 	switch request.Action {
 	case MariaDBHAObserve:
 		if result.Cluster == nil || result.Receipt != "" || result.Frontier != 0 || result.Permit != nil || result.Cluster.Validate() != nil || result.Cluster.ID != request.Cluster.ID || result.Cluster.GroupID != request.Cluster.GroupID {
@@ -272,6 +285,7 @@ type DatabaseBrokerTransport interface {
 }
 
 type BrokerClient struct {
+	ReplicationEpoch func(context.Context,ha.ChannelID)(uint64,error)
 	transport DatabaseBrokerTransport
 	now       func() time.Time
 }
@@ -375,20 +389,29 @@ func (client *BrokerClient) SignWritePermit(ctx context.Context, permit ha.Write
 	return *result.Permit, nil
 }
 
-func (*BrokerClient) CreateDatabaseCheckpoint(context.Context, ha.ReplicationChannel, uint64) (ha.ReplicationCheckpoint, error) {
-	return ha.ReplicationCheckpoint{}, ha.ErrUnsupported
+func (client *BrokerClient) CreateDatabaseCheckpoint(ctx context.Context, channel ha.ReplicationChannel, generation uint64) (ha.ReplicationCheckpoint, error) {
+	result,err:=client.mariaDBHA(ctx,MariaDBHARequest{Action:MariaDBHACheckpoint,Channel:&channel,SourceGeneration:generation})
+	if err!=nil{return ha.ReplicationCheckpoint{},err};return *result.Checkpoint,nil
 }
 
-func (*BrokerClient) CatchUpReplica(context.Context, ha.ReplicationChannel, ha.ReplicationCheckpoint) (ha.ReplicationReceipt, error) {
-	return ha.ReplicationReceipt{}, ha.ErrUnsupported
+func (client *BrokerClient) CatchUpReplica(ctx context.Context, channel ha.ReplicationChannel, checkpoint ha.ReplicationCheckpoint) (ha.ReplicationReceipt, error) {
+	result,err:=client.mariaDBHA(ctx,MariaDBHARequest{Action:MariaDBHACatchUp,Channel:&channel,Checkpoint:&checkpoint})
+	if err!=nil{return ha.ReplicationReceipt{},err};return *result.Replication,nil
 }
 
-func (*BrokerClient) RejoinDatabaseMember(context.Context, ha.DatabaseCluster, ha.NodeID, ha.ReplicationCheckpoint) (string, error) {
-	return "", ha.ErrUnsupported
+func (client *BrokerClient) RejoinDatabaseMember(ctx context.Context, cluster ha.DatabaseCluster, node ha.NodeID, checkpoint ha.ReplicationCheckpoint) (string, error) {
+	result,err:=client.mariaDBHA(ctx,MariaDBHARequest{Action:MariaDBHARejoin,Cluster:cluster,NodeID:node,Checkpoint:&checkpoint})
+	if err!=nil{return "",err};return result.Receipt,nil
 }
 
 func (client *BrokerClient) mariaDBHA(ctx context.Context, value MariaDBHARequest) (MariaDBHAResult, error) {
-	request, err := client.request(ctx, BrokerMariaDBHA)
+	if value.Action==MariaDBHACheckpoint||value.Action==MariaDBHACatchUp||value.Action==MariaDBHARejoin{
+		if client==nil||client.ReplicationEpoch==nil{return MariaDBHAResult{},ErrUnauthorized}
+		var channel ha.ChannelID;if value.Channel!=nil{channel=value.Channel.ID}else if value.Checkpoint!=nil{channel=value.Checkpoint.ChannelID}
+		epoch,epochErr:=client.ReplicationEpoch(ctx,channel);if epochErr!=nil||epoch==0{return MariaDBHAResult{},ErrUnauthorized};value.AuthorityEpoch=epoch
+	}
+	maximum:=30*time.Second;if value.AuthorityEpoch!=0{maximum=2*time.Minute}
+	request, err := client.requestWithMaximum(ctx, BrokerMariaDBHA,maximum)
 	if err != nil { return MariaDBHAResult{}, err }
 	request.MariaDBHA = &value
 	if err = request.validate(client.now().UTC()); err != nil { return MariaDBHAResult{}, err }
@@ -515,9 +538,20 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		if err == nil && validateWorkspaceResult(result, request.Workspace.Access) == nil { response.Query = &result }
 	case BrokerMariaDBHA:
 		result := MariaDBHAResult{}
+		if request.MariaDBHA.AuthorityEpoch!=0{ctx=context.WithValue(ctx,replicationEpochContextKey{},request.MariaDBHA.AuthorityEpoch)}
 		executor, ok := server.Executor.(ha.DatabaseReplicationExecutor)
 		if !ok { err = ErrInvalidCommand; break }
 		switch request.MariaDBHA.Action {
+		case MariaDBHACheckpoint:
+			var checkpoint ha.ReplicationCheckpoint
+			checkpoint,err=executor.CreateDatabaseCheckpoint(ctx,*request.MariaDBHA.Channel,request.MariaDBHA.SourceGeneration)
+			if err==nil{result.Checkpoint=&checkpoint}
+		case MariaDBHACatchUp:
+			var receipt ha.ReplicationReceipt
+			receipt,err=executor.CatchUpReplica(ctx,*request.MariaDBHA.Channel,*request.MariaDBHA.Checkpoint)
+			if err==nil{result.Replication=&receipt}
+		case MariaDBHARejoin:
+			result.Receipt,err=executor.RejoinDatabaseMember(ctx,request.MariaDBHA.Cluster,request.MariaDBHA.NodeID,*request.MariaDBHA.Checkpoint)
 		case MariaDBHAObserve:
 			var cluster ha.DatabaseCluster
 			cluster, err = executor.ObserveCluster(ctx, request.MariaDBHA.Cluster)

@@ -49,6 +49,12 @@ const (
 	sqlFreezeHA
 	sqlPromoteHA
 	sqlObserveNativePrincipal
+	sqlStableGTIDCheckpoint
+	sqlObserveReplication
+	sqlConfigureReplication
+	sqlWaitReplication
+	sqlObserveReplicationPrincipal
+	sqlCreateReplicationPrincipal
 )
 
 type principalMutation struct {
@@ -188,7 +194,9 @@ func (connection *mariaDBConnection) query(ctx context.Context, statement mariaD
 	if err != nil {
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, "/usr/bin/mariadb", connection.arguments...)
+	arguments:=connection.arguments
+	if statement==sqlObserveReplication{arguments=append(append([]string(nil),arguments...),"--vertical")}
+	command := exec.CommandContext(ctx, "/usr/bin/mariadb", arguments...)
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=/root"}
 	command.Stdin = strings.NewReader(script)
 	output := &limitedBuffer{remaining: maximumProcessOutput}
@@ -204,6 +212,7 @@ func (connection *mariaDBConnection) query(ctx context.Context, statement mariaD
 }
 
 func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, error) {
+	if statement==sqlObserveReplication||statement==sqlConfigureReplication||statement==sqlWaitReplication||statement==sqlObserveReplicationPrincipal||statement==sqlCreateReplicationPrincipal{return buildReplicationStatement(statement,values...)}
 	switch statement {
 	case sqlObserveStatus:
 		if len(values) != 0 {
@@ -234,6 +243,11 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 			return "", ErrInvalidResource
 		}
 		return principalObservation(principal), nil
+	case sqlStableGTIDCheckpoint:
+		// One process owns the global read lock for both observations. Closing
+		// its socket releases the lock even on cancellation or client failure.
+		if len(values)!=0{return "",ErrInvalidResource}
+		return "FLUSH TABLES WITH READ LOCK;\nSELECT @@server_id,@@hostname,@@read_only,@@gtid_binlog_pos,@@log_bin,@@gtid_strict_mode;\nSELECT @@server_id,@@hostname,@@read_only,@@gtid_binlog_pos,@@log_bin,@@gtid_strict_mode;\nUNLOCK TABLES;\n",nil
 	case sqlObserveNativePrincipal:
 		mutation,ok:=oneValue[principalMutation](values)
 		if !ok||mutation.Principal.Validate()!=nil||mutation.Principal.CredentialFormat!=CredentialFormatNativeHash||!validNativePasswordHash(mutation.Password){return "",ErrInvalidResource}
@@ -524,18 +538,6 @@ func (executor *LinuxMariaDBExecutor) DemoteDatabaseWriter(ctx context.Context, 
 	return executor.applyLocalHA(ctx, MariaDBHADemote, cluster, node, fencingToken, "", sqlFreezeHA, true)
 }
 
-func (*LinuxMariaDBExecutor) CreateDatabaseCheckpoint(context.Context, ha.ReplicationChannel, uint64) (ha.ReplicationCheckpoint, error) {
-	return ha.ReplicationCheckpoint{}, ha.ErrUnsupported
-}
-
-func (*LinuxMariaDBExecutor) CatchUpReplica(context.Context, ha.ReplicationChannel, ha.ReplicationCheckpoint) (ha.ReplicationReceipt, error) {
-	return ha.ReplicationReceipt{}, ha.ErrUnsupported
-}
-
-func (*LinuxMariaDBExecutor) RejoinDatabaseMember(context.Context, ha.DatabaseCluster, ha.NodeID, ha.ReplicationCheckpoint) (string, error) {
-	return "", ha.ErrUnsupported
-}
-
 func (executor *LinuxMariaDBExecutor) SignWritePermit(ctx context.Context, permit ha.WritePermit) (ha.WritePermit, error) {
 	if executor == nil || ctx == nil || permit.ResourceID != "mariadb-local" || permit.NodeID != ha.NodeID("local") || permit.LeaseID == "" || permit.FencingToken == 0 || permit.AuthorityEpoch == 0 || len(permit.WritePaths) == 0 || permit.Signature != "" || permit.IssuedAt.IsZero() || !permit.ExpiresAt.After(permit.IssuedAt) || !executor.now().UTC().Before(permit.ExpiresAt) {
 		return ha.WritePermit{}, ErrInvalidCommand
@@ -566,11 +568,16 @@ func (executor *LinuxMariaDBExecutor) applyLocalHA(ctx context.Context, action M
 	effectID := localMariaDBHAEffectID(action, cluster.ID, node, fencingToken, leaseID)
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
+	var cursor localMariaDBHAReceipt
+	if cursorErr:=executor.readNamed("effects","ha-fence-cursor.json",&cursor);cursorErr==nil{
+		if cursor.ClusterID!=cluster.ID||fencingToken<cursor.FencingToken{return "",ErrUnauthorized}
+	}else if !errors.Is(cursorErr,ErrNotFound){return "",cursorErr}
 	var existing localMariaDBHAReceipt
 	if err := executor.readNamed("effects", effectID+".json", &existing); err == nil {
 		if existing.EffectID != effectID || existing.Action != action || existing.ClusterID != cluster.ID || existing.NodeID != node || existing.FencingToken != fencingToken || existing.LeaseID != leaseID || existing.ReadOnly != wantReadOnly || existing.ProofDigest == "" || existing.AppliedAt.IsZero() {
 			return "", ErrIdempotency
 		}
+		if cursor.EffectID!=effectID{return "",ErrUnauthorized}
 		encoded, encodeErr := json.Marshal(existing)
 		return string(encoded), encodeErr
 	} else if !errors.Is(err, ErrNotFound) { return "", err }
@@ -581,12 +588,14 @@ func (executor *LinuxMariaDBExecutor) applyLocalHA(ctx context.Context, action M
 	connection, cleanup, err := executor.connection(ctx, instance)
 	if err != nil { return "", err }
 	defer cleanup()
+	if err=executor.writeNamed("effects","ha-fence-cursor.json",localMariaDBHAReceipt{EffectID:effectID,Action:action,ClusterID:cluster.ID,NodeID:node,FencingToken:fencingToken,LeaseID:leaseID,ReadOnly:wantReadOnly});err!=nil{return "",err}
 	output, err := connection.query(ctx, statement)
 	if err != nil { return "", errors.Join(ErrAmbiguous, err) }
 	member, proof, err := parseLocalHAMember(output, executor.now().UTC())
 	if err != nil || member.ReadOnly != wantReadOnly { return "", errors.Join(ErrAmbiguous, err) }
 	receipt := localMariaDBHAReceipt{EffectID:effectID, Action:action, ClusterID:cluster.ID, NodeID:node, FencingToken:fencingToken, LeaseID:leaseID, ReadOnly:member.ReadOnly, GTID:member.GTID, Frontier:member.Sequence, ProofDigest:proof, AppliedAt:member.ObservedAt}
 	if err = executor.writeNamed("effects", effectID+".json", receipt); err != nil { return "", errors.Join(ErrAmbiguous, err) }
+	if err=executor.writeNamed("effects","ha-fence-cursor.json",receipt);err!=nil{return "",errors.Join(ErrAmbiguous,err)}
 	encoded, err := json.Marshal(receipt)
 	if err != nil { return "", err }
 	return string(encoded), nil

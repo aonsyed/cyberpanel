@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/access"
+	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
 	"github.com/aonsyed/cyberpanel/platform/internal/backup"
 	"github.com/aonsyed/cyberpanel/platform/internal/certificates"
@@ -41,6 +42,7 @@ func main() {
 		if err := management.RunLinuxLifecycleWorker(); err != nil { log.Fatalf("run private web-engine candidate: %v", err) }
 		return
 	}
+	if len(os.Args)==3&&os.Args[1]=="--provision-mariadb-replication"{if err:=provisionMariaDBReplication(os.Args[2]);err!=nil{log.Fatal("MariaDB replication provisioning failed")};return}
 	if len(os.Args) == 2 && os.Args[1] == malwarescan.LinuxMalwareWorkerMode {
 		if err := malwarescan.RunLinuxMalwareSiteWorker(); err != nil { log.Fatalf("run site malware worker: %v", err) }
 		return
@@ -84,6 +86,8 @@ func main() {
 	distribution, err := database.DetectLinuxMariaDBDistribution(); if err != nil { log.Fatalf("detect MariaDB distribution: %v", err) }
 	localDatabase, err := database.DefaultLocalInstance(); if err != nil { log.Fatalf("construct local database instance: %v", err) }
 	databaseExecutor, err := database.NewLinuxMariaDBExecutor(databaseSecrets, distribution, []database.DatabaseInstance{localDatabase}); if err != nil { log.Fatalf("initialize MariaDB executor: %v", err) }
+	replicationAuthority,err:=apiserver.NewRecoveryClient("/run/cyberpanel-core/recovery.sock");if err!=nil{log.Fatalf("initialize database replication authority: %v",err)}
+	databaseExecutor.VerifyReplicationAuthority=replicationAuthority.VerifyStaticHAReplication
 	databasePolicy, err := database.NewDatabaseBrokerPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize database peer policy: %v", err) }
 	databaseListener, err := database.ListenDatabaseBroker(controlGID); if err != nil { log.Fatalf("listen on database broker socket: %v", err) }; defer databaseListener.Close()
 	databaseServer := &database.DatabaseBrokerServer{Authorizer:databasePolicy,Executor:databaseExecutor,MaximumConcurrent:64}

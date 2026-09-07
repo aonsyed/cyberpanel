@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/ha"
 )
 
 const (
@@ -83,6 +85,7 @@ type MariaDBInstanceStatus struct {
 // external MariaDB instances. Its public surface is the closed MariaDBExecutor
 // effect sum plus a read-only typed status probe.
 type LinuxMariaDBExecutor struct {
+	VerifyReplicationAuthority func(context.Context,ha.StaticReplicationBinding,ha.NodeID,uint64)error
 	secrets      LinuxMariaDBSecretSource
 	distribution LinuxMariaDBDistribution
 	now          func() time.Time

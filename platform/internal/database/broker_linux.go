@@ -11,6 +11,8 @@ import (
 	"os/user"
 	"strconv"
 	"syscall"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/ha"
 )
 
 const DatabaseBrokerSocketPath = "/run/cyberpanel/database.sock"
@@ -26,7 +28,10 @@ func NewLocalMariaDBClient() (*BrokerClient, error) {
 	info, err := os.Lstat(DatabaseBrokerSocketPath)
 	if err != nil { return nil, err }
 	if info.Mode()&os.ModeSocket == 0 || info.Mode().Perm()&0002 != 0 { return nil, ErrUnauthorized }
-	return NewBrokerClient(FramedDatabaseBrokerTransport{Dialer: LocalDatabaseBrokerDialer{}})
+	client,err:=NewBrokerClient(FramedDatabaseBrokerTransport{Dialer: LocalDatabaseBrokerDialer{}})
+	if err!=nil{return nil,err}
+	client.ReplicationEpoch=func(ctx context.Context,channel ha.ChannelID)(uint64,error){if err:=ctx.Err();err!=nil{return 0,err};_,_,epoch,err:=ha.ReadStaticReplicationBinding(channel);return epoch,err}
+	return client,nil
 }
 
 type DatabaseBrokerPeerPolicy struct{ allowedUID uint32 }
