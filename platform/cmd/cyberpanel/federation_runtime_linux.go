@@ -43,8 +43,40 @@ func startFederationRuntime(ctx context.Context, db *sql.DB, providers *localMar
 	if err != nil {
 		return err
 	}
+	go runFederationProjectionPublisher(ctx, store, controlProjectionSource{})
 	go superviseFederationRuntime(ctx, store, db, providers)
 	return nil
+}
+
+func runFederationProjectionPublisher(ctx context.Context, store *federation.Store, source federation.ProjectionSource) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	reportedFailure := false
+	publish := func() {
+		_, err := store.PublishProjection(ctx, source)
+		if err == nil {
+			reportedFailure = false
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, federation.ErrOffline) {
+			return
+		}
+		if !reportedFailure {
+			// Resource contents and provider errors are deliberately absent from
+			// logs; the local control plane continues while projection retries.
+			log.Print("federation projection publisher deferred; local workloads remain independent")
+			reportedFailure = true
+		}
+	}
+	publish()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			publish()
+		}
+	}
 }
 
 func superviseFederationRuntime(ctx context.Context, store *federation.Store, db *sql.DB, providers *localMariaDBHAProviders) {

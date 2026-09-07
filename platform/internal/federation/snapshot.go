@@ -93,36 +93,12 @@ func (row SnapshotProjection) Validate(watermark uint64, now time.Time) error {
 	return nil
 }
 
-// Bootstrap only declares the source complete when all historical event
-// sequences are retained. A pruned or discontinuous legacy history cannot
-// establish authoritative absence; it remains explicitly incomplete.
+// Legacy event continuity can never establish authoritative absence. Only a
+// complete control-authority scan performed by PublishProjection flips this
+// source bit after its resource events and marker are durably enqueued.
 func (s *Store) bootstrapProjectionSourceTx(ctx context.Context, tx *sql.Tx) error {
-	var complete int
-	err := tx.QueryRowContext(ctx, `SELECT complete FROM federation_projection_source_v1 WHERE singleton_id=1`).Scan(&complete)
-	if err == nil { return nil }
-	if !errors.Is(err,sql.ErrNoRows) { return err }
-	var count, watermark uint64
-	if err=tx.QueryRowContext(ctx,`SELECT COUNT(*) FROM federation_events`).Scan(&count);err!=nil{return err}
-	if err=tx.QueryRowContext(ctx,`SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='federation_events'),0)`).Scan(&watermark);err!=nil{return err}
-	complete=0
-	if count==watermark && count<=100000 { complete=1 }
-	if _,err=tx.ExecContext(ctx,`INSERT INTO federation_projection_source_v1(singleton_id,complete) VALUES(1,?)`,complete);err!=nil{return err}
-	if complete==0 { return nil }
-	rows,err:=tx.QueryContext(ctx,`SELECT sequence,payload_json FROM federation_events ORDER BY sequence`)
-	if err!=nil{return err}
-	var events []NodeEvent
-	var totalBytes int
-	for rows.Next(){
-		var event NodeEvent;var raw []byte;var sequence uint64
-		if err=rows.Scan(&sequence,&raw);err!=nil{rows.Close();return err}
-		totalBytes+=len(raw)
-		if totalBytes>SnapshotMaximumBytes { rows.Close();_,err=tx.ExecContext(ctx,`UPDATE federation_projection_source_v1 SET complete=0 WHERE singleton_id=1`);return err }
-		if json.Unmarshal(raw,&event)!=nil || event.PayloadDigest!=digest(event.Payload){rows.Close();return ErrInvalid}
-		event.Sequence=sequence;events=append(events,event)
-	}
-	err=rows.Err();rows.Close();if err!=nil{return err}
-	for _,event:=range events{if err=s.recordProjectionTx(ctx,tx,event);err!=nil{return err}}
-	return nil
+	_, err := tx.ExecContext(ctx, `INSERT INTO federation_projection_source_v1(singleton_id,complete) VALUES(1,0) ON CONFLICT(singleton_id) DO NOTHING`)
+	return err
 }
 
 func (s *Store) recordProjectionTx(ctx context.Context, tx *sql.Tx, event NodeEvent) error {
@@ -140,6 +116,7 @@ func (s *Store) ProjectionSnapshotChunk(ctx context.Context, request ProjectionS
 	var node,peer ID;var epoch uint64
 	if err=tx.QueryRowContext(ctx,`SELECT node_id,active_peer_id,authority_epoch FROM federation_state WHERE singleton_id=1`).Scan(&node,&peer,&epoch);err!=nil{return chunk,err}
 	if node!=request.NodeID||peer!=request.PeerID||epoch!=request.AuthorityEpoch{return chunk,ErrStale}
+	ready,readyErr:=projectionBaselineReadyTx(ctx,tx,node,epoch);if readyErr!=nil{return chunk,readyErr};if !ready{return chunk,errors.Join(ErrStale,ErrProjectionSourceIncomplete)}
 	var raw []byte
 	err=tx.QueryRowContext(ctx,`SELECT chunk_json FROM federation_projection_snapshots_v1 WHERE snapshot_id=? AND chunk_index=?`,request.SnapshotID,request.NextChunk).Scan(&raw)
 	if err==nil{
@@ -148,10 +125,6 @@ func (s *Store) ProjectionSnapshotChunk(ctx context.Context, request ProjectionS
 	}
 	if !errors.Is(err,sql.ErrNoRows){return chunk,err}
 	if request.NextChunk!=0{return chunk,ErrNotFound}
-	if err=s.bootstrapProjectionSourceTx(ctx,tx);err!=nil{return chunk,err}
-	var complete int
-	if err=tx.QueryRowContext(ctx,`SELECT complete FROM federation_projection_source_v1 WHERE singleton_id=1`).Scan(&complete);err!=nil{return chunk,err}
-	if complete!=1{return chunk,errors.Join(ErrStale,ErrProjectionSourceIncomplete)}
 	var watermark uint64
 	if err=tx.QueryRowContext(ctx,`SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='federation_events'),0)`).Scan(&watermark);err!=nil{return chunk,err}
 	if watermark<request.ExpectedSequence-1||watermark<request.ReceivedSequence{return chunk,ErrStale}
