@@ -90,6 +90,7 @@ type LinuxRuntimeCatalog struct {
 	Manager           Manager                  `json:"manager"`
 	Repositories      []LinuxRepositoryPolicy  `json:"repositories"`
 	Transactions      []LinuxTransactionPolicy `json:"transactions"`
+	RepairCodes       []string                 `json:"repair_codes,omitempty"`
 	AuthorizationKeys []LinuxAuthorizationKey  `json:"authorization_keys"`
 
 	digest            string
@@ -188,6 +189,8 @@ func (catalog LinuxRuntimeCatalog) validate(now time.Time) error {
 		}
 	}
 	transactions := make(map[string]struct{}, len(catalog.Transactions))
+	if len(catalog.RepairCodes) > 1 { return ErrInvalid }
+	for _, code := range catalog.RepairCodes { if catalog.Manager == ManagerAPT && code != "dpkg-audit" || catalog.Manager == ManagerDNF && code != "rpm-verifydb" { return ErrInvalid } }
 	for _, transaction := range catalog.Transactions {
 		if !safeID.MatchString(transaction.ID) || len(transaction.Packages) == 0 || len(transaction.Packages) > MaximumChanges ||
 			len(transaction.Services) > MaximumServiceImpacts || !validReboot(transaction.Reboot) || validateRecovery(transaction.Recovery) != nil ||
@@ -1036,6 +1039,7 @@ const (
 	LinuxBrokerResolve LinuxBrokerOperation = "resolve_security"
 	LinuxBrokerApply   LinuxBrokerOperation = "apply"
 	LinuxBrokerHold    LinuxBrokerOperation = "package_hold"
+	LinuxBrokerRepair LinuxBrokerOperation = "package_repair"
 )
 
 type LinuxBrokerRequest struct {
@@ -1049,6 +1053,7 @@ type LinuxBrokerRequest struct {
 	Hold        *PackageHoldRequest    `json:"hold,omitempty"`
 	TransactionReference string       `json:"transaction_reference,omitempty"`
 	PackageResourceID string          `json:"package_resource_id,omitempty"`
+	Repair *RepairRequest             `json:"repair,omitempty"`
 }
 
 type LinuxBrokerResponse struct {
@@ -1061,10 +1066,12 @@ type LinuxBrokerResponse struct {
 	Attestation *SolverAttestation `json:"attestation,omitempty"`
 	Receipt     *ExecutionReceipt  `json:"receipt,omitempty"`
 	HoldReceipt *PackageHoldReceipt `json:"hold_receipt,omitempty"`
+	RepairResult *RepairResult       `json:"repair_result,omitempty"`
 	CompletedAt time.Time          `json:"completed_at"`
 }
 
 func (request LinuxBrokerRequest) validate(now time.Time) error {
+	if request.Operation != LinuxBrokerRepair && request.Repair != nil { return ErrInvalid }
 	if request.TransactionReference != "" || request.PackageResourceID != "" {
 		if request.Operation != LinuxBrokerResolve || !safeID.MatchString(request.TransactionReference) || !safeID.MatchString(request.PackageResourceID) { return ErrInvalid }
 	}
@@ -1076,6 +1083,8 @@ func (request LinuxBrokerRequest) validate(now time.Time) error {
 		return ErrInvalid
 	}
 	switch request.Operation {
+	case LinuxBrokerRepair:
+		if request.Repair == nil || request.Repair.Validate() != nil || request.Observation != nil || request.Snapshot != nil || request.Execution != nil || request.Hold != nil { return ErrInvalid }
 	case LinuxBrokerObserve:
 		if request.Observation == nil || request.Snapshot != nil || request.Execution != nil || request.Hold != nil || !safeID.MatchString(request.Observation.NodeID) ||
 			!validManager(request.Observation.Manager) || request.Observation.Generation == 0 {
@@ -1100,6 +1109,7 @@ func (request LinuxBrokerRequest) validate(now time.Time) error {
 }
 
 func (response LinuxBrokerResponse) validate(request LinuxBrokerRequest, now time.Time) error {
+	if request.Operation != LinuxBrokerRepair && response.RepairResult != nil { return ErrInvalid }
 	if response.Version != linuxBrokerProtocolVersion || response.RequestID != request.RequestID || response.Operation != request.Operation ||
 		response.CompletedAt.IsZero() || response.CompletedAt.After(now.Add(time.Minute)) || response.Succeeded == (response.FailureCode != "") {
 		return ErrInvalid
@@ -1108,6 +1118,8 @@ func (response LinuxBrokerResponse) validate(request LinuxBrokerRequest, now tim
 		return ErrInvalid
 	}
 	switch request.Operation {
+	case LinuxBrokerRepair:
+		if response.Inventory != nil || response.Attestation != nil || response.Receipt != nil || response.HoldReceipt != nil || response.Succeeded && response.RepairResult == nil || response.RepairResult != nil && response.RepairResult.Validate(request.Repair.Plan) != nil { return ErrInvalid }
 	case LinuxBrokerObserve:
 		if response.Succeeded && (response.Inventory == nil || response.Inventory.Validate() != nil) || response.Attestation != nil || response.Receipt != nil || response.HoldReceipt != nil {
 			return ErrInvalid
@@ -1184,6 +1196,10 @@ func (client *LocalLinuxClient) SetPackageHold(ctx context.Context, request Pack
 		return PackageHoldReceipt{}, InventorySnapshot{}, err
 	}
 	return *response.HoldReceipt, *response.Inventory, err
+}
+
+func (client *LocalLinuxClient) RepairPackageDatabase(ctx context.Context, request RepairRequest) (RepairResult,error) {
+	response,err := client.roundTrip(ctx,LinuxBrokerRequest{Operation:LinuxBrokerRepair,Repair:&request}); if response.RepairResult == nil { return RepairResult{},err }; return *response.RepairResult,err
 }
 
 func (client *LocalLinuxClient) roundTrip(ctx context.Context, request LinuxBrokerRequest) (LinuxBrokerResponse, error) {
@@ -1335,6 +1351,10 @@ func (server *LinuxBrokerServer) serve(connection net.Conn) {
 		if receipt.EffectID != "" {
 			response.HoldReceipt, response.Inventory = &receipt, &inventory
 		}
+	case LinuxBrokerRepair:
+		var result RepairResult
+		result,err = server.Broker.RepairPackageDatabase(ctx,*request.Repair)
+		if result.PlanID != "" { response.RepairResult = &result }
 	}
 	response.Succeeded = err == nil
 	if err != nil {
@@ -1868,6 +1888,7 @@ func (broker *LinuxBroker) Apply(ctx context.Context, request ExecutionRequest) 
 	}
 	broker.applyMu.Lock()
 	defer broker.applyMu.Unlock()
+	if err := broker.journal.repairBlocked(""); err != nil { return ExecutionReceipt{},err }
 	now := broker.now().UTC()
 	entry, found, err := broker.journal.prepare(request, requestDigest, now)
 	if err != nil {
@@ -1920,6 +1941,7 @@ func (broker *LinuxBroker) SetPackageHold(ctx context.Context, request PackageHo
 	}
 	broker.applyMu.Lock()
 	defer broker.applyMu.Unlock()
+	if err := broker.journal.repairBlocked(""); err != nil { return PackageHoldReceipt{},InventorySnapshot{},err }
 	now := broker.now().UTC()
 	entry, found, err := broker.journal.prepareHold(request, request.Digest, now)
 	if err != nil { return PackageHoldReceipt{}, InventorySnapshot{}, ErrAmbiguous }
@@ -2062,6 +2084,91 @@ func (broker *LinuxBroker) reconcile(ctx context.Context, entry linuxJournalEntr
 		return receipt, ErrAmbiguous
 	}
 	return receipt, resultErr
+}
+
+func (catalog *LinuxRuntimeCatalog) PlanPackageRepair(snapshot InventorySnapshot, id, occurrence string, now time.Time) (RepairPlan,error) {
+	if catalog == nil || catalog.validate(now) != nil || snapshot.Validate() != nil || snapshot.NodeID != catalog.NodeID || snapshot.Manager != catalog.Manager || len(catalog.RepairCodes) != 1 { return RepairPlan{},ErrUnsupported }
+	code := catalog.RepairCodes[0]; detected := false
+	for _, lock := range snapshot.Locks { if lock.Held { return RepairPlan{},ErrLocked }; if lock.RepairCode != "" { if lock.RepairCode != code { return RepairPlan{},ErrUnsupported }; detected = true } }
+	if !detected { return RepairPlan{},ErrUnsupported }
+	plan := RepairPlan{ID:id,NodeID:snapshot.NodeID,Manager:snapshot.Manager,RepairCode:code,InventoryID:snapshot.ID,InventoryDigest:snapshot.ContentDigest,InventoryGeneration:snapshot.Generation,PolicyDigest:catalog.digest,MaintenanceOccurrenceID:occurrence,CreatedAt:now.UTC(),ExpiresAt:now.UTC().Add(15*time.Minute)}
+	err := SealRepairPlan(&plan); return plan,err
+}
+
+func repairCommand(plan RepairPlan) (string,[]string,error) {
+	if plan.Validate() != nil { return "",nil,ErrInvalid }
+	if plan.Manager == ManagerAPT && plan.RepairCode == "dpkg-audit" { return dpkgPath,[]string{"--configure","--pending"},nil }
+	if plan.Manager == ManagerDNF && plan.RepairCode == "rpm-verifydb" { return rpmPath,[]string{"--rebuilddb"},nil }
+	return "",nil,ErrUnsupported
+}
+
+func (journal *LinuxJournal) repairPath(id string) string { return filepath.Join(journal.root,"repair-"+digestStrings(id)+".json") }
+func (journal *LinuxJournal) readRepair(path string) (RepairRecord,bool,error) {
+	raw,err := readRootOwnedLinuxRuntimeFile(path,linuxJournalMaximumBytes)
+	if errors.Is(err,os.ErrNotExist) { return RepairRecord{},false,nil }; if err != nil { return RepairRecord{},false,err }
+	var record RepairRecord
+	if decodeLinuxRuntimeJSON(raw,&record) != nil || record.Plan.Validate() != nil || record.Request == nil || record.Request.Validate() != nil || record.Request.Plan != record.Plan || record.State != "executing" && record.State != "succeeded" && record.State != "failed" && record.State != "ambiguous" { return RepairRecord{},false,ErrAmbiguous }
+	if record.State != "executing" && (record.Result == nil || record.Result.Validate(record.Plan) != nil || record.Result.State != record.State) { return RepairRecord{},false,ErrAmbiguous }
+	return record,true,nil
+}
+
+func (journal *LinuxJournal) repairBlocked(allowID string) error {
+	journal.mu.Lock(); defer journal.mu.Unlock()
+	record,found,err := journal.readRepair(filepath.Join(journal.root,"repair-active.json")); if err != nil { return ErrAmbiguous }
+	if found && record.Plan.ID != allowID && (record.State == "executing" || record.State == "ambiguous") { return ErrRecoveryRequired }; return nil
+}
+
+func (journal *LinuxJournal) saveRepair(record RepairRecord) error {
+	journal.mu.Lock(); defer journal.mu.Unlock()
+	if err := journal.writeValueLocked(journal.repairPath(record.Plan.ID),record); err != nil { return err }
+	return journal.writeValueLocked(filepath.Join(journal.root,"repair-active.json"),record)
+}
+
+func (broker *LinuxBroker) RepairPackageDatabase(ctx context.Context,request RepairRequest) (RepairResult,error) {
+	if broker == nil || broker.runtime == nil || broker.journal == nil || ctx == nil || request.Validate() != nil { return RepairResult{},ErrInvalid }
+	broker.applyMu.Lock(); defer broker.applyMu.Unlock()
+	if err := broker.journal.repairBlocked(request.Plan.ID); err != nil { return RepairResult{},err }
+	journal := broker.journal
+	journal.mu.Lock(); record,found,err := journal.readRepair(journal.repairPath(request.Plan.ID)); journal.mu.Unlock()
+	if err != nil { return RepairResult{},ErrAmbiguous }
+	if found {
+		storedDigest,_ := canonicalDigest(record.Request); receivedDigest,_ := canonicalDigest(request)
+		if record.Plan != request.Plan || storedDigest != receivedDigest { return RepairResult{},ErrConflict }
+		if record.Result != nil {
+			if err = journal.saveRepair(record); err != nil { return *record.Result,ErrAmbiguous }
+			if record.State == "succeeded" { return *record.Result,nil }; return *record.Result,ErrRecoveryRequired
+		}
+		// A persisted intent may have crossed the command frontier. Never rerun
+		// configure/rebuild after process loss, even if diagnostics look healthy.
+		result := RepairResult{PlanID:request.Plan.ID,PlanDigest:request.Plan.Digest,State:"ambiguous",ObservedAt:broker.now().UTC()}
+		_ = sealRepairResult(&result); record.State,record.Result = result.State,&result
+		if err = journal.saveRepair(record); err != nil { return result,ErrAmbiguous }; return result,ErrAmbiguous
+	}
+	now := broker.now().UTC()
+	if request.Authorization.Validate(AssurancePhishingResistant,now) != nil || !now.Before(request.Plan.ExpiresAt) || broker.runtime.catalog.validate(now) != nil || broker.runtime.catalog.digest != request.Plan.PolicyDigest { return RepairResult{},ErrUnauthorized }
+	before,err := broker.runtime.Snapshot(ctx,InventoryRequest{NodeID:request.Plan.NodeID,Manager:request.Plan.Manager,Generation:request.Plan.InventoryGeneration}); if err != nil { return RepairResult{},err }
+	if before.ContentDigest != request.Plan.InventoryDigest || before.ID != request.Plan.InventoryID { return RepairResult{},ErrStaleInventory }
+	approved,err := broker.runtime.catalog.PlanPackageRepair(before,request.Plan.ID,request.Plan.MaintenanceOccurrenceID,request.Plan.CreatedAt)
+	if err != nil || approved != request.Plan { return RepairResult{},ErrUnauthorized }
+	if _,held,err := fixedManagerLock(request.Plan.Manager,now); err != nil { return RepairResult{},err } else if held { return RepairResult{},ErrLocked }
+	executable,argv,err := repairCommand(request.Plan); if err != nil { return RepairResult{},err }
+	record = RepairRecord{Plan:request.Plan,Request:&request,State:"executing"}
+	// Intent is fsynced before invocation; shared applyMu and native manager
+	// locks serialize repairs with ordinary transactions and hold effects.
+	if err = journal.saveRepair(record); err != nil { return RepairResult{},ErrAmbiguous }
+	command,runErr := broker.runtime.runner.Run(ctx,executable,argv,MaximumOutputBytes)
+	result := RepairResult{PlanID:request.Plan.ID,PlanDigest:request.Plan.Digest,State:"ambiguous",Command:commandReceipt(command),ObservedAt:broker.now().UTC()}
+	after,observeErr := broker.runtime.Snapshot(ctx,InventoryRequest{NodeID:request.Plan.NodeID,Manager:request.Plan.Manager,Generation:request.Plan.InventoryGeneration+1})
+	if observeErr == nil && after.Validate() == nil && !command.StartedAt.IsZero() && runErr == nil {
+		result.After,result.State = after,"failed"
+		clean := command.ExitCode == 0
+		for _, lock := range after.Locks { if lock.Held || lock.RepairCode != "" { clean = false } }
+		if clean { result.State = "succeeded" }
+	}
+	if err = sealRepairResult(&result); err != nil || result.Validate(request.Plan) != nil { return RepairResult{},ErrAmbiguous }
+	record.State,record.Result = result.State,&result
+	if err = journal.saveRepair(record); err != nil { return result,ErrAmbiguous }
+	if result.State != "succeeded" { return result,ErrRecoveryRequired }; return result,nil
 }
 
 // ReconcileRestart resumes only operations whose commit authorization and

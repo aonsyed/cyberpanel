@@ -34,6 +34,7 @@ type packageMaintenanceLinuxEdge struct {
 	resolver   packageMaintenancePlanResolver
 	catalog    *packagemaint.LinuxRuntimeCatalog
 	holds      packagemaint.PackageHoldExecutor
+	repairs    interface { RepairPackageDatabase(context.Context, packagemaint.RepairRequest) (packagemaint.RepairResult,error) }
 	service    packagemaint.Service
 	nodeID     string
 	manager    packagemaint.Manager
@@ -96,6 +97,7 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 	if err = repository.Bootstrap(ctx); err != nil {
 		return nil, err
 	}
+	if err = repository.BootstrapRepair(ctx); err != nil { return nil,err }
 	rebootRepository, err := rebootcontrol.NewRepository(database)
 	if err != nil {
 		return nil, err
@@ -135,6 +137,7 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 		return nil, err
 	}
 	edge.catalog = catalog
+	edge.repairs = client
 	operation, err := repository.LatestOperation(ctx, catalog.NodeID, catalog.Manager)
 	if errors.Is(err, packagemaint.ErrNotFound) {
 		return edge, nil
@@ -156,6 +159,59 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 
 func (*packageMaintenanceLinuxEdge) PackageMaintenanceCapabilities() apiserver.PackageMaintenanceEdgeCapabilities {
 	return apiserver.PackageMaintenanceEdgeCapabilities{List: true, Refresh: true, Plan: true, Apply: true, Packages: true, Holds: true}
+}
+
+func (edge *packageMaintenanceLinuxEdge) validateRepairCall(ctx context.Context,call apiserver.EdgeCall) error {
+	if edge == nil || ctx == nil || edge.catalog == nil || edge.repairs == nil || call.TenantID != "" || call.PrincipalID == "" || call.CredentialID == "" || call.AuthzEpoch == 0 || !validPackageMaintenanceRuntimeID(call.ResourceID) || call.ExpectedGeneration == 0 || call.CommandID == "" || call.IdempotencyKey == "" { return packagemaint.ErrInvalid }; return nil
+}
+
+func (edge *packageMaintenanceLinuxEdge) PlanPackageRepair(ctx context.Context,call apiserver.EdgeCall,payload apiserver.PackageMaintenanceApplyPayload) (apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection],error) {
+	if err := edge.validateRepairCall(ctx,call); err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	if err := edge.repository.RepairBlocked(ctx,edge.nodeID,edge.manager); err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	snapshot,err := edge.repository.LatestInventory(ctx,edge.nodeID,edge.manager)
+	if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	if snapshot.ID != call.ResourceID || snapshot.Generation != call.ExpectedGeneration { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},packagemaint.ErrStaleInventory }
+	id := "pkgrepair_"+packageMaintenanceDigest(call.CommandID,call.IdempotencyKey,snapshot.ID,payload.MaintenanceOccurrenceID)[:40]
+	record,err := edge.repository.Repair(ctx,id)
+	if errors.Is(err,packagemaint.ErrNotFound) {
+		plan,planErr := edge.catalog.PlanPackageRepair(snapshot,id,payload.MaintenanceOccurrenceID,edge.now().UTC()); if planErr != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},planErr }
+		if err = edge.service.AdmitMaintenance(ctx,packagemaint.MaintenanceAdmissionRequest{RequestID:"pkgmw_"+packageMaintenanceDigest("repair-plan",id)[:32],OccurrenceID:plan.MaintenanceOccurrenceID,NodeID:plan.NodeID,Manager:plan.Manager,ExpectedDuration:packagemaint.MaintenanceExecutionDuration,At:edge.now().UTC()}); err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+		if err = edge.repository.SaveRepairPlan(ctx,plan); err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }; record,err = edge.repository.Repair(ctx,id)
+	}
+	if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	projection,err := edge.projection(ctx,snapshot); if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{OperationID:record.Plan.ID,State:record.State,Generation:projection.Generation,Resource:projection},nil
+}
+
+func (edge *packageMaintenanceLinuxEdge) ExecutePackageRepair(ctx context.Context,call apiserver.EdgeCall,payload apiserver.PackageMaintenanceApplyPayload) (apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection],error) {
+	if err := edge.validateRepairCall(ctx,call); err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	record,err := edge.repository.Repair(ctx,call.ResourceID); if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	plan := record.Plan
+	if plan.NodeID != edge.nodeID || plan.Manager != edge.manager || plan.InventoryGeneration != call.ExpectedGeneration || plan.MaintenanceOccurrenceID != payload.MaintenanceOccurrenceID { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},packagemaint.ErrConflict }
+	if record.State == "planned" {
+		if !edge.now().UTC().Before(plan.ExpiresAt) { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},packagemaint.ErrStalePlan }
+		latest,loadErr := edge.repository.LatestInventory(ctx,edge.nodeID,edge.manager); if loadErr != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},loadErr }; if latest.ID != plan.InventoryID || latest.ContentDigest != plan.InventoryDigest { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},packagemaint.ErrStaleInventory }
+		if err = edge.service.AdmitMaintenance(ctx,packagemaint.MaintenanceAdmissionRequest{RequestID:"pkgmw_"+packageMaintenanceDigest("repair-execute",plan.ID)[:32],OccurrenceID:plan.MaintenanceOccurrenceID,NodeID:plan.NodeID,Manager:plan.Manager,ExpectedDuration:packagemaint.MaintenanceExecutionDuration,At:edge.now().UTC()}); err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+		authorization := packagemaint.RepairAuthorizationRequest(plan,call.PrincipalID)
+		evidence,authorizeErr := edge.service.Authorizer.Authorize(ctx,authorization)
+		if authorizeErr != nil || evidence.ActorID != call.PrincipalID || evidence.AuthorizationEpoch != call.AuthzEpoch || evidence.Validate(packagemaint.AssurancePhishingResistant,edge.now().UTC()) != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},packagemaint.ErrUnauthorized }
+		record,err = edge.repository.StartRepair(ctx,packagemaint.RepairRequest{Plan:plan,Authorization:evidence}); if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	}
+	if record.Request == nil || record.Request.Authorization.ActorID != call.PrincipalID || record.Request.Authorization.AuthorizationEpoch != call.AuthzEpoch { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},packagemaint.ErrUnauthorized }
+	if record.State == "executing" {
+		result,effectErr := edge.repairs.RepairPackageDatabase(ctx,*record.Request)
+		if result.PlanID == "" { if effectErr == nil { effectErr = packagemaint.ErrAmbiguous }; return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},effectErr }
+		if result.Validate(plan) != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},packagemaint.ErrAmbiguous }
+		if result.State != "ambiguous" {
+			latest,loadErr := edge.repository.LatestInventory(ctx,edge.nodeID,edge.manager); if loadErr != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},loadErr }
+			if latest.ID == plan.InventoryID { err = edge.repository.SaveInventory(ctx,result.After,plan.InventoryGeneration) } else if latest.ID != result.After.ID { err = packagemaint.ErrStaleInventory }
+			if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+		}
+		record,err = edge.repository.FinishRepair(ctx,result); if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	}
+	snapshot,err := edge.repository.LatestInventory(ctx,edge.nodeID,edge.manager); if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	projection,err := edge.projection(ctx,snapshot); if err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{},err }
+	return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{OperationID:plan.ID,State:record.State,Generation:projection.Generation,Resource:projection},nil
 }
 
 func (edge *packageMaintenanceLinuxEdge) ListPackageMaintenancePackages(ctx context.Context, call apiserver.EdgeCall,
@@ -531,7 +587,7 @@ func (edge *packageMaintenanceLinuxEdge) validateMutation(ctx context.Context, c
 	} else if call.ResourceID != "" || call.ExpectedGeneration != 0 {
 		return packagemaint.ErrInvalid
 	}
-	return nil
+	return edge.repository.RepairBlocked(ctx,edge.nodeID,edge.manager)
 }
 
 func (edge *packageMaintenanceLinuxEdge) latestOperation(ctx context.Context) (packagemaint.MaintenanceOperation, error) {
@@ -567,7 +623,23 @@ func (edge *packageMaintenanceLinuxEdge) projection(ctx context.Context,
 	if err != nil {
 		return apiserver.PackageMaintenanceProjection{}, err
 	}
-	return projectPackageMaintenance(snapshot, plan, operation, edge.now().UTC()), nil
+	projection := projectPackageMaintenance(snapshot, plan, operation, edge.now().UTC())
+	if projection.PackageDatabaseStatus == "repair_required" && edge.catalog != nil {
+		for _, lock := range snapshot.Locks { for _, code := range edge.catalog.RepairCodes { if lock.RepairCode == code { projection.Type,projection.RepairCode = "repair_required",code } } }
+	}
+	repair,repairErr := edge.repository.LatestRepair(ctx,edge.nodeID,edge.manager)
+	if repairErr != nil && !errors.Is(repairErr,packagemaint.ErrNotFound) { return apiserver.PackageMaintenanceProjection{},repairErr }
+	if repairErr == nil {
+		projection.RepairID,projection.RepairCode,projection.RepairState,projection.RepairDigest = repair.Plan.ID,repair.Plan.RepairCode,repair.State,repair.Plan.Digest
+		if repair.State == "executing" || repair.State == "ambiguous" || repair.State == "planned" && repair.Plan.InventoryID == snapshot.ID && edge.now().UTC().Before(repair.Plan.ExpiresAt) {
+			projection.ID,projection.Type,projection.Generation = repair.Plan.ID,"repair_"+repair.State,repair.Plan.InventoryGeneration
+			projection.MaintenanceOccurrenceID = repair.Plan.MaintenanceOccurrenceID
+			projection.ApplyStatus,projection.RecoveryStatus = "blocked_repair",repair.State
+			if repair.State != "planned" { projection.PackageDatabaseStatus = "repair_required"; projection.RecoveryRequired = true }
+			projection.Ambiguous = repair.State == "ambiguous"
+		}
+	}
+	return projection,nil
 }
 
 type packageMaintenanceInventorySummary struct {

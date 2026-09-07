@@ -820,12 +820,12 @@ func allowedInvocation(executable string, argv []string) bool {
 	case dpkgQueryPath:
 		return len(argv) == 2 && argv[0] == "-W" && argv[1] == "-f=${binary:Package}\t${Architecture}\t${Version}\t${db:Status-Abbrev}\n"
 	case dpkgPath:
-		return equalStrings(argv, []string{"--audit"})
+		return equalStrings(argv, []string{"--audit"}) || equalStrings(argv, []string{"--configure", "--pending"})
 	case aptMarkPath:
 		return equalStrings(argv, []string{"showhold"}) || len(argv) == 2 &&
 			(argv[0] == "hold" || argv[0] == "unhold") && safeAPTSelector(argv[1])
 	case rpmPath:
-		return equalStrings(argv, []string{"--verifydb"}) || equalStrings(argv, []string{"-qa", "--qf", "%{NAME}\t%{ARCH}\t%{EPOCHNUM}\t%{VERSION}-%{RELEASE}\t%{VENDOR}\t%{SIGPGP:pgpsig}\n"})
+		return equalStrings(argv, []string{"--rebuilddb"}) || equalStrings(argv, []string{"--verifydb"}) || equalStrings(argv, []string{"-qa", "--qf", "%{NAME}\t%{ARCH}\t%{EPOCHNUM}\t%{VERSION}-%{RELEASE}\t%{VENDOR}\t%{SIGPGP:pgpsig}\n"})
 	case aptGetPath:
 		if equalStrings(argv, []string{"indextargets", "--format", "$(IDENTIFIER)\t$(SITE)\t$(RELEASE)\t$(COMPONENT)\t$(TRUSTED)"}) || equalStrings(argv, []string{"-s", "-o", "Debug::NoLocking=1", "-o", "APT::Get::Show-Upgraded=true", "upgrade"}) {
 			return true

@@ -24,6 +24,10 @@ type PackageMaintenanceProjection struct {
 	SecurityUpdatesBlocked   uint64    `json:"security_updates_blocked"`
 	HighestSecurity          string    `json:"highest_security"`
 	PackageDatabaseStatus    string    `json:"package_database_status"`
+	RepairID                 string    `json:"repair_id,omitempty"`
+	RepairCode               string    `json:"repair_code,omitempty"`
+	RepairState              string    `json:"repair_state,omitempty"`
+	RepairDigest             string    `json:"repair_digest,omitempty"`
 	RebootRequired           bool      `json:"reboot_required"`
 	PlannedReboot            string    `json:"planned_reboot,omitempty"`
 	InventoryID              string    `json:"inventory_id"`
@@ -86,6 +90,11 @@ type PackageMaintenanceEdgeService interface {
 	ApplyPackageMaintenance(context.Context, EdgeCall, PackageMaintenanceApplyPayload) (EdgeMutation[PackageMaintenanceProjection], error)
 }
 
+type PackageMaintenanceRepairEdge interface {
+	PlanPackageRepair(context.Context,EdgeCall,PackageMaintenanceApplyPayload) (EdgeMutation[PackageMaintenanceProjection],error)
+	ExecutePackageRepair(context.Context,EdgeCall,PackageMaintenanceApplyPayload) (EdgeMutation[PackageMaintenanceProjection],error)
+}
+
 // PackageMaintenanceEdgeCapabilities prevents a status-only deployment from
 // advertising plan or apply before its signed resolver, protected authorizer,
 // and privileged executor are all present.
@@ -104,6 +113,8 @@ type PackageMaintenanceEdgeCapabilityProvider interface {
 
 func registerPackageMaintenanceContracts(registry *Registry) error {
 	definitions := []Operation{
+		consoleOperation("package_maintenance.repair.plan", "package:manage", identity.AssuranceMFA, true, func() any { return &PackageMaintenanceApplyPayload{} }, validatePackageMaintenanceApply, edgeInstallationExistingMutationScope),
+		consoleOperation("package_maintenance.repair.execute", "package:manage", identity.AssurancePhishingResistant, true, func() any { return &PackageMaintenanceApplyPayload{} }, validatePackageMaintenanceApply, edgeInstallationExistingMutationScope),
 		consoleOperation("package_maintenance.status.list", "operations:observe", identity.AssurancePassword, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
 		consoleOperation("package_maintenance.package.list", "operations:observe", identity.AssurancePassword, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
 		consoleOperation("package_maintenance.package.get", "operations:observe", identity.AssurancePassword, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
@@ -143,6 +154,10 @@ func validatePackageMaintenanceApply(value any) error {
 func bindPackageMaintenanceContracts(registry *Registry, services DomainServices) error {
 	if services.PackageMaintenance == nil {
 		return nil
+	}
+	if repairs,ok := services.PackageMaintenance.(PackageMaintenanceRepairEdge); ok {
+		if err := registry.Bind("package_maintenance.repair.plan",func(ctx context.Context,invocation Invocation,value any)(OperationResult,error){ result,err := repairs.PlanPackageRepair(ctx,edgeCall(invocation),*value.(*PackageMaintenanceApplyPayload)); if err != nil { return OperationResult{},mapDomainError(err) }; return edgeOperationResult(http.StatusAccepted,result),nil }); err != nil { return err }
+		if err := registry.Bind("package_maintenance.repair.execute",func(ctx context.Context,invocation Invocation,value any)(OperationResult,error){ result,err := repairs.ExecutePackageRepair(ctx,edgeCall(invocation),*value.(*PackageMaintenanceApplyPayload)); if err != nil { return OperationResult{},mapDomainError(err) }; return edgeOperationResult(http.StatusAccepted,result),nil }); err != nil { return err }
 	}
 	capabilities := PackageMaintenanceEdgeCapabilities{List: true, Refresh: true, Plan: true, Apply: true, Packages: true, Holds: true}
 	if provider, ok := services.PackageMaintenance.(PackageMaintenanceEdgeCapabilityProvider); ok {
