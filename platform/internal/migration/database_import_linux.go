@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ func NewDatabaseImportHandler(ctx context.Context,db *sql.DB,chunks *ChunkStore,
 	if db==nil || chunks==nil || scopes==nil || commands==nil || repository==nil || broker==nil || secret==nil || siteTarget==nil { return nil,ErrInvalid }
 	_,err:=db.ExecContext(ctx,`CREATE TABLE IF NOT EXISTS panel_migration_database_imports(migration_id TEXT NOT NULL,target_id TEXT NOT NULL,effect_id TEXT NOT NULL,input_digest TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(migration_id,target_id),UNIQUE(effect_id))`)
 	if err!=nil { return nil,err }
+	if _,err=db.ExecContext(ctx,`CREATE TABLE IF NOT EXISTS panel_migration_database_compensations(migration_id TEXT NOT NULL,target_id TEXT NOT NULL,input_digest TEXT NOT NULL,receipt_json BLOB NOT NULL,PRIMARY KEY(migration_id,target_id))`);err!=nil{return nil,err}
 	return &DatabaseImportHandler{db:db,chunks:chunks,scopes:scopes,commands:commands,repository:repository,broker:broker,secret:secret,siteTarget:siteTarget},nil
 }
 
@@ -160,10 +162,12 @@ func (handler *DatabaseImportHandler) Compensate(ctx context.Context,intent Impo
 	if !effectMatches(effect,intent) { return ImportEffect{},ErrInvalid }
 	plan,err:=handler.plan(ctx,intent); if err!=nil { return ImportEffect{},err }
 	state,err:=handler.state(ctx,intent); if err!=nil { return ImportEffect{},err }
+	if state=="compensated"{var raw []byte;if err=handler.db.QueryRowContext(ctx,`SELECT receipt_json FROM panel_migration_database_compensations WHERE migration_id=? AND target_id=? AND input_digest=?`,intent.MigrationID.String(),intent.TargetID.String(),intent.InputDigest).Scan(&raw);err!=nil{return ImportEffect{},errors.Join(ErrAmbiguous,err)};var receipt ImportEffect;if json.Unmarshal(raw,&receipt)!=nil||!effectMatches(receipt,intent)||receipt.Status!=ImportEffectCompensated||!isDigest(receipt.EvidenceDigest)||!isDigest(receipt.OutputDigest){return ImportEffect{},ErrAmbiguous};return receipt,nil}
 	if state!="compensated" {
 		if _,err=handler.db.ExecContext(ctx,`UPDATE panel_migration_database_imports SET state='compensating' WHERE migration_id=? AND target_id=? AND input_digest=?`,intent.MigrationID.String(),intent.TargetID.String(),intent.InputDigest); err!=nil { return ImportEffect{},err }
 		request:=plan.restore; request.Action="discard"
-		if _,discardErr:=handler.broker.RestoreMigrationDatabase(ctx,request); discardErr!=nil && !errors.Is(discardErr,database.ErrNotFound) { return ambiguousImportEffect(intent,"DATABASE_RESTORE_CLEANUP_UNCERTAIN",time.Now().UTC()),discardErr }
+		discard,discardErr:=handler.broker.RestoreMigrationDatabase(ctx,request);if discardErr!=nil||discard.State!="discarded"||discard.ID!=request.ID||discard.InputDigest!=intent.InputDigest||discard.ObservedAt.IsZero(){return ambiguousImportEffect(intent,"DATABASE_RESTORE_CLEANUP_UNCERTAIN",time.Now().UTC()),errors.Join(ErrAmbiguous,discardErr)}
+		removedReceipts:=[]database.OperationReceipt{}
 		for _,item:=range []struct{kind database.ResourceKind; id database.ResourceID; command string}{{database.KindPrincipal,plan.principal.ID,"mig-db-principal-"},{database.KindDatabase,plan.target.ID,"mig-db-create-"}} {
 			scope:=database.OperationScope{TenantID:plan.target.TenantID,Kind:item.kind,ID:item.id}
 			created,found,loadErr:=handler.repository.LookupOperation(ctx,scope,item.command+intent.EffectID)
@@ -172,11 +176,13 @@ func (handler *DatabaseImportHandler) Compensate(ctx context.Context,intent Impo
 			header:=plan.header; header.CommandID="mig-db-remove-"+item.id.String()+"-"+intent.EffectID[:16]
 			var command database.Command
 			if item.kind==database.KindPrincipal { command=database.DeletePrincipal{Header:header,PrincipalID:item.id,ExpectedGeneration:1} } else { approval,_:=database.NewResourceID("migration-cancel-"+intent.EffectID[:32]); command=database.DeleteDatabase{Header:header,DatabaseID:item.id,ExpectedGeneration:1,WaiveRecovery:true,ApprovalRef:approval} }
-			removed,removeErr:=handler.commands.Handle(ctx,command); if removeErr!=nil || removed.Status!=database.OperationApplied { return ambiguousImportEffect(intent,"DATABASE_CLEANUP_UNPROVEN",time.Now().UTC()),errors.Join(ErrBlocked,removeErr) }
+			removed,removeErr:=handler.commands.Handle(ctx,command); if removeErr!=nil || removed.Status!=database.OperationApplied||removed.CommandID!=header.CommandID||removed.Scope!=scope||removed.Effect.Outcome!=database.EffectConfirmed||!removed.Effect.MutationObserved||!isDigest(removed.Effect.ProofDigest) { return ambiguousImportEffect(intent,"DATABASE_CLEANUP_UNPROVEN",time.Now().UTC()),errors.Join(ErrBlocked,removeErr) };removedReceipts=append(removedReceipts,removed)
 		}
-		if _,err=handler.db.ExecContext(ctx,`UPDATE panel_migration_database_imports SET state='compensated' WHERE migration_id=? AND target_id=? AND input_digest=?`,intent.MigrationID.String(),intent.TargetID.String(),intent.InputDigest); err!=nil { return ImportEffect{},err }
+		proof:=digestJSON(struct{Input string;Discard database.MigrationRestoreReceipt;Removed []database.OperationReceipt}{intent.InputDigest,discard,removedReceipts});receipt:=ImportEffect{EffectID:intent.EffectID,InputDigest:intent.InputDigest,Status:ImportEffectCompensated,OutputDigest:proof,EvidenceDigest:proof,AppliedAt:time.Now().UTC()};raw,err:=json.Marshal(receipt);if err!=nil{return ImportEffect{},err};tx,err:=handler.db.BeginTx(ctx,nil);if err!=nil{return ImportEffect{},err};defer tx.Rollback()
+		if _,err=tx.ExecContext(ctx,`INSERT INTO panel_migration_database_compensations(migration_id,target_id,input_digest,receipt_json) VALUES(?,?,?,?)`,intent.MigrationID.String(),intent.TargetID.String(),intent.InputDigest,raw);err!=nil{return ImportEffect{},err}
+		if _,err=tx.ExecContext(ctx,`UPDATE panel_migration_database_imports SET state='compensated' WHERE migration_id=? AND target_id=? AND input_digest=?`,intent.MigrationID.String(),intent.TargetID.String(),intent.InputDigest); err!=nil { return ImportEffect{},err };if err=tx.Commit();err!=nil{return ImportEffect{},errors.Join(ErrAmbiguous,err)};return receipt,nil
 	}
-	return ImportEffect{EffectID:intent.EffectID,InputDigest:intent.InputDigest,Status:ImportEffectCompensated,AppliedAt:time.Now().UTC()},nil
+	return ImportEffect{},ErrAmbiguous
 }
 
 var _ CanonicalImportHandler=(*DatabaseImportHandler)(nil)
