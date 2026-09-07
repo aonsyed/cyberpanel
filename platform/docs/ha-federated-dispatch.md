@@ -71,3 +71,46 @@ the mutation to resolve uncertainty. Provisioning
 the external signed approvals and node authority verifier remains an explicit
 deployment prerequisite. Runtime verification is deferred to the requested QEMU
 phase; no tests or builds were performed for this coding slice.
+
+## Owning-node HA ingress
+
+The outbound federation runtime composes the HA ingress only after the domain's
+local MariaDB gate/promotion and OLS listener providers exist. Without protected
+`/etc/cyberpanel/ha/federated-ingress.json`, the runtime advertises no HA mutation
+capabilities. That configuration contains `tenant_id` (`system`), the exact
+enrolled `node_id` and `peer_id`, `group_id`, an explicit `grant_ids` array, and
+`grant_keys`/`approval_keys` maps from signing key IDs to base64 Ed25519 public
+keys. It follows the same root-owned, no-symlink file rules as sender configuration.
+Key material is re-read for each authorization; no private authority key is loaded.
+
+The independently provisioned mutation grant must be present in the node's
+existing federation store and match the current peer epoch. Compute its digest
+with `ha.FederatedHAGrantDigest`, then sign
+`ha.FederatedHAGrantSignaturePayload` with the separately held grant authority key.
+Purpose approvals use `ha.FederatedHAApprovalSignaturePayload`; their plan digest
+remains the exact sender plan described above. These helpers define bytes only:
+neither panel nor node manufactures approval, grant, quorum, or fence evidence.
+
+All eight existing HA commands have closed decoders. Arbitrary command types,
+unknown payload fields, wildcard grant scope and resource/target substitutions are
+denied. The original signed intent is reloaded from the federation acceptance
+store before gateway execution. After exact enrolled-target/group membership
+checks, only the owning node is mapped to the local executor's fixed `local`
+alias; the signed payload and its approval digest are unchanged. OLS observation
+digests are projected to that alias internally, then the signed node receipt binds
+the original requested result digest after the local provider confirms the effect.
+
+Local HA domain admission remains required: group/member/cluster records,
+matching promotion and policy generations, and—before activating writes or
+listeners—the exact admitted writer lease and all required proven fences for the
+previous writer. The federation transport does not replicate or invent these
+records. Missing or stale local domain authority fails closed.
+
+An owning-node file lock serializes HA ingress effects across runtime recomposition
+and processes. A per-resource fence high-water/blocked-token record and effect
+claim are committed before a local effect; stale or blocked-token activation is
+denied. Terminal results are stored only after the existing provider confirms
+success. Replay reads that result and never calls a mutation provider again.
+A crash after the local effect but before its result is saved remains ambiguous;
+the adapter does not infer effect attribution from a generally healthy database
+or rerun a write. This coding slice has not been built or runtime-verified.
