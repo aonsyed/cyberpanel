@@ -2,7 +2,7 @@
 import { computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ArrowClockwise, ArrowRight, CheckCircle, ShieldWarning, X } from "@phosphor-icons/vue";
 import { oneTimeToken, type APIClient } from "../api";
-import type { ActionDefinition } from "../domain";
+import type { ActionDefinition, FieldDefinition } from "../domain";
 import { sessionStore } from "../store";
 
 const props=defineProps<{action:ActionDefinition;tenantId?:string;resource?:Record<string,unknown>|null;expectedGeneration?:number}>();
@@ -17,6 +17,18 @@ const result=ref<unknown>(null);
 const completed=ref(false);
 const title=computed(()=>props.resource?`${props.action.label} · ${String(props.resource.name||props.resource.primary_hostname||props.resource.domain||props.resource.id||"")}`:props.action.label);
 const resultText=computed(()=>result.value===null?"":JSON.stringify(redact(result.value),null,2));
+const plannedChanges=computed(()=>Array.isArray(props.resource?.planned_changes)?props.resource.planned_changes.map(String):[]);
+const plannedServices=computed(()=>Array.isArray(props.resource?.planned_services)?props.resource.planned_services.map(String):[]);
+
+function fieldOptions(field:FieldDefinition):Array<{label:string;value:string}>{
+  if(!field.optionsFrom)return field.options||[];
+  const source=props.resource?.[field.optionsFrom];
+  if(!Array.isArray(source))return [];
+  return source.flatMap((entry:unknown)=>{
+    if(!entry||typeof entry!=="object"||!("label" in entry)||!("value" in entry)||typeof entry.label!=="string"||typeof entry.value!=="string")return [];
+    return [{label:entry.label,value:entry.value}];
+  });
+}
 
 watch([()=>props.action,()=>props.resource],()=>{initialize();if(!props.action.mutating)queueMicrotask(()=>void submit())},{immediate:true});
 function initialize():void{Object.keys(values).forEach((key)=>delete values[key]);props.action.fields?.forEach((field)=>values[field.key]=field.defaultValue??(field.type==="boolean"?false:""));confirmation.value=!props.action.confirmation;failure.value="";result.value=null;completed.value=false}
@@ -75,9 +87,16 @@ onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>wi
       <header><div><p>{{action.mutating?'DURABLE OPERATION':'RESOURCE PROJECTION'}}</p><h2>{{title}}</h2></div><button class="icon-button" type="button" aria-label="Close" @click="emit('close')"><X :size="18"/></button></header>
       <form @submit.prevent="submit">
         <div class="drawer-body">
+          <section v-if="action.operation==='package_maintenance.apply'&&resource" class="result-panel">
+            <strong>Exact approved update impact</strong>
+            <p>Plan: {{resource.plan_digest}} · Maintenance: {{resource.maintenance_occurrence_id}}</p>
+            <ul><li v-for="change in plannedChanges" :key="change">{{change}}</li></ul>
+            <ul><li v-for="service in plannedServices" :key="service">{{service}}</li></ul>
+            <p>Reboot: {{resource.planned_reboot}} · Recovery: {{resource.recovery_kind||resource.recovery_status}}</p>
+          </section>
           <div v-for="field in action.fields||[]" :key="field.key" class="field">
             <label :for="`field-${field.key}`">{{field.label}}</label>
-            <select v-if="field.type==='select'" :id="`field-${field.key}`" v-model="values[field.key]" class="select" :required="field.required"><option value="" disabled>Select…</option><option v-for="option in field.options" :key="option.value" :value="option.value">{{option.label}}</option></select>
+            <select v-if="field.type==='select'" :id="`field-${field.key}`" v-model="values[field.key]" class="select" :required="field.required"><option value="" disabled>Select…</option><option v-for="option in fieldOptions(field)" :key="option.value" :value="option.value">{{option.label}}</option></select>
             <textarea v-else-if="field.type==='textarea'||field.type==='json'" :id="`field-${field.key}`" v-model="values[field.key]" class="textarea" :class="{mono:field.type==='json'}" :required="field.required"></textarea>
             <label v-else-if="field.type==='boolean'" class="checkbox"><input :id="`field-${field.key}`" v-model="values[field.key]" type="checkbox"/><span>Enabled</span></label>
             <input v-else :id="`field-${field.key}`" v-model="values[field.key]" class="input" :class="{mono:field.type==='cidr'||field.type==='cron'}" :type="field.type==='password'?'password':field.type==='number'?'number':field.type==='email'?'email':'text'" :required="field.required"/>

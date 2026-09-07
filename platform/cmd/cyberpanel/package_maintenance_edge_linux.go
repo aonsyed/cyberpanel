@@ -25,12 +25,14 @@ import (
 // callers cannot supply package names, repository locations, or solver data.
 type packageMaintenancePlanResolver interface {
 	ResolveSecurityUpdates(context.Context, packagemaint.InventorySnapshot) (packagemaint.SolverAttestation, error)
+	ResolveIndividualUpdate(context.Context, packagemaint.InventorySnapshot, string, string) (packagemaint.SolverAttestation, error)
 }
 
 type packageMaintenanceLinuxEdge struct {
 	repository *packagemaint.SQLRepository
 	inventory  packagemaint.InventoryProvider
 	resolver   packageMaintenancePlanResolver
+	catalog    *packagemaint.LinuxRuntimeCatalog
 	holds      packagemaint.PackageHoldExecutor
 	service    packagemaint.Service
 	nodeID     string
@@ -132,6 +134,7 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 	if err != nil {
 		return nil, err
 	}
+	edge.catalog = catalog
 	operation, err := repository.LatestOperation(ctx, catalog.NodeID, catalog.Manager)
 	if errors.Is(err, packagemaint.ErrNotFound) {
 		return edge, nil
@@ -171,6 +174,7 @@ func (edge *packageMaintenanceLinuxEdge) ListPackageMaintenancePackages(ctx cont
 	limit := int(payload.Limit); if limit == 0 { limit = 100 }
 	end := start + limit; if end > len(items) { end = len(items) }
 	next := ""; if end < len(items) && end > start { next = items[end-1].ID }
+	for index := start; index < end; index++ { items[index] = edge.withIndividualUpdates(snapshot, items[index]) }
 	return apiserver.EdgePage[apiserver.PackageMaintenancePackageProjection]{Items: append([]apiserver.PackageMaintenancePackageProjection(nil), items[start:end]...), NextCursor: next, Total: uint64(len(items))}, nil
 }
 
@@ -181,7 +185,19 @@ func (edge *packageMaintenanceLinuxEdge) GetPackageMaintenancePackage(ctx contex
 	}
 	snapshot, err := edge.repository.LatestInventory(ctx, edge.nodeID, edge.manager)
 	if err != nil { return apiserver.PackageMaintenancePackageProjection{}, err }
-	return packageMaintenancePackageByID(snapshot, call.ResourceID)
+	projection, err := packageMaintenancePackageByID(snapshot, call.ResourceID)
+	if err != nil { return projection, err }
+	return edge.withIndividualUpdates(snapshot, projection), nil
+}
+
+func (edge *packageMaintenanceLinuxEdge) withIndividualUpdates(snapshot packagemaint.InventorySnapshot, projection apiserver.PackageMaintenancePackageProjection) apiserver.PackageMaintenancePackageProjection {
+	projection.SupportedUpdates = []apiserver.PackageMaintenanceUpdateOption{}
+	if projection.Held || edge.catalog == nil { return projection }
+	for _, option := range edge.catalog.IndividualUpdateOptions(snapshot, projection.ID, edge.now().UTC()) {
+		projection.SupportedUpdates = append(projection.SupportedUpdates, apiserver.PackageMaintenanceUpdateOption{Label: option.Label, Value: option.Value})
+	}
+	if len(projection.SupportedUpdates) > 0 { projection.Type = "update_available" }
+	return projection
 }
 
 func (edge *packageMaintenanceLinuxEdge) HoldPackageMaintenancePackage(ctx context.Context, call apiserver.EdgeCall) (apiserver.EdgeMutation[apiserver.PackageMaintenancePackageProjection], error) {
@@ -281,7 +297,7 @@ func packageMaintenancePackageByID(snapshot packagemaint.InventorySnapshot, id s
 func projectPackageMaintenancePackage(snapshot packagemaint.InventorySnapshot, installed packagemaint.Package) apiserver.PackageMaintenancePackageProjection {
 	security := packagemaint.SecurityNone
 	if installed.PendingSecurity { security = packageMaintenanceSecurity(snapshot.Advisories, installed) }
-	result := apiserver.PackageMaintenancePackageProjection{ID: "pkg_" + packageMaintenanceDigest(snapshot.NodeID, string(snapshot.Manager), installed.Name, installed.Architecture)[:32],
+	result := apiserver.PackageMaintenancePackageProjection{ID: packagemaint.InventoryPackageResourceID(snapshot, installed),
 		Type: "unheld", NodeID: snapshot.NodeID, Manager: string(snapshot.Manager), Name: installed.Name, Architecture: installed.Architecture,
 		InstalledVersion: installed.InstalledVersion, CandidateVersion: installed.CandidateVersion, PendingSecurity: installed.PendingSecurity,
 		Security: string(security), RepositoryID: installed.RepositoryID,
@@ -365,7 +381,14 @@ func (edge *packageMaintenanceLinuxEdge) PlanPackageMaintenance(ctx context.Cont
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
 	}
-	if snapshot.ID != call.ResourceID || snapshot.Generation != call.ExpectedGeneration {
+	if snapshot.Generation != call.ExpectedGeneration {
+		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrStaleInventory
+	}
+	individual := payload.TransactionReference != ""
+	if individual {
+		if !validPackageMaintenanceRuntimeID(payload.TransactionReference) { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrInvalid }
+		if _, err = packageMaintenancePackageByID(snapshot, call.ResourceID); err != nil { return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err }
+	} else if snapshot.ID != call.ResourceID {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrStaleInventory
 	}
 	summary := summarizePackageMaintenanceInventory(snapshot)
@@ -375,7 +398,7 @@ func (edge *packageMaintenanceLinuxEdge) PlanPackageMaintenance(ctx context.Cont
 	if summary.databaseStatus != "ready" {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrLocked
 	}
-	if summary.availableSecurity == 0 {
+	if !individual && summary.availableSecurity == 0 {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrUnsupported
 	}
 	operation, operationErr := edge.latestOperation(ctx)
@@ -401,7 +424,12 @@ func (edge *packageMaintenanceLinuxEdge) PlanPackageMaintenance(ctx context.Cont
 	} else if !errors.Is(planErr, packagemaint.ErrNotFound) {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, planErr
 	}
-	attestation, err := edge.resolver.ResolveSecurityUpdates(ctx, snapshot)
+	var attestation packagemaint.SolverAttestation
+	if individual {
+		attestation, err = edge.resolver.ResolveIndividualUpdate(ctx, snapshot, payload.TransactionReference, call.ResourceID)
+	} else {
+		attestation, err = edge.resolver.ResolveSecurityUpdates(ctx, snapshot)
+	}
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
 	}
@@ -412,7 +440,7 @@ func (edge *packageMaintenanceLinuxEdge) PlanPackageMaintenance(ctx context.Cont
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
 	}
-	if !packageMaintenanceSecurityOnly(snapshot, plan) {
+	if !individual && !packageMaintenanceSecurityOnly(snapshot, plan) {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrUnsupported
 	}
 	if err = edge.service.AdmitMaintenance(ctx, packagemaint.MaintenanceAdmissionRequest{
@@ -673,6 +701,8 @@ func projectPackageMaintenance(snapshot packagemaint.InventorySnapshot, plan pac
 	currentPlan := plan.ID != "" && plan.InventoryID == snapshot.ID && plan.InventoryGeneration == snapshot.Generation &&
 		plan.InventoryDigest == snapshot.ContentDigest
 	if plan.ID != "" {
+		for _, change := range plan.Changes { projection.PlannedChanges = append(projection.PlannedChanges, change.Name + ":" + change.Architecture + " " + change.FromVersion + " → " + change.ToVersion + " (" + string(change.Action) + ")") }
+		for _, service := range plan.Services { projection.PlannedServices = append(projection.PlannedServices, service.ServiceID + ": " + string(service.Action)) }
 		projection.PlanID = plan.ID
 		projection.PlanDigest = plan.Digest
 		projection.MaintenanceOccurrenceID = plan.MaintenanceOccurrenceID

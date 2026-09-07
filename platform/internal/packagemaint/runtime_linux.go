@@ -62,6 +62,7 @@ type LinuxPackageRule struct {
 
 type LinuxTransactionPolicy struct {
 	ID       string               `json:"id"`
+	IndividualUpdate bool         `json:"individual_update,omitempty"`
 	Packages []LinuxPackageRule   `json:"packages"`
 	Services []ServiceImpact      `json:"services"`
 	Disk     DiskEstimate         `json:"disk"`
@@ -201,6 +202,7 @@ func (catalog LinuxRuntimeCatalog) validate(now time.Time) error {
 		transactions[transaction.ID] = struct{}{}
 		packages := make(map[string]struct{}, len(transaction.Packages))
 		for _, rule := range transaction.Packages {
+			if transaction.IndividualUpdate && rule.Action != ChangeUpgrade { return ErrInvalid }
 			if !safePackage.MatchString(rule.Name) || !safeArchitecture.MatchString(rule.Architecture) ||
 				(rule.Action != ChangeUpgrade && rule.Action != ChangeReinstall) || !safeVersion.MatchString(rule.FromVersion) ||
 				!safeVersion.MatchString(rule.ToVersion) || !safeID.MatchString(rule.RepositoryID) {
@@ -663,6 +665,7 @@ func (runtime *LinuxSignedRuntime) ResolveSecurityUpdates(ctx context.Context, s
 	var changes []PackageChange
 	matches := 0
 	for _, transaction := range runtime.catalog.Transactions {
+		if transaction.IndividualUpdate { continue }
 		resolved, match := linuxTransactionChanges(snapshot, transaction)
 		if !match {
 			continue
@@ -737,14 +740,99 @@ func linuxTransactionChanges(snapshot InventorySnapshot, transaction LinuxTransa
 	return changes, true
 }
 
+// IndividualUpdateOption contains an opaque reference to an explicitly signed
+// update closure, never a caller-authored package identity or command.
+type IndividualUpdateOption struct { Label string `json:"label"`; Value string `json:"value"` }
+
+func InventoryPackageResourceID(snapshot InventorySnapshot, installed Package) string {
+	return "pkg_" + digestStrings(snapshot.NodeID, string(snapshot.Manager), installed.Name, installed.Architecture)[:32]
+}
+
+func (catalog *LinuxRuntimeCatalog) individualReference(transaction LinuxTransactionPolicy) string {
+	return "pkgtx_" + digestStrings(catalog.digest, transaction.ID)[:48]
+}
+
+func (catalog *LinuxRuntimeCatalog) IndividualUpdateOptions(snapshot InventorySnapshot, packageID string, now time.Time) []IndividualUpdateOption {
+	result := []IndividualUpdateOption{}
+	if catalog == nil || catalog.validate(now) != nil || snapshot.Validate() != nil || snapshot.NodeID != catalog.NodeID || snapshot.Manager != catalog.Manager { return result }
+	for _, transaction := range catalog.Transactions {
+		if !transaction.IndividualUpdate { continue }
+		changes, ok := individualTransactionChanges(snapshot, transaction, packageID)
+		if !ok { continue }
+		for _, change := range changes {
+			if InventoryPackageResourceID(snapshot, Package{Name: change.Name, Architecture: change.Architecture}) == packageID {
+				result = append(result, IndividualUpdateOption{Label: change.ToVersion + " · " + strconv.Itoa(len(changes)) + " approved package update(s)", Value: catalog.individualReference(transaction)})
+				break
+			}
+		}
+	}
+	return result
+}
+
+func individualTransactionChanges(snapshot InventorySnapshot, transaction LinuxTransactionPolicy, packageID string) ([]PackageChange, bool) {
+	if !transaction.IndividualUpdate { return nil, false }
+	for _, lock := range snapshot.Locks { if lock.Held || lock.RepairCode != "" { return nil, false } }
+	changes := make([]PackageChange, 0, len(transaction.Packages))
+	selected := packageID == ""
+	for _, rule := range transaction.Packages {
+		if rule.Action != ChangeUpgrade || rule.FromVersion == rule.ToVersion { return nil, false }
+		for _, hold := range snapshot.Holds { if hold.PackageName == rule.Name { return nil, false } }
+		var installed Package
+		for _, candidate := range snapshot.Packages { if candidate.Name == rule.Name && candidate.Architecture == rule.Architecture { installed = candidate; break } }
+		if installed.InstalledVersion != rule.FromVersion || installed.CandidateVersion != rule.ToVersion || installed.RepositoryID != rule.RepositoryID { return nil, false }
+		trustedRepository := false
+		keyID := ""
+		for _, repository := range snapshot.Repositories { if repository.ID == rule.RepositoryID && repository.Enabled && repository.Signature == SignatureVerified && repository.SigningKeyID != "" { trustedRepository, keyID = true, repository.SigningKeyID } }
+		if !trustedRepository { return nil, false }
+		var source Provenance
+		installedTrusted := false
+		for _, provenance := range snapshot.Provenance {
+			if provenance.PackageName != rule.Name || provenance.Architecture != rule.Architecture || provenance.RepositoryID != rule.RepositoryID || provenance.Signature != SignatureVerified || provenance.SigningKeyID != keyID || provenance.LocalArtifact { continue }
+			if provenance.Version == rule.FromVersion && provenance.Digest == installed.ProvenanceDigest { installedTrusted = true }
+			if provenance.Version == rule.ToVersion { source = provenance }
+		}
+		if !installedTrusted || source.Digest == "" { return nil, false }
+		if InventoryPackageResourceID(snapshot, installed) == packageID { selected = true }
+		changes = append(changes, PackageChange{Name: rule.Name, Architecture: rule.Architecture, Action: ChangeUpgrade,
+			FromVersion: rule.FromVersion, ToVersion: rule.ToVersion, RepositoryID: rule.RepositoryID, ProvenanceDigest: source.Digest, Selected: true, Security: SecurityNone})
+	}
+	return changes, selected && len(changes) > 0
+}
+
+func (runtime *LinuxSignedRuntime) individualAttestation(snapshot InventorySnapshot, transaction LinuxTransactionPolicy, changes []PackageChange) (SolverAttestation, error) {
+	attestation := SolverAttestation{ResolverID: runtime.catalog.individualReference(transaction), InventoryDigest: snapshot.ContentDigest,
+		Changes: changes, Services: append([]ServiceImpact(nil), transaction.Services...), Disk: transaction.Disk, Reboot: transaction.Reboot,
+		Recovery: transaction.Recovery, Frontier: transaction.Frontier, ResolvedAt: runtime.now().UTC()}
+	err := SealSolverAttestation(&attestation)
+	return attestation, err
+}
+
+func (runtime *LinuxSignedRuntime) ResolveIndividualUpdate(ctx context.Context, snapshot InventorySnapshot, reference, packageID string) (SolverAttestation, error) {
+	if runtime == nil || runtime.catalog == nil || ctx == nil || snapshot.Validate() != nil || snapshot.NodeID != runtime.catalog.NodeID || snapshot.Manager != runtime.catalog.Manager || runtime.catalog.validate(runtime.now().UTC()) != nil || !safeID.MatchString(packageID) || !safeID.MatchString(reference) { return SolverAttestation{}, ErrInvalid }
+	if err := ctx.Err(); err != nil { return SolverAttestation{}, err }
+	for _, transaction := range runtime.catalog.Transactions {
+		if !transaction.IndividualUpdate || runtime.catalog.individualReference(transaction) != reference { continue }
+		changes, ok := individualTransactionChanges(snapshot, transaction, packageID)
+		if !ok { return SolverAttestation{}, ErrUnsupported }
+		return runtime.individualAttestation(snapshot, transaction, changes)
+	}
+	return SolverAttestation{}, ErrUnsupported
+}
+
 func (runtime *LinuxSignedRuntime) Resolve(ctx context.Context, snapshot InventorySnapshot, plan MaintenancePlan) (SolverAttestation, error) {
+	if runtime == nil || runtime.catalog == nil || ctx == nil || snapshot.Validate() != nil || snapshot.NodeID != runtime.catalog.NodeID || snapshot.Manager != runtime.catalog.Manager || runtime.catalog.validate(runtime.now().UTC()) != nil { return SolverAttestation{}, ErrInvalid }
+	if err := ctx.Err(); err != nil { return SolverAttestation{}, err }
+	// The plan's solver digest binds the selected signed transaction reference
+	// and full closure. Rebuild it from current inventory inside panel-execd.
+	for _, transaction := range runtime.catalog.Transactions {
+		changes, ok := individualTransactionChanges(snapshot, transaction, "")
+		if !ok { continue }
+		attestation, err := runtime.individualAttestation(snapshot, transaction, changes)
+		if err == nil && attestation.TransactionDigest == plan.SolverDigest { return attestation, nil }
+	}
 	attestation, err := runtime.ResolveSecurityUpdates(ctx, snapshot)
-	if err != nil {
-		return SolverAttestation{}, err
-	}
-	if attestation.TransactionDigest != plan.SolverDigest {
-		return SolverAttestation{}, ErrStalePlan
-	}
+	if err != nil { return SolverAttestation{}, err }
+	if attestation.TransactionDigest != plan.SolverDigest { return SolverAttestation{}, ErrStalePlan }
 	return attestation, nil
 }
 
@@ -959,6 +1047,8 @@ type LinuxBrokerRequest struct {
 	Snapshot    *InventorySnapshot     `json:"snapshot,omitempty"`
 	Execution   *ExecutionRequest      `json:"execution,omitempty"`
 	Hold        *PackageHoldRequest    `json:"hold,omitempty"`
+	TransactionReference string       `json:"transaction_reference,omitempty"`
+	PackageResourceID string          `json:"package_resource_id,omitempty"`
 }
 
 type LinuxBrokerResponse struct {
@@ -975,6 +1065,9 @@ type LinuxBrokerResponse struct {
 }
 
 func (request LinuxBrokerRequest) validate(now time.Time) error {
+	if request.TransactionReference != "" || request.PackageResourceID != "" {
+		if request.Operation != LinuxBrokerResolve || !safeID.MatchString(request.TransactionReference) || !safeID.MatchString(request.PackageResourceID) { return ErrInvalid }
+	}
 	if request.Version != linuxBrokerProtocolVersion || len(request.RequestID) != 36 || !strings.HasPrefix(request.RequestID, "pkg-") ||
 		request.Deadline.Before(now.Add(-time.Second)) || request.Deadline.After(now.Add(2*time.Hour)) {
 		return ErrInvalid
@@ -1068,6 +1161,12 @@ func (client *LocalLinuxClient) ResolveSecurityUpdates(ctx context.Context, snap
 	if response.Attestation == nil {
 		return SolverAttestation{}, err
 	}
+	return *response.Attestation, err
+}
+
+func (client *LocalLinuxClient) ResolveIndividualUpdate(ctx context.Context, snapshot InventorySnapshot, reference, packageID string) (SolverAttestation, error) {
+	response, err := client.roundTrip(ctx, LinuxBrokerRequest{Operation: LinuxBrokerResolve, Snapshot: &snapshot, TransactionReference: reference, PackageResourceID: packageID})
+	if response.Attestation == nil { return SolverAttestation{}, err }
 	return *response.Attestation, err
 }
 
@@ -1215,7 +1314,11 @@ func (server *LinuxBrokerServer) serve(connection net.Conn) {
 		}
 	case LinuxBrokerResolve:
 		var attestation SolverAttestation
-		attestation, err = server.Broker.ResolveSecurityUpdates(ctx, *request.Snapshot)
+		if request.TransactionReference != "" {
+			attestation, err = server.Broker.runtime.ResolveIndividualUpdate(ctx, *request.Snapshot, request.TransactionReference, request.PackageResourceID)
+		} else {
+			attestation, err = server.Broker.ResolveSecurityUpdates(ctx, *request.Snapshot)
+		}
 		if err == nil {
 			response.Attestation = &attestation
 		}

@@ -30,6 +30,8 @@ type PackageMaintenanceProjection struct {
 	InventoryDigest          string    `json:"inventory_digest"`
 	PlanID                   string    `json:"plan_id,omitempty"`
 	PlanDigest               string    `json:"plan_digest,omitempty"`
+	PlannedChanges           []string  `json:"planned_changes,omitempty"`
+	PlannedServices          []string  `json:"planned_services,omitempty"`
 	MaintenanceOccurrenceID  string    `json:"maintenance_occurrence_id,omitempty"`
 	PlanStatus               string    `json:"plan_status"`
 	ApplyStatus              string    `json:"apply_status"`
@@ -49,6 +51,7 @@ type PackageMaintenanceProjection struct {
 }
 
 type PackageMaintenancePackageProjection struct {
+	SupportedUpdates []PackageMaintenanceUpdateOption `json:"supported_updates"`
 	ID string `json:"id"`; Type string `json:"type"`; NodeID string `json:"node_id"`; Manager string `json:"manager"`
 	Name string `json:"name"`; Architecture string `json:"architecture"`; InstalledVersion string `json:"installed_version"`; CandidateVersion string `json:"candidate_version,omitempty"`
 	PendingSecurity bool `json:"pending_security"`; Security string `json:"security"`; RepositoryID string `json:"repository_id,omitempty"`; RepositoryOrigin string `json:"repository_origin,omitempty"`
@@ -60,7 +63,10 @@ type PackageMaintenancePackageProjection struct {
 	InventoryID string `json:"inventory_id"`; InventoryDigest string `json:"inventory_digest"`; Generation uint64 `json:"generation"`; UpdatedAt time.Time `json:"updated_at"`
 }
 
+type PackageMaintenanceUpdateOption struct { Label string `json:"label"`; Value string `json:"value"` }
+
 type PackageMaintenancePlanPayload struct {
+	TransactionReference    string `json:"transaction_reference,omitempty"`
 	ValidForSeconds         uint32 `json:"valid_for_seconds,omitempty"`
 	MaintenanceOccurrenceID string `json:"maintenance_occurrence_id"`
 }
@@ -117,6 +123,7 @@ func registerPackageMaintenanceContracts(registry *Registry) error {
 
 func validatePackageMaintenancePlan(value any) error {
 	payload := value.(*PackageMaintenancePlanPayload)
+	if payload.TransactionReference != "" && !validEdgeID(payload.TransactionReference) { return invalid("signed package update reference") }
 	if payload.ValidForSeconds == 0 {
 		payload.ValidForSeconds = 1800
 	}
