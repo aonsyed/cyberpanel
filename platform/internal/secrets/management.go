@@ -24,6 +24,7 @@ type ManagementAction string
 
 const (
 	ManagementEnroll ManagementAction = "enroll"
+	ManagementEnrollExact ManagementAction = "enroll_exact"
 	ManagementRotate ManagementAction = "rotate"
 	ManagementRevoke ManagementAction = "revoke"
 	ManagementProvisionMalwareApproval ManagementAction = "provision_malware_approval"
@@ -52,7 +53,7 @@ func (request ManagementRequest) Validate(now time.Time) error {
 		if request.ExpectedVersion != 0 || request.ExpectedBindingDigest != "" || validateMalwareApprovalProvision(request) != nil {
 			return ErrInvalid
 		}
-	case ManagementEnroll:
+	case ManagementEnroll, ManagementEnrollExact:
 		if len(request.Material) == 0 || request.ExpectedVersion != 0 || request.ExpectedBindingDigest != "" {
 			return ErrInvalid
 		}
@@ -134,6 +135,16 @@ func NewManagementClient(transport ManagementTransport) (*ManagementClient, erro
 }
 
 func (client *ManagementClient) Put(ctx context.Context, request PutRequest) (Metadata, error) {
+	return client.put(ctx, request, false)
+}
+
+// PutExact is create-only and replay-safe; it never exposes stored material.
+func (client *ManagementClient) PutExact(ctx context.Context, request PutRequest) (Metadata, error) {
+	if request.ExpectedVersion != 0 || request.ExpectedBindingDigest != "" { wipe(request.Plaintext); return Metadata{}, ErrInvalid }
+	return client.put(ctx, request, true)
+}
+
+func (client *ManagementClient) put(ctx context.Context, request PutRequest, exact bool) (Metadata, error) {
 	if client == nil || client.transport == nil || ctx == nil {
 		wipe(request.Plaintext)
 		return Metadata{}, ErrInvalid
@@ -142,6 +153,7 @@ func (client *ManagementClient) Put(ctx context.Context, request PutRequest) (Me
 	wipe(request.Plaintext)
 	defer wipe(material)
 	action := ManagementEnroll
+	if exact { action = ManagementEnrollExact }
 	if request.ExpectedVersion > 0 {
 		action = ManagementRotate
 	}
@@ -340,7 +352,9 @@ func (server *ManagementServer) serve(connection net.Conn) {
 			metadata, err = server.Broker.store.Head(ctx, request.SecretID)
 		}
 	} else {
-		metadata, err = server.Broker.Put(ctx, PutRequest{
+		put := server.Broker.Put
+		if request.Action == ManagementEnrollExact { put = server.Broker.EnrollExact }
+		metadata, err = put(ctx, PutRequest{
 			ID:              request.SecretID,
 			OwnerTenantID:   request.OwnerTenantID,
 			Purpose:         request.Purpose,

@@ -199,11 +199,11 @@ func (server *MaterialServer) serve(connection net.Conn) {
 }
 
 func writeMaterialFrame(writer io.Writer, value any) error {
-	content, err := json.Marshal(value); if err != nil || len(content)==0 || len(content)>MaterialMaximumFrame{return ErrInvalid}
+	content, err := json.Marshal(value); defer wipe(content); if err != nil || len(content)==0 || len(content)>MaterialMaximumFrame{return ErrInvalid}
 	var header [4]byte; binary.BigEndian.PutUint32(header[:],uint32(len(content)))
 	if err=writeMaterialBytes(writer,header[:]);err!=nil{return err};return writeMaterialBytes(writer,content)
 }
 func writeMaterialBytes(writer io.Writer, content []byte) error { for len(content)>0{written,err:=writer.Write(content);if err!=nil{return err};if written<=0||written>len(content){return io.ErrShortWrite};content=content[written:]};return nil }
-func readMaterialFrame(reader io.Reader,target any)error{var header [4]byte;if _,err:=io.ReadFull(reader,header[:]);err!=nil{return err};size:=binary.BigEndian.Uint32(header[:]);if size==0||size>MaterialMaximumFrame{return ErrInvalid};content:=make([]byte,size);if _,err:=io.ReadFull(reader,content);err!=nil{return err};decoder:=json.NewDecoder(bytes.NewReader(content));decoder.DisallowUnknownFields();if err:=decoder.Decode(target);err!=nil{return ErrInvalid};if decoder.Decode(&struct{}{})!=io.EOF{return ErrInvalid};return nil}
+func readMaterialFrame(reader io.Reader,target any)error{var header [4]byte;if _,err:=io.ReadFull(reader,header[:]);err!=nil{return err};size:=binary.BigEndian.Uint32(header[:]);if size==0||size>MaterialMaximumFrame{return ErrInvalid};content:=make([]byte,size);defer wipe(content);if _,err:=io.ReadFull(reader,content);err!=nil{return err};decoder:=json.NewDecoder(bytes.NewReader(content));decoder.DisallowUnknownFields();if err:=decoder.Decode(target);err!=nil{return ErrInvalid};if decoder.Decode(&struct{}{})!=io.EOF{return ErrInvalid};return nil}
 func classifyMaterialFailure(err error)string{switch{case errors.Is(err,ErrNotFound):return "not_found";case errors.Is(err,ErrForbidden):return "forbidden";case errors.Is(err,ErrExpired):return "expired";case errors.Is(err,ErrRevoked):return "revoked";case errors.Is(err,ErrConflict),errors.Is(err,ErrRollback):return "conflict";case errors.Is(err,ErrInvalid):return "invalid_request";default:return "unavailable"}}
 func materialFailure(code string)error{switch code{case "invalid_request":return ErrInvalid;case "not_found":return ErrNotFound;case "forbidden":return ErrForbidden;case "expired":return ErrExpired;case "revoked":return ErrRevoked;case "conflict":return ErrConflict;default:return errors.New("secret material broker unavailable")}}
