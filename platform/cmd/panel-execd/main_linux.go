@@ -128,6 +128,7 @@ func main() {
 	mailPlatform, err := detectMailPlatform(); if err != nil { log.Fatalf("detect mail platform: %v", err) }
 	mailOwnership, err := resolveMailOwnership(); if err != nil { log.Fatalf("resolve mail daemon ownership: %v", err) }
 	mailHost, err := mail.OpenLinuxMailHost(mailPlatform,mailOwnership); if err != nil { log.Fatalf("initialize mail host: %v", err) }; defer mailHost.Close()
+	mailHost.SiteRegistry = registry
 	mailPolicy, err := mail.NewMailDaemonPeerPolicy(controlUID); if err != nil { log.Fatalf("initialize mail peer policy: %v", err) }
 	mailListener, err := mail.ListenMailDaemon(controlGID); if err != nil { log.Fatalf("listen on mail daemon socket: %v", err) }; defer mailListener.Close()
 	mailServer, err := mail.NewMailDaemonServer(mailHost,mailPolicy); if err != nil { log.Fatalf("initialize mail daemon server: %v", err) }; mailServer.MaximumConcurrent=32;mailServer.MaximumCampaignConcurrent=4

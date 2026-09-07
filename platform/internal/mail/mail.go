@@ -13,7 +13,8 @@ type DomainID string; type MailboxID string; type AliasID string; type PolicyID 
 type Address string; type Capability string
 const ( CapabilityPlus Capability = "plus"; CapabilityPattern Capability = "pattern"; CapabilityPipe Capability = "pipe" )
 type Domain struct { ID DomainID `json:"id"`; Name string `json:"name"`; Tenant string `json:"tenant"`; DKIM DKIM `json:"dkim"`; Relay Relay `json:"relay"`; Policy PolicyID `json:"policy"` }
-type Mailbox struct { ID MailboxID `json:"id"`; Domain DomainID `json:"domain"`; Local string `json:"local"`; QuotaBytes uint64 `json:"quota_bytes"`; Enabled bool `json:"enabled"` }
+type MailboxCredentialRef string
+type Mailbox struct { ID MailboxID `json:"id"`; Domain DomainID `json:"domain"`; SiteID string `json:"site_id,omitempty"`; Local string `json:"local"`; QuotaBytes uint64 `json:"quota_bytes"`; Enabled bool `json:"enabled"`; CredentialRef MailboxCredentialRef `json:"credential_ref,omitempty"` }
 type Alias struct { ID AliasID `json:"id"`; Domain DomainID `json:"domain"`; Source Address `json:"source"`; Targets []Address `json:"targets"`; CatchAll bool `json:"catch_all"`; Capability Capability `json:"capability,omitempty"`; PipeRef string `json:"pipe_ref,omitempty"` }
 type Policy struct { ID PolicyID `json:"id"`; MaxMailboxBytes uint64 `json:"max_mailbox_bytes"`; MaxRecipients uint32 `json:"max_recipients"`; SpamThreshold float64 `json:"spam_threshold"`; RetainDays uint32 `json:"retain_days"`; Log LogPolicy `json:"log"` }
 type DKIM struct { Selector string `json:"selector"`; PublicKey string `json:"public_key"`; PrivateKeyRef string `json:"private_key_ref"`; Enabled bool `json:"enabled"` }

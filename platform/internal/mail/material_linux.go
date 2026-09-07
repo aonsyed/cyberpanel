@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"strconv"
+	"strings"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 )
@@ -153,3 +155,38 @@ func wipeMailBytes(values ...[]byte) {
 }
 
 var _ MailMaterialResolver = (*LocalMailMaterialResolver)(nil)
+
+const MailboxCredentialAdapterID = "mail.dovecot.mailbox-hash"
+const MailboxCredentialAdapterVersion = "linux-dovecot-crypt-v1"
+
+// Only the scheme explicitly emitted by supported legacy CyberPanel is
+// accepted. Hash-looking plaintext, weak/unknown crypt schemes and excessive
+// bcrypt cost are not promoted to credentials by shape guessing.
+func ValidateMailboxCredentialHash(value []byte) error {
+	if len(value) != 67 || !bytes.HasPrefix(value, []byte("{CRYPT}$2b$")) { return ErrInvalidCommand }
+	if value[13] != '$' { return ErrInvalidCommand }
+	cost, err := strconv.Atoi(string(value[11:13]))
+	if err != nil || cost < 10 || cost > 14 { return ErrInvalidCommand }
+	for _, character := range value[14:] { if !(character == '.' || character == '/' || character >= '0' && character <= '9' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z') { return ErrInvalidCommand } }
+	return nil
+}
+
+func MailboxCredentialAudience(tenant string, domain DomainID, mailbox MailboxID, release string) (secrets.ID, secrets.AudienceBinding, error) {
+	if !validOpaque(tenant) || !validOpaque(string(domain)) || !validOpaque(string(mailbox)) { return "", secrets.AudienceBinding{}, ErrInvalidCommand }
+	audience := secrets.AudienceBinding{AdapterID: MailboxCredentialAdapterID, AdapterVersion: MailboxCredentialAdapterVersion,
+		Account: "local-dovecot", Origin: "local://panel-execd/dovecot", ResourceKind: "mailbox_crypt_bcrypt",
+		ResourceID: mailMaterialID("mailboxaudience", tenant, string(domain), string(mailbox)), ResourceGeneration: 1,
+		Operations: []secrets.Operation{secrets.OperationAuthenticate}, ConsumerReleaseDigest: release}
+	if audience.Validate() != nil { return "", secrets.AudienceBinding{}, ErrInvalidCommand }
+	return mailMaterialID("mailtenant", tenant), audience, nil
+}
+
+func (resolver *LocalMailMaterialResolver) ResolveMailboxHash(ctx context.Context, tenant string, domain DomainID, mailbox MailboxID, reference MailboxCredentialRef) ([]byte, error) {
+	identifier, err := secrets.NewID(string(reference))
+	if err != nil || resolver == nil || resolver.client == nil || !validOpaque(tenant) || !validOpaque(string(domain)) || !validOpaque(string(mailbox)) || strings.TrimSpace(string(reference)) != string(reference) { return nil, ErrInvalidCommand }
+	response, err := resolver.client.Read(ctx, secrets.MaterialRequest{SecretID: identifier, OwnerTenantID: mailMaterialID("mailtenant", tenant),
+		Purpose: secrets.PurposeAuthentication, Operation: secrets.OperationAuthenticate, AdapterID: MailboxCredentialAdapterID, AdapterVersion: MailboxCredentialAdapterVersion,
+		ResourceID: mailMaterialID("mailboxaudience", tenant, string(domain), string(mailbox))})
+	if err != nil || ValidateMailboxCredentialHash(response.Material) != nil { wipeMailBytes(response.Material); return nil, ErrUnauthorized }
+	return response.Material, nil
+}
