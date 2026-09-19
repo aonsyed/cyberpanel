@@ -197,6 +197,25 @@ Logs are retained in `.work/qemu/runs/current-ubuntu-arm64-20260919-smoke/`:
 `clone-integrated-check-20260920.log` and `clone-live-components-20260920.log`.
 No downloads, signing changes, broker privilege changes, or host tests occurred.
 
+### Committed-source matrix continuation — 2026-09-20
+
+Revision `458fd7876` was exported with `git archive HEAD platform` into the fresh
+`/home/harness/revision-458fd7876` directory on the retained AlmaLinux ARM64
+overlay. Offline `go mod verify`, `go test ./... -count=1`, and `go build ./...`
+all exited zero in the QEMU guest (Go 1.26.5, AlmaLinux 9.8). Command output and
+exit are recorded in the task transcript. This is package/build qualification,
+not live service qualification. The guest was then asked to shut down cleanly.
+Both retained AMD64 overlays subsequently passed the same offline module
+verification, uncached full Go suite and build for `458fd7876`, also from fresh
+revision directories. Each SSH job exited zero and its saved log ends with
+`MATRIX_EXIT=0`. Logs are retained at
+`current-ubuntu-amd64-20260919-matrix/matrix-458fd7876.log` and
+`current-alma-amd64-20260919-matrix/matrix-458fd7876.log` under the parent
+repository's `.work/qemu/runs/`. Both AMD64 guests were asked to shut down after
+their logs were copied and checked. These package/build runs do not include
+the Ubuntu ARM64 opt-in live service fixtures. No images or toolchains were
+downloaded; overlays and evidence were retained.
+
 ### Application connection authority and integrated Go check — 2026-09-20
 
 `TestQEMUApplicationConnectionAuthority` exercises the production resolver

@@ -40,7 +40,9 @@ into fewer files does not bypass the line limits.
 
 Latest executable verification is recorded in `RUN-REPORT.md`: the current
 application database/TLS changes passed the full uncached Go suite in Ubuntu
-ARM64 QEMU. Earlier four-guest matrix results do not qualify these newer changes.
+ARM64 QEMU. Revision `458fd7876` then passed offline module verification,
+uncached full Go suites and builds on AlmaLinux ARM64 and both AMD64 guests.
+Live database/broker component evidence remains Ubuntu ARM64 only.
 Frontend strict compilation and desktop/mobile install/clone drawer interactions
 passed against controlled API boundaries, not an installed panel. The current
 JavaScript bundle is 529.78 kB and retains the size warning.
@@ -56,7 +58,7 @@ states; staging failure journals survive cancellation and SQLite reopen.
 
 Next gates remain the installed material-delivery privilege decision below,
 full signed panel installation and live API/service journeys, partial-clone
-recovery, and current-source qualification on the other three OS/architecture
+recovery, and live service qualification across the supported OS/architecture
 combinations. Component tests do not establish full product parity.
 
 Later Ubuntu ARM64 work installed a signed **authentication component** release
