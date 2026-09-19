@@ -247,7 +247,7 @@ func TestDeletingAndQuarantineNeverPurgeWithoutExplicitLifecycleEdges(t *testing
 
 func mustCreate(t *testing.T, site, tenant, project, hostname string) Site {
 	t.Helper()
-	got, err := Create(CreateInput{ID: mustSiteID(t, site), TenantID: mustTenantID(t, tenant), ProjectID: mustProjectID(t, project), PrimaryHostname: mustHostname(t, hostname)})
+	got, err := Create(CreateInput{ID: mustSiteID(t, site), TenantID: mustTenantID(t, tenant), ProjectID: mustProjectID(t, project), PrimaryHostname: mustHostname(t, hostname), PHPProfile: PHPProfile83})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
