@@ -49,6 +49,7 @@ type InstallationID string
 type DefinitionID string
 type RecipeID string
 type DatabaseBindingID string
+type DatabaseInstanceID string
 type SecretRef string
 type ReleaseID string
 type DeploymentID string

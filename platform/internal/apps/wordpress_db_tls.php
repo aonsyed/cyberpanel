@@ -1,8 +1,9 @@
 <?php
 // CyberPanel managed database TLS drop-in, version 1.
-// Installed as wp-content/db.php with fixed, private sibling configuration files.
+// Only this executable drop-in belongs in wp-content. Material is outside it.
 
 final class CyberPanel_TLS_WPDB extends wpdb {
+    private const MATERIAL_DIRECTORY = '__CYBERPANEL_PRIVATE_DIRECTORY_BASE64__';
     private bool $cyberpanelInitialized = false;
 
     public function close() {
@@ -17,8 +18,12 @@ final class CyberPanel_TLS_WPDB extends wpdb {
         mysqli_report(MYSQLI_REPORT_OFF);
         $connection = null;
         try {
+            $materialDirectory = base64_decode(self::MATERIAL_DIRECTORY, true);
+            if (!$materialDirectory || $materialDirectory[0] !== '/' || str_contains($materialDirectory, "\0")) {
+                throw new RuntimeException('Invalid private material directory');
+            }
             $configuration = json_decode(
-                file_get_contents(__DIR__ . '/.cyberpanel-db-tls.json'),
+                file_get_contents($materialDirectory . '/.cyberpanel-db-tls.json'),
                 true,
                 8,
                 JSON_THROW_ON_ERROR
@@ -49,9 +54,9 @@ final class CyberPanel_TLS_WPDB extends wpdb {
             $mutual = $configuration['mutual'];
             if (!mysqli_ssl_set(
                 $connection,
-                $mutual ? __DIR__ . '/.cyberpanel-db-client.key' : null,
-                $mutual ? __DIR__ . '/.cyberpanel-db-client.pem' : null,
-                __DIR__ . '/.cyberpanel-db-ca.pem',
+                $mutual ? $materialDirectory . '/.cyberpanel-db-client.key' : null,
+                $mutual ? $materialDirectory . '/.cyberpanel-db-client.pem' : null,
+                $materialDirectory . '/.cyberpanel-db-ca.pem',
                 null,
                 null
             )) {

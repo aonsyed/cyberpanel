@@ -41,28 +41,37 @@ func (coordinator StagingCoordinator) CreateClone(ctx context.Context, request C
 	if err != nil { return ApplicationInstallation{}, StagingRelation{}, coordinator.fail(ctx, operation, StagingSync{}, "source_snapshot", err) }
 	defer func() { _ = coordinator.Snapshots.ReleaseApplicationSnapshot(context.WithoutCancel(ctx), snapshot.ID) }()
 	if err := coordinator.Snapshots.VerifyApplicationSnapshot(ctx, snapshot.ID); err != nil { return ApplicationInstallation{}, StagingRelation{}, coordinator.fail(ctx, operation, StagingSync{}, "verify_source_snapshot", err) }
-	database, err := coordinator.Databases.ProvisionApplicationDatabase(ctx, request.TenantID, request.TargetSiteID, request.TargetInstallationID, source.Kind)
+	database, err := coordinator.Databases.ProvisionApplicationDatabase(ctx, request.TenantID, request.TargetSiteID, request.TargetInstallationID, source.Kind, request.TargetDatabaseInstanceID)
 	if err != nil { return ApplicationInstallation{}, StagingRelation{}, coordinator.fail(ctx, operation, StagingSync{}, "database", err) }
 	rewrite := IdentityRewrite{SourceURL: request.SourceURL, TargetURL: request.TargetURL, Application: source.Kind, SerializedDataAware: source.Kind == ApplicationWordPress, RewriteFiles: true, RewriteDatabase: true, PreserveGUIDs: source.Kind == ApplicationWordPress}
 	cloneExecution := CloneExecution{SourceScope: sourceScope, TargetScope: targetScope, SourceInstallationID: source.ID, TargetInstallationID: request.TargetInstallationID, SourceSnapshot: snapshot, TargetDatabase: database, Selection: request.Selection, Rewrite: rewrite, SuppressMail: true, DenyExternalActions: true}
 	receipt, err := coordinator.Executor.CreateClone(ctx, cloneExecution)
-	if err != nil { _ = coordinator.Databases.RevokeApplicationDatabase(ctx, database.ID); return ApplicationInstallation{}, StagingRelation{}, coordinator.fail(ctx, operation, StagingSync{}, "clone", err) }
-	if err := receipt.Validate("create_clone", targetScope, request.TargetInstallationID); err != nil { _ = coordinator.Databases.RevokeApplicationDatabase(ctx, database.ID); return ApplicationInstallation{}, StagingRelation{}, coordinator.fail(ctx, operation, StagingSync{}, "clone_receipt", err) }
+	if err != nil { return ApplicationInstallation{}, StagingRelation{}, coordinator.failedClone(ctx, operation, database.ID, "clone", err) }
+	if err := receipt.Validate("create_clone", targetScope, request.TargetInstallationID); err != nil { return ApplicationInstallation{}, StagingRelation{}, coordinator.failedClone(ctx, operation, database.ID, "clone_receipt", err) }
 	health, probeReceipt, err := coordinator.Executor.ProbeClone(ctx, cloneExecution)
 	if err != nil || health.State != HealthHealthy {
 		if err == nil { err = ErrIntegrity }
-		_ = coordinator.Databases.RevokeApplicationDatabase(ctx, database.ID)
-		return ApplicationInstallation{}, StagingRelation{}, coordinator.fail(ctx, operation, StagingSync{}, "probe", err)
+		return ApplicationInstallation{}, StagingRelation{}, coordinator.failedClone(ctx, operation, database.ID, "probe", err)
 	}
-	if err := probeReceipt.Validate("probe_clone", targetScope, request.TargetInstallationID); err != nil { return ApplicationInstallation{}, StagingRelation{}, coordinator.fail(ctx, operation, StagingSync{}, "probe_receipt", err) }
+	if err := probeReceipt.Validate("probe_clone", targetScope, request.TargetInstallationID); err != nil { return ApplicationInstallation{}, StagingRelation{}, coordinator.failedClone(ctx, operation, database.ID, "probe_receipt", err) }
 	now := coordinator.now()
 	installation := ApplicationInstallation{ID: request.TargetInstallationID, TenantID: source.TenantID, ProjectID: request.TargetProjectID, SiteID: request.TargetSiteID, SiteUID: request.TargetSiteUID, DefinitionID: source.DefinitionID, Recipe: source.Recipe, Kind: source.Kind, Root: request.TargetRoot, RuntimeID: request.TargetRuntimeID, DatabaseBindingID: database.ID, SecretRefs: []SecretRef{database.PasswordRef}, StorageMode: source.StorageMode, State: InstallationActive, ActiveReleaseID: source.ActiveReleaseID, Health: health, Generation: 1, CreatedAt: now, UpdatedAt: now}
+	if request.TargetDatabaseClientIdentityRef!="" { installation.SecretRefs=append(installation.SecretRefs,request.TargetDatabaseClientIdentityRef) }
 	if err := coordinator.Store.CreateInstallation(ctx, installation); err != nil { return ApplicationInstallation{}, StagingRelation{}, coordinator.recovery(ctx, operation, StagingSync{}, "persist_installation", err) }
 	relation := StagingRelation{ID: request.RelationID, SourceInstallationID: source.ID, TargetInstallationID: installation.ID, SourceSiteID: source.SiteID, TargetSiteID: installation.SiteID, MailSuppressed: true, ExternalActionsDenied: true, AccessPolicyID: request.AccessPolicyID, Generation: 1, CreatedAt: now}
 	if err := coordinator.Store.CreateStagingRelation(ctx, relation); err != nil { return ApplicationInstallation{}, StagingRelation{}, coordinator.recovery(ctx, operation, StagingSync{}, "persist_relation", err) }
 	operation.State, operation.Stage, operation.ResultDigest, operation.UpdatedAt = OperationCommitted, "committed", receipt.OutputDigest, now
 	if err := coordinator.Store.UpdateOperation(ctx, operation); err != nil { return ApplicationInstallation{}, StagingRelation{}, err }
 	return installation, relation, nil
+}
+
+// Database revocation cannot undo partially published target files. Keep the
+// operation recoverable rather than claiming complete compensation.
+func (coordinator StagingCoordinator) failedClone(ctx context.Context, operation Operation, database DatabaseBindingID, stage string, cause error) error {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	cause = errors.Join(cause, coordinator.Databases.RevokeApplicationDatabase(cleanup, database))
+	return coordinator.recovery(cleanup, operation, StagingSync{}, stage, cause)
 }
 
 func (coordinator StagingCoordinator) now() time.Time {
@@ -143,19 +152,26 @@ func (coordinator StagingCoordinator) rollback(ctx context.Context, operation Op
 }
 
 func (coordinator StagingCoordinator) fail(ctx context.Context, operation Operation, sync StagingSync, stage string, cause error) error {
+	journal, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	sync.State, sync.Failure, sync.UpdatedAt = SyncFailed, cause.Error(), coordinator.now()
-	if sync.ID != "" { _ = coordinator.Store.UpdateStagingSync(ctx, sync) }
+	var syncErr error
+	if sync.ID != "" { syncErr = coordinator.Store.UpdateStagingSync(journal, sync) }
 	operation.State, operation.Stage, operation.Failure, operation.UpdatedAt = OperationFailed, stage, cause.Error(), coordinator.now()
-	_ = coordinator.Store.UpdateOperation(ctx, operation)
+	journalErr := coordinator.Store.UpdateOperation(journal, operation)
+	if syncErr != nil || journalErr != nil { return errors.Join(ErrRecoveryRequired, cause, syncErr, journalErr) }
 	return cause
 }
 
 func (coordinator StagingCoordinator) recovery(ctx context.Context, operation Operation, sync StagingSync, stage string, cause error) error {
+	journal, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	sync.State, sync.Failure, sync.UpdatedAt = SyncRecoveryNeeded, cause.Error(), coordinator.now()
-	if sync.ID != "" { _ = coordinator.Store.UpdateStagingSync(ctx, sync) }
+	var syncErr error
+	if sync.ID != "" { syncErr = coordinator.Store.UpdateStagingSync(journal, sync) }
 	operation.State, operation.Stage, operation.Failure, operation.UpdatedAt = OperationRecoveryRequired, stage, cause.Error(), coordinator.now()
-	_ = coordinator.Store.UpdateOperation(ctx, operation)
-	return errors.Join(ErrRecoveryRequired, cause)
+	journalErr := coordinator.Store.UpdateOperation(journal, operation)
+	return errors.Join(ErrRecoveryRequired, cause, syncErr, journalErr)
 }
 
 type ScanCoordinator struct {

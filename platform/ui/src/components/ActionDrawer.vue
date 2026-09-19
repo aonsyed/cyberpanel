@@ -80,11 +80,12 @@ async function submit():Promise<void>{
     }
     completed.value=true;
     if(props.action.mutating){sessionStore.notify({tone:"healthy",title:`${props.action.label} accepted`,body:"The durable operation was admitted and will continue if this browser disconnects."});emit("complete",result.value)}
-  }catch(error){failure.value=error instanceof Error?error.message:"The operation could not be admitted."}finally{submitting.value=false}
+  }catch(error){failure.value=error instanceof Error?error.message:"The operation could not be admitted."}finally{clearSensitiveValues();submitting.value=false}
 }
-function redact(value:unknown,key=""):unknown{if(/password|secret|token|credential|private[_-]?key|authorization/i.test(key))return"[REDACTED]";if(Array.isArray(value))return value.map((item)=>redact(item));if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value as Record<string,unknown>).map(([entryKey,entryValue])=>[entryKey,redact(entryValue,entryKey)]));return value}
+function clearSensitiveValues():void{for(const field of props.action.fields||[]){if(field.sensitive||field.type==="password")values[field.key]=""}}
+function redact(value:unknown,key=""):unknown{if(/password|secret|token|credential|private[_-]?key|client[_-]?key|authorization/i.test(key))return"[REDACTED]";if(Array.isArray(value))return value.map((item)=>redact(item));if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value as Record<string,unknown>).map(([entryKey,entryValue])=>[entryKey,redact(entryValue,entryKey)]));return value}
 function keydown(event:KeyboardEvent):void{if(event.key==="Escape")emit("close")}
-onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>window.removeEventListener("keydown",keydown));
+onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>{clearSensitiveValues();window.removeEventListener("keydown",keydown)});
 </script>
 
 <template>
@@ -103,7 +104,7 @@ onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>wi
           <div v-for="field in action.fields||[]" :key="field.key" class="field">
             <label :for="`field-${field.key}`">{{field.label}}</label>
             <select v-if="field.type==='select'" :id="`field-${field.key}`" v-model="values[field.key]" class="select" :required="Boolean(field.required)"><option value="" disabled>Select…</option><option v-for="option in fieldOptions(field)" :key="option.value" :value="option.value">{{option.label}}</option></select>
-            <textarea v-else-if="field.type==='textarea'||field.type==='json'" :id="`field-${field.key}`" :value="String(values[field.key]??'')" @input="values[field.key]=($event.target as HTMLTextAreaElement).value" class="textarea" :class="{mono:field.type==='json'}" :required="Boolean(field.required)"></textarea>
+            <textarea v-else-if="field.type==='textarea'||field.type==='json'" :id="`field-${field.key}`" :value="String(values[field.key]??'')" @input="values[field.key]=($event.target as HTMLTextAreaElement).value" class="textarea" :class="{mono:field.type==='json'}" :required="Boolean(field.required)" :autocomplete="field.sensitive?'off':'on'" :spellcheck="!field.sensitive"></textarea>
             <label v-else-if="field.type==='boolean'" class="checkbox"><input :id="`field-${field.key}`" v-model="values[field.key]" type="checkbox"/><span>Enabled</span></label>
             <input v-else :id="`field-${field.key}`" v-model="values[field.key]" class="input" :class="{mono:field.type==='cidr'||field.type==='cron'}" :type="field.type==='password'?'password':field.type==='number'?'number':field.type==='email'?'email':'text'" :required="Boolean(field.required)"/>
             <p v-if="field.helper" class="field-help">{{field.helper}}</p><p v-if="errors[field.key]" class="field-error">{{errors[field.key]}}</p>

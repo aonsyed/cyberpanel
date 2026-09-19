@@ -43,7 +43,7 @@ func (secrets *installFailureSecrets) IssueApplicationSecret(context.Context, Te
 	return "", secrets.failure
 }
 
-func (database *compensationDatabase) ProvisionApplicationDatabase(context.Context, TenantID, SiteID, InstallationID, ApplicationKind) (DatabaseBinding, error) {
+func (database *compensationDatabase) ProvisionApplicationDatabase(context.Context, TenantID, SiteID, InstallationID, ApplicationKind, DatabaseInstanceID) (DatabaseBinding, error) {
 	return DatabaseBinding{ID: "appdb-1"}, nil
 }
 
@@ -64,17 +64,18 @@ func TestInstallSecretFailureCleansProvisionedResources(t *testing.T) {
 			service := ApplicationService{Store: store, Catalog: installFailureCatalog{}, Databases: database, Secrets: secrets, Executor: unusedInstallExecutor{}, Now: func() time.Time { return now }}
 			request := InstallRequest{
 				CommandID: "install-1", TenantID: "tenant-1", SiteID: "site-1", SiteUID: 1001, SiteGeneration: 1,
-				IsolationProfile: "isolated", InstallationID: "app-1", RuntimeID: "php-83",
+				IsolationProfile: "isolated", InstallationID: "app-1", DatabaseInstanceID: "mariadb-local", RuntimeID: "php-83",
 				CanonicalURL: "https://example.test", Locale: "en_US", Timezone: "UTC", ReleaseID: "release-1",
 				Administrator: AdministratorBootstrap{Username: "admin", Email: "admin@example.test", DisplayName: "Admin", PasswordRef: "admin-1"},
 				Recipe:        RecipeReference{ID: "recipe-1", DefinitionID: "wordpress", ProductVersion: "6.8.0", RecipeDigest: strings.Repeat("a", 64), Signature: "fixture", SigningKeyID: "key-1", CatalogEpoch: 1, PublishedAt: now.Add(-time.Hour)},
 				CatalogTarget: CatalogTarget{OperatingSystem: OSUbuntuNoble, Architecture: ArchitectureARM64, WebEngine: EngineOpenLiteSpeed, PHPVersion: "8.3.0"},
 			}
+			request.DatabaseClientIdentityRef = SecretRef(ApplicationManagedSecretID("database_tls", request.InstallationID).String())
 			_, err := service.Install(context.Background(), request)
 			if !errors.Is(err, issueFailure) {
 				t.Fatalf("lost issue failure: %v", err)
 			}
-			if len(secrets.revoked) != 1 || secrets.revoked[0] != "admin-1" || len(database.revoked) != 1 {
+			if len(secrets.revoked) != 2 || secrets.revoked[0] != "admin-1" || secrets.revoked[1] != request.DatabaseClientIdentityRef || len(database.revoked) != 1 {
 				t.Fatalf("resources leaked: secrets=%v databases=%v", secrets.revoked, database.revoked)
 			}
 			wantState := OperationCompensated

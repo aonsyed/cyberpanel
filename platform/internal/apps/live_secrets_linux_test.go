@@ -4,6 +4,7 @@ package apps
 
 import (
 	"context"
+	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -107,5 +108,50 @@ func TestQEMULiveApplicationSecretLease(t *testing.T) {
 	if replay, err := issuer.IssueApplicationSecret(ctx, "qemu-tenant", "qemu-site", installation, "administrator"); err != nil || replay != adminRef {
 		t.Fatalf("administrator replay: %v", err)
 	}
-	t.Log("actual broker issuance, exact cached replay, tenant/release binding rejection, revocation and durable lease verified")
+	t.Run("application database client identity", func(t *testing.T) {
+		now := time.Now().UTC()
+		certificate, key := applicationClientCertificateFixture(t, x509.ExtKeyUsageClientAuth, now.Add(-time.Hour), now.Add(time.Hour))
+		defer wipeLinuxApplicationBytes(key)
+		tlsRef, err := issuer.EnrollDatabaseClientIdentity(ctx, "qemu-tenant", "qemu-site", installation, certificate, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if err := issuer.RevokeApplicationSecret(cleanup, tlsRef); err != nil {
+				t.Error(err)
+			}
+		}()
+		tlsID := ApplicationManagedSecretID("database_tls", installation)
+		before, err := store.LoadApplicationSecretLease(ctx, tlsID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, "DELETE FROM app_secret_leases WHERE secret_id=?", tlsID); err != nil {
+			t.Fatal(err)
+		}
+		if replay, err := issuer.EnrollDatabaseClientIdentity(ctx, "qemu-tenant", "qemu-site", installation, certificate, key); err != nil || replay != tlsRef {
+			t.Fatalf("recover missing local journal: %v", err)
+		}
+		after, err := store.LoadApplicationSecretLease(ctx, tlsID)
+		if err != nil || after.Metadata.Version != before.Metadata.Version || after.Metadata.BindingDigest != before.Metadata.BindingDigest {
+			t.Fatal("exact client identity replay changed broker binding")
+		}
+		if _, err := issuer.EnrollDatabaseClientIdentity(ctx, "other-tenant", "qemu-site", installation, certificate, key); !errors.Is(err, ErrPolicyDenied) {
+			t.Fatal("cross-tenant client identity adopted")
+		}
+		otherCertificate, otherKey := applicationClientCertificateFixture(t, x509.ExtKeyUsageClientAuth, now.Add(-time.Hour), now.Add(time.Hour))
+		defer wipeLinuxApplicationBytes(otherKey)
+		if _, err := issuer.EnrollDatabaseClientIdentity(ctx, "qemu-tenant", "qemu-site", installation, otherCertificate, otherKey); !errors.Is(err, secrets.ErrConflict) {
+			t.Fatalf("implicit client identity rotation accepted: %v", err)
+		}
+		if err := issuer.RevokeApplicationSecret(ctx, tlsRef); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := issuer.EnrollDatabaseClientIdentity(ctx, "qemu-tenant", "qemu-site", installation, certificate, key); !errors.Is(err, ErrConflict) {
+			t.Fatal("revoked client identity resurrected")
+		}
+	})
+	t.Log("actual broker issuance, exact replay/journal recovery, authority rejection, client identity enrollment and revocation verified")
 }

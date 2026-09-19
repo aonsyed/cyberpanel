@@ -16,6 +16,8 @@ type InstallRequest struct {
 	SiteGeneration  uint64 `json:"site_generation"`
 	IsolationProfile string `json:"isolation_profile"`
 	InstallationID  InstallationID `json:"installation_id"`
+	DatabaseInstanceID DatabaseInstanceID `json:"database_instance_id"`
+	DatabaseClientIdentityRef SecretRef `json:"database_client_identity_ref,omitempty"`
 	Recipe           RecipeReference `json:"recipe"`
 	CatalogTarget    CatalogTarget `json:"catalog_target"`
 	Root             RelativePath `json:"root"`
@@ -34,6 +36,8 @@ func (request InstallRequest) Validate(now time.Time) error {
 	if request.ProjectID != "" { if err := requireID("project", string(request.ProjectID)); err != nil { return err } }
 	if err := requireID("site", string(request.SiteID)); err != nil { return err }
 	if err := requireID("installation", string(request.InstallationID)); err != nil { return err }
+	if request.DatabaseClientIdentityRef!="" && request.DatabaseClientIdentityRef!=SecretRef(ApplicationManagedSecretID("database_tls",request.InstallationID).String()) { return ErrPolicyDenied }
+	if err := requireID("database instance", string(request.DatabaseInstanceID)); err != nil { return err }
 	if err := requireID("release", string(request.ReleaseID)); err != nil { return err }
 	if request.SiteUID < 1000 || request.SiteGeneration == 0 || !validID(request.IsolationProfile) || request.RuntimeID == "" || request.CanonicalURL == "" || request.Locale == "" || request.Timezone == "" {
 		return fmt.Errorf("%w: install request", ErrInvalid)
@@ -79,6 +83,7 @@ func (service ApplicationService) Install(ctx context.Context, request InstallRe
 	definition, err := service.Catalog.Resolve(ctx, request.Recipe, request.CatalogTarget)
 	if err != nil { return ApplicationInstallation{}, service.fail(ctx, operation, "catalog", err) }
 	secretRefs := []SecretRef{request.Administrator.PasswordRef}
+	if request.DatabaseClientIdentityRef!="" { secretRefs=append(secretRefs,request.DatabaseClientIdentityRef) }
 	installation := ApplicationInstallation{ID: request.InstallationID, TenantID: request.TenantID, ProjectID: request.ProjectID, SiteID: request.SiteID, SiteUID: request.SiteUID, DefinitionID: definition.ID, Recipe: definition.Recipe, Kind: definition.Kind, Root: request.Root, RuntimeID: request.RuntimeID, StorageMode: definition.StorageMode, State: InstallationPending, Health: HealthObservation{State: HealthUnknown}, SecretRefs:append([]SecretRef(nil),secretRefs...), Generation: 1, CreatedAt: now, UpdatedAt: now}
 	if err := service.Store.CreateInstallation(ctx, installation); err != nil { return ApplicationInstallation{}, service.fail(ctx, operation, "persist_installation", err) }
 	previousGeneration := installation.Generation
@@ -86,7 +91,7 @@ func (service ApplicationService) Install(ctx context.Context, request InstallRe
 	if err := service.Store.UpdateInstallation(ctx, installation, previousGeneration); err != nil { return ApplicationInstallation{}, service.fail(ctx, operation, "transition", err) }
 	operation.State, operation.Stage, operation.UpdatedAt = OperationExecuting, "provision_database", service.now()
 	if err := service.Store.UpdateOperation(ctx, operation); err != nil { return ApplicationInstallation{}, err }
-	database, err := service.Databases.ProvisionApplicationDatabase(ctx, request.TenantID, request.SiteID, request.InstallationID, definition.Kind)
+	database, err := service.Databases.ProvisionApplicationDatabase(ctx, request.TenantID, request.SiteID, request.InstallationID, definition.Kind, request.DatabaseInstanceID)
 	if err != nil { return ApplicationInstallation{}, service.fail(ctx, operation, "provision_database", err) }
 	installation.DatabaseBindingID = database.ID
 	configurationSecret, err := service.Secrets.IssueApplicationSecret(ctx, request.TenantID, request.SiteID, request.InstallationID, "configuration")
@@ -112,6 +117,7 @@ func (service ApplicationService) Install(ctx context.Context, request InstallRe
 	if err := service.Store.SaveInventory(ctx, inventory); err != nil { return ApplicationInstallation{}, service.failRecovery(ctx, operation, "persist_inventory", err) }
 	if err := service.Secrets.RevokeApplicationSecret(ctx, request.Administrator.PasswordRef); err != nil { return ApplicationInstallation{}, service.failRecovery(ctx, operation, "revoke_administrator_bootstrap", err) }
 	installation.SecretRefs = []SecretRef{configurationSecret}
+	if request.DatabaseClientIdentityRef!="" { installation.SecretRefs=append(installation.SecretRefs,request.DatabaseClientIdentityRef) }
 	previousGeneration = installation.Generation
 	installation.ActiveReleaseID, installation.Health = release.ID, health
 	if err := installation.Transition(InstallationActive, service.now()); err != nil { return ApplicationInstallation{}, service.failRecovery(ctx, operation, "activate", err) }

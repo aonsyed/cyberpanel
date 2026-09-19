@@ -3,12 +3,14 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -270,6 +272,10 @@ func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
 			t.Fatal(err)
 		}
 		wordpressRoot := filepath.Join(root, "wordpress")
+		privateRoot := filepath.Join(root, "wordpress-private")
+		if err := os.Mkdir(privateRoot, 0700); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.Mkdir(wordpressRoot, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -277,6 +283,7 @@ func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		dropin = bytes.Replace(dropin, []byte("__CYBERPANEL_PRIVATE_DIRECTORY_BASE64__"), []byte(base64.StdEncoding.EncodeToString([]byte(privateRoot))), 1)
 		if err := os.WriteFile(filepath.Join(wordpressRoot, "db.php"), dropin, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -287,7 +294,7 @@ func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
 				t.Fatal(err)
 			}
 			for file, value := range map[string][]byte{".cyberpanel-db-tls.json": configuration, ".cyberpanel-db-ca.pem": authority, ".cyberpanel-db-client.pem": clientCert, ".cyberpanel-db-client.key": privateKey} {
-				if err := os.WriteFile(filepath.Join(wordpressRoot, file), value, 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(privateRoot, file), value, 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -303,6 +310,9 @@ func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
 				t.Fatalf("WordPress %s: %v: %s", name, err, output)
 			}
 			t.Logf("WordPress %s: %s", name, strings.TrimSpace(string(output)))
+			if os.Getenv("CYBERPANEL_QEMU_LIVE_WORDPRESS_CLI") == "1" {
+				checkQEMUWordPressDatabaseCLI(t, ctx, root, privateRoot, host, port, password, mutual, accept, tlsError, rootQuery)
+			}
 		}
 		check("trusted TLS", "127.0.0.1", ca, nil, nil, false, true, false)
 		check("wrong CA", "127.0.0.1", wrongCA, nil, nil, false, false, true)

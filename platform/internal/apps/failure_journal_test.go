@@ -13,59 +13,70 @@ import (
 )
 
 func TestFailureJournalSurvivesCanceledRequest(t *testing.T) {
-	for _, recovery := range []bool{false, true} {
-		name := "failed"
-		if recovery {
-			name = "recovery_required"
-		}
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "control.db")
-			db, err := sql.Open("sqlite", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-			repository := SQLRepository{DB: db}
-			if err := repository.Bootstrap(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			now := time.Now().UTC()
-			operation := Operation{CommandID: "install-1", Kind: "install", TenantID: "tenant-1", SiteID: "site-1", RequestDigest: strings.Repeat("a", 64), State: OperationExecuting, Stage: "install", CreatedAt: now, UpdatedAt: now}
-			if _, _, err := repository.AdmitOperation(context.Background(), operation); err != nil {
-				t.Fatal(err)
-			}
-			service := ApplicationService{Store: repository}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			fail := service.fail
-			want := OperationFailed
+	for _, owner := range []string{"application", "staging"} {
+		for _, recovery := range []bool{false, true} {
+			name := "failed"
 			if recovery {
-				fail = service.failRecovery
-				want = OperationRecoveryRequired
+				name = "recovery_required"
 			}
-			err = fail(ctx, operation, "interrupted", context.Canceled)
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("lost cause: %v", err)
-			}
-			if errors.Is(err, ErrRecoveryRequired) != recovery {
-				t.Fatalf("wrong recovery outcome: %v", err)
-			}
-			if err := db.Close(); err != nil {
-				t.Fatal(err)
-			}
-			db, err = sql.Open("sqlite", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-			stored, err := (SQLRepository{DB: db}).LoadOperation(context.Background(), operation.CommandID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if stored.State != want || stored.Stage != "interrupted" || stored.Failure != context.Canceled.Error() {
-				t.Fatalf("failure not durable after reopen: %+v", stored)
-			}
-		})
+			t.Run(owner+"/"+name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "control.db")
+				db, err := sql.Open("sqlite", path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				repository := SQLRepository{DB: db}
+				if err := repository.Bootstrap(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				now := time.Now().UTC()
+				operation := Operation{CommandID: "install-1", Kind: "install", TenantID: "tenant-1", SiteID: "site-1", RequestDigest: strings.Repeat("a", 64), State: OperationExecuting, Stage: "install", CreatedAt: now, UpdatedAt: now}
+				if _, _, err := repository.AdmitOperation(context.Background(), operation); err != nil {
+					t.Fatal(err)
+				}
+				service := ApplicationService{Store: repository}
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				fail := service.fail
+				want := OperationFailed
+				if recovery {
+					fail = service.failRecovery
+					want = OperationRecoveryRequired
+				}
+				if owner == "staging" {
+					coordinator := StagingCoordinator{Store: repository}
+					fail = func(ctx context.Context, operation Operation, stage string, cause error) error {
+						if recovery {
+							return coordinator.recovery(ctx, operation, StagingSync{}, stage, cause)
+						}
+						return coordinator.fail(ctx, operation, StagingSync{}, stage, cause)
+					}
+				}
+				err = fail(ctx, operation, "interrupted", context.Canceled)
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("lost cause: %v", err)
+				}
+				if errors.Is(err, ErrRecoveryRequired) != recovery {
+					t.Fatalf("wrong recovery outcome: %v", err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				db, err = sql.Open("sqlite", path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				stored, err := (SQLRepository{DB: db}).LoadOperation(context.Background(), operation.CommandID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stored.State != want || stored.Stage != "interrupted" || stored.Failure != context.Canceled.Error() {
+					t.Fatalf("failure not durable after reopen: %+v", stored)
+				}
+			})
+		}
 	}
 }
 

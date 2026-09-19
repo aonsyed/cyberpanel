@@ -414,6 +414,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("initialize application runtime: %v", err)
 	}
+	applicationRuntime.DatabaseConnections = databaseExecutor
 	applicationPolicy, err := apps.NewLinuxApplicationBrokerPeerPolicy(controlUID)
 	if err != nil {
 		log.Fatalf("initialize application peer policy: %v", err)

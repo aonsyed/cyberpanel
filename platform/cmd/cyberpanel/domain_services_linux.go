@@ -609,7 +609,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize hosting console edge: %w", err)
 	}
-	hostingCloneConsoleEdge, err := newHostingCloneEdge(hostingCoordinator, repositories.Hosting, repositories.Applications, applicationStaging, applicationAccessProtection, applicationClient, webAccessPolicies, runtimeClock{}.Now)
+	hostingCloneConsoleEdge, err := newHostingCloneEdge(hostingCoordinator, repositories.Hosting, repositories.Applications, applicationStaging, applicationAccessProtection, applicationClient, applicationSecrets, webAccessPolicies, runtimeClock{}.Now)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize hosting clone edge: %w", err)
 	}

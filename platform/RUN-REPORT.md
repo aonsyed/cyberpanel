@@ -22,6 +22,211 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Results
 
+### Install drawer client identity controls — real QEMU browser
+
+The application install drawer now exposes optional multiline client
+certificate/private-key fields with WordPress/mutual-TLS guidance. Private
+fields are explicitly marked sensitive: autocomplete/spellcheck are disabled
+for the key, password/sensitive values are cleared after completed submission
+(including API failure) and unmount, and result rendering redacts client-key
+fields. This clears form state; it does not claim secure erasure of immutable
+JavaScript strings or already-sent transport buffers.
+
+Chromium inside Ubuntu ARM64 QEMU drove the actual Vue `ActionDrawer` and
+current application field definitions at 1366×900 and 390×844. All four
+success/failure cases passed: exact multiline PEM submission, cleared key and
+administrator password, result redaction, no page errors and no horizontal
+overflow. The API boundary was a controlled success/failure fixture; this is
+not an authenticated installed-panel HTTP enrollment test. Browser harness:
+`application-install-browser.cjs` in the current QEMU run directory; mobile
+evidence: `application-install-mobile.png`, visually inspected after copying
+it from the guest. The temporary loopback Vite server was stopped afterward.
+
+An initial check found stale guest UI source/dependencies (Vite 7.1.3). The
+current UI tree and lockfile were synchronized and `npm ci --ignore-scripts`
+installed the locked dependencies in QEMU. With Vite 7.3.6, strict typecheck
+and production build passed. Current main bundle: 529.33 kB (138.57 kB gzip);
+the existing >500 kB warning remains. No OS images or Go archives were
+downloaded. Clone identity controls and full installed enrollment remain open.
+
+### Public application install input — client identity wiring
+
+The `apps.instance.install` handler now accepts optional paired
+`database_client_certificate` / `database_client_key` PEM inputs, bounded to
+64 KiB each. Partial pairs, NUL bytes, over-limit inputs and unsupported
+non-WordPress client-identity requests are rejected. The handler extracts
+administrator and client-identity material into non-JSON byte fields, clears
+the decoded payload's material strings before calling the edge, and wipes
+the byte fields on return. The authenticated transport/canonical request still
+necessarily carries the original input for existing request validation and
+idempotency; no claim is made that clearing the handler payload erases those
+immutable transport copies.
+
+The edge validates its derived install request, enrolls the application client
+identity through the existing broker issuer, and passes only its deterministic
+reference to the install service. A durable terminal failed/compensated
+operation allows enrollment cleanup. An executing, recovery-required or
+unreadable operation preserves the lease for recovery rather than risking
+revocation of a concurrent original install's identity. Such uncertain pending
+leases remain in the local lease journal.
+
+QEMU payload tests passed for paired-field validation, sensitive-field transfer,
+non-serialization of the private material struct and byte wiping. The apps and
+API package suites and the core binary build passed. This is source wiring and
+component validation, not a live HTTP installation claim. Clone input remains
+to be connected; install UI controls are now checked above. Full installed material delivery still
+awaits the broker privilege choice. No downloads occurred in this phase.
+
+### Client identity lifecycle and truthful purge outcomes — 2026-09-20
+
+Install requests now accept only the deterministic client-identity reference
+for their installation. That reference is recorded with the pending
+installation, included in install compensation, and retained alongside the
+configuration secret when activation succeeds. Shared secret-ID derivation
+was moved unchanged out of the Linux adapter so request validation and broker
+enrollment use the same rule.
+
+Purge previously ignored database/secret revocation errors and committed a
+removed installation. It now attempts all referenced cleanup, with a bounded
+context independent of request cancellation, before marking the installation
+removed. Failure leaves the installation removing and records a
+recovery-required operation; a journal-write failure is also returned rather
+than hidden. QEMU coordinator tests cover successful cleanup, database and
+secret failures, and request cancellation after filesystem removal. The
+install failure test now verifies client-identity revocation as well.
+
+The Linux purge path also removes the installation's fixed private TLS files
+outside the document root. A descriptor-anchored QEMU filesystem test verifies
+this even after `db.php` has been deleted, including repeated cleanup. Empty
+private directories may remain; certificate/key material and client launchers
+do not. The apps package suite and both core/execd builds passed inside QEMU.
+These are coordinator/filesystem checks, not a complete installed panel purge.
+
+### Application-specific database client identity — backend enrollment
+
+`ApplicationSecretIssuer.EnrollDatabaseClientIdentity` now validates the
+certificate/key pair, validity interval and client-auth usage before enrolling
+it through the broker's write-only `PutExact` management operation. It uses
+the application tenant/installation/release audience and the same
+`database_tls` secret identity consumed by the WordPress runtime, never the
+external instance administrator's identity. The encoded private payload is
+wiped after use. Runtime material validation now also rejects expired or
+non-client identities.
+
+The installed Ubuntu ARM64 QEMU broker passed actual enrollment, exact replay,
+recovery after deleting only the fixture's local lease row, cross-tenant
+rejection, changed-certificate conflict, revocation and refusal to resurrect
+the revoked identity. Unit checks reject server-only, expired, not-yet-valid,
+mismatched-key and empty-certificate inputs. The focused run passed in 0.096s:
+`CYBERPANEL_QEMU_LIVE_APP_SECRETS=1 go test ./internal/apps -run 'TestApplicationDatabaseClientIdentityValidation|TestQEMULiveApplicationSecretLease' -count=1 -v`.
+All broker fixture identities were revoked on test exit. No material-consumer
+privileges were changed.
+
+This is backend enrollment, not a completed installed public workflow. The install handler
+now invokes it as recorded above; clone handling is wired as recorded below. Install UI
+controls have passed the component browser checks recorded above.
+Installation reference tracking and purge cleanup are now implemented as
+recorded above. The existing broker privilege
+decision remains pending for installed material delivery. No additional
+downloads were performed in this phase.
+
+### Clone target identity wiring and drawer checks — 2026-09-20
+
+The clone edge accepts a separate target database client certificate/key,
+validates the pair before site effects, and enrolls it for the target
+tenant/site/installation. Clone request validation rejects a source or arbitrary
+identity reference. Successful cloning retains the target identity for later
+cleanup. A failed edge call revokes it only when its durable application
+operation is failed/compensated; executing or uncertain operations retain it
+for recovery. This does not prove transactional cleanup of every partial clone.
+
+The site Clone drawer now exposes the optional paired PEM fields and treats the
+private key as sensitive. Ubuntu ARM64 QEMU checks passed:
+
+- Fresh apps and API package suites, including target-reference rejection.
+- UI typecheck and production build (529.78 kB JS chunk warning remains).
+- Real Chromium drawer at 1366×900 and 390×844, each with successful and rejected
+  controlled API responses: exact PEM payload, source ID/generation, database-copy
+  selection, private-key clearing, result redaction, no page errors or overflow.
+
+The mobile screenshot was visually inspected. Fixture scripts and screenshot
+are retained in `.work/qemu/runs/current-ubuntu-arm64-20260919-smoke/`
+(`application-install-browser.cjs clone`, `application-install-smoke.html`,
+`application-clone-mobile.png`). The temporary Vite process was stopped.
+These browser checks exercise the actual component with a controlled API
+boundary, not the installed HTTP clone/material-delivery chain. Full installed
+clone and partial-failure cleanup qualification remain open. No downloads or
+broker privilege changes occurred.
+
+### Partial clone failure reporting — 2026-09-20
+
+A QEMU regression reproduced discarded database-revocation errors, a misleading
+failed operation after partial target-file writes, and cancellation suppressing
+both revocation and journaling. Clone execution/receipt and probe/receipt failures
+now attempt database revocation with a bounded cancellation-independent context
+and retain a recovery-required operation. Database cleanup does not prove target
+files were removed, so successful revocation alone no longer permits terminal
+failure reporting. The edge consequently preserves the target client identity
+for recovery instead of revoking it based on a misleading failed journal state.
+
+Recovery journaling uses its own bounded context and returns operation/sync
+journal errors alongside the original cause. Seven coordinator regression cases
+cover partial execution, database cleanup failure, cancellation, journal failure,
+invalid clone receipt, probe failure and invalid probe receipt. Fresh apps/API
+package suites and core/execd builds passed in Ubuntu ARM64 QEMU. These checks use
+controlled executor/database boundaries; they do not prove cleanup of actual
+partial clone files or a completed installed recovery journey.
+
+### Durable staging journal and integrated rerun — 2026-09-20
+
+The SQLite reopen regression now covers application and staging failure/recovery
+records under request cancellation. It reproduced staging's early failure record
+remaining `executing` after reopening the database. Staging failure journaling now
+uses a bounded cancellation-independent context and surfaces write errors rather
+than discarding them. Recovery journaling passed the same actual SQLite reopen
+check.
+
+After this correction, `go test ./... -count=1` passed as root inside the Ubuntu
+ARM64 guest (opt-in integration tests are not implied by that command). A separate
+opt-in run passed installed application-secret enrollment/replay, protected-state
+connection resolution, and actual WordPress/PHP/WP-CLI/MariaDB TLS and mutual-TLS
+checks, including import/export rejection for untrusted identities. These remain
+component checks, not a completed installed panel clone or broker material chain.
+
+Logs are retained in `.work/qemu/runs/current-ubuntu-arm64-20260919-smoke/`:
+`clone-integrated-check-20260920.log` and `clone-live-components-20260920.log`.
+No downloads, signing changes, broker privilege changes, or host tests occurred.
+
+### Application connection authority and integrated Go check — 2026-09-20
+
+`TestQEMUApplicationConnectionAuthority` exercises the production resolver
+against root-owned database/principal/instance records in the disposable
+Ubuntu ARM64 guest. It creates unique fixture records and removes them on exit.
+The secret-source fixture permits only the exact pinned-CA reference/audience;
+administrator credentials, principal passwords and server private-key requests
+fail the test. Local resolution requests no material. External resolution
+returns only the bound instance, SQL names, endpoint, TLS mode and public CA.
+
+The first run exposed acceptance of disabled principals and quarantined,
+deleting or deleted resources. Those states are now rejected before any CA
+request. Resolution uses the executor's mutation mutex when joining the three
+protected records. Cross-tenant/site requests, mismatched record identities,
+principal-instance mismatches and endpoint/server-name disagreement are also
+rejected. CA lease failure returns no usable connection profile.
+
+The WordPress caller now verifies the exact instance ID and placement against
+that protected result, in addition to SQL names and endpoint. Its focused
+QEMU test rejects substituted instance/database/principal/placement/endpoint
+values. Both tests passed after the fix (apps 0.007s, database 0.044s).
+
+The existing integrated `go test ./...` run then exited successfully inside
+Ubuntu ARM64 QEMU. Its 111 package-result lines include packages without tests
+and cached unchanged packages; they are not 111 live product journeys.
+Opt-in database/WordPress tests were run separately as recorded here, not
+silently counted as exercised by the default suite. Guest evidence:
+`/home/harness/application-integration-check-20260920.log`.
+No OS image, package or toolchain downloads occurred in this resolver phase.
+
 ### Application database provisioning replay — installed broker verified in QEMU
 
 `TestQEMULiveApplicationDatabaseProvisionReplay` now exercises the current
@@ -201,7 +406,90 @@ CA and optional client identity before connecting, enforces the configured TCP
 endpoint and peer verification, and checks that the session negotiated a TLS
 cipher. It preserves WordPress charset/SQL-mode/database initialization and has
 its own connection-initialization state because WordPress's corresponding
-property is private. This asset is **not yet wired into install/clone**.
+property is private. Uncommitted install/clone wiring now invokes this asset,
+but that integration is **not ready to activate**.
+
+The current wiring obtains database/principal identity and endpoint/CA settings
+from the database executor's protected state, with tenant/site checks. It does
+not expose administrator passwords or private keys. Mutual TLS requests a
+separate application-audience identity. Explicit TLS arguments are added for
+WP-CLI import/export because those commands bypass the WordPress drop-in.
+
+Focused QEMU checks passed for private file modes, replay/partial install,
+managed-file removal on a local transition, rejection of TLS flag overrides,
+and preserving unrelated drop-ins and symlink targets. On 2026-09-20 the
+material files were moved outside the document root into a per-installation
+directory under the site generation (`application-db-<installation digest>`),
+mode 0700 with 0600 files. Only the executable `db.php` is published in
+`wp-content`; its exact managed template carries a base64-encoded private
+path. Descriptor-anchored no-follow operations protect material writes.
+Additional QEMU checks passed for absence of material in the document root,
+clone isolation (including local-transition preservation of source material),
+and stable material paths after release-directory promotion. Both package
+suites passed as root in QEMU after these changes; `panel-execd` built there.
+The real PHP/WordPress/MariaDB TLS test passed again with material outside
+its WordPress directory, including all six trusted/untrusted identity cases.
+No image or toolchain downloads were performed for this checkpoint.
+
+Outstanding before enabling this wiring: qualify the protected-state resolver
+and application-identity enrollment; run full install/clone journeys. The
+wiring has not been installed or exercised with production application
+credentials. Actual WP-CLI component qualification is recorded below.
+
+### WP-CLI database import/export — real TLS failures corrected
+
+On 2026-09-20, the Ubuntu ARM64 guest ran WP-CLI 2.12.0 with WordPress 7.1,
+PHP 8.3.6 and the isolated MariaDB 10.11.14 TLS fixture. WP-CLI's downloaded
+PHAR matched the release's published SHA256:
+`ce34ddd838f7351d6759068d09793f26755463b4a4610a5a5c0a97b68220d85c`.
+WordPress core passed `wp core verify-checksums --version=7.1`. These small
+test dependencies were downloaded inside QEMU; no OS images or Go archives
+were downloaded. They are not enrolled production release artifacts.
+
+Actual import testing exposed two problems invisible to argument-only tests:
+
+- File import opened a preliminary SQL-mode connection without forwarding
+  TLS options; mutual TLS failed with database error 1045. Snapshot import now
+  streams the verified dump descriptor through stdin, avoiding that connection
+  and retaining the SQL modes contained in the exported dump.
+- Import's option whitelist silently discarded MariaDB's
+  `ssl-verify-server-cert` flag. A wrong-hostname import actually succeeded
+  before the correction. A fixed private client launcher now supplies
+  `--no-defaults --ssl=1 --ssl-verify-server-cert=1` directly to MariaDB.
+  The runtime validates the launcher bytes and selects it only for TLS
+  imports. It contains no credentials and is mode 0700 outside the web root.
+  CA and application-client identity arguments remain explicit. No ambient
+  database option files or certificate-verification bypasses are introduced.
+
+Both trusted TLS and trusted mutual TLS now export real table contents,
+delete the fixture row, import the dump, and independently verify restoration
+through the server's local administrative socket. Both export and import
+reject wrong CA, wrong hostname, absent required client identity and an
+untrusted client identity. Rejected imports leave the fixture row unchanged.
+The existing PHP/mysqli connection/reconnect checks also pass in the same run.
+
+The fixture subsequently passed a complete WordPress 7.1 bootstrap using the
+managed `wp-content/db.php`, not the minimal `wpdb` test bootstrap. `wp core
+install` created the installation over server-authenticated TLS; `core
+is-installed`, `option get siteurl` and WordPress's `wp_authenticate` plus
+`manage_options` capability check passed over both TLS and mutual TLS.
+The administrator password was supplied through stdin, never argv. A separate
+administrative SQL query confirmed the persisted administrator record. The
+same installed WordPress database was reused for the mutual-TLS check; a fresh
+mutual-TLS installation is not claimed. The complete updated fixture passed in
+4.092s. This validates real WordPress startup and authentication code, not an
+OLS-served browser login or the panel's installed provisioning/broker chain.
+
+The production snapshot-import boundary test verifies stdin delivery of the
+exact digest-checked dump and rejects a mismatched digest or symlink before
+launching the command. That boundary test uses a capture executable; the
+database fixture separately executes real WP-CLI. This is not a full installed
+panel clone certification.
+
+Reproduction inside QEMU as root:
+`CYBERPANEL_QEMU_LIVE_MARIADB=1 CYBERPANEL_QEMU_LIVE_WORDPRESS_TLS=1 CYBERPANEL_QEMU_LIVE_WORDPRESS_CLI=1 go test ./internal/apps ./internal/database -run 'TestWordPressSnapshotImportStreamsVerifiedDump|TestWordPressTLSManagedFiles|TestQEMULiveMariaDBExternalTLS' -count=1 -v`.
+All selected checks passed (apps 0.076s, database 2.237s). The complete apps
+and database package suites and the execd build were then checked in QEMU.
 
 Driver-level qualification now passes inside QEMU using actual WordPress
 `wpdb`, PHP mysqli/mysqlnd and the isolated real MariaDB TLS fixture. Trusted

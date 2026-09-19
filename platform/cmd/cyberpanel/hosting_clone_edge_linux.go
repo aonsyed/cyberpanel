@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
@@ -24,17 +25,20 @@ type hostingCloneEdge struct {
 	staging  *apps.StagingCoordinator
 	access   *apps.AccessProtectionService
 	executor *apps.LinuxApplicationClient
+	secrets *apps.ApplicationSecretIssuer
 	policies *accesspolicy.Authority
 	now      func() time.Time
 }
 
-func newHostingCloneEdge(hosting hostingservice.Service, sites *sqlrepo.Repository, applications apps.SQLRepository, staging *apps.StagingCoordinator, accessProtection *apps.AccessProtectionService, executor *apps.LinuxApplicationClient, policies *accesspolicy.Authority, now func() time.Time) (*hostingCloneEdge, error) {
-	if sites == nil || applications.DB == nil || staging == nil || accessProtection == nil || executor == nil || policies == nil { return nil, apps.ErrInvalid }
+func newHostingCloneEdge(hosting hostingservice.Service, sites *sqlrepo.Repository, applications apps.SQLRepository, staging *apps.StagingCoordinator, accessProtection *apps.AccessProtectionService, executor *apps.LinuxApplicationClient, secrets *apps.ApplicationSecretIssuer, policies *accesspolicy.Authority, now func() time.Time) (*hostingCloneEdge, error) {
+	if sites == nil || applications.DB == nil || staging == nil || accessProtection == nil || executor == nil || secrets == nil || policies == nil { return nil, apps.ErrInvalid }
 	if now == nil { now = time.Now }
-	return &hostingCloneEdge{hosting:hosting,sites:sites,apps:applications,staging:staging,access:accessProtection,executor:executor,policies:policies,now:now},nil
+	return &hostingCloneEdge{hosting:hosting,sites:sites,apps:applications,staging:staging,access:accessProtection,executor:executor,secrets:secrets,policies:policies,now:now},nil
 }
 
-func (edge *hostingCloneEdge) CloneSite(ctx context.Context, call apiserver.EdgeCall, payload apiserver.HostingClonePayload) (apiserver.EdgeMutation[apiserver.HostingSiteProjection], error) {
+func (edge *hostingCloneEdge) CloneSite(ctx context.Context, call apiserver.EdgeCall, payload apiserver.HostingClonePayload, material apiserver.ApplicationCloneMaterial) (apiserver.EdgeMutation[apiserver.HostingSiteProjection], error) {
+	if (len(material.DatabaseClientCertificate)==0)!=(len(material.DatabaseClientKey)==0) { return apiserver.EdgeMutation[apiserver.HostingSiteProjection]{},apps.ErrInvalid }
+	if len(material.DatabaseClientCertificate)>0 { if err:=apps.ValidateApplicationDatabaseClientIdentity(material.DatabaseClientCertificate,material.DatabaseClientKey,edge.now());err!=nil { return apiserver.EdgeMutation[apiserver.HostingSiteProjection]{},err } }
 	tenant, err := site.NewTenantID(call.TenantID)
 	if err != nil { return apiserver.EdgeMutation[apiserver.HostingSiteProjection]{}, err }
 	sourceSiteID, err := site.NewSiteID(call.ResourceID)
@@ -70,8 +74,21 @@ func (edge *hostingCloneEdge) CloneSite(ctx context.Context, call apiserver.Edge
 	if err != nil { return apiserver.EdgeMutation[apiserver.HostingSiteProjection]{}, err }
 	targetInstallationID := apps.InstallationID("clone-" + targetToken)
 	relationID := apps.StagingRelationID("staging-" + targetToken)
-	targetInstallation, _, err := edge.staging.CreateClone(ctx, apps.CloneRequest{CommandID:apps.CommandID(call.CommandID+"-application"),RelationID:relationID,TenantID:apps.TenantID(call.TenantID),Source:sourceApplication,TargetSiteID:apps.SiteID(targetSiteID.String()),TargetProjectID:apps.ProjectID(payload.ProjectID),TargetSiteUID:targetScope.SiteUID,TargetInstallationID:targetInstallationID,TargetRoot:sourceApplication.Root,SourceURL:"https://"+primaryHostname(sourceSite),TargetURL:"https://"+targetHostname.String(),TargetRuntimeID:sourceApplication.RuntimeID,CreateDatabase:payload.CopyDatabase,MailSuppressed:true,ExternalActionsDenied:true,AccessPolicyID:string(policy.PolicyRef)},sourceScope,targetScope)
-	if err != nil { return apiserver.EdgeMutation[apiserver.HostingSiteProjection]{}, err }
+	var clientIdentity apps.SecretRef
+	if len(material.DatabaseClientCertificate)>0 {
+		clientIdentity,err=edge.secrets.EnrollDatabaseClientIdentity(ctx,apps.TenantID(call.TenantID),apps.SiteID(targetSiteID.String()),targetInstallationID,material.DatabaseClientCertificate,material.DatabaseClientKey)
+		if err!=nil { return apiserver.EdgeMutation[apiserver.HostingSiteProjection]{},err }
+	}
+	cloneCommand:=apps.CommandID(call.CommandID+"-application")
+	targetInstallation, _, err := edge.staging.CreateClone(ctx, apps.CloneRequest{CommandID:cloneCommand,RelationID:relationID,TenantID:apps.TenantID(call.TenantID),Source:sourceApplication,TargetSiteID:apps.SiteID(targetSiteID.String()),TargetProjectID:apps.ProjectID(payload.ProjectID),TargetSiteUID:targetScope.SiteUID,TargetInstallationID:targetInstallationID,TargetDatabaseInstanceID:apps.DatabaseInstanceID(payload.DatabaseInstanceID),TargetDatabaseClientIdentityRef:clientIdentity,TargetRoot:sourceApplication.Root,SourceURL:"https://"+primaryHostname(sourceSite),TargetURL:"https://"+targetHostname.String(),TargetRuntimeID:sourceApplication.RuntimeID,CreateDatabase:payload.CopyDatabase,MailSuppressed:true,ExternalActionsDenied:true,AccessPolicyID:string(policy.PolicyRef)},sourceScope,targetScope)
+	if err != nil {
+		if clientIdentity!="" {
+			cleanup,cancel:=context.WithTimeout(context.WithoutCancel(ctx),30*time.Second);defer cancel()
+			operation,loadErr:=edge.apps.LoadOperation(cleanup,cloneCommand)
+			if loadErr==nil && (operation.State==apps.OperationFailed || operation.State==apps.OperationCompensated) { err=errors.Join(err,edge.secrets.RevokeApplicationSecret(cleanup,clientIdentity)) }
+		}
+		return apiserver.EdgeMutation[apiserver.HostingSiteProjection]{}, err
+	}
 	_, err = edge.access.Configure(ctx, apps.AccessProtectionRequest{
 		CommandID:          apps.CommandID(call.CommandID + "-access-binding"),
 		InstallationID:     targetInstallation.ID,

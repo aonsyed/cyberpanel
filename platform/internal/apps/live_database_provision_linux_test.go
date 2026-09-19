@@ -98,21 +98,21 @@ func TestQEMULiveApplicationDatabaseProvisionReplay(t *testing.T) {
 	}
 	installation := InstallationID(fmt.Sprintf("qemu-provision-%x", time.Now().UnixNano()))
 	if transport.loseNext {
-		if _, err := provisioner.ProvisionApplicationDatabase(ctx, "qemu-tenant", "qemu-site", installation, ApplicationWordPress); err == nil {
+		if _, err := provisioner.ProvisionApplicationDatabase(ctx, "qemu-tenant", "qemu-site", installation, ApplicationWordPress, DatabaseInstanceID(instance.ID.String())); err == nil {
 			t.Fatal("lost response was not injected")
 		}
 		if commands.calls != 0 {
 			t.Fatal("database commands ran before credential acknowledgement")
 		}
 	}
-	first, err := provisioner.ProvisionApplicationDatabase(ctx, "qemu-tenant", "qemu-site", installation, ApplicationWordPress)
+	first, err := provisioner.ProvisionApplicationDatabase(ctx, "qemu-tenant", "qemu-site", installation, ApplicationWordPress, DatabaseInstanceID(instance.ID.String()))
 	if err != nil {
 		t.Fatalf("first provision: %v", err)
 	}
 	if len(transport.heads) != 2 {
 		t.Fatalf("expected two audience-bound credentials, got %d", len(transport.heads))
 	}
-	replayed, err := provisioner.ProvisionApplicationDatabase(ctx, "qemu-tenant", "qemu-site", installation, ApplicationWordPress)
+	replayed, err := provisioner.ProvisionApplicationDatabase(ctx, "qemu-tenant", "qemu-site", installation, ApplicationWordPress, DatabaseInstanceID(instance.ID.String()))
 	if err != nil {
 		t.Fatalf("identical provisioning replay must preserve credentials: %v", err)
 	}

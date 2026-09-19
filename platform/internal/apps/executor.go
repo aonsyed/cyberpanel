@@ -3,6 +3,8 @@ package apps
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +32,8 @@ func (scope SiteExecutionScope) Validate() error {
 
 type DatabaseBinding struct {
 	ID            DatabaseBindingID `json:"id"`
+	InstanceID    DatabaseInstanceID `json:"instance_id"`
+	Placement     string `json:"placement"`
 	Engine        string `json:"engine"`
 	DatabaseName  string `json:"database_name"`
 	PrincipalName string `json:"principal_name"`
@@ -40,10 +44,35 @@ type DatabaseBinding struct {
 
 func (binding DatabaseBinding) Validate() error {
 	if err := requireID("database binding", string(binding.ID)); err != nil { return err }
-	if !componentNamePattern.MatchString(binding.DatabaseName) || !componentNamePattern.MatchString(binding.PrincipalName) || !validID(binding.EndpointRef) || !validID(string(binding.PasswordRef)) {
+	if err := requireID("database instance", string(binding.InstanceID)); err != nil { return err }
+	if binding.Engine != "mariadb" {
+		return fmt.Errorf("%w: database engine", ErrInvalid)
+	}
+	switch binding.Placement {
+	case "local":
+		if binding.EndpointRef != "local-mariadb" {
+			return fmt.Errorf("%w: local database endpoint", ErrInvalid)
+		}
+	case "external":
+		if binding.EndpointRef == "local-mariadb" || !binding.TLSRequired {
+			return fmt.Errorf("%w: external database endpoint or TLS", ErrInvalid)
+		}
+	default:
+		return fmt.Errorf("%w: database placement", ErrInvalid)
+	}
+	if binding.Placement != "local" && binding.Placement != "external" || !componentNamePattern.MatchString(binding.DatabaseName) || !componentNamePattern.MatchString(binding.PrincipalName) || !validApplicationDatabaseEndpoint(binding.EndpointRef) || !validID(string(binding.PasswordRef)) {
 		return fmt.Errorf("%w: database binding", ErrInvalid)
 	}
 	return nil
+}
+
+func validApplicationDatabaseEndpoint(value string) bool {
+	if value == "local-mariadb" { return true }
+	if len(value) == 0 || len(value) > 261 || strings.ContainsAny(value, "\x00\r\n\t /\\@") { return false }
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || host == "" || port == "" { return false }
+	parsed, err := strconv.ParseUint(port, 10, 16)
+	return err == nil && parsed > 0
 }
 
 type AdministratorBootstrap struct {
@@ -267,7 +296,7 @@ type RecoveryPointProvider interface {
 }
 
 type DatabaseProvisioner interface {
-	ProvisionApplicationDatabase(context.Context, TenantID, SiteID, InstallationID, ApplicationKind) (DatabaseBinding, error)
+	ProvisionApplicationDatabase(context.Context, TenantID, SiteID, InstallationID, ApplicationKind, DatabaseInstanceID) (DatabaseBinding, error)
 	RevokeApplicationDatabase(context.Context, DatabaseBindingID) error
 }
 

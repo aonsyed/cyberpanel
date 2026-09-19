@@ -121,8 +121,27 @@ type HostingBindingProjection struct {
 type HostingClonePayload struct {
 	PrimaryHostname string `json:"primary_hostname"`
 	ProjectID       string `json:"project_id"`
+	DatabaseInstanceID string `json:"database_instance_id"`
 	CopyDatabase    bool   `json:"copy_database"`
 	AccessCredentialRef string `json:"access_credential_ref"`
+	DatabaseClientCertificate string `json:"database_client_certificate,omitempty"`
+	DatabaseClientKey string `json:"database_client_key,omitempty"`
+}
+
+type ApplicationCloneMaterial struct {
+	DatabaseClientCertificate []byte `json:"-"`
+	DatabaseClientKey []byte `json:"-"`
+}
+
+func takeApplicationCloneMaterial(payload *HostingClonePayload) ApplicationCloneMaterial {
+	material:=ApplicationCloneMaterial{[]byte(payload.DatabaseClientCertificate),[]byte(payload.DatabaseClientKey)}
+	payload.DatabaseClientCertificate,payload.DatabaseClientKey="",""
+	return material
+}
+
+func (material ApplicationCloneMaterial) clear() {
+	clearSecret(material.DatabaseClientCertificate)
+	clearSecret(material.DatabaseClientKey)
 }
 
 type HostingPreviewPayload struct {
@@ -318,6 +337,7 @@ type ApplicationProjection struct {
 
 type ApplicationInstallEdgePayload struct {
 	SiteID      string `json:"site_id"`
+	DatabaseInstanceID string `json:"database_instance_id"`
 	Application string `json:"application"`
 	Version     string `json:"version"`
 	RecipeID    string `json:"recipe_id,omitempty"`
@@ -325,9 +345,29 @@ type ApplicationInstallEdgePayload struct {
 	AdministratorEmail string `json:"administrator_email"`
 	AdministratorDisplayName string `json:"administrator_display_name"`
 	AdministratorPassword string `json:"administrator_password"`
+	DatabaseClientCertificate string `json:"database_client_certificate,omitempty"`
+	DatabaseClientKey string `json:"database_client_key,omitempty"`
 	Locale string `json:"locale,omitempty"`
 	Timezone string `json:"timezone,omitempty"`
 	Title string `json:"title,omitempty"`
+}
+
+type ApplicationInstallMaterial struct {
+	AdministratorPassword []byte `json:"-"`
+	DatabaseClientCertificate []byte `json:"-"`
+	DatabaseClientKey []byte `json:"-"`
+}
+
+func takeApplicationInstallMaterial(payload *ApplicationInstallEdgePayload) ApplicationInstallMaterial {
+	material:=ApplicationInstallMaterial{[]byte(payload.AdministratorPassword),[]byte(payload.DatabaseClientCertificate),[]byte(payload.DatabaseClientKey)}
+	payload.AdministratorPassword,payload.DatabaseClientCertificate,payload.DatabaseClientKey="","",""
+	return material
+}
+
+func (material ApplicationInstallMaterial) clear() {
+	clearSecret(material.AdministratorPassword)
+	clearSecret(material.DatabaseClientCertificate)
+	clearSecret(material.DatabaseClientKey)
 }
 
 type ApplicationDiscoveryEdgePayload struct {
@@ -1116,7 +1156,7 @@ type HostingEdgeService interface {
 }
 
 type HostingCloneEdgeService interface {
-	CloneSite(context.Context, EdgeCall, HostingClonePayload) (EdgeMutation[HostingSiteProjection], error)
+	CloneSite(context.Context, EdgeCall, HostingClonePayload, ApplicationCloneMaterial) (EdgeMutation[HostingSiteProjection], error)
 }
 
 type HostingPreviewEdgeService interface {
@@ -1150,7 +1190,7 @@ type ApplicationEdgeService interface {
 	ListApplications(context.Context, EdgeCall, EdgePagePayload) (EdgePage[ApplicationProjection], error)
 	DiscoverApplications(context.Context, EdgeCall, ApplicationDiscoveryEdgePayload) (ApplicationDiscoveryEdgeResult, error)
 	AdoptApplication(context.Context, EdgeCall, ApplicationAdoptEdgePayload) (EdgeMutation[ApplicationProjection], error)
-	InstallApplication(context.Context, EdgeCall, ApplicationInstallEdgePayload, []byte) (EdgeMutation[ApplicationProjection], error)
+	InstallApplication(context.Context, EdgeCall, ApplicationInstallEdgePayload, ApplicationInstallMaterial) (EdgeMutation[ApplicationProjection], error)
 	UpdateApplication(context.Context, EdgeCall, ApplicationUpdateEdgePayload) (EdgeMutation[ApplicationProjection], error)
 	RemoveApplication(context.Context, EdgeCall) (EdgeMutation[ApplicationProjection], error)
 	ScanApplication(context.Context, EdgeCall, ApplicationScanPayload) (EdgeMutation[ApplicationProjection], error)
@@ -1599,7 +1639,8 @@ func validateDatabaseExternalEnrollment(value any) error {
 
 func validateHostingClone(value any) error {
 	payload := value.(*HostingClonePayload)
-	if !validMailHostname(payload.PrimaryHostname) || !validEdgeID(payload.ProjectID) || !payload.CopyDatabase || !validEdgeID(payload.AccessCredentialRef) { return invalid("site clone") }
+	if !validApplicationClientIdentityInput(payload.DatabaseClientCertificate,payload.DatabaseClientKey) { return invalid("clone database client identity") }
+	if !validMailHostname(payload.PrimaryHostname) || !validEdgeID(payload.ProjectID) || !validEdgeID(payload.DatabaseInstanceID) || !payload.CopyDatabase || !validEdgeID(payload.AccessCredentialRef) { return invalid("site clone") }
 	return nil
 }
 
@@ -1674,9 +1715,15 @@ func validateAccessFileWrite(value any) error {
 
 func validateApplicationInstall(value any) error {
 	payload := value.(*ApplicationInstallEdgePayload)
-	if !validEdgeID(payload.SiteID) || !validEdgeID(payload.Version) || payload.RecipeID!=""&&!validEdgeID(payload.RecipeID) || !safeEdgeText(payload.AdministratorUsername,128) || !strings.Contains(payload.AdministratorEmail,"@") || !safeEdgeText(payload.AdministratorEmail,320) || !safeEdgeText(payload.AdministratorDisplayName,256) || len(payload.AdministratorPassword)<12 || len(payload.AdministratorPassword)>4096 || payload.Locale!=""&&!safeEdgeText(payload.Locale,64) || payload.Timezone!=""&&!safeEdgeText(payload.Timezone,128) || payload.Title!=""&&!safeEdgeText(payload.Title,256) { return invalid("application install") }
+	if !validApplicationClientIdentityInput(payload.DatabaseClientCertificate,payload.DatabaseClientKey) { return invalid("application database client identity") }
+	if payload.DatabaseClientCertificate!="" && payload.Application!="wordpress" { return invalid("application database TLS support") }
+	if !validEdgeID(payload.SiteID) || !validEdgeID(payload.DatabaseInstanceID) || !validEdgeID(payload.Version) || payload.RecipeID!=""&&!validEdgeID(payload.RecipeID) || !safeEdgeText(payload.AdministratorUsername,128) || !strings.Contains(payload.AdministratorEmail,"@") || !safeEdgeText(payload.AdministratorEmail,320) || !safeEdgeText(payload.AdministratorDisplayName,256) || len(payload.AdministratorPassword)<12 || len(payload.AdministratorPassword)>4096 || payload.Locale!=""&&!safeEdgeText(payload.Locale,64) || payload.Timezone!=""&&!safeEdgeText(payload.Timezone,128) || payload.Title!=""&&!safeEdgeText(payload.Title,256) { return invalid("application install") }
 	switch payload.Application { case "wordpress", "joomla", "prestashop", "magento", "mautic": default: return invalid("application kind") }
 	return nil
+}
+
+func validApplicationClientIdentityInput(certificate,key string) bool {
+	return (certificate=="")== (key=="") && len(certificate)<=64<<10 && len(key)<=64<<10 && !strings.ContainsRune(certificate,0) && !strings.ContainsRune(key,0)
 }
 
 func validateApplicationDiscoveryEdge(value any) error {
@@ -2393,7 +2440,7 @@ func bindConsoleEdgeContracts(registry *Registry, services DomainServices) error
 			return edgeOperationResult(http.StatusOK, result), nil
 		}); err != nil { return err }
 	}
-	if services.HostingCloneEdge != nil { if err:=registry.Bind("hosting.site.clone",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){result,err:=services.HostingCloneEdge.CloneSite(ctx,edgeCall(inv),*value.(*HostingClonePayload));if err!=nil{return OperationResult{},mapDomainError(err)};return edgeOperationResult(http.StatusAccepted,result),nil});err!=nil{return err} }
+	if services.HostingCloneEdge != nil { if err:=registry.Bind("hosting.site.clone",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){payload:=value.(*HostingClonePayload);material:=takeApplicationCloneMaterial(payload);defer material.clear();result,err:=services.HostingCloneEdge.CloneSite(ctx,edgeCall(inv),*payload,material);if err!=nil{return OperationResult{},mapDomainError(err)};return edgeOperationResult(http.StatusAccepted,result),nil});err!=nil{return err} }
 	if services.HostingPreviewEdge != nil { if err:=registry.Bind("hosting.site.preview.issue",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){result,err:=services.HostingPreviewEdge.IssuePreview(ctx,edgeCall(inv),*value.(*HostingPreviewPayload));if err!=nil{return OperationResult{},mapDomainError(err)};return OperationResult{Status:http.StatusCreated,Value:result},nil});err!=nil{return err} }
 	if services.HostingAccessPolicyEdge != nil { if err:=registry.Bind("hosting.binding.access_policy",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){result,err:=services.HostingAccessPolicyEdge.ConfigureAccessPolicy(ctx,edgeCall(inv),*value.(*HostingAccessPolicyPayload));if err!=nil{return OperationResult{},mapDomainError(err)};return edgeOperationResult(http.StatusOK,result),nil});err!=nil{return err} }
 	if services.Hosting != nil {
@@ -2560,8 +2607,8 @@ func bindConsoleEdgeContracts(registry *Registry, services DomainServices) error
 			return edgeOperationResult(http.StatusCreated, result), nil
 		}); err != nil { return err } }
 		if capabilities.Install { if err := registry.Bind("apps.instance.install", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
-			payload:=value.(*ApplicationInstallEdgePayload);password:=[]byte(payload.AdministratorPassword);payload.AdministratorPassword="";defer clearSecret(password)
-			result, err := services.ApplicationEdge.InstallApplication(ctx, edgeCall(inv), *payload, password); if err != nil { return OperationResult{}, mapDomainError(err) }
+			payload:=value.(*ApplicationInstallEdgePayload);material:=takeApplicationInstallMaterial(payload);defer material.clear()
+			result, err := services.ApplicationEdge.InstallApplication(ctx, edgeCall(inv), *payload, material); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return edgeOperationResult(http.StatusCreated, result), nil
 		}); err != nil { return err } }
 		if capabilities.Update { if err := registry.Bind("apps.instance.update", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {

@@ -213,11 +213,21 @@ func (coordinator LifecycleCoordinator) Remove(ctx context.Context, request Remo
 	if request.Disposition == RemovalPurge { expectedOperation = "remove" }
 	if err := receipt.Validate(expectedOperation, scope, installation.ID); err != nil { return ApplicationInstallation{}, coordinator.recovery(ctx, operation, "receipt", err) }
 	if request.Disposition == RemovalPurge {
+		cleanup,cancel:=context.WithTimeout(context.WithoutCancel(ctx),30*time.Second)
+		defer cancel()
+		ctx=cleanup
+		var cleanupErr error
+		if installation.DatabaseBindingID!="" {
+			if coordinator.Databases==nil { cleanupErr=errors.Join(cleanupErr,ErrInvalid) } else { cleanupErr=errors.Join(cleanupErr,coordinator.Databases.RevokeApplicationDatabase(ctx,installation.DatabaseBindingID)) }
+		}
+		for _,secret:=range installation.SecretRefs {
+			if coordinator.Secrets==nil { cleanupErr=errors.Join(cleanupErr,ErrInvalid);break }
+			cleanupErr=errors.Join(cleanupErr,coordinator.Secrets.RevokeApplicationSecret(ctx,secret))
+		}
+		if cleanupErr!=nil { return ApplicationInstallation{},coordinator.recovery(ctx,operation,"revoke_resources",cleanupErr) }
 		previousGeneration = installation.Generation
 		if err := installation.Transition(InstallationRemoved, coordinator.now()); err != nil { return ApplicationInstallation{}, coordinator.recovery(ctx, operation, "removed", err) }
 		if err := coordinator.Store.UpdateInstallation(ctx, installation, previousGeneration); err != nil { return ApplicationInstallation{}, coordinator.recovery(ctx, operation, "removed", err) }
-		if coordinator.Databases != nil && installation.DatabaseBindingID != "" { _ = coordinator.Databases.RevokeApplicationDatabase(ctx, installation.DatabaseBindingID) }
-		if coordinator.Secrets != nil { for _, secret := range installation.SecretRefs { _ = coordinator.Secrets.RevokeApplicationSecret(ctx, secret) } }
 	}
 	operation.State, operation.Stage, operation.ResultDigest, operation.UpdatedAt = OperationCommitted, "committed", receipt.OutputDigest, coordinator.now()
 	if err := coordinator.Store.UpdateOperation(ctx, operation); err != nil { return ApplicationInstallation{}, err }
@@ -232,8 +242,8 @@ func (coordinator LifecycleCoordinator) fail(ctx context.Context, operation Oper
 
 func (coordinator LifecycleCoordinator) recovery(ctx context.Context, operation Operation, stage string, cause error) error {
 	operation.State, operation.Stage, operation.Failure, operation.UpdatedAt = OperationRecoveryRequired, stage, cause.Error(), coordinator.now()
-	_ = coordinator.Store.UpdateOperation(ctx, operation)
-	return errors.Join(ErrRecoveryRequired, cause)
+	journalErr := coordinator.Store.UpdateOperation(ctx, operation)
+	return errors.Join(ErrRecoveryRequired, cause, journalErr)
 }
 
 func requireLifecycleDependencies(store ApplicationStore, executor SiteApplicationExecutor) error {

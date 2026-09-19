@@ -7,7 +7,9 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -216,7 +219,9 @@ func validStagingApplicationURL(raw string) bool {
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.RawPath != "" || parsed.Opaque != "" {
 		return false
 	}
-	if parsed.Path == "" || parsed.Path == "/" { return true }
+	if parsed.Path == "" || parsed.Path == "/" {
+		return true
+	}
 	return strings.HasPrefix(parsed.Path, "/") && !strings.Contains(parsed.Path, "//") && path.Clean(parsed.Path) == parsed.Path && len(parsed.Path) <= 2048
 }
 
@@ -507,6 +512,9 @@ func (runtime *LinuxApplicationRuntime) configureClonedWordPress(ctx context.Con
 	if err = injectWordPressCloneConstants(configPath, target.binding); err != nil {
 		return err
 	}
+	if err = runtime.configureWordPressDatabaseTLS(ctx, target, execution.TargetScope, execution.TargetInstallationID, execution.TargetDatabase); err != nil {
+		return err
+	}
 	return runtime.importWordPressSnapshot(ctx, target, execution.SourceSnapshot, dumpPath)
 }
 
@@ -589,15 +597,28 @@ func (runtime *LinuxApplicationRuntime) importWordPressSnapshot(ctx context.Cont
 	if snapshot.DatabaseDigest == "" {
 		return ErrInvalid
 	}
-	info, err := os.Lstat(dumpPath)
+	fd, err := syscall.Open(dumpPath, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return errors.Join(ErrIntegrity, err)
+	}
+	dump := os.NewFile(uintptr(fd), dumpPath)
+	defer dump.Close()
+	info, err := dump.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || uint64(info.Size()) > linuxApplicationStagingMaximumBytes {
 		return ErrIntegrity
 	}
-	digest, err := digestLinuxApplicationFile(dumpPath, uint64(info.Size()))
-	if err != nil || digest != snapshot.DatabaseDigest {
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(dump, info.Size()+1))
+	if err != nil || n != info.Size() || hex.EncodeToString(hash.Sum(nil)) != snapshot.DatabaseDigest {
 		return errors.Join(ErrIntegrity, err)
 	}
-	_, stderr, _, err := runtime.wp(ctx, target, nil, 4<<20, "db", "import", dumpPath)
+	if _, err := dump.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	// WP-CLI 2.12's file import opens an extra SQL-mode connection without
+	// forwarding TLS options. Stream the verified snapshot instead; exported
+	// SQL carries its own session modes, and no insecure probe is necessary.
+	_, stderr, _, err := runtime.wpReader(ctx, target, io.LimitReader(dump, info.Size()), 4<<20, "db", "import", "-")
 	if err != nil {
 		return fmt.Errorf("import staged WordPress database: %w: %s", err, stderr)
 	}

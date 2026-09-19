@@ -38,12 +38,26 @@ into fewer files does not bypass the line limits.
 
 ## Current position
 
-Latest executable verification is recorded in `RUN-REPORT.md`: all four
-Ubuntu/AlmaLinux amd64/arm64 Go suites/builds pass on the updated source;
-frontend strict compilation and desktop/mobile navigation component interactions
-pass in QEMU. Startup panics are fixed and the JavaScript bundle is reduced from
-6.02 MB to 529 kB. A complete signed installation and live API/service journeys
-remain pending; the external application database-placement slice is unfinished.
+Latest executable verification is recorded in `RUN-REPORT.md`: the current
+application database/TLS changes passed the full uncached Go suite in Ubuntu
+ARM64 QEMU. Earlier four-guest matrix results do not qualify these newer changes.
+Frontend strict compilation and desktop/mobile install/clone drawer interactions
+passed against controlled API boundaries, not an installed panel. The current
+JavaScript bundle is 529.78 kB and retains the size warning.
+
+WordPress now resolves the selected database through protected ownership/state
+records, uses a pinned CA and optional separate application client identity,
+keeps TLS material outside the document root, and verifies TLS for WP-CLI imports
+as well as runtime connections. Real WordPress/PHP/WP-CLI/MariaDB TLS and mTLS
+component checks passed; other certified applications' external database runtime
+support remains incomplete. Install/clone identity enrollment and private drawer
+inputs are wired. Purge cleanup errors and partial clone failures retain recovery
+states; staging failure journals survive cancellation and SQLite reopen.
+
+Next gates remain the installed material-delivery privilege decision below,
+full signed panel installation and live API/service journeys, partial-clone
+recovery, and current-source qualification on the other three OS/architecture
+combinations. Component tests do not establish full product parity.
 
 Later Ubuntu ARM64 work installed a signed **authentication component** release
 and exercised the real authd socket as the control-plane account: password and

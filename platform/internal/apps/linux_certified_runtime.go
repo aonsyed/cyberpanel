@@ -1127,10 +1127,16 @@ func (runtime *LinuxApplicationRuntime) restoreApplicationDatabase(ctx context.C
 }
 
 func (runtime *LinuxApplicationRuntime) commandReader(ctx context.Context, scope linuxApplicationScope, binary string, input io.Reader, maximum int, args ...string) ([]byte, []byte, int, error) {
+	return runtime.commandReaderEnvironment(ctx,scope,binary,input,maximum,nil,args...)
+}
+
+func (runtime *LinuxApplicationRuntime) commandReaderEnvironment(ctx context.Context, scope linuxApplicationScope, binary string, input io.Reader, maximum int, environment []string, args ...string) ([]byte, []byte, int, error) {
 	if maximum <= 0 || maximum > 8<<20 { maximum = 8 << 20 }
 	command := exec.CommandContext(ctx, binary, args...)
 	command.Dir = scope.root
 	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME="+scope.root, "LANG=C.UTF-8"}
+	if binary==runtime.WPCLI { command.Env=append(command.Env,"WP_CLI_CACHE_DIR="+filepath.Join(scope.root,".wp-cli-cache")) }
+	command.Env=append(command.Env,environment...)
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: scope.binding.UID, Gid: scope.binding.GID, NoSetGroups: true}}
 	command.Stdin = input
 	var stdout, stderr limitedApplicationBuffer
