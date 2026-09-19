@@ -27,7 +27,7 @@ type migrationMailboxTransfer struct {
 	sourceDigest string
 }
 
-type migrationChunkReader struct {
+type migrationMailChunkReader struct {
 	ctx        context.Context
 	store      *migration.ChunkStore
 	descriptor migration.Chunk
@@ -35,7 +35,7 @@ type migrationChunkReader struct {
 	digest     hash.Hash
 }
 
-func (reader *migrationChunkReader) Read(destination []byte) (int, error) {
+func (reader *migrationMailChunkReader) Read(destination []byte) (int, error) {
 	if reader.offset == reader.descriptor.Size {
 		return 0, io.EOF
 	}
@@ -80,7 +80,7 @@ func (target *migrationMailTarget) mailboxTransfer(ctx context.Context, chunks [
 	if descriptor.Size < 1024 || descriptor.MediaType != migration.MaildirV1MediaType || descriptor.Compression != "tar" || descriptor.EncryptionDomain != "mailbox-data" || descriptor.ObjectCount == 0 || descriptor.ObjectCount > migration.MaildirManifestMaxFiles+1 {
 		return migrationMailboxTransfer{}, migration.ErrBlocked
 	}
-	reader := &migrationChunkReader{ctx: ctx, store: target.chunks, descriptor: descriptor, digest: sha256.New()}
+	reader := &migrationMailChunkReader{ctx: ctx, store: target.chunks, descriptor: descriptor, digest: sha256.New()}
 	archive := tar.NewReader(reader)
 	generated := make([]migration.MaildirManifestFile, 0)
 	offsets := map[string][]uint64{}
