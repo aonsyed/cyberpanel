@@ -34,7 +34,7 @@ func (transport *UnixCoreTransport) Invoke(ctx context.Context, request CoreRequ
 	httpRequest.Header.Set("Content-Type",ContentTypeJSON); httpRequest.Header.Set("X-Request-ID",request.Request.RequestID)
 	httpResponse, err := transport.client.Do(httpRequest); if err != nil { return response,fmtUnavailable(err) }; defer httpResponse.Body.Close()
 	if httpResponse.StatusCode != http.StatusOK { return response,ErrUnavailable }
-	body, err := io.ReadAll(io.LimitReader(httpResponse.Body,DefaultMaximumResponseBytes+65537)); if err != nil || len(body)>DefaultMaximumResponseBytes+65536 { return response,ErrUnavailable }
+	body, err := io.ReadAll(io.LimitReader(httpResponse.Body,DefaultMaximumResponseBytes+65537)); if err != nil || int64(len(body))>DefaultMaximumResponseBytes+65536 { return response,ErrUnavailable }
 	if err=decodeStrict(body,&response);err!=nil{return response,ErrUnavailable}
 	if response.ProtocolVersion!=InternalProtocolVersion||response.Status<200||response.Status>599||(response.Envelope==nil)==(response.Problem==nil){return CoreResponse{},ErrUnavailable}
 	if response.Envelope!=nil&&(response.Envelope.APIVersion!=APIVersion||response.Envelope.RequestID!=request.Request.RequestID||response.Envelope.Operation!=request.Request.Operation||response.Envelope.CompletedAt.IsZero()){return CoreResponse{},ErrUnavailable}
@@ -47,7 +47,7 @@ func (transport *UnixCoreTransport) Health(ctx context.Context) error {
 	response,err:=transport.client.Do(request);if err!=nil{return fmtUnavailable(err)};defer response.Body.Close();if response.StatusCode!=http.StatusOK{return ErrUnavailable};content,err:=io.ReadAll(io.LimitReader(response.Body,(1<<20)+1));if err!=nil||len(content)>1<<20{return ErrUnavailable};return nil
 }
 
-func (transport *UnixCoreTransport)Catalog(ctx context.Context)(CoreCatalog,error){var catalog CoreCatalog;request,err:=http.NewRequestWithContext(ctx,http.MethodGet,"http://panel-core/internal/v1/catalog",nil);if err!=nil{return catalog,err};response,err:=transport.client.Do(request);if err!=nil{return catalog,fmtUnavailable(err)};defer response.Body.Close();if response.StatusCode!=http.StatusOK{return catalog,ErrUnavailable};content,err:=io.ReadAll(io.LimitReader(response.Body,DefaultMaximumResponseBytes+1));if err!=nil||len(content)>DefaultMaximumResponseBytes{return catalog,ErrUnavailable};if err=decodeStrict(content,&catalog);err!=nil||catalog.ProtocolVersion!=InternalProtocolVersion||catalog.APIVersion!=APIVersion{return CoreCatalog{},ErrUnavailable};return catalog,nil}
+func (transport *UnixCoreTransport)Catalog(ctx context.Context)(CoreCatalog,error){var catalog CoreCatalog;request,err:=http.NewRequestWithContext(ctx,http.MethodGet,"http://panel-core/internal/v1/catalog",nil);if err!=nil{return catalog,err};response,err:=transport.client.Do(request);if err!=nil{return catalog,fmtUnavailable(err)};defer response.Body.Close();if response.StatusCode!=http.StatusOK{return catalog,ErrUnavailable};content,err:=io.ReadAll(io.LimitReader(response.Body,DefaultMaximumResponseBytes+1));if err!=nil||int64(len(content))>DefaultMaximumResponseBytes{return catalog,ErrUnavailable};if err=decodeStrict(content,&catalog);err!=nil||catalog.ProtocolVersion!=InternalProtocolVersion||catalog.APIVersion!=APIVersion{return CoreCatalog{},ErrUnavailable};return catalog,nil}
 
 func (transport *UnixCoreTransport) ResolvePreview(ctx context.Context, hostname string) (preview.Resolution, error) {
 	var resolution preview.Resolution
