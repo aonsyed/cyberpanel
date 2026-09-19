@@ -4,12 +4,12 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
-Production implementation is the only active priority until the full product
-surface exists. Do not create test-only slices, run tests, perform review
-passes, expand the harness, or build parity-harvesting infrastructure while
-production functionality remains unimplemented. Existing tests stay parked.
-After the complete production implementation exists, run the full QEMU-only
-test, review, hardening, and qualification program on Ubuntu and AlmaLinux.
+The user's latest direction supersedes the earlier code-first testing deferral.
+Close and verify the existing scope now. Run builds and tests only inside QEMU
+guests on Ubuntu and AlmaLinux; distinguish package-suite results from live
+installed API/UI/service qualification. Fix concrete failures without adding
+new feature lanes or expanding the harness. Record the tested revision and
+preserve run evidence; historical passes do not qualify newer changes.
 
 ## Closure scope freeze
 
@@ -37,6 +37,64 @@ an explicit exception from the coordinator before it grows, and splitting code
 into fewer files does not bypass the line limits.
 
 ## Current position
+
+Latest executable verification is recorded in `RUN-REPORT.md`: all four
+Ubuntu/AlmaLinux amd64/arm64 Go suites/builds pass on the updated source;
+frontend strict compilation and desktop/mobile navigation component interactions
+pass in QEMU. Startup panics are fixed and the JavaScript bundle is reduced from
+6.02 MB to 529 kB. A complete signed installation and live API/service journeys
+remain pending; the external application database-placement slice is unfinished.
+
+### Verified checkpoint, 2026-09-19
+
+- Saved QEMU Go-suite exits are zero for Ubuntu/AlmaLinux ARM64 at
+  `6348dbf323` and Ubuntu/AlmaLinux AMD64 at `624fd0abd`. Each log has 17
+  passing packages and 94 packages without test files. These are not installed
+  panel, browser, live API, or full service-lifecycle qualification results.
+  Evidence: parent repository `.work/qemu/runs/closure-*-20260919-01/`.
+- Upstream stable synchronization (`9be6c087c`, 181 incoming commits) and
+  default `v3.0.5-dev` alignment (`17fc2e603`, 21 additional commits) changed
+  no `platform/` files. The latter alignment also removed stable-only changes;
+  merged Git ancestry is not proof of Go behavioral parity.
+- The six platform feature commits after `6348dbf323`, through `da547a90b`,
+  and the uncommitted application database-placement slice are not covered by
+  the above successful runs. Do not label them verified.
+- Application external-database placement is unfinished: certified runtime
+  host resolution still accepts only the local sentinel, and cloned WordPress
+  configuration does not yet configure pinned remote TLS. Endpoint selection
+  alone must not be treated as secure external application DB support.
+- Next gates: current-source QEMU compile/tests; close observed failures;
+  actual installed API/UI/service journeys; remaining OS/architecture matrix.
+  Do not resume broad feature discovery as a substitute for these gates.
+- Current Ubuntu ARM64 smoke run: guest boots with Go 1.26.5. The initial
+  offline full suite/build was blocked by absent pinned modules; the user then
+  authorized downloading them. `go mod download` and `go mod verify` succeeded.
+  Full compilation exposed a stale `n8nPrerequisiteError` reference after the
+  shared container error type was renamed; that reference is now corrected.
+  `full-current-fixed.log` records `go test -count=1 ./...` and `go build ./...`
+  both exiting zero: 18 passing packages and 93 without tests. The application
+  regression cases now also pass in the full Linux package, not just the
+  portable slice. This covers HEAD `da547a90b` plus the current code changes;
+  initial source manifest and `fixed-source-sha256.txt` identify the snapshot.
+  This does not establish installed UI/API/service qualification or the other
+  three OS/architecture combinations. Evidence is in
+  parent `.work/qemu/runs/current-ubuntu-arm64-20260919-smoke/`.
+  `focused-baseline.log` reproduces four database-binding validation failures;
+  `focused-fixed.log` proves all 11 cases pass after the engine/placement/TLS
+  guards. This executes the exact portable application sources inside QEMU,
+  excluding Linux-tagged adapters, and does not qualify the full apps package.
+  Tested `executor.go` SHA256:
+  `e6dfc10e78058209c94c38eef9d53ca1311ae8a2d6e7811a85c3fc9d24b57ac9`.
+- Verified module downloads are retained outside disposable guests in parent
+  `.work/qemu/downloads/go-module-download-cache-20260919.tgz` for reuse.
+- The same guest reproduced discarded journal-write errors during install
+  compensation. Cleanup now preserves those errors and signals recovery when
+  its progress or result cannot be persisted. `compensation-baseline.log`
+  records three failing cases; `compensation-fixed.log` records all four
+  compensation cases plus the 11 binding cases passing. These use the real
+  portable service with injected journal/cleanup failures, not a live database.
+  Tested `service.go` SHA256:
+  `3d9fc9bd15648ad99d7cc879db0019c151ae1ed29c5d58872a17b732b98ce92f`.
 
 - Implemented production core: tenant/site/domain lifecycle, durable command
   admission, node-wide composition, OpenLiteSpeed and LiteSpeed Enterprise
@@ -113,15 +171,16 @@ into fewer files does not bypass the line limits.
 - In progress: remaining runtime connections, installer provisioning, package
   maintenance outcomes, optional federation lifecycle, migration conversion,
   and signed application release inputs.
-- QEMU qualification is deliberately deferred until the production surface is
-  coded, per the hard execution rule above.
+- QEMU qualification is active, not deferred. Saved runs are under the parent
+  repository's `.work/qemu/runs`; reconcile their revisions before claiming
+  current qualification.
 
 ## Scope truth
 
 The codebase is now a broad greenfield production implementation, not merely a
 first-site slice. It is not yet a completed or qualified parity release:
 remaining work is the final concrete-adapter and process composition pass,
-frontend journey completion, and then the deferred QEMU-only
+frontend journey completion, and the QEMU-only
 compile/test/review/hardening program.
 
 ## Resumed implementation, 2026-09-07
