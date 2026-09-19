@@ -13,11 +13,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/database"
+	hostingservice "github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 )
@@ -27,6 +29,10 @@ type databaseEdgeRepository interface {
 	ListDatabaseInstances(context.Context, string, uint16) ([]database.DatabaseInstance, string, uint64, error)
 	DatabasePrincipalCount(context.Context, site.TenantID, database.ResourceID) (uint64, error)
 	LoadResource(context.Context, database.ResourceKind, database.ResourceID) (database.ResourceEnvelope, error)
+}
+
+type databaseEdgeSiteStore interface {
+	Load(context.Context, site.TenantID, site.SiteID) (site.Site, error)
 }
 
 type databaseEdgeCoordinator interface {
@@ -43,18 +49,19 @@ type databaseEdgeSecretManagement interface {
 
 type databaseEdge struct {
 	repository    databaseEdgeRepository
+	sites         databaseEdgeSiteStore
 	coordinator   databaseEdgeCoordinator
 	status        databaseEdgeStatus
 	management    databaseEdgeSecretManagement
 	releaseDigest string
 }
 
-func newDatabaseEdge(repository databaseEdgeRepository, coordinator databaseEdgeCoordinator, status databaseEdgeStatus, management databaseEdgeSecretManagement, releaseDigest string) (apiserver.DatabaseEdgeService, error) {
+func newDatabaseEdge(repository databaseEdgeRepository, sites databaseEdgeSiteStore, coordinator databaseEdgeCoordinator, status databaseEdgeStatus, management databaseEdgeSecretManagement, releaseDigest string) (apiserver.DatabaseEdgeService, error) {
 	digest, err := hex.DecodeString(releaseDigest)
-	if repository == nil || coordinator == nil || status == nil || management == nil || err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != releaseDigest {
+	if repository == nil || sites == nil || coordinator == nil || status == nil || management == nil || err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != releaseDigest {
 		return nil, errors.New("database edge requires repository, coordinator, secret broker, and exact executor digest")
 	}
-	return &databaseEdge{repository: repository, coordinator: coordinator, status: status, management: management, releaseDigest: releaseDigest}, nil
+	return &databaseEdge{repository: repository, sites: sites, coordinator: coordinator, status: status, management: management, releaseDigest: releaseDigest}, nil
 }
 
 func (edge *databaseEdge) ListDatabases(ctx context.Context, call apiserver.EdgeCall, page apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.DatabaseProjection], error) {
@@ -75,6 +82,221 @@ func (edge *databaseEdge) ListDatabases(ctx context.Context, call apiserver.Edge
 		items = append(items, apiserver.DatabaseProjection{ID: value.ID.String(), SiteID: value.SiteID.String(), Name: value.Name.String(), Instance: value.InstanceID.String(), Principals: principals, Status: string(value.Status.Lifecycle), Generation: value.Generation})
 	}
 	return apiserver.EdgePage[apiserver.DatabaseProjection]{Items: items, NextCursor: next, Total: total}, nil
+}
+
+func (edge *databaseEdge) CreateManagedDatabase(ctx context.Context, call apiserver.EdgeCall, payload apiserver.DatabaseCreateManagedPayload) (apiserver.EdgeMutation[apiserver.DatabaseProjection], error) {
+	if edge == nil || edge.repository == nil || edge.sites == nil || edge.coordinator == nil || ctx == nil || call.CommandID == "" || call.TenantID == "" || call.ResourceID != "" || call.ExpectedGeneration != 0 {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrUnauthorized
+	}
+	tenantID, err := site.NewTenantID(call.TenantID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrInvalidResource
+	}
+	siteID, err := site.NewSiteID(payload.SiteID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrInvalidResource
+	}
+	aggregate, err := edge.sites.Load(ctx, tenantID, siteID)
+	if err != nil {
+		if errors.Is(err, hostingservice.ErrNotFound) {
+			return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrNotFound
+		}
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, err
+	}
+	if aggregate.TenantID() != tenantID || aggregate.ID() != siteID || aggregate.Lifecycle() != site.LifecycleActive {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrConflict
+	}
+	instanceID, err := database.NewResourceID(payload.InstanceID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrInvalidResource
+	}
+	instance, err := edge.loadDatabaseInstance(ctx, instanceID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, err
+	}
+	if instance.Status.Lifecycle != database.LifecycleReady || instance.Status.Reconciliation != database.ReconciliationInSync {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrConflict
+	}
+	name, err := database.ParseSQLIdentifier(payload.Name)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrInvalidResource
+	}
+	charset, err := database.ParseSQLIdentifier(payload.Charset)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrInvalidResource
+	}
+	collation, err := database.ParseSQLIdentifier(payload.Collation)
+	if err != nil || payload.QuotaBytes == 0 || payload.QuotaBytes > 1<<60 {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrInvalidResource
+	}
+	idDigest := sha256.Sum256([]byte("cyberpanel:managed-database:v1\x00" + tenantID.String() + "\x00" + call.CommandID))
+	databaseID, _ := database.NewResourceID("db-" + hex.EncodeToString(idDigest[:])[:48])
+	resource := database.Database{
+		Metadata: database.Metadata{
+			ID: databaseID,
+			TenantID: tenantID,
+			SiteID: siteID,
+			Generation: 1,
+			Status: database.ResourceStatus{Lifecycle: database.LifecycleProvisioning, Health: database.HealthUnknown, Reconciliation: database.ReconciliationPending},
+		},
+		InstanceID: instanceID,
+		Name: name,
+		Charset: charset,
+		Collation: collation,
+		QuotaBytes: payload.QuotaBytes,
+	}
+	receipt, err := edge.coordinator.Handle(ctx, database.CreateDatabase{
+		Header: database.CommandHeader{CommandID: call.CommandID, Actor: database.Actor{TenantID: tenantID, Capability: database.CapabilityTenantManage}, TenantID: tenantID},
+		Database: resource,
+	})
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, err
+	}
+	if receipt.Status != database.OperationApplied {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, database.ErrInvalidReceipt
+	}
+	stored, err := edge.loadDatabase(ctx, databaseID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, err
+	}
+	principals, err := edge.repository.DatabasePrincipalCount(ctx, tenantID, databaseID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseProjection]{}, err
+	}
+	projection := projectDatabase(stored, principals)
+	return apiserver.EdgeMutation[apiserver.DatabaseProjection]{OperationID: call.CommandID, State: projection.Status, Generation: projection.Generation, Resource: projection}, nil
+}
+
+func (edge *databaseEdge) CreateManagedPrincipal(ctx context.Context, call apiserver.EdgeCall, payload apiserver.DatabasePrincipalCreateManagedPayload, password []byte) (apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection], error) {
+	defer wipeDatabaseEdgeMaterial(password)
+	if edge == nil || edge.repository == nil || edge.coordinator == nil || edge.management == nil || ctx == nil || call.CommandID == "" || call.TenantID == "" || call.ResourceID == "" || call.ExpectedGeneration == 0 {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrUnauthorized
+	}
+	if len(password) < 12 || len(password) > 4096 || bytes.IndexByte(password, 0) >= 0 {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrInvalidResource
+	}
+	tenantID, err := site.NewTenantID(call.TenantID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrInvalidResource
+	}
+	databaseID, err := database.NewResourceID(call.ResourceID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrInvalidResource
+	}
+	managedDatabase, err := edge.loadDatabase(ctx, databaseID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, err
+	}
+	if managedDatabase.TenantID != tenantID {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrNotFound
+	}
+	if managedDatabase.Generation != call.ExpectedGeneration || managedDatabase.Status.Lifecycle != database.LifecycleReady || managedDatabase.Status.Reconciliation != database.ReconciliationInSync {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrConflict
+	}
+	instance, err := edge.loadDatabaseInstance(ctx, managedDatabase.InstanceID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, err
+	}
+	if instance.ID != managedDatabase.InstanceID || instance.Status.Lifecycle != database.LifecycleReady || instance.Status.Reconciliation != database.ReconciliationInSync {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrConflict
+	}
+	name, err := database.ParseSQLIdentifier(payload.Name)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrInvalidResource
+	}
+	hostScope := database.HostScope(payload.HostScope)
+	networkPolicyID := database.ResourceID{}
+	switch hostScope {
+	case database.HostScopeLoopback:
+		if instance.Placement != database.PlacementLocal {
+			return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrConflict
+		}
+	case database.HostScopePolicy:
+		policy, policyErr := edge.loadNetworkPolicy(ctx, instance.NetworkPolicyID)
+		if policyErr != nil {
+			return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, policyErr
+		}
+		if policy.ID != instance.NetworkPolicyID || policy.InstanceID != instance.ID || policy.Status.Lifecycle != database.LifecycleReady || policy.Status.Reconciliation != database.ReconciliationInSync || len(policy.AllowedCIDRs) == 0 {
+			return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrConflict
+		}
+		networkPolicyID = policy.ID
+	default:
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrInvalidResource
+	}
+	privileges := make([]database.Privilege, len(payload.Privileges))
+	for index, value := range payload.Privileges {
+		privileges[index] = database.Privilege(value)
+	}
+	sort.Slice(privileges, func(left, right int) bool { return privileges[left] < privileges[right] })
+	principalID, grantSetID, credentialRef, err := managedDatabasePrincipalIDs(tenantID, databaseID, call.CommandID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrInvalidResource
+	}
+	status := database.ResourceStatus{Lifecycle: database.LifecycleProvisioning, Health: database.HealthUnknown, Reconciliation: database.ReconciliationPending}
+	principal := database.DatabasePrincipal{
+		Metadata: database.Metadata{ID: principalID, TenantID: tenantID, SiteID: managedDatabase.SiteID, Generation: 1, Status: status},
+		InstanceID: instance.ID,
+		Name: name,
+		HostScope: hostScope,
+		NetworkPolicyID: networkPolicyID,
+		CredentialSecretRef: credentialRef,
+	}
+	grantSet := database.GrantSet{
+		Metadata: database.Metadata{ID: grantSetID, TenantID: tenantID, SiteID: managedDatabase.SiteID, Generation: 1, Status: status},
+		InstanceID: instance.ID,
+		DatabaseID: managedDatabase.ID,
+		PrincipalID: principal.ID,
+		Grants: []database.Grant{{Scope: database.GrantScopeDatabase, Privileges: privileges}},
+	}
+	if principal.Validate() != nil || grantSet.Validate() != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrInvalidResource
+	}
+	origin := "local://panel-execd/mariadb"
+	if instance.External != nil {
+		origin = "mariadb://" + net.JoinHostPort(instance.External.Endpoint.Host, strconv.FormatUint(uint64(instance.External.Endpoint.Port), 10))
+	}
+	if _, err = edge.management.PutExact(ctx, secrets.PutRequest{
+		ID: database.DatabaseSecretRecordID(credentialRef.String()),
+		OwnerTenantID: database.DatabaseTenantOwnerID(tenantID.String()),
+		Purpose: secrets.PurposeDatabase,
+		Audience: secrets.AudienceBinding{
+			AdapterID: database.MariaDBSecretAdapterID,
+			AdapterVersion: database.MariaDBSecretAdapterVersion,
+			Account: name.String(),
+			Origin: origin,
+			ResourceKind: "database_principal",
+			ResourceID: database.DatabaseAudienceID(principalID.String()),
+			ResourceGeneration: principal.Generation,
+			Operations: []secrets.Operation{secrets.OperationAuthenticate},
+			ConsumerReleaseDigest: edge.releaseDigest,
+		},
+		Plaintext: append([]byte(nil), password...),
+	}); err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, mapDatabaseEdgeSecretError(err)
+	}
+	header := database.CommandHeader{Actor: database.Actor{TenantID: tenantID, Capability: database.CapabilityTenantManage}, TenantID: tenantID}
+	header.CommandID = managedDatabaseSubcommandID("principal", tenantID, databaseID, call.CommandID)
+	receipt, err := edge.coordinator.Handle(ctx, database.CreatePrincipal{Header: header, Principal: principal})
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, err
+	}
+	if receipt.Status != database.OperationApplied {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrInvalidReceipt
+	}
+	header.CommandID = managedDatabaseSubcommandID("grants", tenantID, databaseID, call.CommandID)
+	receipt, err = edge.coordinator.Handle(ctx, database.ReplaceGrantSet{Header: header, GrantSet: grantSet})
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, err
+	}
+	if receipt.Status != database.OperationApplied {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, database.ErrInvalidReceipt
+	}
+	stored, err := edge.loadDatabasePrincipal(ctx, principalID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{}, err
+	}
+	projection := projectDatabasePrincipal(stored, managedDatabase.ID, privileges)
+	return apiserver.EdgeMutation[apiserver.DatabasePrincipalProjection]{OperationID: call.CommandID, State: projection.Status, Generation: projection.Generation, Resource: projection}, nil
 }
 
 func (edge *databaseEdge) ListDatabaseInstances(ctx context.Context, call apiserver.EdgeCall, page apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.DatabaseInstanceProjection], error) {
@@ -258,6 +480,76 @@ func (edge *databaseEdge) loadDatabaseInstance(ctx context.Context, id database.
 	return *instance, nil
 }
 
+func (edge *databaseEdge) loadDatabase(ctx context.Context, id database.ResourceID) (database.Database, error) {
+	envelope, err := edge.repository.LoadResource(ctx, database.KindDatabase, id)
+	if err != nil {
+		return database.Database{}, err
+	}
+	resource, err := database.DecodeResource(envelope)
+	if err != nil {
+		return database.Database{}, err
+	}
+	value, ok := resource.(*database.Database)
+	if !ok {
+		return database.Database{}, database.ErrInvalidResource
+	}
+	return *value, nil
+}
+
+func (edge *databaseEdge) loadDatabasePrincipal(ctx context.Context, id database.ResourceID) (database.DatabasePrincipal, error) {
+	envelope, err := edge.repository.LoadResource(ctx, database.KindPrincipal, id)
+	if err != nil {
+		return database.DatabasePrincipal{}, err
+	}
+	resource, err := database.DecodeResource(envelope)
+	if err != nil {
+		return database.DatabasePrincipal{}, err
+	}
+	value, ok := resource.(*database.DatabasePrincipal)
+	if !ok {
+		return database.DatabasePrincipal{}, database.ErrInvalidResource
+	}
+	return *value, nil
+}
+
+func (edge *databaseEdge) loadNetworkPolicy(ctx context.Context, id database.ResourceID) (database.NetworkAccessPolicy, error) {
+	envelope, err := edge.repository.LoadResource(ctx, database.KindNetworkPolicy, id)
+	if err != nil {
+		return database.NetworkAccessPolicy{}, err
+	}
+	resource, err := database.DecodeResource(envelope)
+	if err != nil {
+		return database.NetworkAccessPolicy{}, err
+	}
+	value, ok := resource.(*database.NetworkAccessPolicy)
+	if !ok {
+		return database.NetworkAccessPolicy{}, database.ErrInvalidResource
+	}
+	return *value, nil
+}
+
+func managedDatabasePrincipalIDs(tenantID site.TenantID, databaseID database.ResourceID, commandID string) (database.ResourceID, database.ResourceID, database.SecretRef, error) {
+	seed := tenantID.String() + "\x00" + databaseID.String() + "\x00" + commandID
+	principalDigest := sha256.Sum256([]byte("cyberpanel:managed-database-principal:v1\x00" + seed))
+	grantDigest := sha256.Sum256([]byte("cyberpanel:managed-database-grants:v1\x00" + seed))
+	credentialDigest := sha256.Sum256([]byte("cyberpanel:managed-database-credential:v1\x00" + seed))
+	principalID, err := database.NewResourceID("dbprincipal-" + hex.EncodeToString(principalDigest[:])[:48])
+	if err != nil {
+		return database.ResourceID{}, database.ResourceID{}, database.SecretRef{}, err
+	}
+	grantSetID, err := database.NewResourceID("dbgrants-" + hex.EncodeToString(grantDigest[:])[:48])
+	if err != nil {
+		return database.ResourceID{}, database.ResourceID{}, database.SecretRef{}, err
+	}
+	credentialRef, err := database.NewSecretRef("dbcredential-" + hex.EncodeToString(credentialDigest[:])[:48])
+	return principalID, grantSetID, credentialRef, err
+}
+
+func managedDatabaseSubcommandID(kind string, tenantID site.TenantID, databaseID database.ResourceID, commandID string) string {
+	digest := sha256.Sum256([]byte("cyberpanel:managed-database-command:v1\x00" + kind + "\x00" + tenantID.String() + "\x00" + databaseID.String() + "\x00" + commandID))
+	return "db-" + kind + "-" + hex.EncodeToString(digest[:])[:48]
+}
+
 func externalDatabaseSecretReferences(instanceID database.ResourceID) (database.SecretRef, database.SecretRef, error) {
 	administratorDigest := sha256.Sum256([]byte("cyberpanel:external-database-administrator:v1\x00" + instanceID.String()))
 	caDigest := sha256.Sum256([]byte("cyberpanel:external-database-ca:v1\x00" + instanceID.String()))
@@ -321,6 +613,35 @@ func projectDatabaseInstance(instance database.DatabaseInstance) apiserver.Datab
 		Health: string(instance.Status.Health),
 		Status: string(instance.Status.Lifecycle),
 		Generation: instance.Generation,
+	}
+}
+
+func projectDatabase(value database.Database, principals uint64) apiserver.DatabaseProjection {
+	return apiserver.DatabaseProjection{
+		ID: value.ID.String(),
+		SiteID: value.SiteID.String(),
+		Name: value.Name.String(),
+		Instance: value.InstanceID.String(),
+		Principals: principals,
+		Status: string(value.Status.Lifecycle),
+		Generation: value.Generation,
+	}
+}
+
+func projectDatabasePrincipal(value database.DatabasePrincipal, databaseID database.ResourceID, privileges []database.Privilege) apiserver.DatabasePrincipalProjection {
+	projectedPrivileges := make([]string, len(privileges))
+	for index, privilege := range privileges {
+		projectedPrivileges[index] = string(privilege)
+	}
+	return apiserver.DatabasePrincipalProjection{
+		ID: value.ID.String(),
+		DatabaseID: databaseID.String(),
+		Name: value.Name.String(),
+		HostScope: string(value.HostScope),
+		NetworkPolicyID: value.NetworkPolicyID.String(),
+		Privileges: projectedPrivileges,
+		Status: string(value.Status.Lifecycle),
+		Generation: value.Generation,
 	}
 }
 

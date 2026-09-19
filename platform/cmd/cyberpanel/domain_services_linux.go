@@ -176,7 +176,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("digest database executor: %w", err)
 	}
-	databaseConsoleEdge, err := newDatabaseEdge(repositories.Database, databaseCoordinator, databaseExecutor, secretEnrollment.client, databaseConsumerDigest)
+	databaseConsoleEdge, err := newDatabaseEdge(repositories.Database, repositories.Hosting, databaseCoordinator, databaseExecutor, secretEnrollment.client, databaseConsumerDigest)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize database console edge: %w", err)
 	}

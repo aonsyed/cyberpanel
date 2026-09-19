@@ -162,6 +162,33 @@ type DatabaseProjection struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type DatabaseCreateManagedPayload struct {
+	SiteID       string `json:"site_id"`
+	InstanceID   string `json:"instance_id"`
+	Name         string `json:"name"`
+	Charset      string `json:"charset"`
+	Collation    string `json:"collation"`
+	QuotaBytes   uint64 `json:"quota_bytes"`
+}
+
+type DatabasePrincipalCreateManagedPayload struct {
+	Name       string   `json:"name"`
+	Password   string   `json:"password"`
+	HostScope  string   `json:"host_scope"`
+	Privileges []string `json:"privileges"`
+}
+
+type DatabasePrincipalProjection struct {
+	ID              string   `json:"id"`
+	DatabaseID      string   `json:"database_id"`
+	Name            string   `json:"name"`
+	HostScope       string   `json:"host_scope"`
+	NetworkPolicyID string   `json:"network_policy_id,omitempty"`
+	Privileges      []string `json:"privileges"`
+	Status          string   `json:"status"`
+	Generation      uint64   `json:"generation"`
+}
+
 // DatabaseInstanceProjection deliberately omits protected secret references.
 // Operators can inspect placement, pinned endpoint identity, capacity, and
 // observed state without gaining a material-broker lookup handle.
@@ -1082,6 +1109,8 @@ type HostingAccessPolicyEdgeService interface {
 
 type DatabaseEdgeService interface {
 	ListDatabases(context.Context, EdgeCall, EdgePagePayload) (EdgePage[DatabaseProjection], error)
+	CreateManagedDatabase(context.Context, EdgeCall, DatabaseCreateManagedPayload) (EdgeMutation[DatabaseProjection], error)
+	CreateManagedPrincipal(context.Context, EdgeCall, DatabasePrincipalCreateManagedPayload, []byte) (EdgeMutation[DatabasePrincipalProjection], error)
 	ListDatabaseInstances(context.Context, EdgeCall, EdgePagePayload) (EdgePage[DatabaseInstanceProjection], error)
 	InspectDatabaseInstance(context.Context, EdgeCall) (DatabaseInstanceProjection, error)
 	EnrollExternalDatabaseInstance(context.Context, EdgeCall, DatabaseExternalEnrollmentPayload, DatabaseExternalEnrollmentSecrets) (EdgeMutation[DatabaseInstanceProjection], error)
@@ -1278,6 +1307,8 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("hosting.binding.access_policy", "site:manage", mfa, true, func() any { return &HostingAccessPolicyPayload{} }, validateHostingAccessPolicy, edgeTenantExistingMutationScope),
 
 		consoleOperation("database.database.list", "database:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
+		consoleOperation("database.database.create_managed", "database:create", password, true, func() any { return &DatabaseCreateManagedPayload{} }, validateDatabaseCreateManaged, edgeTenantCreateScope),
+		consoleOperation("database.principal.create_managed", "database:manage", password, true, func() any { return &DatabasePrincipalCreateManagedPayload{} }, validateDatabasePrincipalCreateManaged, edgeTenantExistingMutationScope),
 		consoleOperation("database.console.issue", "database:console", mfa, true, func() any { return &DatabaseConsolePayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("database.network.configure", "database:manage", mfa, true, func() any { return &DatabaseNetworkPayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("database.instance.list", "database:admin", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
@@ -1415,6 +1446,61 @@ func validateEdgePage(value any) error {
 	payload := value.(*EdgePagePayload)
 	if payload.Limit == 0 { payload.Limit = 100 }
 	if payload.Limit > 500 || len(payload.Cursor) > 1024 || strings.ContainsAny(payload.Cursor, "\x00\r\n\t") { return invalid("page") }
+	return nil
+}
+
+func validateDatabaseCreateManaged(value any) error {
+	payload := value.(*DatabaseCreateManagedPayload)
+	if _, err := site.NewSiteID(payload.SiteID); err != nil {
+		return invalid("database site")
+	}
+	if _, err := database.NewResourceID(payload.InstanceID); err != nil {
+		return invalid("database instance")
+	}
+	if _, err := database.ParseSQLIdentifier(payload.Name); err != nil {
+		return invalid("database name")
+	}
+	if _, err := database.ParseSQLIdentifier(payload.Charset); err != nil {
+		return invalid("database charset")
+	}
+	if _, err := database.ParseSQLIdentifier(payload.Collation); err != nil {
+		return invalid("database collation")
+	}
+	if payload.QuotaBytes == 0 || payload.QuotaBytes > 1<<60 {
+		return invalid("database quota")
+	}
+	return nil
+}
+
+func validateDatabasePrincipalCreateManaged(value any) error {
+	payload := value.(*DatabasePrincipalCreateManagedPayload)
+	if _, err := database.ParseSQLIdentifier(payload.Name); err != nil {
+		return invalid("database principal name")
+	}
+	if len(payload.Password) < 12 || len(payload.Password) > 4096 || strings.IndexByte(payload.Password, 0) >= 0 {
+		return invalid("database principal password")
+	}
+	if payload.HostScope != string(database.HostScopeLoopback) && payload.HostScope != string(database.HostScopePolicy) {
+		return invalid("database principal host scope")
+	}
+	if len(payload.Privileges) == 0 || len(payload.Privileges) > 14 {
+		return invalid("database principal privileges")
+	}
+	seen := make(map[string]struct{}, len(payload.Privileges))
+	for _, privilege := range payload.Privileges {
+		switch database.Privilege(privilege) {
+		case database.PrivilegeSelect, database.PrivilegeInsert, database.PrivilegeUpdate, database.PrivilegeDelete,
+			database.PrivilegeCreate, database.PrivilegeAlter, database.PrivilegeIndex, database.PrivilegeDrop,
+			database.PrivilegeCreateTemporary, database.PrivilegeExecute, database.PrivilegeCreateView,
+			database.PrivilegeShowView, database.PrivilegeTrigger, database.PrivilegeEvent:
+		default:
+			return invalid("database principal privilege")
+		}
+		if _, exists := seen[privilege]; exists {
+			return invalid("duplicate database principal privilege")
+		}
+		seen[privilege] = struct{}{}
+	}
 	return nil
 }
 
@@ -2312,6 +2398,18 @@ func bindConsoleEdgeContracts(registry *Registry, services DomainServices) error
 		if err := registry.Bind("database.database.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.DatabaseEdge.ListDatabases(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("database.database.create_managed", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.DatabaseEdge.CreateManagedDatabase(ctx, edgeCall(inv), *value.(*DatabaseCreateManagedPayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusCreated, result), nil
+		}); err != nil { return err }
+		if err := registry.Bind("database.principal.create_managed", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			payload := value.(*DatabasePrincipalCreateManagedPayload)
+			password := []byte(payload.Password)
+			payload.Password = ""
+			defer clearSecret(password)
+			result, err := services.DatabaseEdge.CreateManagedPrincipal(ctx, edgeCall(inv), *payload, password); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusCreated, result), nil
 		}); err != nil { return err }
 		if err := registry.Bind("database.instance.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.DatabaseEdge.ListDatabaseInstances(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
