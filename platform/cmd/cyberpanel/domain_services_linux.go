@@ -636,7 +636,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("connect isolated Chromium helper: %w", err)
 	}
-	chromeRenderer, err := sitepreview.NewChromiumRenderer("/usr/bin/chromium", sitepreview.NewSystemDNSResolver(), chromeNamespace)
+	chromeRenderer, err := sitepreview.NewChromiumRenderer("/usr/bin/chromium-browser", sitepreview.NewSystemDNSResolver(), chromeNamespace)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize isolated Chromium renderer: %w", err)
 	}
