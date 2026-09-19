@@ -482,7 +482,8 @@ func validSourceID(value string) bool {
 
 func validHostname(value string) bool {
 	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
-	if len(value) < 1 || len(value) > 253 || netip.ParseAddr(value).IsValid() || strings.ContainsAny(value, `/\\:@`) {
+	parsedAddress, _ := netip.ParseAddr(value)
+	if len(value) < 1 || len(value) > 253 || parsedAddress.IsValid() || strings.ContainsAny(value, `/\\:@`) {
 		return false
 	}
 	labels:=strings.Split(value,".")
