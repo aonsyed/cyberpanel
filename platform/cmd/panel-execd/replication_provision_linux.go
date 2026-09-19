@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,8 +30,56 @@ type mariaDBReplicationProvisionReceipt struct {
 	CompletedAt    time.Time  `json:"completed_at"`
 }
 
-// Only the channel identifier is argv. Credentials must arrive on stdin from
-// the operator, never in arguments, environment variables or a config file.
+type mariaDBReplicationProvisionEnvelope struct {
+	Credential            json.RawMessage `json:"credential"`
+	ExpectedVersion       uint64          `json:"expected_version,omitempty"`
+	ExpectedBindingDigest string          `json:"expected_binding_digest,omitempty"`
+}
+
+func decodeMariaDBReplicationProvision(raw []byte) (database.MariaDBReplicationCredential, uint64, string, error) {
+	if len(raw) == 0 || len(raw) > 16<<10 {
+		return database.MariaDBReplicationCredential{}, 0, "", database.ErrInvalidResource
+	}
+	var envelope mariaDBReplicationProvisionEnvelope
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&envelope) == nil && decoder.Decode(&struct{}{}) == io.EOF && len(envelope.Credential) != 0 {
+		credential, err := database.DecodeMariaDBReplicationCredential(envelope.Credential)
+		if err != nil {
+			return database.MariaDBReplicationCredential{}, 0, "", err
+		}
+		if credential.CredentialGeneration == 1 {
+			if envelope.ExpectedVersion != 0 || envelope.ExpectedBindingDigest != "" {
+				credential.Wipe()
+				return database.MariaDBReplicationCredential{}, 0, "", database.ErrInvalidResource
+			}
+		} else if envelope.ExpectedVersion == 0 || credential.CredentialGeneration != envelope.ExpectedVersion+1 || !validReplicationProvisionDigest(envelope.ExpectedBindingDigest) {
+			credential.Wipe()
+			return database.MariaDBReplicationCredential{}, 0, "", database.ErrInvalidResource
+		}
+		return credential, envelope.ExpectedVersion, envelope.ExpectedBindingDigest, nil
+	}
+	credential, err := database.DecodeMariaDBReplicationCredential(raw)
+	if err != nil {
+		return database.MariaDBReplicationCredential{}, 0, "", err
+	}
+	if credential.CredentialGeneration != 1 {
+		credential.Wipe()
+		return database.MariaDBReplicationCredential{}, 0, "", database.ErrInvalidResource
+	}
+	return credential, 0, "", nil
+}
+
+func validReplicationProvisionDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
+}
+
+// Only the channel identifier is argv. Credentials and rotation CAS metadata
+// arrive on stdin, never in arguments, environment variables or a config file.
 func provisionMariaDBReplication(channelText string) error {
 	if os.Geteuid() != 0 {
 		return database.ErrUnauthorized
@@ -48,12 +97,16 @@ func provisionMariaDBReplication(channelText string) error {
 	if err = recovery.VerifyStaticHAReplication(ctx, binding, node, epoch); err != nil {
 		return err
 	}
-	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 8193))
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, (16<<10)+1))
 	if err != nil {
 		return err
 	}
-	defer func() { for index := range raw { raw[index] = 0 } }()
-	credential, err := database.DecodeMariaDBReplicationCredential(raw)
+	defer func() {
+		for index := range raw {
+			raw[index] = 0
+		}
+	}()
+	credential, expectedVersion, expectedDigest, err := decodeMariaDBReplicationProvision(raw)
 	if err != nil {
 		return err
 	}
@@ -76,7 +129,11 @@ func provisionMariaDBReplication(channelText string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { for index := range material { material[index] = 0 } }()
+	defer func() {
+		for index := range material {
+			material[index] = 0
+		}
+	}()
 	materialHash := sha256.Sum256(material)
 	materialDigest := hex.EncodeToString(materialHash[:])
 	client, err := secrets.NewLocalManagementClient()
@@ -92,22 +149,27 @@ func provisionMariaDBReplication(channelText string) error {
 		return err
 	}
 	secretID := database.DatabaseSecretRecordID(binding.PurposeKeyRef)
-	audience := secrets.AudienceBinding{AdapterID: database.MariaDBSecretAdapterID, AdapterVersion: database.MariaDBSecretAdapterVersion,
+	audience := secrets.AudienceBinding{
+		AdapterID: database.MariaDBSecretAdapterID, AdapterVersion: database.MariaDBSecretAdapterVersion,
 		Account: "local-mariadb", Origin: "local://panel-execd/mariadb", ResourceKind: "database_replication_channel",
 		ResourceID: database.DatabaseAudienceID("replication-" + string(binding.ChannelID)), ResourceGeneration: binding.ChannelGeneration,
-		Operations: []secrets.Operation{secrets.OperationAuthenticate}, ConsumerReleaseDigest: release}
+		Operations: []secrets.Operation{secrets.OperationAuthenticate}, ConsumerReleaseDigest: release,
+	}
 	audienceDigest := rebootcontrol.ExecutionDigest(audience)
 	requestDigest := rebootcontrol.ExecutionDigest(struct {
-		Binding          ha.StaticReplicationBinding
-		Node             ha.NodeID
-		AuthorityEpoch   uint64
-		DeploymentDigest string
-		DeploymentEpoch  uint64
-		SecretID         secrets.ID
-		Owner            secrets.ID
-		Audience         secrets.AudienceBinding
-		MaterialDigest   string
-	}{binding, node, epoch, binding.DeploymentDigest, binding.DeploymentEpoch, secretID, owner, audience, materialDigest})
+		Binding               ha.StaticReplicationBinding
+		Node                  ha.NodeID
+		AuthorityEpoch        uint64
+		DeploymentDigest      string
+		DeploymentEpoch       uint64
+		SecretID              secrets.ID
+		Owner                 secrets.ID
+		Audience              secrets.AudienceBinding
+		MaterialDigest        string
+		CredentialGeneration  uint64
+		ExpectedVersion       uint64
+		ExpectedBindingDigest string
+	}{binding, node, epoch, binding.DeploymentDigest, binding.DeploymentEpoch, secretID, owner, audience, materialDigest, credential.CredentialGeneration, expectedVersion, expectedDigest})
 	if audienceDigest == "" || requestDigest == "" {
 		return database.ErrInvalidResource
 	}
@@ -120,43 +182,61 @@ func provisionMariaDBReplication(channelText string) error {
 		return err
 	}
 	defer admission.DB.Close()
-	lease, err := admission.AdmitExecution(ctx, rebootcontrol.ExecutionBinding{Boundary: "mariadb-replication-provision", Method: "put_exact",
+	method := "put_exact"
+	if expectedVersion != 0 {
+		method = "put_cas"
+	}
+	lease, err := admission.AdmitExecution(ctx, rebootcontrol.ExecutionBinding{
+		Boundary: "mariadb-replication-provision", Method: method,
 		EffectID: "mariadb-replication-" + requestDigest, RequestDigest: requestDigest, Caller: "root-standalone-provisioner",
 		Resource: rebootcontrol.ExecutionResource(struct {
-			Channel          ha.ChannelID
-			Generation       uint64
-			Role             string
-			Node             ha.NodeID
-			Peer             ha.NodeID
-			DeploymentDigest string
-			DeploymentEpoch  uint64
-			SecretID         secrets.ID
-			AudienceDigest   string
-		}{binding.ChannelID, binding.ChannelGeneration, binding.LocalRole, node, binding.PeerNodeID, binding.DeploymentDigest,
-			binding.DeploymentEpoch, secretID, audienceDigest})})
+			Channel              ha.ChannelID
+			ChannelGeneration    uint64
+			CredentialGeneration uint64
+			Role                 string
+			Node                 ha.NodeID
+			Peer                 ha.NodeID
+			DeploymentDigest     string
+			DeploymentEpoch      uint64
+			SecretID             secrets.ID
+			AudienceDigest       string
+		}{binding.ChannelID, binding.ChannelGeneration, credential.CredentialGeneration, binding.LocalRole, node, binding.PeerNodeID,
+			binding.DeploymentDigest, binding.DeploymentEpoch, secretID, audienceDigest}),
+	})
 	if err != nil {
 		return err
 	}
 	if len(lease.Cached) != 0 {
 		var receipt mariaDBReplicationProvisionReceipt
-		if json.Unmarshal(lease.Cached, &receipt) != nil || !validMariaDBReplicationProvisionReceipt(receipt, secretID, requestDigest, audienceDigest) {
+		if json.Unmarshal(lease.Cached, &receipt) != nil || !validMariaDBReplicationProvisionReceipt(receipt, secretID, credential.CredentialGeneration, requestDigest, audienceDigest) {
 			return rebootcontrol.ErrIntegrity
 		}
 		return writeMariaDBReplicationProvisionReceipt(receipt)
 	}
 	defer func() { _ = rebootcontrol.SettleExecution(admission, lease, false, nil) }()
-	metadata, err := client.PutExact(ctx, secrets.PutRequest{ID: secretID, OwnerTenantID: owner, Purpose: secrets.PurposeDatabase,
-		Audience: audience, Plaintext: material})
+	put := secrets.PutRequest{
+		ID: secretID, OwnerTenantID: owner, Purpose: secrets.PurposeDatabase, Audience: audience, Plaintext: material,
+		ExpectedVersion: expectedVersion, ExpectedBindingDigest: expectedDigest,
+	}
+	var metadata secrets.Metadata
+	if expectedVersion == 0 {
+		metadata, err = client.PutExact(ctx, put)
+	} else {
+		metadata, err = client.Put(ctx, put)
+	}
 	if err != nil {
 		return err
 	}
 	if metadata.Validate() != nil || metadata.ID != secretID || metadata.OwnerTenantID != owner || metadata.Purpose != secrets.PurposeDatabase ||
-		metadata.Version != 1 || metadata.State != secrets.StateActive || rebootcontrol.ExecutionDigest(metadata.Audience) != audienceDigest {
+		metadata.Version != credential.CredentialGeneration || metadata.State != secrets.StateActive ||
+		rebootcontrol.ExecutionDigest(metadata.Audience) != audienceDigest {
 		return rebootcontrol.ErrIntegrity
 	}
-	receipt := mariaDBReplicationProvisionReceipt{SecretID: metadata.ID, Version: metadata.Version, BindingDigest: metadata.BindingDigest,
-		RequestDigest: requestDigest, AudienceDigest: audienceDigest, CompletedAt: time.Now().UTC()}
-	if !validMariaDBReplicationProvisionReceipt(receipt, secretID, requestDigest, audienceDigest) {
+	receipt := mariaDBReplicationProvisionReceipt{
+		SecretID: metadata.ID, Version: metadata.Version, BindingDigest: metadata.BindingDigest,
+		RequestDigest: requestDigest, AudienceDigest: audienceDigest, CompletedAt: time.Now().UTC(),
+	}
+	if !validMariaDBReplicationProvisionReceipt(receipt, secretID, credential.CredentialGeneration, requestDigest, audienceDigest) {
 		return rebootcontrol.ErrIntegrity
 	}
 	if err = rebootcontrol.SettleExecution(admission, lease, true, receipt); err != nil {
@@ -165,14 +245,13 @@ func provisionMariaDBReplication(channelText string) error {
 	return writeMariaDBReplicationProvisionReceipt(receipt)
 }
 
-func validMariaDBReplicationProvisionReceipt(receipt mariaDBReplicationProvisionReceipt, secretID secrets.ID, requestDigest, audienceDigest string) bool {
-	if receipt.SecretID != secretID || receipt.Version != 1 || receipt.RequestDigest != requestDigest || receipt.AudienceDigest != audienceDigest ||
-		receipt.CompletedAt.IsZero() || receipt.CompletedAt.After(time.Now().UTC().Add(time.Minute)) {
+func validMariaDBReplicationProvisionReceipt(receipt mariaDBReplicationProvisionReceipt, secretID secrets.ID, version uint64, requestDigest, audienceDigest string) bool {
+	if receipt.SecretID != secretID || receipt.Version != version || version == 0 || receipt.RequestDigest != requestDigest ||
+		receipt.AudienceDigest != audienceDigest || receipt.CompletedAt.IsZero() || receipt.CompletedAt.After(time.Now().UTC().Add(time.Minute)) {
 		return false
 	}
 	for _, digest := range []string{receipt.BindingDigest, receipt.RequestDigest, receipt.AudienceDigest} {
-		decoded, err := hex.DecodeString(digest)
-		if err != nil || len(decoded) != sha256.Size {
+		if !validReplicationProvisionDigest(digest) {
 			return false
 		}
 	}

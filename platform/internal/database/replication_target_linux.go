@@ -39,7 +39,7 @@ func replicationPeer(binding ha.StaticReplicationBinding)(netip.Addr,error){
 }
 
 func buildReplicationStatement(kind mariaDBStatement,values ...any)(string,error){
-	if kind==sqlObserveReplication{if len(values)!=0{return "",ErrInvalidCommand};return "SELECT @@server_id AS cp_server_id,@@read_only AS cp_read_only,@@gtid_binlog_pos AS cp_binlog_pos,@@gtid_slave_pos AS cp_slave_pos,@@gtid_current_pos AS cp_current_pos,@@gtid_strict_mode AS cp_strict_mode;\nSHOW SLAVE STATUS;\n",nil}
+	if kind==sqlObserveReplication{if len(values)!=0{return "",ErrInvalidCommand};return "SELECT @@server_id AS cp_server_id,@@read_only AS cp_read_only,@@gtid_binlog_pos AS cp_binlog_pos,@@gtid_slave_pos AS cp_slave_pos,@@gtid_current_pos AS cp_current_pos,@@gtid_strict_mode AS cp_strict_mode;\nSHOW ALL SLAVES STATUS;\n",nil}
 	value,ok:=oneValue[replicationSQLInput](values);if !ok||value.Credential.Validate()!=nil{return "",ErrInvalidCommand}
 	ip,err:=replicationPeer(value.Binding);if err!=nil{return "",err}
 	user,host:=value.Credential.Username.String(),ip.String();account:="'"+user+"'@'"+host+"'"
@@ -61,14 +61,15 @@ func buildReplicationStatement(kind mariaDBStatement,values ...any)(string,error
 	}
 }
 
-type replicationPrincipalJournal struct{ChannelID ha.ChannelID;Epoch uint64;PeerAddress string;Username string;CredentialDigest string;State string}
+type replicationPrincipalJournal struct{ChannelID ha.ChannelID;Epoch,CredentialGeneration uint64;PeerAddress string;Username string;CredentialDigest string;State string}
 
 func(executor *LinuxMariaDBExecutor)ensureReplicationPrincipal(ctx context.Context,connection *mariaDBConnection,binding ha.StaticReplicationBinding,credential MariaDBReplicationCredential)error{
 	if binding.LocalRole!="source"{return ErrUnauthorized}
 	input:=replicationSQLInput{Binding:binding,Credential:credential}
 	output,err:=connection.query(ctx,sqlObserveReplicationPrincipal,input);if err!=nil{return err};defer wipeBytes(output)
-	name:="ha-repl-user-"+digestBytes([]byte(binding.ChannelID))[:32]+".json"
-	want:=replicationPrincipalJournal{ChannelID:binding.ChannelID,Epoch:credential.AuthorityEpoch,PeerAddress:binding.PeerAddress,Username:credential.Username.String(),CredentialDigest:digestBytes(credential.Password),State:"prepared"}
+	principalIdentity:=string(binding.ChannelID)+"\x00"+strconv.FormatUint(credential.CredentialGeneration,10)
+	name:="ha-repl-user-"+digestBytes([]byte(principalIdentity))[:32]+".json"
+	want:=replicationPrincipalJournal{ChannelID:binding.ChannelID,Epoch:credential.AuthorityEpoch,CredentialGeneration:credential.CredentialGeneration,PeerAddress:binding.PeerAddress,Username:credential.Username.String(),CredentialDigest:digestBytes(credential.Password),State:"prepared"}
 	var existing replicationPrincipalJournal
 	loadErr:=executor.readNamed("effects",name,&existing)
 	if loadErr==nil{actual:=existing;actual.State="prepared";left,_:=json.Marshal(actual);right,_:=json.Marshal(want);if !bytes.Equal(left,right){return ErrIdempotency}}else if !errors.Is(loadErr,ErrNotFound){return loadErr}
@@ -126,11 +127,12 @@ func observeReplica(ctx context.Context,connection *mariaDBConnection)(replicaOb
 	lines:=strings.Split(strings.TrimSpace(string(output)),"\n");if len(lines)<1{return replicaObservation{},ErrInvalidResource}
 	result:=replicaObservation{Fields:map[string]string{},Proof:digestBytes(output)}
 	rows:=0
-	for _,line:=range lines{trimmed:=strings.TrimSpace(line);if strings.HasPrefix(trimmed,"***"){rows++;if rows>2{return replicaObservation{},ErrUnauthorized};continue};key,value,ok:=strings.Cut(trimmed,":");if !ok{return replicaObservation{},ErrInvalidResource};if _,duplicate:=result.Fields[key];duplicate{return replicaObservation{},ErrInvalidResource};result.Fields[key]=strings.TrimSpace(value)}
+	for _,line:=range lines{trimmed:=strings.TrimSpace(line);if strings.HasPrefix(trimmed,"***"){rows++;if rows>2{return replicaObservation{},ha.ErrUnsupported};continue};key,value,ok:=strings.Cut(trimmed,":");if !ok{return replicaObservation{},ErrInvalidResource};if _,duplicate:=result.Fields[key];duplicate{return replicaObservation{},ErrInvalidResource};result.Fields[key]=strings.TrimSpace(value)}
 	if rows==0||result.Fields["cp_read_only"]!="1"||result.Fields["cp_strict_mode"]!="1"{return replicaObservation{},ErrUnauthorized}
 	serverID,err:=strconv.ParseUint(result.Fields["cp_server_id"],10,32);if err!=nil||serverID==0{return replicaObservation{},ErrInvalidResource}
 	result.ServerID=serverID;result.Binlog=result.Fields["cp_binlog_pos"];result.Slave=result.Fields["cp_slave_pos"];result.Current=result.Fields["cp_current_pos"]
 	for _,key:=range []string{"cp_server_id","cp_read_only","cp_binlog_pos","cp_slave_pos","cp_current_pos","cp_strict_mode"}{delete(result.Fields,key)}
+	if rows==2{connectionName,ok:=result.Fields["Connection_name"];if !ok||connectionName!=""{return replicaObservation{},ha.ErrUnsupported};delete(result.Fields,"Connection_name")}
 	return result,nil
 }
 
@@ -144,7 +146,7 @@ func replicaCompatible(observed replicaObservation,checkpoint ha.ReplicationChec
 	return slave==current
 }
 
-type localReplicaJournal struct{Channel ha.ReplicationChannel;Checkpoint ha.ReplicationCheckpoint;Epoch uint64;DeploymentDigest string;FenceToken uint64;State string;Receipt ha.ReplicationReceipt}
+type localReplicaJournal struct{Channel ha.ReplicationChannel;Checkpoint ha.ReplicationCheckpoint;Epoch,CredentialGeneration uint64;DeploymentDigest string;FenceToken uint64;State string;Receipt ha.ReplicationReceipt}
 
 func(executor *LinuxMariaDBExecutor)replicationFence()(localMariaDBHAReceipt,error){
 	var fence localMariaDBHAReceipt
@@ -163,41 +165,68 @@ func(executor *LinuxMariaDBExecutor)CatchUpReplica(ctx context.Context,channel h
 	fence,err:=executor.replicationFence();if err!=nil{return ha.ReplicationReceipt{},err}
 	instanceID,_:=NewResourceID("mariadb-local");instance,err:=executor.instance(instanceID);if err!=nil||instance.Placement!=PlacementLocal{return ha.ReplicationReceipt{},ErrUnauthorized}
 	connection,cleanup,err:=executor.connection(ctx,instance);if err!=nil{return ha.ReplicationReceipt{},err};defer cleanup()
-	before,err:=observeReplica(ctx,connection);if err!=nil||!replicaCompatible(before,checkpoint){return ha.ReplicationReceipt{},ha.ErrSplitBrainRisk}
+	before,err:=observeReplica(ctx,connection);if err!=nil{return ha.ReplicationReceipt{},err}
+	if !replicaCompatible(before,checkpoint){return ha.ReplicationReceipt{},ha.ErrSplitBrainRisk}
 	name:="ha-replica-"+digestBytes([]byte(channel.ID))[:32]+".json"
-	journal:=localReplicaJournal{Channel:channel,Checkpoint:checkpoint,Epoch:epoch,DeploymentDigest:binding.DeploymentDigest,FenceToken:fence.FencingToken,State:"applying"}
+	journal:=localReplicaJournal{Channel:channel,Checkpoint:checkpoint,Epoch:epoch,CredentialGeneration:credential.CredentialGeneration,DeploymentDigest:binding.DeploymentDigest,FenceToken:fence.FencingToken,State:"applying"}
 	var previous localReplicaJournal
 	loadErr:=executor.readNamed("effects",name,&previous)
+	sameCheckpoint,replay,rotationPending:=false,false,false
 	if loadErr==nil{
 		if previous.Epoch!=epoch||previous.DeploymentDigest!=binding.DeploymentDigest||previous.FenceToken!=fence.FencingToken{return ha.ReplicationReceipt{},ErrUnauthorized}
 		oldChannel,_:=json.Marshal(previous.Channel);newChannel,_:=json.Marshal(channel);if !bytes.Equal(oldChannel,newChannel){return ha.ReplicationReceipt{},ErrIdempotency}
-		if previous.Checkpoint.ID==checkpoint.ID{oldCheckpoint,_:=json.Marshal(previous.Checkpoint);newCheckpoint,_:=json.Marshal(checkpoint);if !bytes.Equal(oldCheckpoint,newCheckpoint){return ha.ReplicationReceipt{},ErrIdempotency}}
+		sameCheckpoint=previous.Checkpoint.ID==checkpoint.ID
+		if sameCheckpoint{oldCheckpoint,_:=json.Marshal(previous.Checkpoint);newCheckpoint,_:=json.Marshal(checkpoint);if !bytes.Equal(oldCheckpoint,newCheckpoint){return ha.ReplicationReceipt{},ErrIdempotency}}
 		if previous.Checkpoint.WriteFrontier>checkpoint.WriteFrontier{return ha.ReplicationReceipt{},ha.ErrCheckpointStale}
-		if previous.State=="applying"&&previous.Checkpoint.ID!=checkpoint.ID{return ha.ReplicationReceipt{},ErrAmbiguous}
+		if previous.CredentialGeneration==0||previous.CredentialGeneration>credential.CredentialGeneration||credential.CredentialGeneration-previous.CredentialGeneration>1{return ha.ReplicationReceipt{},ErrUnauthorized}
+		if previous.State!="applied"&&previous.State!="applying"{return ha.ReplicationReceipt{},ErrInvalidReceipt}
+		if previous.State=="applied"&&!replicationReceiptMatchesCheckpoint(previous.Receipt,channel,previous.Checkpoint){return ha.ReplicationReceipt{},ErrInvalidReceipt}
+		if previous.State=="applying"&&(!sameCheckpoint||previous.CredentialGeneration!=credential.CredentialGeneration){return ha.ReplicationReceipt{},ErrAmbiguous}
+		replay=previous.State=="applied"&&sameCheckpoint&&previous.CredentialGeneration==credential.CredentialGeneration
+		rotationPending=credential.CredentialGeneration>1&&((previous.CredentialGeneration+1==credential.CredentialGeneration&&previous.State=="applied")||(previous.CredentialGeneration==credential.CredentialGeneration&&previous.State=="applying"))
 	}else if !errors.Is(loadErr,ErrNotFound){return ha.ReplicationReceipt{},loadErr}
-	if len(before.Fields)>0&&!replicaEndpointMatches(before,binding,credential){return ha.ReplicationReceipt{},ErrUnauthorized}
+	currentEndpoint:=len(before.Fields)>0&&replicaEndpointMatches(before,binding,credential)
+	if len(before.Fields)>0&&!currentEndpoint&&(!rotationPending||!replicaEndpointMatchesGeneration(before,binding,credential.CredentialGeneration-1)){return ha.ReplicationReceipt{},ErrUnauthorized}
 	if err=verifyReplicationPeerTLS(ctx,binding);err!=nil{return ha.ReplicationReceipt{},err}
+	if replay{
+		receipt:=previous.Receipt
+		if !currentEndpoint||!replicaCaughtUp(before,binding,credential,channel,checkpoint)||!replicationReceiptMatchesCheckpoint(receipt,channel,checkpoint){return ha.ReplicationReceipt{},ErrAmbiguous}
+		if err=executor.VerifyReplicationAuthority(ctx,binding,node,epoch);err!=nil{return ha.ReplicationReceipt{},ErrUnauthorized}
+		return receipt,nil
+	}
+	if loadErr==nil&&len(before.Fields)==0&&previous.State!="applying"{return ha.ReplicationReceipt{},ErrAmbiguous}
+	if loadErr!=nil||previous.State=="applied"{if err=executor.writeNamed("effects",name,journal);err!=nil{return ha.ReplicationReceipt{},err}}
 	input:=replicationSQLInput{Binding:binding,Credential:credential,Checkpoint:checkpoint,StopExisting:len(before.Fields)>0}
-	if loadErr!=nil{
-		if err=executor.writeNamed("effects",name,journal);err!=nil{return ha.ReplicationReceipt{},err}
+	if !currentEndpoint{
 		if err=executor.VerifyReplicationAuthority(ctx,binding,node,epoch);err!=nil{return ha.ReplicationReceipt{},ErrUnauthorized}
 		if _,err=connection.query(ctx,sqlConfigureReplication,input);err!=nil{return ha.ReplicationReceipt{},ErrAmbiguous}
-	}else if len(before.Fields)==0{return ha.ReplicationReceipt{},ErrAmbiguous}
-	if loadErr==nil&&previous.State!="applied"&&previous.State!="applying"{return ha.ReplicationReceipt{},ErrInvalidReceipt}
+	}else if loadErr!=nil{
+		if err=executor.VerifyReplicationAuthority(ctx,binding,node,epoch);err!=nil{return ha.ReplicationReceipt{},ErrUnauthorized}
+		if _,err=connection.query(ctx,sqlConfigureReplication,input);err!=nil{return ha.ReplicationReceipt{},ErrAmbiguous}
+	}
 	waitOutput,waitErr:=connection.query(ctx,sqlWaitReplication,input);if waitErr!=nil||strings.TrimSpace(string(waitOutput))!="0"{return ha.ReplicationReceipt{},ErrAmbiguous}
-	after,err:=observeReplica(ctx,connection);if err!=nil||!replicaCaughtUp(after,binding,credential,channel,checkpoint){return ha.ReplicationReceipt{},ErrAmbiguous}
+	after,err:=observeReplica(ctx,connection);if err!=nil{return ha.ReplicationReceipt{},err};if !replicaCaughtUp(after,binding,credential,channel,checkpoint){return ha.ReplicationReceipt{},ErrAmbiguous}
 	if err=executor.VerifyReplicationAuthority(ctx,binding,node,epoch);err!=nil{return ha.ReplicationReceipt{},ErrUnauthorized}
-	proof,_:=json.Marshal(struct{Channel ha.ChannelID;Checkpoint ha.CheckpointID;Epoch,Fence uint64;Observation string}{channel.ID,checkpoint.ID,epoch,fence.FencingToken,after.Proof})
+	proof,_:=json.Marshal(struct{Channel ha.ChannelID;Checkpoint ha.CheckpointID;Epoch,Fence,CredentialGeneration uint64;Observation string}{channel.ID,checkpoint.ID,epoch,fence.FencingToken,credential.CredentialGeneration,after.Proof})
 	receipt:=ha.ReplicationReceipt{ChannelID:channel.ID,SourceNodeID:channel.SourceNodeID,TargetNodeID:channel.TargetNodeID,SourceGeneration:checkpoint.SourceGeneration,WriteFrontier:checkpoint.WriteFrontier,Position:checkpoint.Position,ManifestDigest:checkpoint.ManifestDigest,TargetReceipt:string(proof),VerifiedAt:executor.now().UTC()}
 	journal.State="applied";journal.Receipt=receipt
 	if err=executor.writeNamed("effects",name,journal);err!=nil{return ha.ReplicationReceipt{},ErrAmbiguous}
 	return receipt,nil
 }
 
+func replicationReceiptMatchesCheckpoint(receipt ha.ReplicationReceipt,channel ha.ReplicationChannel,checkpoint ha.ReplicationCheckpoint)bool{
+	return receipt.ChannelID==channel.ID&&receipt.SourceNodeID==channel.SourceNodeID&&receipt.TargetNodeID==channel.TargetNodeID&&receipt.SourceGeneration==checkpoint.SourceGeneration&&receipt.WriteFrontier==checkpoint.WriteFrontier&&receipt.Position==checkpoint.Position&&receipt.ManifestDigest==checkpoint.ManifestDigest&&receipt.TargetReceipt!=""&&!receipt.VerifiedAt.IsZero()
+}
+
 func replicaEndpointMatches(value replicaObservation,binding ha.StaticReplicationBinding,credential MariaDBReplicationCredential)bool{
+	return replicaEndpointMatchesGeneration(value,binding,credential.CredentialGeneration)
+}
+
+func replicaEndpointMatchesGeneration(value replicaObservation,binding ha.StaticReplicationBinding,generation uint64)bool{
+	if generation==0{return false}
 	ip,err:=replicationPeer(binding);if err!=nil{return false}
 	fields:=value.Fields
-	return fields["Master_Host"]==ip.String()&&fields["Master_Port"]=="3306"&&fields["Master_User"]==credential.Username.String()&&fields["Using_Gtid"]=="Slave_Pos"&&fields["Master_SSL_Allowed"]=="Yes"&&fields["Master_SSL_Verify_Server_Cert"]=="Yes"&&fields["Master_SSL_CA_File"]==binding.TLSCAPath
+	return fields["Master_Host"]==ip.String()&&fields["Master_Port"]=="3306"&&fields["Master_User"]==MariaDBReplicationUsernameForGeneration(binding.ChannelID,generation)&&fields["Using_Gtid"]=="Slave_Pos"&&fields["Master_SSL_Allowed"]=="Yes"&&fields["Master_SSL_Verify_Server_Cert"]=="Yes"&&fields["Master_SSL_CA_File"]==binding.TLSCAPath
 }
 
 func replicaCaughtUp(value replicaObservation,binding ha.StaticReplicationBinding,credential MariaDBReplicationCredential,channel ha.ReplicationChannel,checkpoint ha.ReplicationCheckpoint)bool{

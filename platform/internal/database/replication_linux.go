@@ -16,8 +16,17 @@ import (
 )
 
 type localGTIDCheckpoint struct {
-	Channel ha.ReplicationChannel `json:"channel"`
-	Checkpoint ha.ReplicationCheckpoint `json:"checkpoint"`
+	Channel              ha.ReplicationChannel `json:"channel"`
+	CredentialGeneration uint64                `json:"credential_generation"`
+	Checkpoint           ha.ReplicationCheckpoint `json:"checkpoint"`
+}
+
+func localGTIDCheckpointIdentity(channel ha.ReplicationChannel,generation,credentialGeneration uint64)([]byte,string,error){
+	encoded,err:=json.Marshal(struct{Channel ha.ReplicationChannel;Generation,CredentialGeneration uint64}{channel,generation,credentialGeneration})
+	if err!=nil{return nil,"",err}
+	journalIdentity,err:=json.Marshal(struct{Channel ha.ReplicationChannel;Generation uint64}{channel,generation})
+	if err!=nil{return nil,"",err}
+	return encoded,"ha-checkpoint-"+digestBytes(journalIdentity)[:40]+".json",nil
 }
 
 func(executor *LinuxMariaDBExecutor)replicationBinding(ctx context.Context,channelID ha.ChannelID)(ha.StaticReplicationBinding,ha.NodeID,uint64,error){
@@ -48,19 +57,28 @@ func(executor *LinuxMariaDBExecutor)CreateDatabaseCheckpoint(ctx context.Context
 	binding,node,epoch,err:=executor.replicationBinding(ctx,channel.ID);if err!=nil||!bindingMatchesChannel(binding,node,channel,"source"){return ha.ReplicationCheckpoint{},ErrUnauthorized}
 	ctx=context.WithValue(ctx,sqlMaintenanceCapability{},true)
 	credential,err:=executor.replicationCredential(ctx,binding,channel,epoch);if err!=nil{return ha.ReplicationCheckpoint{},err};defer credential.Wipe()
-	encoded,err:=json.Marshal(struct{Channel ha.ReplicationChannel;Generation uint64}{channel,generation});if err!=nil{return ha.ReplicationCheckpoint{},err}
-	identity:=digestBytes(encoded);name:="ha-checkpoint-"+identity[:40]+".json"
+	encoded,name,err:=localGTIDCheckpointIdentity(channel,generation,credential.CredentialGeneration);if err!=nil{return ha.ReplicationCheckpoint{},err}
+	identity:=digestBytes(encoded)
 	var prior localGTIDCheckpoint
+	replay:=false
 	if err=executor.readNamed("effects",name,&prior);err==nil{
 		left,_:=json.Marshal(prior.Channel);right,_:=json.Marshal(channel)
-		if string(left)!=string(right)||prior.Checkpoint.SourceGeneration!=generation||!verifyReplicationCheckpoint(prior.Checkpoint,channel,credential){return ha.ReplicationCheckpoint{},ErrIdempotency};return prior.Checkpoint,nil
+		if string(left)!=string(right)||prior.Checkpoint.SourceGeneration!=generation{return ha.ReplicationCheckpoint{},ErrIdempotency}
+		if prior.CredentialGeneration==credential.CredentialGeneration{if !verifyReplicationCheckpoint(prior.Checkpoint,channel,credential){return ha.ReplicationCheckpoint{},ErrIdempotency};replay=true}else if prior.CredentialGeneration==0||prior.CredentialGeneration>=credential.CredentialGeneration||credential.CredentialGeneration-prior.CredentialGeneration>1{return ha.ReplicationCheckpoint{},ErrIdempotency}
 	}else if !errors.Is(err,ErrNotFound){return ha.ReplicationCheckpoint{},err}
 	instanceID,_:=NewResourceID("mariadb-local");instance,err:=executor.instance(instanceID);if err!=nil||instance.Placement!=PlacementLocal{return ha.ReplicationCheckpoint{},ErrUnauthorized}
 	connection,cleanup,err:=executor.connection(ctx,instance);if err!=nil{return ha.ReplicationCheckpoint{},err};defer cleanup()
 	preflight,err:=connection.query(ctx,sqlStableGTIDCheckpoint);if err!=nil{return ha.ReplicationCheckpoint{},err}
 	preLines:=strings.Split(strings.TrimSpace(string(preflight)),"\n");if len(preLines)!=2||preLines[0]!=preLines[1]{return ha.ReplicationCheckpoint{},ErrAmbiguous}
 	preFields:=strings.Split(preLines[0],"\t");if len(preFields)!=6||preFields[2]!="1"||preFields[4]!="1"||preFields[5]!="1"{return ha.ReplicationCheckpoint{},ErrUnauthorized}
+	topology,err:=observeReplica(ctx,connection);if err!=nil{return ha.ReplicationCheckpoint{},err}
+	if len(topology.Fields)!=0{return ha.ReplicationCheckpoint{},ha.ErrUnsupported}
 	if err=executor.ensureReplicationPrincipal(ctx,connection,binding,credential);err!=nil{return ha.ReplicationCheckpoint{},err}
+	if replay{
+		if preFields[3]!=prior.Checkpoint.Position{return ha.ReplicationCheckpoint{},ha.ErrCheckpointStale}
+		if err=executor.VerifyReplicationAuthority(ctx,binding,node,epoch);err!=nil{return ha.ReplicationCheckpoint{},ErrUnauthorized}
+		return prior.Checkpoint,nil
+	}
 	output,err:=connection.query(ctx,sqlStableGTIDCheckpoint);if err!=nil{return ha.ReplicationCheckpoint{},err}
 	lines:=strings.Split(strings.TrimSpace(string(output)),"\n")
 	if len(lines)!=2||lines[0]!=lines[1]{return ha.ReplicationCheckpoint{},ErrAmbiguous}
@@ -74,13 +92,13 @@ func(executor *LinuxMariaDBExecutor)CreateDatabaseCheckpoint(ctx context.Context
 	checkpoint.StableViewRef=replicationCheckpointMAC(checkpoint,channel,credential)
 	if checkpoint.Validate()!=nil{return ha.ReplicationCheckpoint{},ErrInvalidReceipt}
 	if err=executor.VerifyReplicationAuthority(ctx,binding,node,epoch);err!=nil{return ha.ReplicationCheckpoint{},ErrUnauthorized}
-	if err=executor.writeNamed("effects",name,localGTIDCheckpoint{Channel:channel,Checkpoint:checkpoint});err!=nil{return ha.ReplicationCheckpoint{},err}
+	if err=executor.writeNamed("effects",name,localGTIDCheckpoint{Channel:channel,CredentialGeneration:credential.CredentialGeneration,Checkpoint:checkpoint});err!=nil{return ha.ReplicationCheckpoint{},err}
 	return checkpoint,nil
 }
 
 func replicationCheckpointMAC(checkpoint ha.ReplicationCheckpoint,channel ha.ReplicationChannel,credential MariaDBReplicationCredential)string{
 	checkpoint.StableViewRef=""
-	unsigned,_:=json.Marshal(struct{Domain string;Channel ha.ReplicationChannel;Epoch uint64;Checkpoint ha.ReplicationCheckpoint}{"cyberpanel-mariadb-checkpoint-v1",channel,credential.AuthorityEpoch,checkpoint})
+	unsigned,_:=json.Marshal(struct{Domain string;Channel ha.ReplicationChannel;Epoch,CredentialGeneration uint64;Checkpoint ha.ReplicationCheckpoint}{"cyberpanel-mariadb-checkpoint-v1",channel,credential.AuthorityEpoch,credential.CredentialGeneration,checkpoint})
 	mac:=hmac.New(sha256.New,credential.CheckpointKey);_,_=mac.Write(unsigned);return "mariadb-gtid-hmac:"+hex.EncodeToString(mac.Sum(nil))
 }
 

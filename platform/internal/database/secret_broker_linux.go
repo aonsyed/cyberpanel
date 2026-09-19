@@ -46,7 +46,9 @@ func(source *LinuxSecretBrokerSource)MariaDBReplicationCredential(ctx context.Co
 	ref,err:=NewSecretRef(binding.PurposeKeyRef);if err!=nil{return MariaDBReplicationCredential{},err}
 	response,err:=source.read(ctx,DatabaseSecretRecordID(ref.String()),source.installationOwner,DatabaseAudienceID("replication-"+string(binding.ChannelID)),secrets.OperationAuthenticate)
 	if err!=nil{return MariaDBReplicationCredential{},err};defer wipeBytes(response.Material)
-	return DecodeMariaDBReplicationCredential(response.Material)
+	credential,err:=DecodeMariaDBReplicationCredential(response.Material)
+	if err!=nil||credential.CredentialGeneration!=response.SecretVersion||!validSHA256(response.BindingDigest){credential.Wipe();return MariaDBReplicationCredential{},ErrUnauthorized}
+	return credential,nil
 }
 
 func(source *LinuxSecretBrokerSource)ExternalAdministrator(ctx context.Context,ref SecretRef,audience ResourceID,instanceID ResourceID)(MariaDBAdministrator,error){
