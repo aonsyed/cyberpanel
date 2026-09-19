@@ -205,7 +205,7 @@ func ProjectionManifestDigest(coverage ProjectionCoverageManifest, entries []Pro
 		return entries[left].ResourceKind < entries[right].ResourceKind
 	})
 	for index, entry := range entries {
-		if !validProjectionPart(entry.ResourceKind, 256) || !validProjectionPart(entry.ResourceID, 256) || entry.TenantID != "" && !validProjectionPart(entry.TenantID, 256) || entry.SourceGeneration > projectionMaximumGeneration || !validSHA256Digest(entry.ProjectionDigest) {
+		if !validProjectionPart(entry.ResourceKind, 256) || !validProjectionPart(entry.ResourceID, 256) || !validProjectionTenant(entry.ResourceKind, entry.TenantID) || entry.SourceGeneration > projectionMaximumGeneration || !validSHA256Digest(entry.ProjectionDigest) {
 			return "", ErrInvalid
 		}
 		if _, ok := included[entry.ResourceKind]; !ok {
@@ -231,7 +231,7 @@ func DecodeProjectionResourcePayload(raw json.RawMessage) (ProjectionResourcePay
 		return value, ErrInvalid
 	}
 	canonical, err := canonicalJSON(raw)
-	if err != nil || !bytes.Equal(canonical, raw) || value.Schema != "cyberpanel.federation.resource-projection.v1" || value.Operation != "upsert" && value.Operation != "tombstone" || !value.NodeID.Valid() || value.AuthorityEpoch == 0 || value.SourceWatermark == 0 || value.SourceWatermark > projectionMaximumGeneration || !validProjectionPart(value.ResourceKind, 256) || !validProjectionPart(value.ResourceID, 256) || value.TenantID != "" && !validProjectionPart(value.TenantID, 256) || value.Generation == 0 || value.Generation > projectionMaximumGeneration || value.SourceGeneration > projectionMaximumGeneration || !validSHA256Digest(value.ProjectionDigest) {
+	if err != nil || !bytes.Equal(canonical, raw) || value.Schema != "cyberpanel.federation.resource-projection.v1" || value.Operation != "upsert" && value.Operation != "tombstone" || !value.NodeID.Valid() || value.AuthorityEpoch == 0 || value.SourceWatermark == 0 || value.SourceWatermark > projectionMaximumGeneration || !validProjectionPart(value.ResourceKind, 256) || !validProjectionPart(value.ResourceID, 256) || !validProjectionTenant(value.ResourceKind, value.TenantID) || value.Generation == 0 || value.Generation > projectionMaximumGeneration || value.SourceGeneration > projectionMaximumGeneration || !validSHA256Digest(value.ProjectionDigest) {
 		return value, ErrInvalid
 	}
 	if value.Operation == "upsert" {
@@ -397,6 +397,12 @@ VALUES(1,?,?,1,0,'',0,?) ON CONFLICT(singleton_id) DO UPDATE SET
 	}
 	scan, err := source.ScanProjection(ctx, tx)
 	if err != nil {
+		if ctx.Err() == nil {
+			_ = tx.Rollback()
+			if invalidateErr := s.markProjectionSourceIncomplete(ctx, node, epoch, now); invalidateErr != nil {
+				return result, errors.Join(err, invalidateErr)
+			}
+		}
 		return result, err
 	}
 	coverage, included, err := normalizeProjectionCoverage(scan.Coverage)
@@ -609,6 +615,32 @@ func (s *Store) ProjectionBaselineReady(ctx context.Context, node ID, epoch uint
 	return ready == 1 && sourceComplete == 1, err
 }
 
+func (s *Store) markProjectionSourceIncomplete(ctx context.Context, node ID, epoch uint64, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var currentNode ID
+	var currentEpoch uint64
+	if err = tx.QueryRowContext(ctx, `SELECT node_id,authority_epoch FROM federation_state WHERE singleton_id=1`).Scan(&currentNode, &currentEpoch); err != nil {
+		return err
+	}
+	if currentNode != node || currentEpoch != epoch {
+		return ErrStale
+	}
+	if err = s.bootstrapProjectionSourceTx(ctx, tx); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE federation_projection_source_v1 SET complete=0 WHERE singleton_id=1`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE federation_projection_publisher_v1 SET baseline_complete=0,updated_at=? WHERE singleton_id=1 AND node_id=? AND authority_epoch=?`, now, node, epoch); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func projectionBaselineReadyTx(ctx context.Context, tx *sql.Tx, node ID, epoch uint64) (bool, error) {
 	var ready, sourceComplete int
 	err := tx.QueryRowContext(ctx, `SELECT p.baseline_complete,s.complete FROM federation_projection_publisher_v1 p JOIN federation_projection_source_v1 s ON s.singleton_id=1 WHERE p.singleton_id=1 AND p.node_id=? AND p.authority_epoch=?`, node, epoch).Scan(&ready, &sourceComplete)
@@ -684,7 +716,7 @@ func normalizeProjectionResources(values []ProjectionResource, included map[stri
 	bytesUsed := 0
 	for index := range resources {
 		resource := &resources[index]
-		if !validProjectionPart(resource.ResourceKind, 256) || !validProjectionPart(resource.ResourceID, 256) || resource.TenantID != "" && !validProjectionPart(resource.TenantID, 256) || resource.Generation > projectionMaximumGeneration {
+		if !validProjectionPart(resource.ResourceKind, 256) || !validProjectionPart(resource.ResourceID, 256) || !validProjectionTenant(resource.ResourceKind, resource.TenantID) || resource.Generation > projectionMaximumGeneration {
 			return nil, nil, 0, ErrInvalid
 		}
 		if _, covered := included[resource.ResourceKind]; !covered {
@@ -727,6 +759,9 @@ func loadProjectionLedger(ctx context.Context, tx *sql.Tx) (map[string]projectio
 
 func newProjectionEvent(node ID, epoch uint64, tenant, kind, id string, generation uint64, eventKind string, value any, occurredAt time.Time) (NodeEvent, error) {
 	var event NodeEvent
+	if kind != "" && !validProjectionTenant(kind, tenant) {
+		return event, ErrInvalid
+	}
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return event, err
@@ -746,6 +781,13 @@ func newProjectionEvent(node ID, epoch uint64, tenant, kind, id string, generati
 
 func validProjectionPart(value string, maximum int) bool {
 	return value != "" && len(value) <= maximum && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func validProjectionTenant(kind, tenant string) bool {
+	if tenant == "" {
+		return kind != "dns.zone"
+	}
+	return validProjectionPart(tenant, 256)
 }
 
 func projectionLedgerKey(kind, id string) string { return kind + "\x00" + id }

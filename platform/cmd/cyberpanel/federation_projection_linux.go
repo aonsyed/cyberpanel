@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
@@ -140,20 +141,40 @@ func scanProjectionSites(ctx context.Context, tx *sql.Tx, collector *controlProj
 }
 
 func scanProjectionDNSZones(ctx context.Context, tx *sql.Tx, collector *controlProjectionCollector) error {
-	rows, err := tx.QueryContext(ctx, `SELECT z.id,z.zone_json,COALESCE(d.tenant_id,''),COALESCE(d.generation,0),COALESCE(d.phase,'disabled') FROM dns_zones z LEFT JOIN dnssec_status_v2 d ON d.zone_id=z.id ORDER BY z.id`)
+	rows, err := tx.QueryContext(ctx, `SELECT z.id,z.zone_json,z.zone_spec_json,z.tenant_id,z.ownership_state,z.generation,z.zone_name,z.pending_effect,d.tenant_id,d.generation,d.phase,d.status_json FROM dns_zones z LEFT JOIN dnssec_status_v2 d ON d.zone_id=z.id ORDER BY z.id`)
 	if err != nil { return err }
 	defer rows.Close()
 	for rows.Next() {
-		var id, tenant, phase string
-		var dnssecGeneration uint64
-		var raw []byte
-		if err = rows.Scan(&id, &raw, &tenant, &dnssecGeneration, &phase); err != nil { return err }
+		var id, tenant, ownershipState, zoneName, pendingEffect string
+		var ownershipGeneration uint64
+		var zoneRaw, specRaw, dnssecRaw []byte
+		var dnssecTenant, dnssecPhase sql.NullString
+		var dnssecGenerationValue sql.NullInt64
+		if err = rows.Scan(&id, &zoneRaw, &specRaw, &tenant, &ownershipState, &ownershipGeneration, &zoneName, &pendingEffect, &dnssecTenant, &dnssecGenerationValue, &dnssecPhase, &dnssecRaw); err != nil { return err }
+		if pendingEffect != "" || ownershipState == "pending" { return federation.ErrProjectionSourceIncomplete }
+		if ownershipState == "quarantined" {
+			if tenant != "" || ownershipGeneration != 0 { return federation.ErrInvalid }
+			return federation.ErrProjectionSourceIncomplete
+		}
+		if ownershipState != "owned" && ownershipState != "deleted" || tenant == "" || len(tenant) > 256 || strings.ContainsAny(tenant, "\x00\r\n") || ownershipGeneration == 0 || zoneName == "" { return federation.ErrInvalid }
 		var zone dns.Zone
-		if decodeProjectionRow(raw, &zone) != nil || string(zone.ID) != id { return federation.ErrInvalid }
-		generation := zone.Serial
-		if dnssecGeneration > generation { generation = dnssecGeneration }
-		if generation == 0 { generation = 1 }
-		if err = collector.add(tenant, "dns.zone", id, generation, map[string]any{"id": id, "name": zone.Name, "role": string(zone.Role), "serial": zone.Serial, "providerBound": zone.Provider != "", "transferPeerCount": len(zone.Peers), "dnssecPhase": phase, "dnssecGeneration": dnssecGeneration}); err != nil { return err }
+		var spec dns.ZoneSpec
+		if decodeProjectionRow(zoneRaw, &zone) != nil || decodeProjectionRow(specRaw, &spec) != nil || string(zone.ID) != id || string(spec.ID) != id || zone.TenantID != tenant || spec.TenantID != tenant || zone.Name != zoneName || spec.Name.String() != zoneName || spec.Generation != ownershipGeneration || zone.Serial == 0 { return federation.ErrInvalid }
+		expectedRole := dns.Primary
+		if spec.Mode == dns.ZoneSecondary { expectedRole = dns.Secondary }
+		if zone.Role != expectedRole { return federation.ErrInvalid }
+		if ownershipState == "deleted" { continue }
+		dnssecPresent := dnssecTenant.Valid || dnssecGenerationValue.Valid || dnssecPhase.Valid || len(dnssecRaw) != 0
+		dnssecGeneration := uint64(0)
+		phase := string(dns.DNSSECDisabled)
+		if dnssecPresent {
+			if !dnssecTenant.Valid || !dnssecGenerationValue.Valid || !dnssecPhase.Valid || len(dnssecRaw) == 0 || dnssecGenerationValue.Int64 < 1 || dnssecTenant.String != tenant { return federation.ErrInvalid }
+			var status dns.DNSSECStatus
+			if decodeProjectionRow(dnssecRaw, &status) != nil || string(status.ZoneID) != id || status.TenantID != tenant || status.Generation != uint64(dnssecGenerationValue.Int64) || string(status.Phase) != dnssecPhase.String { return federation.ErrInvalid }
+			dnssecGeneration = status.Generation
+			phase = string(status.Phase)
+		}
+		if err = collector.add(tenant, "dns.zone", id, ownershipGeneration, map[string]any{"id": id, "tenantId": tenant, "name": zoneName, "role": string(zone.Role), "serial": zone.Serial, "providerBound": zone.Provider != "", "transferPeerCount": len(zone.Peers), "generation": ownershipGeneration, "dnssecPhase": phase, "dnssecGeneration": dnssecGeneration}); err != nil { return err }
 	}
 	return rows.Err()
 }
