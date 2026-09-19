@@ -162,6 +162,51 @@ type DatabaseProjection struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+// DatabaseInstanceProjection deliberately omits protected secret references.
+// Operators can inspect placement, pinned endpoint identity, capacity, and
+// observed state without gaining a material-broker lookup handle.
+type DatabaseInstanceProjection struct {
+	ID             string `json:"id"`
+	Placement      string `json:"placement"`
+	Endpoint       string `json:"endpoint"`
+	ServerName     string `json:"server_name,omitempty"`
+	TLS            string `json:"tls"`
+	Version        string `json:"version"`
+	StorageBytes   uint64 `json:"storage_bytes"`
+	MemoryBytes    uint64 `json:"memory_bytes"`
+	MaxConnections uint32 `json:"max_connections"`
+	Health         string `json:"health"`
+	Status         string `json:"status"`
+	Generation     uint64 `json:"generation"`
+}
+
+type DatabaseExternalEnrollmentPayload struct {
+	ID                       string `json:"id"`
+	Host                     string `json:"host"`
+	Port                     uint16 `json:"port"`
+	TLSMode                  string `json:"tls_mode"`
+	VersionMajor             uint16 `json:"version_major"`
+	VersionMinor             uint16 `json:"version_minor"`
+	VersionPatch             uint16 `json:"version_patch,omitempty"`
+	NetworkPolicyID          string `json:"network_policy_id"`
+	StorageBytes             uint64 `json:"storage_bytes"`
+	MemoryBytes              uint64 `json:"memory_bytes"`
+	MaxConnections           uint32 `json:"max_connections"`
+	AdministratorUsername    string `json:"administrator_username"`
+	AdministratorPassword    string `json:"administrator_password"`
+	ClientCertificatePEM     string `json:"client_certificate_pem,omitempty"`
+	ClientKeyPEM             string `json:"client_key_pem,omitempty"`
+	CertificateAuthorityPEM  string `json:"certificate_authority_pem"`
+	ApprovalRef              string `json:"approval_ref"`
+}
+
+type DatabaseExternalEnrollmentSecrets struct {
+	AdministratorPassword   []byte
+	ClientCertificatePEM    []byte
+	ClientKeyPEM            []byte
+	CertificateAuthorityPEM []byte
+}
+
 type AccessCredentialProjection struct {
 	ID         string    `json:"id"`
 	SiteID     string    `json:"site_id"`
@@ -1033,6 +1078,8 @@ type HostingAccessPolicyEdgeService interface {
 
 type DatabaseEdgeService interface {
 	ListDatabases(context.Context, EdgeCall, EdgePagePayload) (EdgePage[DatabaseProjection], error)
+	ListDatabaseInstances(context.Context, EdgeCall, EdgePagePayload) (EdgePage[DatabaseInstanceProjection], error)
+	EnrollExternalDatabaseInstance(context.Context, EdgeCall, DatabaseExternalEnrollmentPayload, DatabaseExternalEnrollmentSecrets) (EdgeMutation[DatabaseInstanceProjection], error)
 }
 
 type AccessEdgeService interface {
@@ -1228,6 +1275,8 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("database.database.list", "database:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
 		consoleOperation("database.console.issue", "database:console", mfa, true, func() any { return &DatabaseConsolePayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("database.network.configure", "database:manage", mfa, true, func() any { return &DatabaseNetworkPayload{} }, nil, edgeTenantExistingMutationScope),
+		consoleOperation("database.instance.list", "database:admin", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
+		consoleOperation("database.instance.enroll_external", "database:admin", mfa, true, func() any { return &DatabaseExternalEnrollmentPayload{} }, validateDatabaseExternalEnrollment, edgeInstallationCreateScope),
 
 		consoleOperation("access.credential.list", "access:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
 		consoleOperation("access.credential.create", "access:manage", mfa, true, func() any { return &AccessCredentialCreatePayload{} }, validateAccessCredentialCreate, edgeTenantCreateScope),
@@ -1360,6 +1409,36 @@ func validateEdgePage(value any) error {
 	payload := value.(*EdgePagePayload)
 	if payload.Limit == 0 { payload.Limit = 100 }
 	if payload.Limit > 500 || len(payload.Cursor) > 1024 || strings.ContainsAny(payload.Cursor, "\x00\r\n\t") { return invalid("page") }
+	return nil
+}
+
+func validateDatabaseExternalEnrollment(value any) error {
+	payload := value.(*DatabaseExternalEnrollmentPayload)
+	if _, err := database.NewResourceID(payload.ID); err != nil {
+		return invalid("database instance id")
+	}
+	if _, err := database.NewResourceID(payload.NetworkPolicyID); err != nil {
+		return invalid("database network policy id")
+	}
+	if _, err := database.NewResourceID(payload.ApprovalRef); err != nil {
+		return invalid("database approval")
+	}
+	if _, err := database.ParseSQLIdentifier(payload.AdministratorUsername); err != nil {
+		return invalid("database administrator")
+	}
+	if payload.Port == 0 || !safeEdgeText(payload.Host, 253) || strings.ContainsAny(payload.Host, " /\\@") ||
+		(payload.TLSMode != string(database.TLSRequired) && payload.TLSMode != string(database.TLSMutual)) ||
+		payload.VersionMajor == 0 || payload.StorageBytes == 0 || payload.MemoryBytes == 0 || payload.MaxConnections == 0 ||
+		len(payload.AdministratorPassword) == 0 || len(payload.AdministratorPassword) > 64<<10 || strings.IndexByte(payload.AdministratorPassword, 0) >= 0 ||
+		len(payload.CertificateAuthorityPEM) == 0 || len(payload.CertificateAuthorityPEM) > 64<<10 ||
+		len(payload.ClientCertificatePEM) > 64<<10 || len(payload.ClientKeyPEM) > 64<<10 {
+		return invalid("external database enrollment")
+	}
+	mutual := payload.TLSMode == string(database.TLSMutual)
+	if mutual != (payload.ClientCertificatePEM != "" && payload.ClientKeyPEM != "") ||
+		!mutual && (payload.ClientCertificatePEM != "" || payload.ClientKeyPEM != "") {
+		return invalid("external database TLS material")
+	}
 	return nil
 }
 
@@ -2227,6 +2306,30 @@ func bindConsoleEdgeContracts(registry *Registry, services DomainServices) error
 		if err := registry.Bind("database.database.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.DatabaseEdge.ListDatabases(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("database.instance.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.DatabaseEdge.ListDatabaseInstances(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("database.instance.enroll_external", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			payload := value.(*DatabaseExternalEnrollmentPayload)
+			material := DatabaseExternalEnrollmentSecrets{
+				AdministratorPassword: []byte(payload.AdministratorPassword),
+				ClientCertificatePEM: []byte(payload.ClientCertificatePEM),
+				ClientKeyPEM: []byte(payload.ClientKeyPEM),
+				CertificateAuthorityPEM: []byte(payload.CertificateAuthorityPEM),
+			}
+			payload.AdministratorPassword = ""
+			payload.ClientCertificatePEM = ""
+			payload.ClientKeyPEM = ""
+			payload.CertificateAuthorityPEM = ""
+			defer clearSecret(material.AdministratorPassword)
+			defer clearSecret(material.ClientCertificatePEM)
+			defer clearSecret(material.ClientKeyPEM)
+			defer clearSecret(material.CertificateAuthorityPEM)
+			result, err := services.DatabaseEdge.EnrollExternalDatabaseInstance(ctx, edgeCall(inv), *payload, material)
+			if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusCreated, result), nil
 		}); err != nil { return err }
 	}
 	if services.Database != nil {

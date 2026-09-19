@@ -168,7 +168,15 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		return apiserver.DomainServices{}, fmt.Errorf("connect database executor: %w", err)
 	}
 	databaseCoordinator := database.NewCoordinator(repositories.Database, databaseExecutor, runtimeClock{})
-	databaseConsoleEdge, err := newDatabaseEdge(repositories.Database)
+	secretEnrollment, err := newSecretEnrollmentClient()
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("connect secret management broker: %w", err)
+	}
+	databaseConsumerDigest, err := webEngineExecutableDigest("/usr/local/libexec/cyberpanel/panel-execd")
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("digest database executor: %w", err)
+	}
+	databaseConsoleEdge, err := newDatabaseEdge(repositories.Database, databaseCoordinator, secretEnrollment.client, databaseConsumerDigest)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize database console edge: %w", err)
 	}
@@ -502,10 +510,6 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	containerConsoleEdge, err := newContainerEdge(containerService, repositories.Containers, containerBroker)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize container console edge: %w", err)
-	}
-	secretEnrollment, err := newSecretEnrollmentClient()
-	if err != nil {
-		return apiserver.DomainServices{}, fmt.Errorf("connect secret management broker: %w", err)
 	}
 	mailDeliveryMaterial, err := secrets.NewLocalMaterialClient()
 	if err != nil {

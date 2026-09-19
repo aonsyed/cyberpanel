@@ -116,6 +116,30 @@ export const pages: Record<string, PageDefinition> = {
     columns:[{key:"name",label:"Database"},{key:"site",label:"Site"},{key:"instance",label:"Instance"},{key:"size",label:"Size",format:"bytes"},{key:"principals",label:"Principals",format:"number"},{key:"status",label:"Status",format:"status"}],
     rowActions:[{id:"browse",label:"Open console",operation:"database.console.issue",mutating:true,tone:"info"},{id:"principal",label:"Add principal",operation:"database.principal.create",mutating:true},{id:"remote",label:"Network access",operation:"database.network.configure",mutating:true,assurance:"mfa"},{id:"delete",label:"Delete",operation:"database.database.delete",mutating:true,tone:"critical",assurance:"mfa"}],emptyTitle:"No databases",emptyBody:"Create a database with an isolated principal and exact grant set."
   },
+  databaseInstances: {
+    id:"databaseInstances",title:"Database instances",description:"Local and managed external MariaDB placement, pinned TLS identity, capacity, and health.",resourceKind:"database.instance",scope:"installation",listOperation:"database.instance.list",
+    createAction:{id:"enroll",label:"Enroll external MariaDB",operation:"database.instance.enroll_external",mutating:true,assurance:"mfa",scope:"installation",confirmation:"The node will pin this endpoint and CA, seal the administrative credential for panel-execd only, and perform a live version and TLS probe before admitting the instance.",fields:[
+      {key:"id",label:"Instance ID",type:"text",required:true,helper:"Stable control-plane identifier; it cannot be reused with different credentials."},
+      {key:"host",label:"Endpoint host / SNI",type:"text",required:true,helper:"Exact DNS name or IPv4 address presented to MariaDB. The pinned TLS identity must match it."},
+      {key:"port",label:"Port",type:"number",required:true,defaultValue:3306},
+      {key:"tls_mode",label:"TLS policy",type:"select",required:true,defaultValue:"required",options:[{label:"Pinned server TLS",value:"required"},{label:"Mutual TLS",value:"mutual"}]},
+      {key:"version_major",label:"Expected major version",type:"number",required:true,defaultValue:10},
+      {key:"version_minor",label:"Expected minor version",type:"number",required:true,defaultValue:11},
+      {key:"version_patch",label:"Expected patch version",type:"number",required:true,defaultValue:0},
+      {key:"network_policy_id",label:"Network policy ID",type:"text",required:true},
+      {key:"storage_bytes",label:"Storage capacity (bytes)",type:"number",required:true,defaultValue:1099511627776},
+      {key:"memory_bytes",label:"Memory capacity (bytes)",type:"number",required:true,defaultValue:8589934592},
+      {key:"max_connections",label:"Connection capacity",type:"number",required:true,defaultValue:500},
+      {key:"administrator_username",label:"Least-privilege management account",type:"text",required:true},
+      {key:"administrator_password",label:"Management password",type:"password",required:true},
+      {key:"certificate_authority_pem",label:"Pinned CA certificate PEM",type:"textarea",required:true},
+      {key:"client_certificate_pem",label:"Client certificate PEM",type:"textarea",helper:"Required only for mutual TLS."},
+      {key:"client_key_pem",label:"Client private key PEM",type:"textarea",helper:"Required only for mutual TLS; it is sealed and never returned."},
+      {key:"approval_ref",label:"High-risk approval reference",type:"text",required:true}
+    ]},
+    columns:[{key:"id",label:"Instance"},{key:"placement",label:"Placement",format:"status"},{key:"endpoint",label:"Endpoint"},{key:"version",label:"MariaDB"},{key:"tls",label:"TLS",format:"status"},{key:"health",label:"Health",format:"status"},{key:"storage_bytes",label:"Storage",format:"bytes"},{key:"max_connections",label:"Connections",format:"number"},{key:"status",label:"Lifecycle",format:"status"}],
+    emptyTitle:"No database instances",emptyBody:"The node has not published its local MariaDB instance or enrolled a managed external instance."
+  },
   redis: {
     id:"redis",title:"Managed Redis",description:"Consumer-aware Redis instances with encrypted ACL references, bounded resources, health proof, recovery evidence, and guarded lifecycle.",resourceKind:"redis.instance",listOperation:"redis.instance.list",detailOperation:"redis.instance.get",
     createAction:{id:"create",label:"Create Redis",operation:"redis.instance.create",mutating:true,assurance:"mfa",fields:[{key:"instance_id",label:"Instance ID",type:"text",required:true},{key:"spec_json",label:"Canonical Redis specification",type:"textarea",required:true,helper:"Paste a redisservice InstanceSpec JSON document. This operations profile accepts the cyberpanel ACL user, an encrypted secret reference and digest, the unix_socket listener with mode 0660, 16 databases, balanced-or-disabled RDB, everysec-or-disabled AOF with at least one persistence source enabled, and an exact qualified Redis version. Identity, scope, and generations are assigned by the control plane."}]},
@@ -407,6 +431,7 @@ export const navigation: NavigationGroup[] = [
   ]},
   {id:"data",label:"Data & access",items:[
     {id:"databases",label:"Databases",route:"/databases",icon:"Database",pageId:"databases",keywords:["mariadb","mysql","grants"]},
+    {id:"database-instances",label:"Database instances",route:"/database-instances",icon:"HardDrives",pageId:"databaseInstances",keywords:["mariadb","mysql","external","remote","tls"]},
     {id:"redis",label:"Managed Redis",route:"/redis",icon:"StackSimple",pageId:"redis",keywords:["redis","cache","session","rspamd"]},
     {id:"files",label:"Files & deploy",route:"/files",icon:"FolderOpen",pageId:"files",keywords:["file manager","git","upload"]},
     {id:"access",label:"FTP, SSH & terminal",route:"/access",icon:"TerminalWindow",pageId:"access",keywords:["sftp","key","shell"]},

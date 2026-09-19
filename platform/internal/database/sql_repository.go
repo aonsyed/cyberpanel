@@ -120,6 +120,69 @@ func (repository *SQLRepository) ListDatabases(ctx context.Context, tenant site.
 	if err=rows.Err();err!=nil{return nil,"",0,err};return values,next,total,nil
 }
 
+// ListDatabaseInstances returns the installation-owned MariaDB placement
+// catalog. Secret references remain inside the domain resource; API adapters
+// must project only non-secret connection and health metadata.
+func (repository *SQLRepository) ListDatabaseInstances(ctx context.Context, cursor string, limit uint16) ([]DatabaseInstance, string, uint64, error) {
+	if repository == nil || repository.db == nil || len(cursor) > 128 {
+		return nil, "", 0, ErrInvalidResource
+	}
+	if limit == 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		return nil, "", 0, ErrInvalidResource
+	}
+	var total uint64
+	if err := repository.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM panel_database_resources
+WHERE kind=? AND tenant_id='' AND json_extract(status_json,'$.lifecycle')<>'deleted'`, string(KindDatabaseInstance)).Scan(&total); err != nil {
+		return nil, "", 0, err
+	}
+	rows, err := repository.db.QueryContext(ctx, `SELECT resource_id,generation,spec_json,status_json
+FROM panel_database_resources
+WHERE kind=? AND tenant_id='' AND resource_id>? AND json_extract(status_json,'$.lifecycle')<>'deleted'
+ORDER BY resource_id LIMIT ?`, string(KindDatabaseInstance), cursor, int(limit)+1)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	defer rows.Close()
+	values := make([]DatabaseInstance, 0, limit)
+	next := ""
+	for rows.Next() {
+		var idRaw string
+		var generation uint64
+		var spec, statusJSON []byte
+		if err = rows.Scan(&idRaw, &generation, &spec, &statusJSON); err != nil {
+			return nil, "", 0, err
+		}
+		if len(values) == int(limit) {
+			next = values[len(values)-1].ID.String()
+			break
+		}
+		id, parseErr := NewResourceID(idRaw)
+		if parseErr != nil {
+			return nil, "", 0, ErrInvalidResource
+		}
+		metadata := Metadata{ID: id, Generation: generation}
+		if json.Unmarshal(statusJSON, &metadata.Status) != nil {
+			return nil, "", 0, ErrInvalidResource
+		}
+		resource, decodeErr := DecodeResource(ResourceEnvelope{Kind: KindDatabaseInstance, Metadata: metadata, Spec: spec})
+		if decodeErr != nil {
+			return nil, "", 0, decodeErr
+		}
+		instance, ok := resource.(*DatabaseInstance)
+		if !ok {
+			return nil, "", 0, ErrInvalidResource
+		}
+		values = append(values, *instance)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, "", 0, err
+	}
+	return values, next, total, nil
+}
+
 func (repository *SQLRepository) DatabasePrincipalCount(ctx context.Context, tenant site.TenantID, databaseID ResourceID) (uint64,error) {
 	if repository==nil||repository.db==nil||tenant.String()==""||databaseID.IsZero(){return 0,ErrInvalidResource};var count uint64
 	err:=repository.db.QueryRowContext(ctx,`SELECT COUNT(DISTINCT json_extract(spec_json,'$.principal_id')) FROM panel_database_resources WHERE kind=? AND tenant_id=? AND parent_id=? AND json_extract(status_json,'$.lifecycle')<>'deleted'`,string(KindGrantSet),tenant.String(),databaseID.String()).Scan(&count);return count,err
