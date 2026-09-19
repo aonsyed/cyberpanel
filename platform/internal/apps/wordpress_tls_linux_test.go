@@ -4,6 +4,7 @@ package apps
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"os"
@@ -141,6 +142,51 @@ func TestWordPressTLSManagedFiles(t *testing.T) {
 		entries, err := os.ReadDir(private)
 		if err != nil || len(entries) != 0 {
 			t.Fatalf("private client identity left after purge: %v", err)
+		}
+	})
+	t.Run("clone delete clears private identity", func(t *testing.T) {
+		scope := newScope(t)
+		scope.binding.UID, scope.binding.GID = 1001, 1001
+		if err := os.Chown(filepath.Join(scope.root, "wp-content"), 1001, 1001); err != nil {
+			t.Fatal(err)
+		}
+		if err := installWordPressTLSFiles(scope, payloads(true)); err != nil {
+			t.Fatal(err)
+		}
+		private, err := wordpressTLSPrivatePath(scope, installation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime := &LinuxApplicationRuntime{Resolver: LinuxApplicationSiteResolverFunc(func(context.Context, SiteID) (LinuxApplicationSiteBinding, error) { return scope.binding, nil })}
+		execution := StagingDeleteExecution{SourceScope: SiteExecutionScope{TenantID: "tenant-test", SiteID: "source-test", SiteUID: 1002, ResourceGeneration: 1, IsolationProfile: "isolated"}, TargetScope: SiteExecutionScope{TenantID: "tenant-test", SiteID: "target-test", SiteUID: 1001, ResourceGeneration: 1, IsolationProfile: "isolated"}, RelationID: "relation-test", TargetInstallation: installation, RecoveryPointID: "recovery-test"}
+		for i := 0; i < 2; i++ {
+			receipt, err := runtime.DeleteClone(context.Background(), execution)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := receipt.Validate("delete_clone", execution.TargetScope, installation); err != nil {
+				t.Fatal(err)
+			}
+		}
+		entries, err := os.ReadDir(private)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("clone private identity remains: %v, %d files", err, len(entries))
+		}
+		entries, err = os.ReadDir(scope.root)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("clone public files remain: %v", err)
+		}
+	})
+	t.Run("clone delete refuses source site", func(t *testing.T) {
+		called := false
+		runtime := &LinuxApplicationRuntime{Resolver: LinuxApplicationSiteResolverFunc(func(context.Context, SiteID) (LinuxApplicationSiteBinding, error) {
+			called = true
+			return LinuxApplicationSiteBinding{}, errors.New("source resolution attempted")
+		})}
+		scope := SiteExecutionScope{TenantID: "tenant-test", SiteID: "same-site", SiteUID: 1001, ResourceGeneration: 1, IsolationProfile: "isolated"}
+		_, err := runtime.DeleteClone(context.Background(), StagingDeleteExecution{SourceScope: scope, TargetScope: scope, RelationID: "relation-test", TargetInstallation: installation, RecoveryPointID: "recovery-test"})
+		if !errors.Is(err, ErrInvalid) || called {
+			t.Fatalf("source-site deletion reached resolver: %v", err)
 		}
 	})
 	t.Run("unrelated dropin preserved", func(t *testing.T) {

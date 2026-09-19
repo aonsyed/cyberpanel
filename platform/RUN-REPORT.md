@@ -216,6 +216,23 @@ their logs were copied and checked. These package/build runs do not include
 the Ubuntu ARM64 opt-in live service fixtures. No images or toolchains were
 downloaded; overlays and evidence were retained.
 
+### Clone-delete private material cleanup — after matrix checkpoint
+
+The production `DeleteClone` path was directly exercised as root in Ubuntu ARM64
+QEMU against a unique managed-site filesystem fixture. The regression first
+showed six private TLS artifacts left outside the emptied document root. A
+second case showed identical source/target site IDs reaching the resolver.
+
+Deletion now rejects identical sites before resolution and removes the target
+installation's fixed private TLS files before clearing its public tree. The
+runtime test verifies the returned receipt and empty private/public directories
+after repeated deletion; the same-site case verifies no resolver call occurs.
+The full apps package suite and `panel-execd` build passed in QEMU. Fixture-only
+files were removed by test cleanup. This does not implement or qualify the
+missing durable coordinator journey for recovering every partial clone.
+This small follow-up postdates `458fd7876`; its new runtime checks have run on
+Ubuntu ARM64, not the three other guests' completed matrix checkpoint.
+
 ### Application connection authority and integrated Go check — 2026-09-20
 
 `TestQEMUApplicationConnectionAuthority` exercises the production resolver

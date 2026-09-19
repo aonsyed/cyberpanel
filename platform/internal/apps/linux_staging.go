@@ -180,11 +180,14 @@ func (runtime *LinuxApplicationRuntime) RollbackSync(ctx context.Context, execut
 }
 
 func (runtime *LinuxApplicationRuntime) DeleteClone(ctx context.Context, execution StagingDeleteExecution) (ExecutionReceipt, error) {
-	if execution.SourceScope.Validate() != nil || execution.TargetScope.Validate() != nil || execution.SourceScope.TenantID != execution.TargetScope.TenantID || !validID(string(execution.RelationID)) || !validID(string(execution.TargetInstallation)) || !validID(string(execution.RecoveryPointID)) {
+	if execution.SourceScope.Validate() != nil || execution.TargetScope.Validate() != nil || execution.SourceScope.TenantID != execution.TargetScope.TenantID || execution.SourceScope.SiteID == execution.TargetScope.SiteID || !validID(string(execution.RelationID)) || !validID(string(execution.TargetInstallation)) || !validID(string(execution.RecoveryPointID)) {
 		return ExecutionReceipt{}, ErrInvalid
 	}
 	target, err := runtime.resolve(ctx, execution.TargetScope)
 	if err != nil {
+		return ExecutionReceipt{}, err
+	}
+	if err = removeWordPressTLSMaterial(target, execution.TargetInstallation); err != nil {
 		return ExecutionReceipt{}, err
 	}
 	if err = clearLinuxApplicationRoot(target.root); err != nil {
