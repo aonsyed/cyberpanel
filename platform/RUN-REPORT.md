@@ -233,6 +233,27 @@ missing durable coordinator journey for recovering every partial clone.
 This small follow-up postdates `458fd7876`; its new runtime checks have run on
 Ubuntu ARM64, not the three other guests' completed matrix checkpoint.
 
+### Durable partial-clone installation identity
+
+Clone execution previously began before any target application record existed.
+A real SQLite regression in Ubuntu ARM64 QEMU reproduced the missing record
+both at executor entry and after a canceled partial clone and database reopen.
+
+The coordinator now persists an `installing` target with its database and secret
+references before file execution. Execution/probe failures transition that
+record to `recovery_required` with generation advancement, independently of
+request cancellation, and preserve state-write errors. Successful execution
+updates the existing installation to active instead of creating it only at the
+end. SQLite reopen tests cover both committed and recovery outcomes, retained
+target identity references and durable replay behavior. The fresh apps suite and
+core/execd builds passed in Ubuntu ARM64 QEMU.
+
+The executor/database effects in these coordinator tests are controlled
+fixtures. Full installed recovery/purge of an incomplete WordPress tree remains
+unqualified, including recovery-point creation when the clone never completed.
+An installation persistence failure before execution still requires recovery
+of provisioned database resources. No new recovery protocol was introduced.
+
 ### Application connection authority and integrated Go check — 2026-09-20
 
 `TestQEMUApplicationConnectionAuthority` exercises the production resolver
