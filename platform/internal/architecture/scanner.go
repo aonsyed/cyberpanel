@@ -186,6 +186,7 @@ var approvedExternalImports = map[string]struct{}{
 	"github.com/jackc/pgx/v5/stdlib":  {},
 	"golang.org/x/crypto/argon2":       {},
 	"golang.org/x/crypto/bcrypt":       {},
+	"golang.org/x/sys/unix":            {},
 	"modernc.org/sqlite":               {},
 }
 
