@@ -72,7 +72,10 @@ into fewer files does not bypass the line limits.
   consumers. PowerDNS uses a protected local SQLite authority by default.
 - Container workloads and signed container applications are composed into
   panel-core with rootless policy, brokered storage/network/exposure, and
-  OLS/LSE proxy activation. Container command execution now uses an MFA-gated,
+  OLS/LSE proxy activation. The named n8n and Hermes Agent products have
+  signed, digest-pinned recipes, protected secret slots, durable lifecycle
+  state, backed-up volumes, and domain-only exposure; actual release recipes
+  and QEMU lifecycle qualification remain external gates. Container command execution now uses an MFA-gated,
   expiring, one-time token exchange whose token is never persisted in
   plaintext; the browser console generates and exchanges that token locally
   and exposes only the bounded execution receipt. Local backup repositories, stable-view capture,
@@ -109,8 +112,7 @@ into fewer files does not bypass the line limits.
   qualification remain outstanding; runtime source alone is not certification.
 - In progress: remaining runtime connections, installer provisioning, package
   maintenance outcomes, optional federation lifecycle, migration conversion,
-  and application release packaging. The n8n model/coordinator exists but its
-  concrete container adapter and product entry points still need implementation.
+  and signed application release inputs.
 - QEMU qualification is deliberately deferred until the production surface is
   coded, per the hard execution rule above.
 

@@ -219,6 +219,7 @@ type DomainServices struct {
 	Containers *containers.Service
 	ContainerApplications *containers.ApplicationService
 	N8N *integrations.N8NRuntime
+	Hermes *integrations.HermesRuntime
 	WebEngine *management.Service
 	Audit *audit.Service
 	DashboardEdge DashboardEdgeService

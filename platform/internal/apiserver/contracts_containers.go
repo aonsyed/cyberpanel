@@ -31,6 +31,12 @@ type N8NActionPayload struct {
  Definition *integrations.N8NDefinition `json:"definition,omitempty"`
  ExpectedGeneration uint64 `json:"expected_generation,omitempty"`
 }
+type HermesActionPayload struct {
+ Installation integrations.HermesInstallation `json:"installation"`
+ InstallationID integrations.ID `json:"installation_id"`
+ Definition *integrations.HermesDefinition `json:"definition,omitempty"`
+ ExpectedGeneration uint64 `json:"expected_generation,omitempty"`
+}
 
 func registerContainerContracts(registry *Registry)error{
 	operations:=[]Operation{
@@ -49,6 +55,7 @@ func registerContainerContracts(registry *Registry)error{
 	}
 	for _, action := range []string{"install","observe","update","suspend","resume","remove"} {
  operations=append(operations,Operation{Name:"integration.n8n."+action,Permission:identity.MustPermission("container:expose"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:action!="observe",MaximumBodyBytes:64<<10,NewPayload:func()any{return &N8NActionPayload{}},ResolveScope:tenantScope})
+ operations=append(operations,Operation{Name:"integration.hermes."+action,Permission:identity.MustPermission("container:expose"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:action!="observe",MaximumBodyBytes:64<<10,NewPayload:func()any{return &HermesActionPayload{}},ResolveScope:tenantScope})
 }
 for _,operation:=range operations{if err:=register(registry,operation);err!=nil{return err}}
 	return nil
@@ -86,6 +93,35 @@ func bindContainers(registry *Registry,services DomainServices)error{
    });err!=nil{return err}
   }
  }
+ if services.Hermes != nil {
+  for _, action := range []string{"install","observe","update","suspend","resume","remove"} {
+   action:=action
+   if err:=registry.Bind("integration.hermes."+action,func(ctx context.Context,inv Invocation,value any)(OperationResult,error){
+    payload:=value.(*HermesActionPayload)
+    id:=payload.InstallationID
+    if action=="install"{id=payload.Installation.ID}
+    if id==""{id=integrations.ID(inv.Request.ResourceID)}
+    resource,err:=containers.NewID(string(id));if err!=nil{return OperationResult{},ErrInvalidRequest}
+    if inv.Request.ResourceID!=""&&inv.Request.ResourceID!=string(id){return OperationResult{},ErrInvalidRequest}
+    generation:=inv.Request.ExpectedGeneration
+    if payload.ExpectedGeneration!=0{if generation!=0&&generation!=payload.ExpectedGeneration{return OperationResult{},ErrInvalidRequest};generation=payload.ExpectedGeneration}
+    inv.Request.ExpectedGeneration=generation
+    meta:=containerMeta(inv,"application.deploy",resource)
+    if action=="observe"{receipt,err:=services.Hermes.Observe(ctx,meta,id);if err!=nil{return OperationResult{},hermesAPIError(err)};return OperationResult{Status:http.StatusOK,Value:receipt,Generation:receipt.ObservedGeneration},nil}
+    installation:=payload.Installation
+    if action!="install"{
+     current,err:=services.Hermes.Store.LoadHermesInstallation(ctx,id);if err!=nil{return OperationResult{},hermesAPIError(err)}
+     if string(current.TenantID)!=inv.Request.TenantID{return OperationResult{},ErrNotFound}
+     installation=current
+     if action=="update"{if payload.Definition==nil{return OperationResult{},ErrInvalidRequest};installation.Definition=*payload.Definition}
+    }
+    if action=="install"{installation.TenantID=integrations.TenantID(inv.Request.TenantID)}
+    receipt,err:=services.Hermes.Apply(ctx,meta,installation,action);if err!=nil{return OperationResult{},hermesAPIError(err)}
+    status:=http.StatusOK;if action=="install"{status=http.StatusCreated}
+    return OperationResult{Status:status,Value:receipt,Generation:receipt.ObservedGeneration},nil
+   });err!=nil{return err}
+  }
+ }
 
 	if services.Containers!=nil{
 		if err:=registry.Bind("container.image.pull",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){resource,err:=containers.NewID(inv.Request.ResourceID);if err!=nil{return OperationResult{},ErrInvalidRequest};p:=value.(*ContainerImagePayload);image,result,err:=services.Containers.PullImage(ctx,containers.PullImageCommand{Meta:containerMeta(inv,"image.pull",resource),ImageID:resource,RegistryCredentialID:p.RegistryCredentialID,Registry:p.Registry,Repository:p.Repository,Tag:p.Tag,Platform:p.Platform});if err!=nil{return OperationResult{},mapDomainError(err)};return OperationResult{Status:http.StatusOK,Value:struct{Image containers.Image `json:"image"`;Operation containers.Result `json:"operation"`}{image,result},Generation:image.Generation},nil});err!=nil{return err}
@@ -108,12 +144,18 @@ func bindContainers(registry *Registry,services DomainServices)error{
 
 // Retain actionable release/trust/recovery diagnostics instead of reporting a
 // successful deployment or swallowing the prerequisite behind a generic 500.
-type n8nPrerequisiteError struct{ cause error; detail string }
-func (err *n8nPrerequisiteError) Error() string{return err.detail}
-func (err *n8nPrerequisiteError) Unwrap() error{return err.cause}
+type containerApplicationPrerequisiteError struct{ cause error; detail string }
+func (err *containerApplicationPrerequisiteError) Error() string{return err.detail}
+func (err *containerApplicationPrerequisiteError) Unwrap() error{return err.cause}
 func n8nAPIError(err error) error {
- if errors.Is(err,integrations.ErrN8NRecipeUnavailable){return &n8nPrerequisiteError{ErrUnavailable,"The requested signed n8n recipe is not installed. Provision the approved offline container catalog and retry."}}
- if errors.Is(err,integrations.ErrN8NRecipeTrust){return &n8nPrerequisiteError{ErrForbidden,"The n8n recipe signature is invalid or its release signing key is not trusted on this node."}}
- if errors.Is(err,integrations.ErrIntegrity)||errors.Is(err,containers.ErrPolicy){return &n8nPrerequisiteError{ErrInvalidRequest,"The n8n definition, workload graph, or secret bindings do not match the signed release contract."}}
+ if errors.Is(err,integrations.ErrN8NRecipeUnavailable){return &containerApplicationPrerequisiteError{ErrUnavailable,"The requested signed n8n recipe is not installed. Provision the approved offline container catalog and retry."}}
+ if errors.Is(err,integrations.ErrN8NRecipeTrust){return &containerApplicationPrerequisiteError{ErrForbidden,"The n8n recipe signature is invalid or its release signing key is not trusted on this node."}}
+ if errors.Is(err,integrations.ErrIntegrity)||errors.Is(err,containers.ErrPolicy){return &containerApplicationPrerequisiteError{ErrInvalidRequest,"The n8n definition, workload graph, or secret bindings do not match the signed release contract."}}
+ return mapDomainError(err)
+}
+func hermesAPIError(err error) error {
+ if errors.Is(err,integrations.ErrHermesRecipeUnavailable){return &containerApplicationPrerequisiteError{ErrUnavailable,"The requested signed Hermes recipe is not installed. Provision the approved offline container catalog and retry."}}
+ if errors.Is(err,integrations.ErrHermesRecipeTrust){return &containerApplicationPrerequisiteError{ErrForbidden,"The Hermes recipe signature is invalid or its release signing key is not trusted on this node."}}
+ if errors.Is(err,integrations.ErrIntegrity)||errors.Is(err,containers.ErrPolicy){return &containerApplicationPrerequisiteError{ErrInvalidRequest,"The Hermes definition, workload, route, or secret bindings do not match the signed release contract."}}
  return mapDomainError(err)
 }

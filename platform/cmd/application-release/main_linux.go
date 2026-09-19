@@ -45,6 +45,7 @@ type releaseInput struct {
 	Recipes []string `json:"recipes"`
 	Artifacts []releaseArtifact `json:"artifacts"`
 	N8NRecipe string `json:"n8n_recipe"`
+	HermesRecipe string `json:"hermes_recipe"`
 }
 
 type releaseKey struct {
@@ -99,7 +100,7 @@ func assemble(ctx context.Context, inputPath, outputPath string) error {
 	if err != nil { return err }
 	var input releaseInput
 	if err = strictJSON(payload, &input); err != nil { return err }
-	if input.CreatedAt.IsZero() || input.CreatedAt.Nanosecond() != 0 || input.CreatedAt.After(time.Now().UTC()) || len(input.Keys) == 0 || len(input.Keys) > 64 || len(input.Recipes) < 5 || len(input.Recipes) > 512 || len(input.Artifacts) == 0 || len(input.Artifacts) > 512 || input.PanelBinary == "" || input.N8NRecipe == "" { return errors.New("invalid release metadata or missing real release inputs") }
+	if input.CreatedAt.IsZero() || input.CreatedAt.Nanosecond() != 0 || input.CreatedAt.After(time.Now().UTC()) || len(input.Keys) == 0 || len(input.Keys) > 64 || len(input.Recipes) < 5 || len(input.Recipes) > 512 || len(input.Artifacts) == 0 || len(input.Artifacts) > 512 || input.PanelBinary == "" || input.N8NRecipe == "" || input.HermesRecipe == "" { return errors.New("invalid release metadata or missing real release inputs") }
 	binaryDigest, err := hex.DecodeString(input.PanelBinarySHA256)
 	if err != nil || len(binaryDigest) != sha256.Size || input.PanelBinarySHA256 != strings.ToLower(input.PanelBinarySHA256) { return errors.New("panel_binary_sha256 must pin the actual release executable") }
 	base := filepath.Dir(inputPath)
@@ -173,6 +174,16 @@ func assemble(ctx context.Context, inputPath, outputPath string) error {
 	n8nBytes, err = json.Marshal(n8n)
 	if err != nil { return err }
 	entries = append(entries, memoryEntry("container-recipes/n8n.json", n8nBytes))
+	hermesBytes, err := readInput(resolve(input.HermesRecipe), 4<<20)
+	if err != nil { return err }
+	var hermes containers.ApplicationRecipe
+	if err = strictJSON(hermesBytes, &hermes); err != nil { return err }
+	if hermes.ID == n8n.ID { return errors.New("container application recipe IDs must be unique") }
+	if err = n8nVerifier.Verify(ctx, hermes); err != nil { return fmt.Errorf("Hermes signature: %w", err) }
+	if err = integrations.ValidateHermesApplicationRecipe(hermes); err != nil { return fmt.Errorf("Hermes contract: %w", err) }
+	hermesBytes, err = json.Marshal(hermes)
+	if err != nil { return err }
+	entries = append(entries, memoryEntry("container-recipes/hermes.json", hermesBytes))
 	binary, err := openInput(resolve(input.PanelBinary), 1<<30)
 	if err != nil { return err }
 	defer binary.Close()
@@ -185,6 +196,7 @@ func assemble(ctx context.Context, inputPath, outputPath string) error {
 	}
 	if platform == "" { return errors.New("unsupported panel executable architecture") }
 	for _, workload := range n8n.Workloads { if workload.Spec.Image.Platform != platform { return errors.New("n8n image platform must match the panel executable") } }
+	for _, workload := range hermes.Workloads { if workload.Spec.Image.Platform != platform { return errors.New("Hermes image platform must match the panel executable") } }
 	info, err := binary.Stat()
 	closeErr := binary.Close()
 	if err != nil || closeErr != nil { return errors.Join(err, closeErr) }

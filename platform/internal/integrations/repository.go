@@ -63,6 +63,11 @@ CREATE TABLE IF NOT EXISTS integration_n8n_installations (
  state TEXT NOT NULL, generation INTEGER NOT NULL, installation_json BLOB NOT NULL,
  updated_at TIMESTAMP NOT NULL, UNIQUE(site_id)
 );
+CREATE TABLE IF NOT EXISTS integration_hermes_installations (
+ id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL,
+ state TEXT NOT NULL, generation INTEGER NOT NULL, installation_json BLOB NOT NULL,
+ updated_at TIMESTAMP NOT NULL, UNIQUE(site_id)
+);
 `
 
 type Store interface {
@@ -83,6 +88,8 @@ type Store interface {
 	UpdateNotificationAttempt(context.Context, NotificationAttempt) error
 	SaveN8NInstallation(context.Context, N8NInstallation, uint64) error
 	LoadN8NInstallation(context.Context, ID) (N8NInstallation, error)
+	SaveHermesInstallation(context.Context, HermesInstallation, uint64) error
+	LoadHermesInstallation(context.Context, ID) (HermesInstallation, error)
 }
 
 type BindingTombstone struct {
@@ -121,6 +128,8 @@ func (repository SQLRepository) LoadNotificationAttempt(ctx context.Context, id 
 func (repository SQLRepository) UpdateNotificationAttempt(ctx context.Context, attempt NotificationAttempt) error { payload, err := marshal(attempt); if err != nil { return err }; result, err := repository.DB.ExecContext(ctx, `UPDATE integration_notification_attempts SET state = ?, attempt = ?, next_attempt_at = ?, attempt_json = ?, updated_at = ? WHERE id = ?`, attempt.State, attempt.Attempt, nullableTime(attempt.NextAttemptAt), payload, attempt.UpdatedAt, attempt.ID); if err != nil { return err }; return requireOne(result) }
 func (repository SQLRepository) SaveN8NInstallation(ctx context.Context, installation N8NInstallation, expected uint64) error { if err:=installation.Validate();err!=nil{return err};payload,err:=marshal(installation);if err!=nil{return err};if expected==0{_,err=repository.DB.ExecContext(ctx,`INSERT INTO integration_n8n_installations (id,tenant_id,site_id,state,generation,installation_json,updated_at) VALUES (?,?,?,?,?,?,?)`,installation.ID,installation.TenantID,installation.SiteID,installation.State,installation.Generation,payload,installation.UpdatedAt);return err};if installation.Generation!=expected+1{return ErrStaleGeneration};result,err:=repository.DB.ExecContext(ctx,`UPDATE integration_n8n_installations SET state=?,generation=?,installation_json=?,updated_at=? WHERE id=? AND generation=?`,installation.State,installation.Generation,payload,installation.UpdatedAt,installation.ID,expected);if err!=nil{return err};return requireGeneration(result)}
 func (repository SQLRepository) LoadN8NInstallation(ctx context.Context,id ID)(N8NInstallation,error){var payload []byte;err:=repository.DB.QueryRowContext(ctx,`SELECT installation_json FROM integration_n8n_installations WHERE id=?`,id).Scan(&payload);if errors.Is(err,sql.ErrNoRows){return N8NInstallation{},ErrNotFound};if err!=nil{return N8NInstallation{},err};var installation N8NInstallation;if err:=unmarshal(payload,&installation);err!=nil{return N8NInstallation{},err};return installation,installation.Validate()}
+func (repository SQLRepository) SaveHermesInstallation(ctx context.Context, installation HermesInstallation, expected uint64) error { if err:=installation.Validate();err!=nil{return err};payload,err:=marshal(installation);if err!=nil{return err};if expected==0{_,err=repository.DB.ExecContext(ctx,`INSERT INTO integration_hermes_installations (id,tenant_id,site_id,state,generation,installation_json,updated_at) VALUES (?,?,?,?,?,?,?)`,installation.ID,installation.TenantID,installation.SiteID,installation.State,installation.Generation,payload,installation.UpdatedAt);return err};if installation.Generation!=expected+1{return ErrStaleGeneration};result,err:=repository.DB.ExecContext(ctx,`UPDATE integration_hermes_installations SET state=?,generation=?,installation_json=?,updated_at=? WHERE id=? AND generation=?`,installation.State,installation.Generation,payload,installation.UpdatedAt,installation.ID,expected);if err!=nil{return err};return requireGeneration(result)}
+func (repository SQLRepository) LoadHermesInstallation(ctx context.Context,id ID)(HermesInstallation,error){var payload []byte;err:=repository.DB.QueryRowContext(ctx,`SELECT installation_json FROM integration_hermes_installations WHERE id=?`,id).Scan(&payload);if errors.Is(err,sql.ErrNoRows){return HermesInstallation{},ErrNotFound};if err!=nil{return HermesInstallation{},err};var installation HermesInstallation;if err:=unmarshal(payload,&installation);err!=nil{return HermesInstallation{},err};return installation,installation.Validate()}
 
 func requireOne(result sql.Result) error { count, err := result.RowsAffected(); if err != nil { return err }; if count != 1 { return ErrNotFound }; return nil }
 func requireGeneration(result sql.Result) error { count, err := result.RowsAffected(); if err != nil { return err }; if count != 1 { return ErrStaleGeneration }; return nil }

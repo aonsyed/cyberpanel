@@ -17,11 +17,12 @@ The input document has these fields (all required):
 | `sequence`, `minimum_epoch` | Positive monotonic catalog sequence and minimum trusted key epoch |
 | `created_at` | Actual RFC3339 UTC release timestamp, without fractional seconds |
 | `panel_binary` | Existing Linux `cyberpanel` executable built for the target panel release |
-| `panel_binary_sha256` | Actual lowercase SHA-256 of that executable; n8n images must match its ELF architecture |
+| `panel_binary_sha256` | Actual lowercase SHA-256 of that executable; n8n and Hermes images must match its ELF architecture |
 | `keys` | Array of `{id, path, minimum_epoch, maximum_epoch}`; public keys only, Ed25519 PKIX PEM or hex |
 | `recipes` | Paths to signed PHP version-2 recipe envelopes |
 | `artifacts` | Array of `{sha256, path}` for the exact local `.tar.gz` bytes referenced by those recipes |
 | `n8n_recipe` | Path to an existing signed `containers.ApplicationRecipe` JSON document named `n8n` |
+| `hermes_recipe` | Path to an existing signed `containers.ApplicationRecipe` JSON document named `hermes` |
 
 No private key is accepted. Input digests, product versions, epochs, and dates
 must describe the real release. The assembler computes manifest/file digests
@@ -58,7 +59,7 @@ fields, verifies the signature and digest, then hydrates the three excluded
 fields. The hydrated definition digest equals the authenticated payload digest.
 The assembler never performs these signing steps or manufactures envelopes.
 
-## n8n and installation
+## n8n, Hermes Agent, and installation
 
 n8n uses its existing independent `SignedRecipeVerifier` format, not the PHP
 envelope. Its signing key must be among input `keys` and must already be trusted
@@ -77,17 +78,28 @@ container store; this package does not pull or bundle OCI images. Per-install
 secret material must also be enrolled through the protected container-runtime
 broker for the derived resource IDs before deployment.
 
+Hermes uses the same independent signed-recipe format and trust loader. Its
+contract permits exactly one rootless `gateway` workload, a digest-pinned image,
+one private network, one backed-up `/opt/data` volume, a TCP health probe on port
+9119, and the exact `gateway run` command. The dashboard username, password, and
+session secret are broker references; the HTTPS public URL is derived from the
+admitted route and substituted only into the recipe's signed value slot. The
+recipe must reserve at least 2 GiB RAM, expose no arbitrary host port, and must
+not include a database. Provider API keys are entered inside Hermes and are not
+collected by the panel.
+
 The component contains `cyberpanel`, `application-catalog/manifest.json`,
 `application-catalog/keys/*.pub`, `application-catalog/recipes/*.json`,
-`application-catalog/artifacts/<sha256>.tar.gz`, and `container-recipes/n8n.json`.
+`application-catalog/artifacts/<sha256>.tar.gz`, `container-recipes/n8n.json`,
+and `container-recipes/hermes.json`.
 It is intended for the panel component, not extraction directly into `/usr`.
 The existing installer must authenticate this component through its signed
 outer release manifest, with actual component hash/size and member inventory.
 This command does not create or sign that outer release manifest.
 
-The root installer validates n8n even when reusing an installer receipt. It
+The root installer validates n8n and Hermes even when reusing an installer receipt. It
 provisions the PHP catalog through the existing generation/rollback path.
-Panel startup reads n8n only beside its resolved executable under the protected
+Panel startup reads both recipes only beside its resolved executable under the protected
 `/opt/cyberpanel/slots/.../components/panel` tree, verifies root ownership and
 non-writable ancestors, verifies its existing signature, validates the shared
 contract, and calls `RegisterRecipe` before serving. A slot rollback selects
@@ -96,9 +108,9 @@ that slot's recipe; prior immutable database recipe versions remain available.
 ## Inputs still required for QEMU verification
 
 Provide real signed version-2 envelopes and actual upstream/prepared archives
-for all five PHP products, their trusted public keys/epochs, a signed queue-mode
-n8n recipe with real image digests and trusted host key, the target Linux panel
-binary, and the outer signed release catalog. No such material is embedded in
+for all five PHP products, their trusted public keys/epochs, signed queue-mode
+n8n and Hermes recipes with real image digests and trusted host keys, the target
+Linux panel binary, and the outer signed release catalog. No such material is embedded in
 source. Compilation, deterministic-output checks, negative signature/archive
 checks, installer/rollback/startup execution, and product lifecycle verification
 in the supported QEMU guests remain required before any certification claim.

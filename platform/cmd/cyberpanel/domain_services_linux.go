@@ -489,6 +489,16 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err = containerApplications.RegisterRecipe(ctx, packagedN8N); err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("register packaged n8n recipe: %w", err)
 	}
+	packagedHermes, err := containers.ReadPackagedHermesRecipe(ctx, recipeVerifier)
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("load packaged Hermes recipe: %w", err)
+	}
+	if err = integrations.ValidateHermesApplicationRecipe(packagedHermes); err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("validate packaged Hermes contract: %w", err)
+	}
+	if err = containerApplications.RegisterRecipe(ctx, packagedHermes); err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("register packaged Hermes recipe: %w", err)
+	}
 	containerConsoleEdge, err := newContainerEdge(containerService, repositories.Containers, containerBroker)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize container console edge: %w", err)
@@ -866,6 +876,18 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		Containers:                  containerService,
 		ContainerApplications:       containerApplications,
 		N8N: &integrations.N8NRuntime{Applications: containerApplications, Containers: containerService, Repository: repositories.Containers, Store: repositories.Integrations, Verifier: recipeVerifier, Allocator: containerIDs, AuthorizeSite: func(ctx context.Context, tenantID, siteID string) error {
+			tenant, err := site.NewTenantID(tenantID)
+			if err != nil {
+				return err
+			}
+			resource, err := site.NewSiteID(siteID)
+			if err != nil {
+				return err
+			}
+			_, err = repositories.Hosting.Load(ctx, tenant, resource)
+			return err
+		}},
+		Hermes: &integrations.HermesRuntime{Applications: containerApplications, Containers: containerService, Repository: repositories.Containers, Store: repositories.Integrations, Verifier: recipeVerifier, Allocator: containerIDs, AuthorizeSite: func(ctx context.Context, tenantID, siteID string) error {
 			tenant, err := site.NewTenantID(tenantID)
 			if err != nil {
 				return err
