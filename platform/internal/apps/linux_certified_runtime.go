@@ -823,7 +823,7 @@ func (runtime *LinuxApplicationRuntime) repairCertifiedApplication(ctx context.C
 		}
 		if err != nil { return ExecutionReceipt{}, err }
 	}
-	return receiptForApplication("repair", execution.Scope, execution.Installation, execution, execution.Actions, "", execution.RecoveryPointID, false), nil
+	return receiptForApplication("repair", execution.Scope, execution.Installation, execution, execution.Actions, "", SnapshotID(execution.RecoveryPointID), false), nil
 }
 
 func (runtime *LinuxApplicationRuntime) applicationVersion(ctx context.Context, scope linuxApplicationScope, manifest linuxApplicationReleaseManifest) (string, error) {
