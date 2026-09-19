@@ -158,7 +158,7 @@ func parseFolders(lines []string, quota Quota) ([]Folder, error) {
 			if strings.EqualFold(name, "INBOX") {
 				folder.SpecialUse = SpecialInbox
 			}
-			if position := strings.LastIndexRune(name, folder.Delimiter); position >= 0 {
+			if position := strings.LastIndex(name, string(folder.Delimiter)); position >= 0 {
 				folder.Parent = name[:position]
 			}
 			folders[name] = folder
