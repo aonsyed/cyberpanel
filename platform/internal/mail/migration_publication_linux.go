@@ -205,7 +205,7 @@ func (host *LinuxMailHost) ActivateMigrationPublication(ctx context.Context, bun
 		postfix, postfixErr := host.controlService(ctx, ServicePostfix, ServiceProbe)
 		dovecot, dovecotErr := host.controlService(ctx, ServiceDovecot, ServiceProbe)
 		if postfixErr != nil || dovecotErr != nil || !postfix.Active || !dovecot.Active {
-			return MailPublicationReceipt{}, errors.Join(ErrBlocked, postfixErr, dovecotErr)
+			return MailPublicationReceipt{}, errors.Join(ErrConflict, postfixErr, dovecotErr)
 		}
 		journal.PostfixWasActive, journal.DovecotWasActive = true, true
 		for _, request := range bundle.Maildirs {

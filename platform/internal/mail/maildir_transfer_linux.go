@@ -406,7 +406,7 @@ func verifyMaildirAt(ctx context.Context, maildir int, manifest migration.Maildi
 			return errors.Join(ErrUnauthorized, statErr)
 		}
 		walkErr := walkDirectoryNames(child, func(name string) error {
-			if err = ctx.Err(); err != nil {
+			if err := ctx.Err(); err != nil {
 				return err
 			}
 			if subdirectory == "tmp" {
