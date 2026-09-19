@@ -58,6 +58,20 @@
       "archive_path": "cpanel-archive-migrator",
       "install_path": "/usr/local/libexec/cyberpanel/cpanel-archive-migrator",
       "mode": "0755"
+    },
+    {
+      "path_id": "cyberpanel_sitepreview_route",
+      "command": "./cmd/cyberpanel-sitepreview-route",
+      "archive_path": "cyberpanel-sitepreview-route",
+      "install_path": "/usr/libexec/cyberpanel-sitepreview-route",
+      "mode": "0755"
+    },
+    {
+      "path_id": "cyberpanel_sitepreview_chromium",
+      "command": "./cmd/cyberpanel-sitepreview-chromium",
+      "archive_path": "cyberpanel-sitepreview-chromium",
+      "install_path": "/usr/libexec/cyberpanel-sitepreview-chromium",
+      "mode": "0755"
     }
   ]
 }

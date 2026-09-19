@@ -51,6 +51,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	"github.com/aonsyed/cyberpanel/platform/internal/redisservice"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
+	"github.com/aonsyed/cyberpanel/platform/internal/sitepreview"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/accesspolicy"
 	webcatalog "github.com/aonsyed/cyberpanel/platform/internal/webengine/catalog"
@@ -613,6 +614,41 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize hosting preview edge: %w", err)
 	}
+	sitePreviewRepository, err := sitepreview.NewRepository(repositories.ControlDB, previewRegistrableDomain)
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("open exact site-preview authority: %w", err)
+	}
+	if err = sitePreviewRepository.Bootstrap(ctx); err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("bootstrap exact site-preview authority: %w", err)
+	}
+	sitePreviewDirectory := sitePreviewDirectory{sites: repositories.Hosting, catalog: catalog}
+	sitePreviewAuthorization := sitePreviewAuthorizer{authority: mailDeliveryAuthorizer, now: runtimeClock{}.Now}
+	sitePreviewAuditor := sitePreviewAudit{writer: auditService.Writer}
+	sitePreviewRoutes, err := sitepreview.NewLinuxRouteRuntime("", "")
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("connect exact site-preview route helper: %w", err)
+	}
+	sitePreviews, err := sitepreview.NewService(sitePreviewRepository, sitePreviewDirectory, sitePreviewAuthorization, sitePreviewAuditor, sitePreviewRoutes, previewRegistrableDomain)
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("initialize exact site-preview service: %w", err)
+	}
+	chromeNamespace, err := sitepreview.NewLinuxChromeNamespace("")
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("connect isolated Chromium helper: %w", err)
+	}
+	chromeRenderer, err := sitepreview.NewChromiumRenderer("/usr/bin/chromium", sitepreview.NewSystemDNSResolver(), chromeNamespace)
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("initialize isolated Chromium renderer: %w", err)
+	}
+	sitePreviewArtifacts, err := sitepreview.NewLinuxArtifactStore("")
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("open site-preview artifact store: %w", err)
+	}
+	siteScreenshots, err := sitepreview.NewScreenshotService(sitePreviewRepository, sitePreviewDirectory, sitePreviewAuthorization, sitePreviewAuditor, chromeRenderer, sitePreviewArtifacts)
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("initialize site screenshot service: %w", err)
+	}
+	startSitePreviewWorkers(ctx, sitePreviews, siteScreenshots)
 	backupClient, err := backup.NewLocalLinuxBackupClient()
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("connect backup executor: %w", err)
@@ -779,6 +815,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		Hosting:                     hostingCoordinator,
 		HostingQuery:                repositories.Hosting,
 		HostingPreviews:             previewSessions,
+		SitePreviews:                sitePreviews,
+		SiteScreenshots:             siteScreenshots,
 		HostingEdge:                 hostingConsoleEdge,
 		HostingCloneEdge:            hostingCloneConsoleEdge,
 		HostingPreviewEdge:          hostingPreviewConsoleEdge,

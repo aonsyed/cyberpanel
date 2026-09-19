@@ -29,20 +29,20 @@ type DNSResolver interface {
 }
 
 type ChromeLaunch struct {
-	JobID            ScreenshotJobID
-	Binary           string
-	ProfileDirectory string
-	OutputPath       string
-	URL              string
-	Host             string
-	SNI              string
-	AllowedEndpoint  netip.AddrPort
-	Width            uint32
-	Height           uint32
+	JobID                ScreenshotJobID
+	Binary               string
+	ProfileDirectory     string
+	OutputPath           string
+	URL                  string
+	Host                 string
+	SNI                  string
+	AllowedEndpoint      netip.AddrPort
+	Width                uint32
+	Height               uint32
 	MaximumResponseBytes uint64
-	MaximumRedirects uint8
-	Deadline         time.Time
-	Arguments        []string
+	MaximumRedirects     uint8
+	Deadline             time.Time
+	Arguments            []string
 }
 
 func (launch ChromeLaunch) Validate() error {
@@ -261,6 +261,10 @@ func fixedChromeArguments(profile, output, target, hostname string, address neti
 	window := strconv.FormatUint(uint64(width), 10) + "," + strconv.FormatUint(uint64(height), 10)
 	return []string{
 		"--headless=new",
+		// The helper already places Chromium in a fresh, unprivileged user and
+		// network namespace. Chromium sees namespace-root, so its setuid sandbox
+		// cannot be used there; the outer namespace remains the security boundary.
+		"--no-sandbox",
 		"--disable-background-networking",
 		"--disable-breakpad",
 		"--disable-client-side-phishing-detection",
