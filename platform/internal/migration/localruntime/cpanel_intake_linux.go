@@ -586,6 +586,11 @@ func canonicalLocalPath(path string) bool {
 	return path != "" && filepath.IsAbs(path) && filepath.Clean(path) == path
 }
 
+func runtimeScopeText(value string, maximum int) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && len(value) <= maximum && !strings.ContainsAny(value, "\x00\r\n")
+}
+
 func digestLocalPath(path string) string {
 	sum := sha256.Sum256([]byte("cpanel-local-intake-path-v1\x00" + path))
 	return hex.EncodeToString(sum[:])
