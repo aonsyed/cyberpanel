@@ -30,4 +30,4 @@ func decodeStrict(content []byte,target any)error{decoder:=json.NewDecoder(strin
 func newLocalID(prefix string)(string,error){value:=make([]byte,18);if _,err:=rand.Read(value);err!=nil{return "",err};return prefix+"_"+strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(value)),nil}
 func wipe(value []byte){for index:=range value{value[index]=0}}
 func printJSON(value any)error{encoder:=json.NewEncoder(os.Stdout);encoder.SetIndent("","  ");return encoder.Encode(value)}
-func usage(){fmt.Fprintln(os.Stderr,"usage: panelctl invoke [flags]\n       panelctl recovery {health|claim|rotate-trust} [flags]\n       panelctl ha {trust|provision|status} [flags]")}
+func usage(){fmt.Fprintln(os.Stderr,"usage: panelctl invoke [flags]\n       panelctl recovery {health|claim|rotate-trust} [flags]\n       panelctl ha {trust|provision|status|quorum|commit} [flags]")}

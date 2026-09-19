@@ -118,7 +118,7 @@ type PeerVoteProjection struct {
 	State string `json:"state"`
 }
 
-type PeerVoteTopology struct { NodeID NodeID; GroupID NodeGroupID; AuthorityEpoch uint64; Control PeerControl }
+type PeerVoteTopology struct { NodeID NodeID; GroupID NodeGroupID; AuthorityEpoch uint64; DeploymentEpoch uint64; DeploymentDigest string; Control PeerControl }
 type PeerVoteTransport interface { RequestVote(context.Context,PeerVoter,PeerVoteProposal)(PeerPromotionVote,error) }
 type PeerVoteService struct {
 	DB *sql.DB

@@ -17,12 +17,15 @@ import (
 
 func haDeployment(arguments []string) error {
 	if os.Geteuid() != 0 { return errors.New("HA deployment requires local root") }
-	if len(arguments) == 0 { return errors.New("HA deployment requires trust, provision, status, or quorum") }
-	if arguments[0] != "trust" && arguments[0] != "provision" && arguments[0] != "status" && arguments[0] != "quorum" { return errors.New("HA deployment permits only trust, provision, status, and quorum") }
+	if len(arguments) == 0 { return errors.New("HA deployment requires trust, provision, status, quorum, or commit") }
+	if arguments[0] != "trust" && arguments[0] != "provision" && arguments[0] != "status" && arguments[0] != "quorum" && arguments[0] != "commit" { return errors.New("HA deployment permits only trust, provision, status, quorum, and commit") }
 	flags := flag.NewFlagSet("ha "+arguments[0],flag.ContinueOnError)
 	keyPath := flags.String("public-key","","root-owned raw Ed25519 deployment public-key file")
 	bundlePath := flags.String("bundle","","root-owned signed static deployment JSON file")
-	promotionID := flags.String("promotion","","locally persisted promotion ID for signed prepare voting; does not activate a writer")
+	promotionID := flags.String("promotion","","locally persisted promotion ID")
+	channelID := flags.String("channel","","locally persisted replication channel ID for genesis commit")
+	checkpointID := flags.String("checkpoint","","locally persisted replication checkpoint ID for genesis commit")
+	bootstrap := flags.Bool("bootstrap",false,"create the one-time revoked-genesis successor")
 	if err := flags.Parse(arguments[1:]); err != nil { return err }
 	if flags.NArg() != 0 { return errors.New("unexpected HA deployment arguments") }
 	client, err := apiserver.NewRecoveryClient("/run/cyberpanel-core/recovery.sock")
@@ -30,10 +33,20 @@ func haDeployment(arguments []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(),30*time.Second)
 	defer cancel()
 	if arguments[0] == "quorum" {
-		if *keyPath!=""||*bundlePath!=""||*promotionID==""{return errors.New("quorum requires only --promotion")}
+		if *keyPath!=""||*bundlePath!=""||*promotionID==""||*channelID!=""||*checkpointID!=""||*bootstrap{return errors.New("quorum requires only --promotion")}
 		proof,err:=client.CollectHAPeerVotes(ctx,ha.PromotionID(*promotionID));if err!=nil{return err};return printJSON(proof)
 	}
-	if *promotionID!=""{return errors.New("--promotion is valid only for quorum")}
+	if arguments[0] == "commit" {
+		if *keyPath!=""||*bundlePath!=""{return errors.New("commit does not accept file flags")}
+		input:=ha.PeerCommitInput{PromotionID:ha.PromotionID(*promotionID),ChannelID:ha.ChannelID(*channelID),CheckpointID:ha.CheckpointID(*checkpointID),Bootstrap:*bootstrap}
+		if *bootstrap {
+			if *promotionID!=""||*channelID==""||*checkpointID==""{return errors.New("bootstrap commit requires only --bootstrap, --channel, and --checkpoint")}
+		} else if *promotionID==""||*channelID!=""||*checkpointID!="" {
+			return errors.New("commit requires only --promotion unless --bootstrap is set")
+		}
+		status,err:=client.CollectHAPeerCommit(ctx,input);if err!=nil{return err};return printJSON(status)
+	}
+	if *promotionID!=""||*channelID!=""||*checkpointID!=""||*bootstrap{return errors.New("promotion, channel, checkpoint, and bootstrap flags are valid only for quorum or commit")}
 	if arguments[0] == "status" {
 		if *keyPath != "" || *bundlePath != "" { return errors.New("status accepts no file flags") }
 		status, err := client.StaticHAStatus(ctx)
@@ -69,6 +82,6 @@ func haDeployment(arguments []string) error {
 		if err != nil { return err }
 		if status.Digest != digest || status.DeploymentEpoch != receipt.DeploymentEpoch || status.State != "published" { return errors.New("HA deployment publication requires reconciliation") }
 		return printJSON(status)
-	default: return errors.New("HA deployment permits only trust, provision, and status")
+	default: return errors.New("HA deployment permits only trust, provision, status, quorum, and commit")
 	}
 }

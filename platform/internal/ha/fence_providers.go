@@ -93,6 +93,9 @@ func (provider *LocalMariaDBFenceProvider) Fence(ctx context.Context, request Fe
 		return FenceReceipt{}, errors.Join(err, ErrFenceFailed)
 	}
 	databaseReceipt, freezeErr := provider.Database.FreezeDatabaseWrites(ctx, cluster, request.Fence.TargetNodeID, request.Fence.FencingToken)
+	if freezeErr != nil || databaseReceipt == "" {
+		return FenceReceipt{}, errors.Join(freezeErr, ErrFenceFailed)
+	}
 	observed, observeErr := provider.Database.ObserveCluster(ctx, cluster)
 	member, memberErr := requiredDatabaseMember(observed, request.Fence.TargetNodeID)
 	if observeErr != nil || memberErr != nil || !member.ReadOnly {
@@ -370,6 +373,9 @@ func revokeAndObserveLease(ctx context.Context, authority LeaseAuthority, expect
 	}
 	if err := validateObservedFencedLease(observed, expected.ID, expected.GroupID, expected.ResourceID, expected.HolderNodeID, expected.FencingToken, expected.AuthorityEpoch, expected.EnforcedWritePaths); err != nil {
 		return WriterLease{}, errors.Join(revokeErr, err)
+	}
+	if revokeErr != nil {
+		return WriterLease{}, errors.Join(revokeErr, ErrFenceFailed)
 	}
 	return observed, nil
 }

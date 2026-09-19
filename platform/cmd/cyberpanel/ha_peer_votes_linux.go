@@ -28,6 +28,7 @@ const haPeerVoteKeyPath = "/etc/cyberpanel/ha/peer-vote.key"
 
 // Initialized once during domain assembly, before recovery starts serving.
 var localPeerVoteRuntime *ha.PeerVoteService
+var localPeerCommitRuntime *ha.PeerCommitService
 
 type haPeerTransport struct {
 	db *sql.DB
@@ -42,7 +43,8 @@ func (transport *haPeerTransport) topology(ctx context.Context)(ha.PeerVoteTopol
 	bundle,err:=ha.LoadAdmittedPeerDeployment(ctx,transport.db)
 	if err!=nil{return ha.PeerVoteTopology{},err}
 	if ha.NodeID(bundle.Trust.NodeID)!=transport.node || bundle.PeerControl.CASHA256!=transport.caDigest || ha.PeerMembershipDigest(bundle.Group.ID,*bundle.PeerControl)!=transport.membership{return ha.PeerVoteTopology{},ha.ErrNoQuorum}
-	return ha.PeerVoteTopology{NodeID:ha.NodeID(bundle.Trust.NodeID),GroupID:bundle.Group.ID,AuthorityEpoch:bundle.AuthorityEpoch,Control:*bundle.PeerControl},nil
+	digest,err:=ha.StaticDeploymentDigest(bundle);if err!=nil{return ha.PeerVoteTopology{},err}
+	return ha.PeerVoteTopology{NodeID:ha.NodeID(bundle.Trust.NodeID),GroupID:bundle.Group.ID,AuthorityEpoch:bundle.AuthorityEpoch,DeploymentEpoch:bundle.DeploymentEpoch,DeploymentDigest:digest,Control:*bundle.PeerControl},nil
 }
 
 func (transport *haPeerTransport) caller(ctx context.Context,state tls.ConnectionState)(ha.NodeID,error){
@@ -113,7 +115,7 @@ func startHAPeerVoting(ctx context.Context,db *sql.DB,providers *localMariaDBHAP
 	privateKey:=ed25519.NewKeyFromSeed(voteKey[:ed25519.SeedSize]);clear(voteKey)
 	if !bytes.Equal(privateKey.Public().(ed25519.PublicKey),local.VotePublicKey){clear(privateKey);return ha.ErrForbidden}
 	transport:=&haPeerTransport{db:db,certificate:certificate,roots:roots,caDigest:bundle.PeerControl.CASHA256,node:ha.NodeID(bundle.Trust.NodeID),membership:ha.PeerMembershipDigest(bundle.Group.ID,*bundle.PeerControl)}
-	service:=&ha.PeerVoteService{DB:db,Topology:transport.topology,Transport:transport,Now:now,Sign:func(signCtx context.Context,payload []byte)([]byte,error){if _,err:=transport.topology(signCtx);err!=nil{return nil,err};return ed25519.Sign(privateKey,payload),nil}}
+	service:=&ha.PeerVoteService{DB:db,Topology:transport.topology,Transport:transport,Now:now,Sign:func(signCtx context.Context,payload []byte)([]byte,error){if err:=signCtx.Err();err!=nil{return nil,err};return ed25519.Sign(privateKey,payload),nil}}
 	service.Observe=func(observeCtx context.Context,proposal ha.PeerVoteProposal)(string,error){
 		topology,err:=transport.topology(observeCtx);if err!=nil{return "",err}
 		store:=ha.SQLRepository{DB:db}
@@ -137,14 +139,16 @@ func startHAPeerVoting(ctx context.Context,db *sql.DB,providers *localMariaDBHAP
 		proof,err:=json.Marshal(struct{Node ha.NodeID;Proposal string;Lease ha.WriterLease;Member ha.DatabaseMember}{topology.NodeID,proposal.Digest(),lease,member});if err!=nil{return "",err};return haSenderDigest(proof),nil
 	}
 	if err=service.Bootstrap(ctx);err!=nil{return err}
+	commits,err:=newHAPeerCommitRuntime(ctx,service,transport,gate.Executor);if err!=nil{return err}
 	u,err:=url.Parse(local.Endpoint);if err!=nil{return err}
 	listener,err:=net.Listen("tcp",u.Host);if err!=nil{return err}
 	serverTLS:=&tls.Config{MinVersion:tls.VersionTLS13,MaxVersion:tls.VersionTLS13,Certificates:[]tls.Certificate{certificate},ClientAuth:tls.RequireAndVerifyClientCert,ClientCAs:roots,VerifyConnection:func(state tls.ConnectionState)error{
 		verifyCtx,cancel:=context.WithTimeout(ctx,2*time.Second);defer cancel();_,err:=transport.caller(verifyCtx,state);return err
 	}}
-	server:=&http.Server{ReadHeaderTimeout:2*time.Second,ReadTimeout:5*time.Second,WriteTimeout:6*time.Second,IdleTimeout:5*time.Second,MaxHeaderBytes:8<<10,TLSConfig:serverTLS,BaseContext:func(net.Listener)context.Context{return ctx}}
+	server:=&http.Server{ReadHeaderTimeout:2*time.Second,ReadTimeout:15*time.Second,WriteTimeout:15*time.Second,IdleTimeout:5*time.Second,MaxHeaderBytes:8<<10,TLSConfig:serverTLS,BaseContext:func(net.Listener)context.Context{return ctx}}
 	server.Handler=http.HandlerFunc(func(writer http.ResponseWriter,request *http.Request){
 		writer.Header().Set("Cache-Control","no-store");writer.Header().Set("X-Content-Type-Options","nosniff")
+		if serveHAPeerCommit(commits,transport,writer,request){return}
 		if request.Method!=http.MethodPost||request.URL.Path!="/v1/ha/prepare-vote"||request.URL.RawQuery!=""||request.Header.Get("Content-Type")!="application/json"||request.TLS==nil{http.Error(writer,"not permitted",http.StatusForbidden);return}
 		requestCtx,cancel:=context.WithTimeout(request.Context(),4*time.Second);defer cancel()
 		caller,err:=transport.caller(requestCtx,*request.TLS);if err!=nil{http.Error(writer,"not permitted",http.StatusForbidden);return}
@@ -158,6 +162,7 @@ func startHAPeerVoting(ctx context.Context,db *sql.DB,providers *localMariaDBHAP
 	go func(){<-ctx.Done();shutdownCtx,cancel:=context.WithTimeout(context.Background(),3*time.Second);defer cancel();_ = server.Shutdown(shutdownCtx)}()
 	providers.quorum=service
 	localPeerVoteRuntime=service
+	localPeerCommitRuntime=commits
 	return nil
 }
 
