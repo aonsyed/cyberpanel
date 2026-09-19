@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -187,6 +188,25 @@ type DatabasePrincipalProjection struct {
 	Privileges      []string `json:"privileges"`
 	Status          string   `json:"status"`
 	Generation      uint64   `json:"generation"`
+}
+
+type DatabaseNetworkConfigureManagedPayload struct {
+	Interfaces       []string `json:"interfaces"`
+	AllowedCIDRs     []string `json:"allowed_cidrs"`
+	TLSMode          string   `json:"tls_mode"`
+	Verification     string   `json:"verification"`
+	HighRiskApproval string   `json:"high_risk_approval"`
+}
+
+type DatabaseNetworkPolicyProjection struct {
+	ID           string   `json:"id"`
+	InstanceID   string   `json:"instance_id"`
+	Interfaces   []string `json:"interfaces"`
+	AllowedCIDRs []string `json:"allowed_cidrs"`
+	TLS          string   `json:"tls"`
+	Verification string   `json:"verification"`
+	Status       string   `json:"status"`
+	Generation   uint64   `json:"generation"`
 }
 
 // DatabaseInstanceProjection deliberately omits protected secret references.
@@ -1113,6 +1133,7 @@ type DatabaseEdgeService interface {
 	CreateManagedPrincipal(context.Context, EdgeCall, DatabasePrincipalCreateManagedPayload, []byte) (EdgeMutation[DatabasePrincipalProjection], error)
 	ListDatabaseInstances(context.Context, EdgeCall, EdgePagePayload) (EdgePage[DatabaseInstanceProjection], error)
 	InspectDatabaseInstance(context.Context, EdgeCall) (DatabaseInstanceProjection, error)
+	ConfigureDatabaseInstanceNetwork(context.Context, EdgeCall, DatabaseNetworkConfigureManagedPayload) (EdgeMutation[DatabaseNetworkPolicyProjection], error)
 	EnrollExternalDatabaseInstance(context.Context, EdgeCall, DatabaseExternalEnrollmentPayload, DatabaseExternalEnrollmentSecrets) (EdgeMutation[DatabaseInstanceProjection], error)
 }
 
@@ -1310,9 +1331,9 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("database.database.create_managed", "database:create", password, true, func() any { return &DatabaseCreateManagedPayload{} }, validateDatabaseCreateManaged, edgeTenantCreateScope),
 		consoleOperation("database.principal.create_managed", "database:manage", password, true, func() any { return &DatabasePrincipalCreateManagedPayload{} }, validateDatabasePrincipalCreateManaged, edgeTenantExistingMutationScope),
 		consoleOperation("database.console.issue", "database:console", mfa, true, func() any { return &DatabaseConsolePayload{} }, nil, edgeTenantExistingMutationScope),
-		consoleOperation("database.network.configure", "database:manage", mfa, true, func() any { return &DatabaseNetworkPayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("database.instance.list", "database:admin", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
 		consoleOperation("database.instance.health", "database:admin", password, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
+		consoleOperation("database.instance.network.configure", "database:admin", phishingResistant, true, func() any { return &DatabaseNetworkConfigureManagedPayload{} }, validateDatabaseNetworkConfigureManaged, edgeInstallationExistingMutationScope),
 		consoleOperation("database.instance.enroll_external", "database:admin", mfa, true, func() any { return &DatabaseExternalEnrollmentPayload{} }, validateDatabaseExternalEnrollment, edgeInstallationCreateScope),
 
 		consoleOperation("access.credential.list", "access:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
@@ -1500,6 +1521,48 @@ func validateDatabasePrincipalCreateManaged(value any) error {
 			return invalid("duplicate database principal privilege")
 		}
 		seen[privilege] = struct{}{}
+	}
+	return nil
+}
+
+func validateDatabaseNetworkConfigureManaged(value any) error {
+	payload := value.(*DatabaseNetworkConfigureManagedPayload)
+	if len(payload.Interfaces) == 0 || len(payload.Interfaces) > 3 || len(payload.AllowedCIDRs) > 256 {
+		return invalid("database network policy")
+	}
+	interfaces := make(map[string]struct{}, len(payload.Interfaces))
+	for _, networkInterface := range payload.Interfaces {
+		switch database.NetworkInterface(networkInterface) {
+		case database.InterfaceLoopback, database.InterfacePrivate, database.InterfacePublic:
+		default:
+			return invalid("database network interface")
+		}
+		if _, exists := interfaces[networkInterface]; exists {
+			return invalid("duplicate database network interface")
+		}
+		interfaces[networkInterface] = struct{}{}
+	}
+	prefixes := make(map[string]struct{}, len(payload.AllowedCIDRs))
+	for _, raw := range payload.AllowedCIDRs {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil || prefix != prefix.Masked() {
+			return invalid("database network prefix")
+		}
+		if _, exists := prefixes[prefix.String()]; exists {
+			return invalid("duplicate database network prefix")
+		}
+		prefixes[prefix.String()] = struct{}{}
+	}
+	if payload.TLSMode != string(database.TLSRequired) && payload.TLSMode != string(database.TLSMutual) {
+		return invalid("database network TLS")
+	}
+	switch database.VerificationLevel(payload.Verification) {
+	case database.VerifyStructural, database.VerifyLocalEndToEnd, database.VerifyClientConfirmed, database.VerifyIndependentExternal:
+	default:
+		return invalid("database network verification")
+	}
+	if _, err := database.NewResourceID(payload.HighRiskApproval); err != nil {
+		return invalid("database network approval")
 	}
 	return nil
 }
@@ -2419,6 +2482,10 @@ func bindConsoleEdgeContracts(registry *Registry, services DomainServices) error
 			result, err := services.DatabaseEdge.InspectDatabaseInstance(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result, Generation:result.Generation}, nil
 		}); err != nil { return err }
+		if err := registry.Bind("database.instance.network.configure", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
+			result, err := services.DatabaseEdge.ConfigureDatabaseInstanceNetwork(ctx, edgeCall(inv), *value.(*DatabaseNetworkConfigureManagedPayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return edgeOperationResult(http.StatusOK, result), nil
+		}); err != nil { return err }
 		if err := registry.Bind("database.instance.enroll_external", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			payload := value.(*DatabaseExternalEnrollmentPayload)
 			material := DatabaseExternalEnrollmentSecrets{
@@ -2448,13 +2515,6 @@ func bindConsoleEdgeContracts(registry *Registry, services DomainServices) error
 			header := database.CommandHeader{CommandID:commandID(inv), Actor:database.Actor{TenantID:tenant, Capability:database.CapabilityTenantConsole}, TenantID:tenant}
 			receipt, err := services.Database.Handle(ctx, database.OpenConsoleSession{Header:header, Session:payload.Session}); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusCreated, Value:receipt}, nil
-		}); err != nil { return err }
-		if err := registry.Bind("database.network.configure", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
-			tenant, err := site.NewTenantID(inv.Request.TenantID); if err != nil { return OperationResult{}, ErrInvalidRequest }
-			payload := value.(*DatabaseNetworkPayload); payload.Policy.Metadata.TenantID = tenant; payload.Policy.Metadata.Generation = inv.Request.ExpectedGeneration+1
-			header := database.CommandHeader{CommandID:commandID(inv), Actor:database.Actor{TenantID:tenant, Capability:database.CapabilityTenantManage}, TenantID:tenant}
-			receipt, err := services.Database.Handle(ctx, database.ReplaceRemoteCIDRs{Header:header, Policy:payload.Policy}); if err != nil { return OperationResult{}, mapDomainError(err) }
-			return OperationResult{Status:http.StatusOK, Value:receipt}, nil
 		}); err != nil { return err }
 	}
 	if services.AccessEdge != nil {

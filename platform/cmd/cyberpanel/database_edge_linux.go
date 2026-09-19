@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -343,6 +344,90 @@ func (edge *databaseEdge) InspectDatabaseInstance(ctx context.Context, call apis
 	return projection, nil
 }
 
+func (edge *databaseEdge) ConfigureDatabaseInstanceNetwork(ctx context.Context, call apiserver.EdgeCall, payload apiserver.DatabaseNetworkConfigureManagedPayload) (apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection], error) {
+	if edge == nil || edge.repository == nil || edge.coordinator == nil || ctx == nil || call.CommandID == "" || call.TenantID != "" || call.ResourceID == "" || call.ExpectedGeneration == 0 {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, database.ErrUnauthorized
+	}
+	instanceID, err := database.NewResourceID(call.ResourceID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, database.ErrInvalidResource
+	}
+	instance, err := edge.loadDatabaseInstance(ctx, instanceID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, err
+	}
+	if instance.Generation != call.ExpectedGeneration || instance.Status.Lifecycle != database.LifecycleReady || instance.Status.Reconciliation != database.ReconciliationInSync {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, database.ErrConflict
+	}
+	interfaces := make([]database.NetworkInterface, len(payload.Interfaces))
+	for index, value := range payload.Interfaces {
+		interfaces[index] = database.NetworkInterface(value)
+	}
+	sort.Slice(interfaces, func(left, right int) bool { return interfaces[left] < interfaces[right] })
+	prefixes := make([]netip.Prefix, len(payload.AllowedCIDRs))
+	for index, value := range payload.AllowedCIDRs {
+		prefix, parseErr := netip.ParsePrefix(value)
+		if parseErr != nil || prefix != prefix.Masked() {
+			return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, database.ErrInvalidResource
+		}
+		prefixes[index] = prefix
+	}
+	sort.Slice(prefixes, func(left, right int) bool { return prefixes[left].String() < prefixes[right].String() })
+	approval, err := database.NewResourceID(payload.HighRiskApproval)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, database.ErrInvalidResource
+	}
+	tlsMode := database.TLSMode(payload.TLSMode)
+	verification := database.VerificationLevel(payload.Verification)
+	if instance.Placement == database.PlacementExternal {
+		if instance.External == nil || tlsMode != instance.External.RequiredTLS || verification != database.VerifyIndependentExternal || len(prefixes) == 0 {
+			return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, database.ErrConflict
+		}
+	}
+	generation := uint64(1)
+	previous, previousErr := edge.loadNetworkPolicy(ctx, instance.NetworkPolicyID)
+	if previousErr == nil {
+		if previous.ID != instance.NetworkPolicyID || previous.InstanceID != instance.ID || previous.Status.Lifecycle != database.LifecycleReady || previous.Status.Reconciliation != database.ReconciliationInSync {
+			return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, database.ErrConflict
+		}
+		generation = previous.Generation + 1
+	} else if !errors.Is(previousErr, database.ErrNotFound) {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, previousErr
+	}
+	policy := database.NetworkAccessPolicy{
+		Metadata: database.Metadata{
+			ID: instance.NetworkPolicyID,
+			Generation: generation,
+			Status: database.ResourceStatus{Lifecycle: database.LifecycleUpdating, Health: database.HealthUnknown, Reconciliation: database.ReconciliationPending},
+		},
+		InstanceID: instance.ID,
+		Interfaces: interfaces,
+		AllowedCIDRs: prefixes,
+		TLS: tlsMode,
+		Verification: verification,
+		HighRiskApproval: approval,
+	}
+	if policy.Validate() != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, database.ErrInvalidResource
+	}
+	receipt, err := edge.coordinator.Handle(ctx, database.ReplaceRemoteCIDRs{
+		Header: database.CommandHeader{CommandID: call.CommandID, Actor: database.Actor{Capability: database.CapabilityNodeAdmin, ApprovalRef: approval}},
+		Policy: policy,
+	})
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, err
+	}
+	if receipt.Status != database.OperationApplied {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, database.ErrInvalidReceipt
+	}
+	stored, err := edge.loadNetworkPolicy(ctx, policy.ID)
+	if err != nil {
+		return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{}, err
+	}
+	projection := projectDatabaseNetworkPolicy(stored)
+	return apiserver.EdgeMutation[apiserver.DatabaseNetworkPolicyProjection]{OperationID: call.CommandID, State: projection.Status, Generation: projection.Generation, Resource: projection}, nil
+}
+
 func (edge *databaseEdge) EnrollExternalDatabaseInstance(ctx context.Context, call apiserver.EdgeCall, payload apiserver.DatabaseExternalEnrollmentPayload, material apiserver.DatabaseExternalEnrollmentSecrets) (apiserver.EdgeMutation[apiserver.DatabaseInstanceProjection], error) {
 	defer wipeDatabaseEdgeMaterial(material.AdministratorPassword, material.ClientCertificatePEM, material.ClientKeyPEM, material.CertificateAuthorityPEM)
 	if edge == nil || edge.repository == nil || edge.coordinator == nil || edge.management == nil || ctx == nil || call.CommandID == "" || call.TenantID != "" || call.ResourceID != "" || call.ExpectedGeneration != 0 {
@@ -640,6 +725,27 @@ func projectDatabasePrincipal(value database.DatabasePrincipal, databaseID datab
 		HostScope: string(value.HostScope),
 		NetworkPolicyID: value.NetworkPolicyID.String(),
 		Privileges: projectedPrivileges,
+		Status: string(value.Status.Lifecycle),
+		Generation: value.Generation,
+	}
+}
+
+func projectDatabaseNetworkPolicy(value database.NetworkAccessPolicy) apiserver.DatabaseNetworkPolicyProjection {
+	interfaces := make([]string, len(value.Interfaces))
+	for index, networkInterface := range value.Interfaces {
+		interfaces[index] = string(networkInterface)
+	}
+	prefixes := make([]string, len(value.AllowedCIDRs))
+	for index, prefix := range value.AllowedCIDRs {
+		prefixes[index] = prefix.String()
+	}
+	return apiserver.DatabaseNetworkPolicyProjection{
+		ID: value.ID.String(),
+		InstanceID: value.InstanceID.String(),
+		Interfaces: interfaces,
+		AllowedCIDRs: prefixes,
+		TLS: string(value.TLS),
+		Verification: string(value.Verification),
 		Status: string(value.Status.Lifecycle),
 		Generation: value.Generation,
 	}
