@@ -30,6 +30,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/authn"
 	"github.com/aonsyed/cyberpanel/platform/internal/ha"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
+	"github.com/aonsyed/cyberpanel/platform/internal/noderelease"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 )
 
@@ -144,7 +145,9 @@ func runCore(configuration coreConfiguration) error {
 func loadCoreConfiguration(path string) (coreConfiguration, error) {
 	var configuration coreConfiguration
 	if path != coreConfigPath { return configuration, errors.New("panel-core configuration path is not registered") }
-	content, err := readCoreFile(path, 1<<20, false)
+	resolved, err := noderelease.ResolveConfigPath(path)
+	if err != nil { return configuration, err }
+	content, err := readCoreFile(resolved, 1<<20, false)
 	if err != nil { return configuration, err }
 	decoder := json.NewDecoder(&sliceReader{value:content})
 	decoder.DisallowUnknownFields()

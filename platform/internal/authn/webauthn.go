@@ -21,6 +21,7 @@ import (
 	"io"
 	"math/big"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -103,7 +104,13 @@ func walkJSONValue(decoder *json.Decoder,depth int)error{if depth>32{return ErrI
 func decodeRegistration(value registrationEnvelope)([]byte,[]byte,[]byte,error){rawID,err:=decodeBase64URL(value.RawID,16,1024);if err!=nil{return nil,nil,nil,err};if value.ID!=base64.RawURLEncoding.EncodeToString(rawID){return nil,nil,nil,ErrInvalid};client,err:=decodeBase64URL(value.Response.ClientDataJSON,16,1<<20);if err!=nil{return nil,nil,nil,err};attestation,err:=decodeBase64URL(value.Response.AttestationObject,32,2<<20);return rawID,client,attestation,err}
 func decodeBase64URL(value string,minimum,maximum int)([]byte,error){if value==""||len(value)>maximum*2{return nil,ErrInvalid};decoded,err:=base64.RawURLEncoding.DecodeString(value);if err!=nil||len(decoded)<minimum||len(decoded)>maximum||base64.RawURLEncoding.EncodeToString(decoded)!=value{return nil,ErrInvalid};return decoded,nil}
 func validRPID(value string)bool{if len(value)<3||len(value)>253||strings.HasPrefix(value,".")||strings.HasSuffix(value,".")||strings.ContainsAny(value,"/:@ "){return false};for _,label:=range strings.Split(value,"."){if label==""||len(label)>63||label[0]=='-'||label[len(label)-1]=='-'{return false};for _,character:=range label{if !(character>='a'&&character<='z'||character>='0'&&character<='9'||character=='-'){return false}}};return true}
-func validOriginForRP(value,rpID string)bool{parsed,err:=url.Parse(value);return err==nil&&parsed.Scheme=="https"&&parsed.User==nil&&parsed.Path==""&&parsed.RawQuery==""&&parsed.Fragment==""&&strings.EqualFold(parsed.Hostname(),rpID)&&(parsed.Port()==""||parsed.Port()=="443")}
+func validOriginForRP(value, rpID string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || !strings.EqualFold(parsed.Hostname(), rpID) || strings.HasSuffix(parsed.Host, ":") { return false }
+	if parsed.Port() == "" { return true }
+	port, err := strconv.ParseUint(parsed.Port(), 10, 16)
+	return err == nil && port > 0
+}
 func randRead(value []byte)(int,error){return cryptoRandRead(value)}
 
 type ecdsaSignature struct{R,S *big.Int}

@@ -34,6 +34,7 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/controlplane"
 	"github.com/aonsyed/cyberpanel/platform/internal/federation"
+	"github.com/aonsyed/cyberpanel/platform/internal/noderelease"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -297,7 +298,9 @@ func loadConfiguration(path string) (configuration, error) {
 	if path != configPath {
 		return config, errors.New("central configuration path is not registered")
 	}
-	content, err := readProtectedFile(path, maximumConfigurationBytes, false)
+	resolved, err := noderelease.ResolveConfigPath(path)
+	if err != nil { return config, err }
+	content, err := readProtectedFile(resolved, maximumConfigurationBytes, false)
 	if err != nil {
 		return config, err
 	}

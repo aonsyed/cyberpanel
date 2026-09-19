@@ -439,8 +439,9 @@ func readBoundedRegular(path string, maximum int64, private bool) ([]byte, error
 		return nil, ErrInvalid
 	}
 	before, err := os.Lstat(path)
-	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() <= 0 || before.Size() > maximum {
-		return nil, errors.Join(ErrInvalid, err)
+	if err != nil { return nil, err }
+	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() <= 0 || before.Size() > maximum {
+		return nil, ErrInvalid
 	}
 	if private && before.Mode().Perm()&0077 != 0 {
 		return nil, ErrIntegrity

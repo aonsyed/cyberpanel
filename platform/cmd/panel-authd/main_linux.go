@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/authn"
+	"github.com/aonsyed/cyberpanel/platform/internal/noderelease"
 	_ "modernc.org/sqlite"
 )
 
@@ -127,7 +128,9 @@ func loadConfiguration(path string) (configuration, error) {
 	if path != defaultConfigPath {
 		return config, errors.New("configuration path is not the registered path")
 	}
-	content, err := readProtectedFile(path, maximumConfigSize, 0644)
+	resolved, err := noderelease.ResolveConfigPath(path)
+	if err != nil { return config, err }
+	content, err := readProtectedFile(resolved, maximumConfigSize, 0644)
 	if err != nil {
 		return config, err
 	}
@@ -177,7 +180,9 @@ func readCredential(path string) ([]byte, error) {
 	if path != wrappingKeyPath && path != lookupPepperPath {
 		return nil, errors.New("unregistered credential path")
 	}
-	content, err := readProtectedFile(path, 32, 0400)
+	// systemd's protected credential mount uses root-owned 0440 files.
+	// Access to the registered mount is granted to this service separately.
+	content, err := readProtectedFile(path, 32, 0440)
 	if err != nil {
 		return nil, err
 	}
@@ -189,6 +194,10 @@ func readCredential(path string) ([]byte, error) {
 }
 
 func readProtectedFile(path string, maximum int64, maximumMode os.FileMode) ([]byte, error) {
+	return readProtectedFileOwnedBy(path, maximum, maximumMode, 0)
+}
+
+func readProtectedFileOwnedBy(path string, maximum int64, maximumMode os.FileMode, owner uint32) ([]byte, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || maximum <= 0 {
 		return nil, errors.New("unsafe protected file path")
 	}
@@ -197,7 +206,7 @@ func readProtectedFile(path string, maximum int64, maximumMode os.FileMode) ([]b
 		return nil, err
 	}
 	stat, ok := before.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != 0 || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() <= 0 || before.Size() > maximum || before.Mode().Perm()&^maximumMode != 0 {
+	if !ok || stat.Uid != owner || maximumMode == 0440 && stat.Gid != 0 || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() <= 0 || before.Size() > maximum || before.Mode().Perm()&^maximumMode != 0 {
 		return nil, errors.New("unsafe protected file")
 	}
 	file, err := os.Open(path)

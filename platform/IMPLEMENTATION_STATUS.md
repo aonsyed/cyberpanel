@@ -45,6 +45,14 @@ pass in QEMU. Startup panics are fixed and the JavaScript bundle is reduced from
 6.02 MB to 529 kB. A complete signed installation and live API/service journeys
 remain pending; the external application database-placement slice is unfinished.
 
+Later Ubuntu ARM64 work installed a signed **authentication component** release
+and exercised the real authd socket as the control-plane account: password and
+API-key enrollment/verification/revocation passed. Signature tampering and an
+older release were rejected without changing installed state or restarting the
+daemon. This closes a component integration gate, not full panel installation.
+See RUN-REPORT.md for source changes, failed-install evidence, the disposable
+fixture reset, and the precise remaining qualification limits.
+
 ### Verified checkpoint, 2026-09-19
 
 - Saved QEMU Go-suite exits are zero for Ubuntu/AlmaLinux ARM64 at

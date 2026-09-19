@@ -2092,7 +2092,11 @@ func activateAndProbeService(ctx context.Context, probe ServiceProbe) (string, e
 		return "", err
 	}
 	deadline := time.Now().Add(time.Duration(probe.TimeoutSeconds) * time.Second)
+	stableWindow := time.Duration(probe.TimeoutSeconds) * time.Second / 2
+	if stableWindow > 2*time.Second { stableWindow = 2*time.Second }
 	var last string
+	var stableSince time.Time
+	var stableStarted uint64
 	for {
 		active, activeErr := runSystemctl(ctx, "is-active", probe.Unit)
 		last = strings.TrimSpace(active)
@@ -2106,10 +2110,20 @@ func activateAndProbeService(ctx context.Context, probe ServiceProbe) (string, e
 			if parseErr != nil || properties["ActiveState"] != "active" || started == 0 || started <= beforeStarted {
 				return "", ErrIntegrity
 			}
+			if stableStarted != started {
+				stableStarted, stableSince = started, time.Now()
+			}
+			// Type=simple becomes active before application initialization.
+			// Require the same activation to survive multiple observations;
+			// an auto-restart must not count as continuous readiness.
+			if time.Since(stableSince) >= stableWindow {
 			return digestJSON(struct {
 				Unit       string            `json:"unit"`
 				Properties map[string]string `json:"properties"`
 			}{probe.Unit, properties}), nil
+			}
+		} else {
+			stableStarted, stableSince = 0, time.Time{}
 		}
 		if !time.Now().Before(deadline) {
 			return "", fmt.Errorf("%w: %s did not become freshly active (%s)", ErrRecovery, probe.Unit, last)

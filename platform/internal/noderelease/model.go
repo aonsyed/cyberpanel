@@ -442,7 +442,7 @@ func allowedDestination(kind ArtifactKind, destination string) bool {
 	}
 	switch kind {
 	case ArtifactBinary:
-		return pathBelow(destination, "/usr/local/bin") || pathBelow(destination, "/usr/local/sbin") || pathBelow(destination, "/usr/local/libexec/cyberpanel")
+		return pathBelow(destination, "/usr/lib/cyberpanel/bin") || pathBelow(destination, "/usr/local/bin") || pathBelow(destination, "/usr/local/sbin") || pathBelow(destination, "/usr/local/libexec/cyberpanel")
 	case ArtifactConfig:
 		return pathBelow(destination, "/etc/cyberpanel")
 	case ArtifactUnit:
