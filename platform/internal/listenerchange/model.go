@@ -702,6 +702,7 @@ func validDigest(value string) bool {
 		if value[index] < '0' || value[index] > '9' && value[index] < 'a' || value[index] > 'f' {
 			return false
 		}
+	}
 	return true
 }
 
