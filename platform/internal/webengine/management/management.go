@@ -32,7 +32,10 @@ type Executor interface{Inspect(context.Context,webengine.Edition)(Installation,
 type EffectRequest struct{EffectID string;ExpectedGeneration uint64;Fence uint64;PlanDigest,CommitAuthorizationDigest,LicenseMode,SecretRef,SerialFingerprint string;ConversionOS string `json:"conversion_os,omitempty"`;ConversionOSVersion string `json:"conversion_os_version,omitempty"`;ConversionArchitecture string `json:"conversion_architecture,omitempty"`;ConversionVersion string `json:"conversion_version,omitempty"`;ConversionChannel Channel `json:"conversion_channel,omitempty"`}
 type EffectReceipt struct{EffectID,PlanDigest,EvidenceDigest string;Generation,Fence uint64;Outcome string;ObservedAt time.Time}
 type ValidationReceipt struct{EffectID,ConfigDigest,ParserDigest,SemanticDigest string;Valid bool;Findings []string;ObservedAt time.Time}
-type ProbeReceipt struct{EffectID,ConfigDigest string;HTTP,HTTPS,PHP,Cache,TLS,HTTP3 bool;EvidenceDigest string;ObservedAt time.Time}
+type ProbeReceipt struct{EffectID,ConfigDigest,ParserDigest,SemanticDigest,TLSLeafFingerprint string;TLSListenerRefs []webengine.ResourceRef;HTTP,HTTPS,PHP,Cache,TLS,HTTP3,ConfigValid bool;EvidenceDigest string;ObservedAt time.Time}
+// PrivateTLSMaterial is a secretless mount authority for one already-staged
+// immutable certificate generation. It is safe to journal and pass to a worker.
+type PrivateTLSMaterial struct{MaterialKey native.MaterialKey `json:"material_key"`;Generation uint64 `json:"generation"`;CandidatePath string `json:"candidate_path"`;FingerprintSHA256 string `json:"fingerprint_sha256"`;Hostname string `json:"hostname"`}
 type SwitchRequest struct{EffectRequest EffectRequest;Previous,Target webengine.Edition;PreviousConfigDigest,TargetConfigDigest string;RollbackDeadline time.Time}
 type SwitchReceipt struct{EffectID string;Previous,Target webengine.Edition;PreviousConfigDigest,TargetConfigDigest,LeaseID,ConfirmNonce,EvidenceDigest string;Fence uint64;SwitchedAt,RollbackDeadline time.Time;Confirmed,Restored bool;ConversionDigest,HostDigest,PreviousPlanDigest,TargetPlanDigest,ProbeDigest,LicenseDigest,CatalogDigest string;CatalogSequence uint64;PreviousChannel,TargetChannel Channel;PreviousPlan,TargetPlan ArtifactPlan;License LicenseStatus}
 type LicenseRequest struct{Mode,SecretRef string;Trial bool}

@@ -75,6 +75,7 @@ type lifecycleGenerationInput struct {
 	Request      EffectRequest        `json:"request"`
 	Render       native.RenderRequest `json:"render"`
 	ConfigDigest string               `json:"config_digest"`
+	PrivateTLS   []PrivateTLSMaterial `json:"private_tls,omitempty"`
 }
 type lifecycleConvertInput struct {
 	Request              EffectRequest           `json:"request"`

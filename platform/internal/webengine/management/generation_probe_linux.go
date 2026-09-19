@@ -35,6 +35,7 @@ type lifecycleChallenge struct {
 
 type lifecycleExchange struct {
 	Hostname          string
+	Listener          webengine.ResourceRef
 	Port              uint16
 	TLS               bool
 	Status            int
@@ -391,6 +392,9 @@ func executeLifecycleProbes(ctx context.Context, input lifecycleGenerationInput,
 	}
 	var evidence []lifecycleExchange
 	seenHTTP, seenTLS, seenPHP := false, false, false
+	tlsLeaf := ""
+	tlsListeners := []webengine.ResourceRef{}
+	seenTLSListener := map[webengine.ResourceRef]bool{}
 	count := 0
 	for _, binding := range input.Render.Desired.Bindings {
 		// Preview and redirect aliases have different redirect/auth semantics;
@@ -418,11 +422,16 @@ func executeLifecycleProbes(ctx context.Context, input lifecycleGenerationInput,
 						return receipt, err
 					}
 					nonce := hex.EncodeToString(nonceBytes[:])
-					exchange, err := lifecycleHTTPExchange(ctx, hostname.String(), listener, challenge, nonce)
+				exchange, err := lifecycleHTTPExchange(ctx, hostname.String(), ref, listener, challenge, nonce)
 					if err != nil {
 						return receipt, err
 					}
 					evidence = append(evidence, exchange)
+					if exchange.TLS {
+						if tlsLeaf != "" && tlsLeaf != exchange.CertificateDigest { return receipt, ErrConflict }
+						tlsLeaf = exchange.CertificateDigest
+						if !seenTLSListener[ref] { seenTLSListener[ref] = true; tlsListeners = append(tlsListeners, ref) }
+					}
 				}
 				seenPHP = true
 				if listener.TLSMode == webengine.TLSModeTLS {
@@ -437,6 +446,7 @@ func executeLifecycleProbes(ctx context.Context, input lifecycleGenerationInput,
 		return receipt, ErrUnsupported
 	}
 	receipt.HTTP, receipt.HTTPS, receipt.TLS, receipt.PHP = seenHTTP, seenTLS, seenTLS, seenPHP
+	receipt.TLSLeafFingerprint, receipt.TLSListenerRefs = tlsLeaf, tlsListeners
 	receipt.EvidenceDigest = digestJSON(struct {
 		Config    string
 		Exchanges []lifecycleExchange
@@ -454,8 +464,8 @@ func lifecycleLoopbackListener(listener webengine.Listener) bool {
 	return false
 }
 
-func lifecycleHTTPExchange(ctx context.Context, hostname string, listener webengine.Listener, challenge lifecycleChallenge, nonce string) (lifecycleExchange, error) {
-	result := lifecycleExchange{Hostname: hostname, Port: listener.Port, TLS: listener.TLSMode == webengine.TLSModeTLS}
+func lifecycleHTTPExchange(ctx context.Context, hostname string, listenerRef webengine.ResourceRef, listener webengine.Listener, challenge lifecycleChallenge, nonce string) (lifecycleExchange, error) {
+	result := lifecycleExchange{Hostname: hostname, Listener: listenerRef, Port: listener.Port, TLS: listener.TLSMode == webengine.TLSModeTLS}
 	parsed, err := webengine.ParseHostname(hostname)
 	if err != nil || parsed.String() != hostname || listener.Port == 0 {
 		return result, ErrInvalid

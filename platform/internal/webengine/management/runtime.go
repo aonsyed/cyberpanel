@@ -306,6 +306,21 @@ func (runtime *Runtime) ProbeCandidate(ctx context.Context, request EffectReques
 	return runtime.probeRender(ctx, request, render, LinuxManagementShadow)
 }
 
+// ProbePrivateTLSCandidate injects only an already-staged immutable generation
+// into the private candidate namespace. The descriptor contains no key bytes
+// and is rejected by every non-shadow lifecycle operation.
+func (runtime *Runtime) ProbePrivateTLSCandidate(ctx context.Context, request EffectRequest, render native.RenderRequest, material PrivateTLSMaterial) (ProbeReceipt, error) {
+	if runtime == nil || runtime.lifecycle == nil || ctx == nil { return ProbeReceipt{}, ErrInvalid }
+	renderer := runtime.renderers[render.Desired.Engine.Edition]
+	if renderer == nil { return ProbeReceipt{}, ErrInvalid }
+	generation, err := renderer.Render(ctx, render)
+	if err != nil { return ProbeReceipt{}, err }
+	input := lifecycleGenerationInput{Request: request, Render: render, ConfigDigest: generation.ContentDigest, PrivateTLS: []PrivateTLSMaterial{material}}
+	var result ProbeReceipt
+	err = runtime.lifecycle.call(ctx, LinuxManagementShadow, input, &result)
+	return result, err
+}
+
 // ProbeActive proves the supplied site's PHP/TLS paths on the current live
 // listeners. The subset digest and installed master digest are both bound into
 // evidence; a subset is not represented as the whole active configuration.

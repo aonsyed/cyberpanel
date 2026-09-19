@@ -96,6 +96,11 @@ func renderLifecycleGeneration(ctx context.Context, input lifecycleGenerationInp
 	if err != nil || generation.ContentDigest != input.ConfigDigest {
 		return native.ConfigGeneration{}, errors.Join(ErrConflict, err)
 	}
+	if len(input.PrivateTLS) != 0 {
+		if err = validatePrivateTLSMaterials(input.Render, input.PrivateTLS, time.Now().UTC()); err != nil {
+			return native.ConfigGeneration{}, err
+		}
+	}
 	return generation, nil
 }
 
@@ -122,6 +127,9 @@ func (host *LinuxLifecycleHost) handleGeneration(ctx context.Context, request Li
 		}
 		var input lifecycleGenerationInput
 		if decodeLifecyclePayload(request.Payload, &input) != nil {
+			return nil, ErrInvalid
+		}
+		if request.Operation != LinuxManagementShadow && len(input.PrivateTLS) != 0 {
 			return nil, ErrInvalid
 		}
 		if request.Operation == LinuxManagementActiveProbe {

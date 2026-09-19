@@ -698,6 +698,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		if createErr = bindMigrationCertificateSiteTLS(value, catalog, activationClient); createErr != nil {
 			return nil, createErr
 		}
+		migrationProbe.certificate = value
 		return value, nil
 	}
 	migrationFactory := migrationTargetFactory(hostingCoordinator, repositories.Hosting, fileService, dnsAuthority, repositories.Migrations, migrationProbe, containerApplications, migrationSecretFactory, migrationDatabaseFactory, migrationAuxiliaryServices{git: gitService, cron: cronService, backup: backupRuntime}, migrationCertificateFactory, repositories.MailControl, mailProjector, mailClient)

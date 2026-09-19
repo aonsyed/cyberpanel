@@ -65,15 +65,25 @@ func migrationSiteTLS(scope service.CommandScope, key string) composer.TLSInput 
 
 func (binding *migrationCertificateSiteBinding) Activate(ctx context.Context, intent migration.ImportIntent, tenant, key string, generation uint64, names []string) (string, error) {
 	binding.mu.Lock(); defer binding.mu.Unlock()
-	scope, _, err := binding.scope(ctx, intent, tenant, key, generation, names)
+	scope, admission, err := binding.scope(ctx, intent, tenant, key, generation, names)
 	if err != nil { return "", err }
 	if err := binding.target.fence(ctx, intent); err != nil { return "", err }
+	rehearsal, err := binding.target.freshRehearsal(ctx, intent, admission)
+	if err != nil || rehearsal.SiteID != scope.SiteID.String() || rehearsal.Hostname != names[0] || rehearsal.CertificateGeneration != generation { return "", errors.Join(migration.ErrBlocked, err) }
 	effect := "tls_"+key
 	prepared, err := binding.catalog.PrepareSiteTLS(ctx, effect, scope, names[0], migrationSiteTLS(scope, key))
 	if err != nil { return "", err }
 	if prepared.Finalized { return binding.Observe(ctx, intent, tenant, key, generation, names) }
 	composed, err := composer.Compose(prepared.Plan)
 	if err != nil { _ = binding.catalog.Reject(ctx, prepared.Token, effect); return "", err }
+	matchedListener := false
+	for _, listener := range composed.Desired.Engine.Listeners {
+		if listener.Ref == rehearsal.ListenerRef {
+			if listener.TLSMode != webengine.TLSModeTLS || listener.Port != rehearsal.ListenerPort || matchedListener { return "", migration.ErrConflict }
+			matchedListener = true
+		}
+	}
+	if !matchedListener { return "", migration.ErrConflict }
 	var renderer native.Renderer
 	switch composed.Desired.Engine.Edition {
 	case webengine.EditionOpenLiteSpeed: renderer = ols.New()

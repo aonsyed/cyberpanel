@@ -20,8 +20,13 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/certificates"
+	"github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/composer"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/management"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/native"
 )
 
 // The normal site catalog must bind (and observe) this owned TLS material.
@@ -29,6 +34,10 @@ import (
 type migrationCertificateBinding interface {
 	Activate(context.Context, migration.ImportIntent, string, string, uint64, []string) (string, error)
 	Observe(context.Context, migration.ImportIntent, string, string, uint64, []string) (string, error)
+}
+
+type migrationCertificateStagingTarget interface {
+	DiscardStagedCertificate(context.Context, string, string, certificates.CertificateMaterial, string) error
 }
 
 func (host *migrationHostTarget) observeCertificate(ctx context.Context, intent migration.ImportIntent) (migration.ImportEffect, error) {
@@ -60,6 +69,7 @@ type migrationCertificateTarget struct {
 	materials  *certificates.MaterialService
 	runtime    *certificates.SecretMaterialRuntime
 	deployment *certificates.DeploymentCoordinator
+	staging    migrationCertificateStagingTarget
 	secrets    *migrationSecretTarget
 	binding    migrationCertificateBinding
 	mu         sync.Mutex
@@ -70,16 +80,28 @@ const migrationCertificateSchema = `CREATE TABLE IF NOT EXISTS panel_migration_c
  intent_digest TEXT NOT NULL, tenant_id TEXT NOT NULL, resource_id TEXT NOT NULL,
  fingerprint TEXT NOT NULL, material_id TEXT NOT NULL, state TEXT NOT NULL,
  binding_evidence TEXT NOT NULL, PRIMARY KEY(migration_id,target_id)
+);
+CREATE TABLE IF NOT EXISTS panel_migration_certificate_rehearsals (
+ migration_id TEXT NOT NULL,target_id TEXT NOT NULL,effect_id TEXT NOT NULL,intent_digest TEXT NOT NULL,
+ tenant_id TEXT NOT NULL,site_id TEXT NOT NULL,hostname TEXT NOT NULL,resource_id TEXT NOT NULL,material_id TEXT NOT NULL,
+ certificate_generation INTEGER NOT NULL,fingerprint TEXT NOT NULL,candidate_path TEXT NOT NULL,state TEXT NOT NULL,
+ config_digest TEXT NOT NULL,parser_digest TEXT NOT NULL,semantic_digest TEXT NOT NULL,listener_ref TEXT NOT NULL,listener_port INTEGER NOT NULL,
+ authority_digest TEXT NOT NULL,evidence_digest TEXT NOT NULL,receipt_json BLOB NOT NULL,observed_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+ PRIMARY KEY(migration_id,target_id),UNIQUE(effect_id)
 );`
 
 func newMigrationCertificateTarget(ctx context.Context, db *sql.DB, chunks *migration.ChunkStore, scopes *migration.RuntimeScopeStore, materials *certificates.MaterialService, runtime *certificates.SecretMaterialRuntime, deployment *certificates.DeploymentCoordinator, secretTarget *migrationSecretTarget, binding migrationCertificateBinding) (*migrationCertificateTarget, error) {
 	if ctx == nil || db == nil || chunks == nil || scopes == nil || materials == nil || materials.Repository.DB == nil || materials.Audit == nil || runtime == nil || deployment == nil || deployment.Target == nil || secretTarget == nil {
 		return nil, migration.ErrBlocked
 	}
+	staging, ok := deployment.Target.(migrationCertificateStagingTarget)
+	if !ok {
+		return nil, migration.ErrBlocked
+	}
 	if _, err := db.ExecContext(ctx, migrationCertificateSchema); err != nil {
 		return nil, err
 	}
-	return &migrationCertificateTarget{db: db, chunks: chunks, scopes: scopes, materials: materials, runtime: runtime, deployment: deployment, secrets: secretTarget, binding: binding}, nil
+	return &migrationCertificateTarget{db: db, chunks: chunks, scopes: scopes, materials: materials, runtime: runtime, deployment: deployment, staging: staging, secrets: secretTarget, binding: binding}, nil
 }
 
 func migrationCertificateResource(mid, target migration.ID) string {
@@ -374,6 +396,197 @@ func (target *migrationCertificateTarget) ownedMaterial(ctx context.Context, int
 	return generation, nil
 }
 
+type migrationCertificateRehearsalCandidate struct {
+	Intent     migration.ImportIntent
+	Admission  migrationCertificateAdmission
+	Material   certificates.CertificateMaterial
+	Scope      service.CommandScope
+	Consumer   string
+	Candidate  string
+	TLS        composer.TLSInput
+	PrivateTLS management.PrivateTLSMaterial
+}
+
+type migrationCertificateRehearsalReceipt struct {
+	MigrationID           migration.ID          `json:"migration_id"`
+	TargetID              migration.ID          `json:"target_id"`
+	TenantID              string                `json:"tenant_id"`
+	SiteID                string                `json:"site_id"`
+	Hostname              string                `json:"hostname"`
+	ResourceID            string                `json:"resource_id"`
+	MaterialID            string                `json:"material_id"`
+	CertificateGeneration uint64                `json:"certificate_generation"`
+	Fingerprint           string                `json:"fingerprint"`
+	CandidatePath         string                `json:"candidate_path"`
+	ConfigDigest          string                `json:"config_digest"`
+	ParserDigest          string                `json:"parser_digest"`
+	SemanticDigest        string                `json:"semantic_digest"`
+	ListenerRef           webengine.ResourceRef `json:"listener_ref"`
+	ListenerPort          uint16                `json:"listener_port"`
+	AuthorityDigest       string                `json:"authority_digest"`
+	ProbeEvidenceDigest   string                `json:"probe_evidence_digest"`
+	EvidenceDigest        string                `json:"evidence_digest"`
+	ObservedAt            time.Time             `json:"observed_at"`
+}
+
+func (target *migrationCertificateTarget) prepareRehearsal(ctx context.Context, value migration.Migration, plan migration.Plan, scope service.CommandScope, hostname string) (migrationCertificateRehearsalCandidate, error) {
+	var result migrationCertificateRehearsalCandidate
+	if target == nil || target.deployment == nil || target.deployment.Target == nil || target.staging == nil || ctx == nil || plan.MigrationID != value.ID || plan.DryRunDigest != value.PlanDigest || scope.TenantID.String() == "" || scope.SiteID.String() == "" || hostname == "" {
+		return result, migration.ErrInvalid
+	}
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	rows, err := target.db.QueryContext(ctx, `SELECT domain_intent_json FROM panel_migration_host_effects WHERE migration_id=? AND kind=? AND state='dark' ORDER BY source_id LIMIT 2`, value.ID.String(), string(migration.ImportCertificate))
+	if err != nil {
+		return result, err
+	}
+	defer rows.Close()
+	var raw []byte
+	count := 0
+	for rows.Next() {
+		count++
+		if err = rows.Scan(&raw); err != nil {
+			return result, err
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return result, err
+	}
+	if count != 1 || json.Unmarshal(raw, &result.Intent) != nil || migration.ValidateCanonicalImportIntent(result.Intent) != nil {
+		return result, migration.ErrBlocked
+	}
+	result.Admission, err = target.admit(ctx, result.Intent, false)
+	if err != nil {
+		return result, err
+	}
+	if result.Admission.scope.TenantID != scope.TenantID.String() || len(result.Admission.value.Names) != 1 || result.Admission.value.Names[0] != hostname {
+		return result, migration.ErrConflict
+	}
+	manifest, err := target.secrets.repository.Manifest(ctx, value.ManifestRoot)
+	if err != nil {
+		return result, err
+	}
+	var siteSource migration.ID
+	for _, siteValue := range manifest.Sites {
+		if siteValue.PrimaryHostname == hostname {
+			if siteSource != "" {
+				return result, migration.ErrBlocked
+			}
+			siteSource = siteValue.SourceID
+		}
+	}
+	var siteTarget migration.ID
+	for _, mapping := range plan.Mappings {
+		if mapping.SourceKind == string(migration.ImportSite) && mapping.SourceID == siteSource {
+			if siteTarget != "" || mapping.Disposition != migration.DispositionCreate {
+				return result, migration.ErrBlocked
+			}
+			siteTarget = mapping.TargetID
+		}
+	}
+	if siteSource == "" || siteTarget.String() != scope.SiteID.String() {
+		return result, migration.ErrConflict
+	}
+	state, err := target.state(ctx, result.Intent, result.Admission)
+	if err != nil || state != "staged" {
+		return result, errors.Join(migration.ErrBlocked, err)
+	}
+	generation, err := target.ownedMaterial(ctx, result.Intent, result.Admission)
+	if err != nil || generation.CertificateGeneration != 1 || generation.State == certificates.MaterialStateRetired {
+		return result, errors.Join(migration.ErrConflict, err)
+	}
+	result.Material, err = certificates.MigrationDeploymentMaterial(generation)
+	if err != nil {
+		return result, err
+	}
+	result.Scope, result.Consumer = scope, "webengine/"+result.Admission.resource
+	previous, candidate, err := target.deployment.Target.StageCertificate(ctx, result.Consumer, result.Material, result.Intent.EffectID)
+	if err != nil || previous != "" || candidate == "" {
+		return result, errors.Join(migration.ErrConflict, err)
+	}
+	result.Candidate = candidate
+	result.TLS = migrationSiteTLS(scope, result.Admission.resource)
+	result.PrivateTLS = management.PrivateTLSMaterial{MaterialKey: result.TLS.MaterialKey, Generation: result.TLS.Generation, CandidatePath: candidate, FingerprintSHA256: result.Admission.fingerprint, Hostname: hostname}
+	now := time.Now().UTC()
+	_, err = target.db.ExecContext(ctx, `INSERT INTO panel_migration_certificate_rehearsals(migration_id,target_id,effect_id,intent_digest,tenant_id,site_id,hostname,resource_id,material_id,certificate_generation,fingerprint,candidate_path,state,config_digest,parser_digest,semantic_digest,listener_ref,listener_port,authority_digest,evidence_digest,receipt_json,observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'staged','','','','',0,'','','{}','',?) ON CONFLICT(migration_id,target_id) DO NOTHING`, result.Intent.MigrationID.String(), result.Intent.TargetID.String(), result.Intent.EffectID, result.Admission.intentDigest, result.Admission.scope.TenantID, scope.SiteID.String(), hostname, result.Admission.resource, result.Admission.materialID, generation.CertificateGeneration, result.Admission.fingerprint, candidate, now.Format(time.RFC3339Nano))
+	if err != nil {
+		return result, err
+	}
+	var effect, digest, tenant, siteID, storedHostname, resource, materialID, fingerprint, storedCandidate, rehearsalState string
+	var certificateGeneration uint64
+	err = target.db.QueryRowContext(ctx, `SELECT effect_id,intent_digest,tenant_id,site_id,hostname,resource_id,material_id,certificate_generation,fingerprint,candidate_path,state FROM panel_migration_certificate_rehearsals WHERE migration_id=? AND target_id=?`, result.Intent.MigrationID.String(), result.Intent.TargetID.String()).Scan(&effect, &digest, &tenant, &siteID, &storedHostname, &resource, &materialID, &certificateGeneration, &fingerprint, &storedCandidate, &rehearsalState)
+	if err != nil || effect != result.Intent.EffectID || digest != result.Admission.intentDigest || tenant != result.Admission.scope.TenantID || siteID != scope.SiteID.String() || storedHostname != hostname || resource != result.Admission.resource || materialID != result.Admission.materialID || certificateGeneration != 1 || fingerprint != result.Admission.fingerprint || storedCandidate != candidate || rehearsalState != "staged" && rehearsalState != "rehearsed" {
+		return result, errors.Join(migration.ErrConflict, err)
+	}
+	return result, nil
+}
+
+func (target *migrationCertificateTarget) recordRehearsal(ctx context.Context, candidate migrationCertificateRehearsalCandidate, render native.RenderRequest, probe management.ProbeReceipt) (migrationCertificateRehearsalReceipt, error) {
+	var receipt migrationCertificateRehearsalReceipt
+	if target == nil || ctx == nil || probe.EffectID == "" || len(probe.ConfigDigest) != 64 || !probe.ConfigValid || len(probe.ParserDigest) != 64 || len(probe.SemanticDigest) != 64 || len(probe.EvidenceDigest) != 64 || probe.TLSLeafFingerprint != candidate.Admission.fingerprint || len(probe.TLSListenerRefs) != 1 || probe.ObservedAt.IsZero() || probe.ObservedAt.Before(time.Now().UTC().Add(-5*time.Minute)) || probe.ObservedAt.After(time.Now().UTC().Add(time.Minute)) {
+		return receipt, migration.ErrBlocked
+	}
+	var listener webengine.Listener
+	for _, value := range render.Desired.Engine.Listeners {
+		if value.Ref == probe.TLSListenerRefs[0] {
+			if listener.Ref != "" {
+				return receipt, migration.ErrConflict
+			}
+			listener = value
+		}
+	}
+	if listener.Ref == "" || listener.TLSMode != webengine.TLSModeTLS || len(listener.Addresses) != 1 || listener.Addresses[0] != "127.0.0.1" || listener.Port == 0 {
+		return receipt, migration.ErrBlocked
+	}
+	receipt = migrationCertificateRehearsalReceipt{MigrationID: candidate.Intent.MigrationID, TargetID: candidate.Intent.TargetID, TenantID: candidate.Admission.scope.TenantID, SiteID: candidate.Scope.SiteID.String(), Hostname: candidate.Admission.value.Names[0], ResourceID: candidate.Admission.resource, MaterialID: candidate.Admission.materialID, CertificateGeneration: 1, Fingerprint: candidate.Admission.fingerprint, CandidatePath: candidate.Candidate, ConfigDigest: probe.ConfigDigest, ParserDigest: probe.ParserDigest, SemanticDigest: probe.SemanticDigest, ListenerRef: listener.Ref, ListenerPort: listener.Port, ProbeEvidenceDigest: probe.EvidenceDigest, ObservedAt: probe.ObservedAt.UTC()}
+	receipt.AuthorityDigest = migrationCertificateRehearsalAuthority(receipt)
+	copy := receipt
+	copy.EvidenceDigest = ""
+	receipt.EvidenceDigest = migrationHostDigest(copy)
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		return receipt, err
+	}
+	result, err := target.db.ExecContext(ctx, `UPDATE panel_migration_certificate_rehearsals SET state='rehearsed',config_digest=?,parser_digest=?,semantic_digest=?,listener_ref=?,listener_port=?,authority_digest=?,evidence_digest=?,receipt_json=?,observed_at=?,updated_at=? WHERE migration_id=? AND target_id=? AND effect_id=? AND intent_digest=? AND candidate_path=? AND state IN ('staged','rehearsed') AND EXISTS (SELECT 1 FROM panel_migration_certificate_targets AS target_state WHERE target_state.migration_id=? AND target_state.target_id=? AND target_state.state='staged')`, receipt.ConfigDigest, receipt.ParserDigest, receipt.SemanticDigest, string(receipt.ListenerRef), receipt.ListenerPort, receipt.AuthorityDigest, receipt.EvidenceDigest, raw, receipt.ObservedAt.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), candidate.Intent.MigrationID.String(), candidate.Intent.TargetID.String(), candidate.Intent.EffectID, candidate.Admission.intentDigest, candidate.Candidate, candidate.Intent.MigrationID.String(), candidate.Intent.TargetID.String())
+	if err != nil {
+		return receipt, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return receipt, errors.Join(migration.ErrConflict, err)
+	}
+	return receipt, nil
+}
+
+func migrationCertificateRehearsalAuthority(receipt migrationCertificateRehearsalReceipt) string {
+	return migrationHostDigest(struct {
+		MigrationID, TargetID                                                                           migration.ID
+		TenantID, SiteID, Hostname, ResourceID, MaterialID, Fingerprint, CandidatePath                   string
+		ConfigDigest, ParserDigest, SemanticDigest, ProbeEvidenceDigest                                 string
+		CertificateGeneration                                                                           uint64
+		ListenerRef                                                                                     webengine.ResourceRef
+		ListenerPort                                                                                    uint16
+		ObservedAt                                                                                      time.Time
+	}{receipt.MigrationID, receipt.TargetID, receipt.TenantID, receipt.SiteID, receipt.Hostname, receipt.ResourceID, receipt.MaterialID, receipt.Fingerprint, receipt.CandidatePath, receipt.ConfigDigest, receipt.ParserDigest, receipt.SemanticDigest, receipt.ProbeEvidenceDigest, receipt.CertificateGeneration, receipt.ListenerRef, receipt.ListenerPort, receipt.ObservedAt})
+}
+
+func (target *migrationCertificateTarget) freshRehearsal(ctx context.Context, intent migration.ImportIntent, admission migrationCertificateAdmission) (migrationCertificateRehearsalReceipt, error) {
+	var receipt migrationCertificateRehearsalReceipt
+	var raw []byte
+	var state, config, evidence string
+	err := target.db.QueryRowContext(ctx, `SELECT state,config_digest,evidence_digest,receipt_json FROM panel_migration_certificate_rehearsals WHERE migration_id=? AND target_id=? AND effect_id=? AND intent_digest=?`, intent.MigrationID.String(), intent.TargetID.String(), intent.EffectID, admission.intentDigest).Scan(&state, &config, &evidence, &raw)
+	if err != nil || state != "rehearsed" || json.Unmarshal(raw, &receipt) != nil {
+		return receipt, errors.Join(migration.ErrBlocked, err)
+	}
+	copy := receipt
+	copy.EvidenceDigest = ""
+	now := time.Now().UTC()
+	if receipt.MigrationID != intent.MigrationID || receipt.TargetID != intent.TargetID || receipt.TenantID != admission.scope.TenantID || receipt.SiteID == "" || receipt.Hostname != admission.value.Names[0] || receipt.ResourceID != admission.resource || receipt.MaterialID != admission.materialID || receipt.CertificateGeneration != 1 || receipt.Fingerprint != admission.fingerprint || receipt.CandidatePath == "" || len(receipt.ConfigDigest) != 64 || len(receipt.ParserDigest) != 64 || len(receipt.SemanticDigest) != 64 || len(receipt.ProbeEvidenceDigest) != 64 || receipt.ListenerRef == "" || receipt.ListenerPort == 0 || config != receipt.ConfigDigest || evidence != receipt.EvidenceDigest || receipt.AuthorityDigest != migrationCertificateRehearsalAuthority(receipt) || receipt.EvidenceDigest != migrationHostDigest(copy) || receipt.ObservedAt.Before(now.Add(-5*time.Minute)) || receipt.ObservedAt.After(now.Add(time.Minute)) {
+		return receipt, migration.ErrConflict
+	}
+	return receipt, nil
+}
+
 func (target *migrationCertificateTarget) Observe(ctx context.Context, intent migration.ImportIntent) (migration.ImportEffect, error) {
 	target.mu.Lock()
 	defer target.mu.Unlock()
@@ -474,24 +687,25 @@ func (target *migrationCertificateTarget) Activate(ctx context.Context, intent m
 	if err != nil {
 		return migration.ImportEffect{}, err
 	}
+	rehearsal, err := target.freshRehearsal(ctx, intent, admission)
+	if err != nil || rehearsal.CandidatePath == "" {
+		return migration.ImportEffect{}, errors.Join(migration.ErrBlocked, err)
+	}
 	consumer := "webengine/" + admission.resource
-	previous, candidate, err := target.deployment.Target.StageCertificate(ctx, consumer, material, intent.EffectID)
-	if err != nil {
-		return migration.ImportEffect{}, err
-	}
-	if state == "staged" && previous != "" {
-		return migration.ImportEffect{}, migration.ErrConflict
-	}
-	if state == "activating" && previous != "" && previous != candidate {
-		return migration.ImportEffect{}, migration.ErrConflict
-	}
-	if _, err := target.db.ExecContext(ctx, `UPDATE panel_migration_certificate_targets SET state='activating' WHERE migration_id=? AND target_id=? AND state='staged'`, intent.MigrationID.String(), intent.TargetID.String()); err != nil {
-		return migration.ImportEffect{}, err
+	if state == "staged" {
+		result, transitionErr := target.db.ExecContext(ctx, `UPDATE panel_migration_certificate_targets SET state='activating' WHERE migration_id=? AND target_id=? AND state='staged' AND EXISTS (SELECT 1 FROM panel_migration_certificate_rehearsals AS rehearsal WHERE rehearsal.migration_id=? AND rehearsal.target_id=? AND rehearsal.state='rehearsed' AND rehearsal.evidence_digest=?)`, intent.MigrationID.String(), intent.TargetID.String(), intent.MigrationID.String(), intent.TargetID.String(), rehearsal.EvidenceDigest)
+		if transitionErr != nil {
+			return migration.ImportEffect{}, transitionErr
+		}
+		affected, transitionErr := result.RowsAffected()
+		if transitionErr != nil || affected != 1 {
+			return migration.ImportEffect{}, errors.Join(migration.ErrConflict, transitionErr)
+		}
 	}
 	if err := target.fence(ctx, intent); err != nil {
 		return migration.ImportEffect{}, err
 	}
-	activation, err := target.deployment.Target.ActivateCertificate(ctx, consumer, candidate, intent.EffectID)
+	activation, err := target.deployment.Target.ActivateCertificate(ctx, consumer, rehearsal.CandidatePath, intent.EffectID)
 	if err != nil {
 		return migration.ImportEffect{}, err
 	}
@@ -518,14 +732,46 @@ func (target *migrationCertificateTarget) Activate(ctx context.Context, intent m
 	if err != nil {
 		return migration.ImportEffect{}, err
 	}
-	_, err = target.materials.Repository.UpdateOperationalCAS(ctx, admission.scope.TenantID, admission.resource, admission.materialID, certificates.MaterialOperationalUpdate{
-		ExpectedRecordGeneration: generation.RecordGeneration, State: certificates.MaterialStateActive,
-		Consumers: []certificates.MaterialConsumerBinding{{ConsumerID: admission.resource, ConsumerKind: "migration_webengine", ConsumerGeneration: 1, Bound: true, DeployedFingerprint: admission.fingerprint, DeploymentGeneration: 1, DeploymentObservedAt: time.Now().UTC()}}, ObservedAt: time.Now().UTC()})
+	if generation.State == certificates.MaterialStateActive {
+		if len(generation.Consumers) != 1 || generation.Consumers[0].ConsumerID != admission.resource || generation.Consumers[0].DeployedFingerprint != admission.fingerprint || generation.Consumers[0].DeploymentGeneration != 1 {
+			return migration.ImportEffect{}, migration.ErrConflict
+		}
+	} else {
+		_, err = target.materials.Repository.UpdateOperationalCAS(ctx, admission.scope.TenantID, admission.resource, admission.materialID, certificates.MaterialOperationalUpdate{
+			ExpectedRecordGeneration: generation.RecordGeneration, State: certificates.MaterialStateActive,
+			Consumers: []certificates.MaterialConsumerBinding{{ConsumerID: admission.resource, ConsumerKind: "migration_webengine", ConsumerGeneration: 1, Bound: true, DeployedFingerprint: admission.fingerprint, DeploymentGeneration: 1, DeploymentObservedAt: time.Now().UTC()}}, ObservedAt: time.Now().UTC()})
+		if err != nil {
+			return migration.ImportEffect{}, err
+		}
+	}
+	tx, err := target.db.BeginTx(ctx, nil)
 	if err != nil {
 		return migration.ImportEffect{}, err
 	}
-	if _, err := target.db.ExecContext(ctx, `UPDATE panel_migration_certificate_targets SET state='active',binding_evidence=? WHERE migration_id=? AND target_id=? AND state='activating'`, binding, intent.MigrationID.String(), intent.TargetID.String()); err != nil {
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE panel_migration_certificate_targets SET state='active',binding_evidence=? WHERE migration_id=? AND target_id=? AND state='activating'`, binding, intent.MigrationID.String(), intent.TargetID.String())
+	if err == nil {
+		var affected int64
+		affected, err = result.RowsAffected()
+		if err == nil && affected != 1 {
+			err = migration.ErrConflict
+		}
+	}
+	if err == nil {
+		result, err = tx.ExecContext(ctx, `UPDATE panel_migration_certificate_rehearsals SET state='activated',updated_at=? WHERE migration_id=? AND target_id=? AND state='rehearsed' AND evidence_digest=?`, time.Now().UTC().Format(time.RFC3339Nano), intent.MigrationID.String(), intent.TargetID.String(), rehearsal.EvidenceDigest)
+		if err == nil {
+			var affected int64
+			affected, err = result.RowsAffected()
+			if err == nil && affected != 1 {
+				err = migration.ErrConflict
+			}
+		}
+	}
+	if err != nil {
 		return migration.ImportEffect{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return migration.ImportEffect{}, errors.Join(migration.ErrAmbiguous, err)
 	}
 	return target.observe(ctx, intent, admission)
 }
@@ -547,6 +793,44 @@ func migrationCertificateSNI(ctx context.Context, hostname, fingerprint string) 
 	sum := sha256.Sum256(tlsConnection.ConnectionState().PeerCertificates[0].Raw)
 	if hex.EncodeToString(sum[:]) != fingerprint {
 		return migration.ErrConflict
+	}
+	return nil
+}
+
+func (target *migrationCertificateTarget) discardRehearsal(ctx context.Context, intent migration.ImportIntent, admission migrationCertificateAdmission, generation certificates.ManagedCertificateGeneration) error {
+	material, err := certificates.MigrationDeploymentMaterial(generation)
+	if err != nil {
+		return err
+	}
+	consumer := "webengine/" + admission.resource
+	var candidate, state string
+	err = target.db.QueryRowContext(ctx, `SELECT candidate_path,state FROM panel_migration_certificate_rehearsals WHERE migration_id=? AND target_id=? AND effect_id=? AND intent_digest=?`, intent.MigrationID.String(), intent.TargetID.String(), intent.EffectID, admission.intentDigest).Scan(&candidate, &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		previous, staged, stageErr := target.deployment.Target.StageCertificate(ctx, consumer, material, intent.EffectID)
+		if stageErr != nil || previous != "" || staged == "" {
+			return errors.Join(migration.ErrAmbiguous, stageErr)
+		}
+		return target.staging.DiscardStagedCertificate(ctx, consumer, staged, material, intent.EffectID)
+	}
+	if err != nil {
+		return err
+	}
+	if state == "discarded" {
+		return nil
+	}
+	if state == "activated" || state != "staged" && state != "rehearsed" {
+		return migration.ErrWriteFrontier
+	}
+	if err = target.staging.DiscardStagedCertificate(ctx, consumer, candidate, material, intent.EffectID); err != nil {
+		return err
+	}
+	result, err := target.db.ExecContext(ctx, `UPDATE panel_migration_certificate_rehearsals SET state='discarded',updated_at=? WHERE migration_id=? AND target_id=? AND state IN ('staged','rehearsed')`, time.Now().UTC().Format(time.RFC3339Nano), intent.MigrationID.String(), intent.TargetID.String())
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return errors.Join(migration.ErrAmbiguous, err)
 	}
 	return nil
 }
@@ -579,6 +863,9 @@ func (target *migrationCertificateTarget) Compensate(ctx context.Context, intent
 			return migration.ImportEffect{}, err
 		}
 		if generation.State != certificates.MaterialStateRetired {
+			if err = target.discardRehearsal(ctx, intent, admission, generation); err != nil {
+				return migration.ImportEffect{}, errors.Join(migration.ErrAmbiguous, err)
+			}
 			if len(generation.Consumers) != 0 {
 				generation, err = target.materials.Repository.UpdateOperationalCAS(ctx, admission.scope.TenantID, admission.resource, admission.materialID, certificates.MaterialOperationalUpdate{ExpectedRecordGeneration: generation.RecordGeneration, State: certificates.MaterialStateStaged, ObservedAt: time.Now().UTC()})
 				if err != nil {

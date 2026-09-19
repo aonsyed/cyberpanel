@@ -144,6 +144,10 @@ func RunLinuxLifecycleWorker() (err error) {
 	closeErr := store.Close()
 	if err != nil || closeErr != nil { return errors.Join(err, closeErr) }
 	if err = isolateLifecycleFiles(master, edition); err != nil { return err }
+	if len(input.Candidate.PrivateTLS) != 0 {
+		if err = validatePrivateTLSMaterials(input.Candidate.Render, input.Candidate.PrivateTLS, time.Now().UTC()); err != nil { return err }
+		if err = mountPrivateTLSMaterials(input.Candidate.PrivateTLS); err != nil { return err }
+	}
 	var result lifecycleWorkerResult
 	defer func() {
 		encoded, encodeErr := json.Marshal(result)
@@ -166,7 +170,12 @@ func RunLinuxLifecycleWorker() (err error) {
 	// connection startup, with a bounded deadline; never invent success.
 	for attempt := 0; attempt < 20; attempt++ {
 		result.Probe, err = executeLifecycleProbes(ctx, input.Candidate, input.Challenges)
-		if err == nil { return nil }
+		if err == nil {
+			result.Probe.ConfigValid = result.Validation.Valid
+			result.Probe.ParserDigest = result.Validation.ParserDigest
+			result.Probe.SemanticDigest = result.Validation.SemanticDigest
+			return nil
+		}
 		var networkErr net.Error
 		if !errors.As(err, &networkErr) { return err }
 		select { case <-ctx.Done(): return ctx.Err(); case <-time.After(250*time.Millisecond): }
