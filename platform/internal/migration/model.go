@@ -229,6 +229,60 @@ type AccessCredential struct {
 	Provenance  []Provenance
 }
 
+type AccessPrincipalKind string
+
+const (
+	AccessPrincipalSSH  AccessPrincipalKind = "ssh"
+	AccessPrincipalFTPS AccessPrincipalKind = "ftps"
+)
+
+type AccessPrincipalPolicy string
+
+const (
+	AccessPolicyShell         AccessPrincipalPolicy = "shell"
+	AccessPolicySFTPReadWrite AccessPrincipalPolicy = "sftp_read_write"
+	AccessPolicySFTPReadOnly  AccessPrincipalPolicy = "sftp_read_only"
+	AccessPolicyFTPSReadWrite AccessPrincipalPolicy = "ftps_read_write"
+)
+
+type AccessCredentialFormat string
+
+const AccessCredentialUnixCryptHash AccessCredentialFormat = "unix_crypt_hash_v1"
+
+type AccessCredentialReference struct {
+	SecretID string
+	Format   AccessCredentialFormat
+}
+
+type AccessAuthorizedKey struct {
+	KeyID       ID
+	Algorithm   string
+	PublicKey   string
+	Fingerprint string
+	Label       string
+}
+
+// AccessPrincipal is a complete, non-inferred login identity. Source numeric
+// ownership is intentional: a target collision is a terminal conflict, never
+// authority to rewrite an existing account or silently allocate another ID.
+type AccessPrincipal struct {
+	SourceID       ID
+	TargetID       ID
+	PrincipalID    ID
+	TenantID       ID
+	SiteID         ID
+	Kind           AccessPrincipalKind
+	Policy         AccessPrincipalPolicy
+	Username       string
+	HomeRelative   string
+	UID            uint32
+	GID            uint32
+	AuthorizedKeys []AccessAuthorizedKey
+	Credential     *AccessCredentialReference
+	Enabled        bool
+	Provenance     []Provenance
+}
+
 type Schedule struct {
 	SourceID    ID
 	TargetID    ID
@@ -304,6 +358,7 @@ type Manifest struct {
 	MailDomains         []MailDomain
 	Certificates        []Certificate
 	Credentials         []AccessCredential
+	AccessPrincipals    []AccessPrincipal
 	Schedules           []Schedule
 	Repositories        []RepositoryBinding
 	Containers          []ContainerApplication
@@ -341,8 +396,22 @@ func (manifest Manifest) Validate() error {
 		}
 		secrets[secret.SecretID] = secret.Version
 	}
-	if !validateSites(manifest.Sites, chunks) || !validateDatabases(manifest.Databases, chunks) || !validateDNSZones(manifest.DNSZones) || !validateMailDomains(manifest.MailDomains, chunks) || !validateCertificates(manifest.Certificates, chunks) || !validateCredentials(manifest.Credentials) || !validateSchedules(manifest.Schedules) || !validateRepositories(manifest.Repositories) || !validateContainers(manifest.Containers, chunks) || !validateBackupPolicies(manifest.BackupPolicies) || !validConflicts(manifest.Conflicts) {
+	if !validateSites(manifest.Sites, chunks) || !validateDatabases(manifest.Databases, chunks) || !validateDNSZones(manifest.DNSZones) || !validateMailDomains(manifest.MailDomains, chunks) || !validateCertificates(manifest.Certificates, chunks) || !validateCredentials(manifest.Credentials) || !validateAccessPrincipals(manifest.AccessPrincipals) || !validateSchedules(manifest.Schedules) || !validateRepositories(manifest.Repositories) || !validateContainers(manifest.Containers, chunks) || !validateBackupPolicies(manifest.BackupPolicies) || !validConflicts(manifest.Conflicts) {
 		return ErrInvalid
+	}
+	for _, principal := range manifest.AccessPrincipals {
+		if principal.Credential == nil {
+			continue
+		}
+		matched := 0
+		for _, secret := range manifest.Secrets {
+			if secret.SecretID == principal.Credential.SecretID && secret.Purpose == "access-credential" {
+				matched++
+			}
+		}
+		if matched != 1 {
+			return ErrInvalid
+		}
 	}
 	return nil
 }
@@ -519,6 +588,71 @@ func validateCredentials(values []AccessCredential) bool {
 		}
 	}
 	return true
+}
+
+func validateAccessPrincipals(values []AccessPrincipal) bool {
+	seenSources := map[ID]struct{}{}
+	seenPrincipals := map[ID]struct{}{}
+	seenUsernames := map[string]struct{}{}
+	seenUIDs := map[uint32]struct{}{}
+	for _, value := range values {
+		if !uniqueID(value.SourceID, seenSources) || !validOptionalID(value.TargetID) || !value.PrincipalID.Valid() || !value.TenantID.Valid() || !value.SiteID.Valid() || !validAccessLogin(value.Username) || !validOptionalRelativePath(value.HomeRelative) || value.UID < 1000 || value.GID < 1000 {
+			return false
+		}
+		if _, duplicate := seenPrincipals[value.PrincipalID]; duplicate {
+			return false
+		}
+		seenPrincipals[value.PrincipalID] = struct{}{}
+		username := strings.ToLower(value.Username)
+		if _, duplicate := seenUsernames[username]; duplicate {
+			return false
+		}
+		seenUsernames[username] = struct{}{}
+		if _, duplicate := seenUIDs[value.UID]; duplicate {
+			return false
+		}
+		seenUIDs[value.UID] = struct{}{}
+		keys := map[string]struct{}{}
+		switch value.Kind {
+		case AccessPrincipalSSH:
+			if value.Policy != AccessPolicyShell && value.Policy != AccessPolicySFTPReadWrite && value.Policy != AccessPolicySFTPReadOnly || value.Credential != nil || len(value.AuthorizedKeys) == 0 {
+				return false
+			}
+			for _, key := range value.AuthorizedKeys {
+				if !key.KeyID.Valid() || key.Algorithm == "" || len(key.PublicKey) > 32768 || len(key.Fingerprint) != 50 || !strings.HasPrefix(key.Fingerprint, "SHA256:") || strings.TrimSpace(key.Label) == "" || len(key.Label) > 191 || strings.ContainsAny(key.PublicKey+key.Label, "\r\n\x00") {
+					return false
+				}
+				if _, duplicate := keys[key.Fingerprint]; duplicate {
+					return false
+				}
+				keys[key.Fingerprint] = struct{}{}
+			}
+		case AccessPrincipalFTPS:
+			if value.Policy != AccessPolicyFTPSReadWrite || len(value.AuthorizedKeys) != 0 || value.Credential == nil || value.Credential.Format != AccessCredentialUnixCryptHash || value.Credential.SecretID == "" || len(value.Credential.SecretID) > 128 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validAccessLogin(value string) bool {
+	if len(value) < 1 || len(value) > 32 || value[0] == '-' || value[0] == '.' {
+		return false
+	}
+	for index := range value {
+		character := value[index]
+		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+func validOptionalRelativePath(value string) bool {
+	return value == "" || validRelativePath(value)
 }
 
 func validCredentialDisposition(disposition CredentialDisposition, secretID, publicKey string) bool {

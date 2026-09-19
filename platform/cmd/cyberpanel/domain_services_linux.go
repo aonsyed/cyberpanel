@@ -701,7 +701,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		migrationProbe.certificate = value
 		return value, nil
 	}
-	migrationFactory := migrationTargetFactory(hostingCoordinator, repositories.Hosting, fileService, dnsAuthority, repositories.Migrations, migrationProbe, containerApplications, migrationSecretFactory, migrationDatabaseFactory, migrationAuxiliaryServices{git: gitService, cron: cronService, backup: backupRuntime}, migrationCertificateFactory, repositories.MailControl, mailProjector, mailClient)
+	migrationFactory := migrationTargetFactory(hostingCoordinator, repositories.Hosting, fileService, accessClient, dnsAuthority, repositories.Migrations, migrationProbe, containerApplications, migrationSecretFactory, migrationDatabaseFactory, migrationAuxiliaryServices{git: gitService, cron: cronService, backup: backupRuntime}, migrationCertificateFactory, repositories.MailControl, mailProjector, mailClient)
 	migrationRuntime, err := localmigration.New(ctx, repositories.ControlDB, repositories.Migrations, migrationFactory)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize migration runtime: %w", err)

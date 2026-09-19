@@ -284,6 +284,16 @@ func decodeCanonicalPayload(kind ImportResourceKind, payload json.RawMessage, ch
 		artifacts := append(append([]Chunk(nil), value.Certificate...), value.Chain...)
 		return canonicalPayloadShape{sourceID: value.SourceID, targetID: value.TargetID, chunks: artifacts, secrets: []string{value.PrivateKeySecretID}, secretPurposes: map[string]string{value.PrivateKeySecretID: "tls-private-key"}}, nil
 	case ImportCredential:
+		var principal AccessPrincipal
+		if err := StrictCanonicalPayload(payload, &principal); err == nil && validateAccessPrincipals([]AccessPrincipal{principal}) {
+			secrets := []string{}
+			purposes := map[string]string{}
+			if principal.Credential != nil {
+				secrets = append(secrets, principal.Credential.SecretID)
+				bindSecretPurpose(purposes, principal.Credential.SecretID, "access-credential")
+			}
+			return canonicalPayloadShape{sourceID: principal.SourceID, targetID: principal.TargetID, secrets: compactStrings(secrets), secretPurposes: purposes}, nil
+		}
 		var value AccessCredential
 		if err := StrictCanonicalPayload(payload, &value); err != nil || !validateCredentials([]AccessCredential{value}) {
 			return canonicalPayloadShape{}, ErrInvalid
@@ -342,14 +352,14 @@ func bindSecretPurpose(values map[string]string, identifier, purpose string) boo
 
 func canonicalIntentDigests(intent ImportIntent) (string, string, error) {
 	input := struct {
-		MigrationID       ID
-		Kind              ImportResourceKind
+		MigrationID        ID
+		Kind               ImportResourceKind
 		SourceID, TargetID ID
-		Disposition       ResourceDisposition
-		Payload           json.RawMessage
-		Chunks            []Chunk
-		Secrets           []string
-		Generation, Fence uint64
+		Disposition        ResourceDisposition
+		Payload            json.RawMessage
+		Chunks             []Chunk
+		Secrets            []string
+		Generation, Fence  uint64
 	}{intent.MigrationID, intent.Kind, intent.SourceID, intent.TargetID, intent.Disposition, intent.Payload, intent.Chunks, intent.SecretIDs, intent.SourceGeneration, intent.Fence}
 	raw, err := json.Marshal(input)
 	if err != nil {
@@ -496,15 +506,15 @@ func (authority *SQLCanonicalTargetAuthority) apply(ctx context.Context, intent 
 		return rejectedImportEffect(intent, "TARGET_COUNTER_CAPACITY", authority.clock().UTC()), ErrCapacity
 	}
 	resourceMaterial := struct {
-		MigrationID       ID
-		Kind              ImportResourceKind
+		MigrationID        ID
+		Kind               ImportResourceKind
 		SourceID, TargetID ID
-		Payload           json.RawMessage
-		Chunks            []Chunk
-		SecretIDs         []string
-		SourceGeneration  uint64
-		Fence             uint64
-		TargetGeneration  uint64
+		Payload            json.RawMessage
+		Chunks             []Chunk
+		SecretIDs          []string
+		SourceGeneration   uint64
+		Fence              uint64
+		TargetGeneration   uint64
 	}{intent.MigrationID, intent.Kind, intent.SourceID, intent.TargetID, intent.Payload, intent.Chunks, intent.SecretIDs, intent.SourceGeneration, intent.Fence, targetGeneration}
 	outputDigest, err := canonicalTargetDigest("canonical-resource-v1", resourceMaterial)
 	if err != nil {
@@ -607,8 +617,8 @@ func (authority *SQLCanonicalTargetAuthority) compensate(ctx context.Context, in
 	if !found {
 		now := authority.clock().UTC()
 		evidence, digestErr := canonicalTargetDigest("canonical-resource-compensation-absence-v1", struct {
-			MigrationID       ID
-			Kind              ImportResourceKind
+			MigrationID        ID
+			Kind               ImportResourceKind
 			SourceID, TargetID ID
 			EffectID           string
 			InputDigest        string

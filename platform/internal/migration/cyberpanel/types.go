@@ -22,7 +22,7 @@ var (
 
 var opaqueIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_.:@-]{2,191}$`)
 
-const CanonicalManifestSchemaDescriptor="cyberpanel-migration-manifest/v1:sites,databases,dns-zones,mail-domains,certificates,credentials,credential-dispositions,schedules,repositories,containers,backup-policies,secrets,chunks,provenance,conflicts"
+const CanonicalManifestSchemaDescriptor="cyberpanel-migration-manifest/v1:sites,databases,dns-zones,mail-domains,certificates,credentials,access-principals-v1,credential-dispositions,schedules,repositories,containers,backup-policies,secrets,chunks,provenance,conflicts"
 
 func CanonicalManifestSchemaHash()string{return digestText(CanonicalManifestSchemaDescriptor)}
 
@@ -217,10 +217,19 @@ type CertificateRecord struct {
 type CredentialRecord struct {
 	SourceID string
 	SiteSourceID string
+	TenantSourceID string
+	PrincipalSourceID string
 	Kind string
+	Policy string
+	Username string
 	Label string
 	RootRelative string
 	PublicKey string
+	UID uint32
+	GID uint32
+	AuthorizedKeys []AuthorizedPublicKey
+	CredentialFormat migration.AccessCredentialFormat
+	Enabled bool
 	Secret SecretRef
 }
 
@@ -348,7 +357,44 @@ func (s Snapshot) validate(plan SourcePlan) error {
 	}
 	seen:=map[string]struct{}{}
 	for _,certificate:=range s.Certificates{if !validSourceID(certificate.SourceID)||len(certificate.Names)==0||certificate.NotAfter.IsZero()||(certificate.CertificateArtifact!=""&&!certificate.CertificateArtifact.Valid())||(certificate.ChainArtifact!=""&&!certificate.ChainArtifact.Valid())||(certificate.PrivateKey!=""&&!certificate.PrivateKey.Valid()){return ErrInvalid};for _,name:=range certificate.Names{if !validHostname(name){return ErrInvalid}};if _,duplicate:=seen["certificate:"+certificate.SourceID];duplicate{return ErrInvalid};seen["certificate:"+certificate.SourceID]=struct{}{}}
-	for _,credential:=range s.Credentials{if !validSourceID(credential.SourceID)||!validSourceID(credential.SiteSourceID)||credential.Kind==""||credential.Label==""||filepathUnsafe(credential.RootRelative)||(credential.Secret!=""&&!credential.Secret.Valid())||(credential.Secret!=""&&strings.TrimSpace(credential.PublicKey)!=""){return ErrInvalid};if _,duplicate:=seen["credential:"+credential.SourceID];duplicate{return ErrInvalid};seen["credential:"+credential.SourceID]=struct{}{}}
+	for _, credential := range s.Credentials {
+		if !validSourceID(credential.SourceID) || !validSourceID(credential.SiteSourceID) {
+			return ErrInvalid
+		}
+		if credential.PrincipalSourceID != "" {
+			if !validSourceID(credential.TenantSourceID) || !validSourceID(credential.PrincipalSourceID) || !validAccessUsername(credential.Username) || credential.UID == 0 || credential.GID == 0 || credential.RootRelative != "" && filepathUnsafe(credential.RootRelative) {
+				return ErrInvalid
+			}
+			switch credential.Kind {
+			case "ssh":
+				if credential.Policy != "shell" && credential.Policy != "sftp_read_write" && credential.Policy != "sftp_read_only" || credential.Secret != "" || len(credential.AuthorizedKeys) == 0 {
+					return ErrInvalid
+				}
+				keys := map[string]struct{}{}
+				for _, key := range credential.AuthorizedKeys {
+					if key.Fingerprint == "" || key.PublicKey == "" || key.Label == "" {
+						return ErrInvalid
+					}
+					if _, duplicate := keys[key.Fingerprint]; duplicate {
+						return ErrInvalid
+					}
+					keys[key.Fingerprint] = struct{}{}
+				}
+			case "ftps":
+				if credential.Policy != "ftps_read_write" || len(credential.AuthorizedKeys) != 0 || !credential.Secret.Valid() || credential.CredentialFormat != migration.AccessCredentialUnixCryptHash {
+					return ErrInvalid
+				}
+			default:
+				return ErrInvalid
+			}
+		} else if credential.Kind == "" || credential.Label == "" || filepathUnsafe(credential.RootRelative) || (credential.Secret != "" && !credential.Secret.Valid()) || (credential.Secret != "" && strings.TrimSpace(credential.PublicKey) != "") {
+			return ErrInvalid
+		}
+		if _, duplicate := seen["credential:"+credential.SourceID]; duplicate {
+			return ErrInvalid
+		}
+		seen["credential:"+credential.SourceID] = struct{}{}
+	}
 	for _,schedule:=range s.Schedules{if !validSourceID(schedule.SourceID)||!validSourceID(schedule.SiteSourceID)||schedule.Kind==""||schedule.Expression==""||schedule.InvocationID==""||strings.ContainsAny(schedule.Expression,"\r\n"){return ErrInvalid};if _,duplicate:=seen["schedule:"+schedule.SourceID];duplicate{return ErrInvalid};seen["schedule:"+schedule.SourceID]=struct{}{}}
 	for _,repository:=range s.Repositories{if !validSourceID(repository.SourceID)||!validSourceID(repository.SiteSourceID)||repository.Provider==""||repository.Origin==""||strings.ContainsAny(repository.Origin,"\r\n\x00")||(repository.Credential!=""&&!repository.Credential.Valid()){return ErrInvalid};if _,duplicate:=seen["repository:"+repository.SourceID];duplicate{return ErrInvalid};seen["repository:"+repository.SourceID]=struct{}{}}
 	for _,container:=range s.Containers{if !validSourceID(container.SourceID)||!validSourceID(container.SiteSourceID)||!migration.ID(container.RecipeID).Valid()||container.RecipeVersion==""||container.DescriptorArtifact!=""||len(container.VolumeArtifacts)!=0||len(container.Volumes)!=1||len(container.Secrets)!=0||len(container.SecretBindings)!=0{return ErrInvalid};volume:=container.Volumes[0];if !containerVolumeNamePattern.MatchString(volume.SourceName)||!containerVolumeNamePattern.MatchString(volume.RecipeVolume)||!volume.Artifact.Valid(){return ErrInvalid};if _,duplicate:=seen["container:"+container.SourceID];duplicate{return ErrInvalid};seen["container:"+container.SourceID]=struct{}{}}
@@ -455,3 +501,15 @@ func validHostname(value string) bool {
 }
 
 func filepathUnsafe(value string)bool{if value==""||value=="."||strings.HasPrefix(value,"/")||strings.Contains(value,"\\")||strings.ContainsRune(value,'\x00'){return true};for _,part:=range strings.Split(value,"/"){if part==".."||part==""||part=="."{return true}};return false}
+func validAccessUsername(value string) bool {
+	if len(value) < 1 || len(value) > 32 || value[0] == '-' || value[0] == '.' {
+		return false
+	}
+	for index := range value {
+		character := value[index]
+		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.') {
+			return false
+		}
+	}
+	return true
+}

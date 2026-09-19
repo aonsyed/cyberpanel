@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aonsyed/cyberpanel/platform/internal/access"
 	"github.com/aonsyed/cyberpanel/platform/internal/certificates"
 	"github.com/aonsyed/cyberpanel/platform/internal/database"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
@@ -213,7 +214,11 @@ func (target *migrationSecretTarget) approved(ctx context.Context, id migration.
 		return manifest, scope, authority, migration.ErrBlocked
 	}
 	idHash := sha256.Sum256([]byte(manifest.TargetInstallationID + "\x00" + scope.TenantID + "\x00" + id.String() + "\x00" + envelope.SecretID))
-	authority = migrationSecretAuthority{ID: secrets.ID("migsecret_" + hex.EncodeToString(idHash[:])[:48]), Owner: owner, Purpose: purpose, Audience: audience}
+	secretID := secrets.ID("migsecret_" + hex.EncodeToString(idHash[:])[:48])
+	if envelope.Purpose == "access-credential" {
+		secretID = access.AccessSecretRecordID(envelope.SecretID)
+	}
+	authority = migrationSecretAuthority{ID: secretID, Owner: owner, Purpose: purpose, Audience: audience}
 	return manifest, scope, authority, nil
 }
 
@@ -427,6 +432,16 @@ func migrationPasswordIsHash(value []byte) bool {
 }
 
 func migrationSecretMaterial(source, purpose string, value []byte, authority migrationSecretAuthority) (migrationSecretAuthority, []byte, error) {
+	if purpose == "access-credential" {
+		if authority.Purpose != secrets.PurposeAuthentication || authority.Audience.AdapterID != access.LinuxAccessSecretAdapterID || authority.Audience.AdapterVersion != access.LinuxAccessSecretAdapterVersion || authority.Audience.ResourceKind != "migration_access_unix_hash" {
+			return authority, nil, migration.ErrBlocked
+		}
+		hash, err := access.DecodeUnixCryptHashCredential(value)
+		if err != nil {
+			return authority, nil, migration.ErrBlocked
+		}
+		return authority, hash, nil
+	}
 	if purpose == "tls-private-key" {
 		if authority.Purpose != secrets.PurposeTLSKey || authority.Audience.ResourceKind != "migration_certificate_key" || certificates.ValidateMigrationPrivateKey(value) != nil {
 			return authority, nil, migration.ErrBlocked

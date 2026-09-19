@@ -486,6 +486,13 @@ func manifestResources(manifest Manifest) ([]manifestResource, error) {
 	for _, value := range manifest.Credentials {
 		if err := appendResource(ImportCredential, value.SourceID, value, nil, compactStrings([]string{value.SecretID}), nil); err != nil { return nil, err }
 	}
+	for _, value := range manifest.AccessPrincipals {
+		secrets := []string{}
+		if value.Credential != nil {
+			secrets = append(secrets, value.Credential.SecretID)
+		}
+		if err := appendResource(ImportCredential, value.SourceID, value, nil, compactStrings(secrets), nil); err != nil { return nil, err }
+	}
 	for _, value := range manifest.Schedules {
 		if err := appendResource(ImportSchedule, value.SourceID, value, nil, nil, nil); err != nil { return nil, err }
 	}

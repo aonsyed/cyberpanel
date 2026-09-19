@@ -48,13 +48,14 @@ type migrationHostTarget struct {
 	certificate      *migrationCertificateTarget
 	mail             *migrationMailTarget
 	container        *migrationContainerTarget
+	access           *migrationAccessTarget
 	applicationProbe migration.TargetProbe
 	mu               sync.Mutex
 }
 
-func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repository, files *access.FileService, dnsClient *dns.TenantZoneAuthority, repository *migration.SQLRepository, applicationProbe migration.TargetProbe, containerApplications *containers.ApplicationService, secretsFactory func(context.Context, *sql.DB, *migration.RuntimeScopeStore) (migration.MigrationSecretGateway, error), databaseFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (migration.CanonicalImportHandler, error), auxiliaryServices migrationAuxiliaryServices, certificateFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (*migrationCertificateTarget, error), mailStore mailcontrol.SQLControlRepository, mailProjector mailcontrol.RepositorySnapshotProjector, mailRuntime *mailcontrol.MailDaemonClient) localmigration.TargetFactory {
+func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repository, files *access.FileService, accessExecutor access.MigrationPrincipalExecutor, dnsClient *dns.TenantZoneAuthority, repository *migration.SQLRepository, applicationProbe migration.TargetProbe, containerApplications *containers.ApplicationService, secretsFactory func(context.Context, *sql.DB, *migration.RuntimeScopeStore) (migration.MigrationSecretGateway, error), databaseFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (migration.CanonicalImportHandler, error), auxiliaryServices migrationAuxiliaryServices, certificateFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (*migrationCertificateTarget, error), mailStore mailcontrol.SQLControlRepository, mailProjector mailcontrol.RepositorySnapshotProjector, mailRuntime *mailcontrol.MailDaemonClient) localmigration.TargetFactory {
 	return func(ctx context.Context, db *sql.DB, chunks *migration.ChunkStore, capacity migration.TargetCapacityProvider, scopes *migration.RuntimeScopeStore) (*migration.CanonicalTargetImporter, error) {
-		if sites == nil || files == nil || files.Executor == nil || dnsClient == nil || repository == nil || applicationProbe == nil || containerApplications == nil || secretsFactory == nil || databaseFactory == nil || mailStore.DB == nil || mailProjector.Store == nil || mailRuntime == nil {
+		if sites == nil || files == nil || files.Executor == nil || accessExecutor == nil || dnsClient == nil || repository == nil || applicationProbe == nil || containerApplications == nil || secretsFactory == nil || databaseFactory == nil || mailStore.DB == nil || mailProjector.Store == nil || mailRuntime == nil {
 			return nil, migration.ErrBlocked
 		}
 		ledger, err := migration.NewSQLImportLedger(db)
@@ -98,6 +99,10 @@ func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repos
 			return nil, migration.ErrBlocked
 		}
 		target.mail, err = newMigrationMailTarget(ctx, target, chunks, mailStore, mailProjector, mailRuntime, secretTarget)
+		if err != nil {
+			return nil, err
+		}
+		target.access, err = newMigrationAccessTarget(ctx, target, accessExecutor)
 		if err != nil {
 			return nil, err
 		}
@@ -245,6 +250,10 @@ func (target *migrationHostTarget) apply(ctx context.Context, intent migration.I
 	}
 	switch intent.Kind {
 	case migration.ImportSite, migration.ImportDNSZone, migration.ImportCertificate:
+	case migration.ImportCredential:
+		if target.access == nil {
+			return migrationHostFailure(intent, fmt.Errorf("%w: access principal adapter unbound", migration.ErrBlocked))
+		}
 	case migration.ImportMailDomain:
 		if target.mail == nil {
 			return migrationHostFailure(intent, fmt.Errorf("%w: mail import adapter unbound", migration.ErrBlocked))
@@ -277,6 +286,8 @@ func (target *migrationHostTarget) apply(ctx context.Context, intent migration.I
 		effect, err = target.certificate.Apply(ctx, intent)
 	case migration.ImportMailDomain:
 		effect, err = target.mail.Apply(ctx, intent)
+	case migration.ImportCredential:
+		effect, err = target.access.Apply(ctx, intent)
 	case migration.ImportContainer:
 		effect, err = target.container.Apply(ctx, intent)
 	default:
@@ -284,6 +295,14 @@ func (target *migrationHostTarget) apply(ctx context.Context, intent migration.I
 	}
 	if err != nil {
 		return migrationHostFailure(intent, err)
+	}
+	if intent.Kind == migration.ImportCredential {
+		if effect.Status == migration.ImportEffectRejected {
+			return effect, nil
+		}
+		if effect.Status == migration.ImportEffectAmbiguous {
+			return effect, migration.ErrAmbiguous
+		}
 	}
 	if effect.Status != migration.ImportEffectApplied || effect.EvidenceDigest == "" {
 		return migrationHostFailure(intent, migration.ErrAmbiguous)
@@ -321,7 +340,7 @@ func (target *migrationHostTarget) entries(ctx context.Context, value migration.
 			return nil, migration.ErrBlocked
 		}
 		kind := migration.ImportResourceKind(mapping.SourceKind)
-		if kind != migration.ImportSite && kind != migration.ImportDNSZone && (kind != migration.ImportDatabase || target.database == nil) && (kind != migration.ImportCertificate || target.certificate == nil) && (kind != migration.ImportMailDomain || target.mail == nil) && (kind != migration.ImportContainer || target.container == nil) && (!migrationAuxiliaryKind(kind) || target.auxiliary == nil) {
+		if kind != migration.ImportSite && kind != migration.ImportDNSZone && (kind != migration.ImportDatabase || target.database == nil) && (kind != migration.ImportCertificate || target.certificate == nil) && (kind != migration.ImportMailDomain || target.mail == nil) && (kind != migration.ImportContainer || target.container == nil) && (kind != migration.ImportCredential || target.access == nil) && (!migrationAuxiliaryKind(kind) || target.auxiliary == nil) {
 			return nil, fmt.Errorf("%w: target kind %s is not bound", migration.ErrBlocked, kind)
 		}
 		if kind == migration.ImportSite {
@@ -342,7 +361,7 @@ func (target *migrationHostTarget) entries(ctx context.Context, value migration.
 		}
 		entries = append(entries, intent)
 	}
-	if siteCount != 1 || len(entries) != len(manifest.Sites)+len(manifest.Databases)+len(manifest.DNSZones)+len(manifest.MailDomains)+len(manifest.Schedules)+len(manifest.Repositories)+len(manifest.BackupPolicies)+len(manifest.Certificates)+len(manifest.Containers) {
+	if siteCount != 1 || len(entries) != len(manifest.Sites)+len(manifest.Databases)+len(manifest.DNSZones)+len(manifest.MailDomains)+len(manifest.Schedules)+len(manifest.Repositories)+len(manifest.BackupPolicies)+len(manifest.Certificates)+len(manifest.Containers)+len(manifest.AccessPrincipals) {
 		return nil, fmt.Errorf("%w: this target adapter requires one site and complete supported mappings", migration.ErrBlocked)
 	}
 	return entries, nil
@@ -358,7 +377,7 @@ func (target *migrationHostTarget) supportedManifest(ctx context.Context, value 
 	if manifest.MigrationID != value.ID || manifest.MerkleRoot != value.ManifestRoot || manifest.Validate() != nil {
 		return manifest, migration.ErrInvalid
 	}
-	if len(manifest.Sites) != 1 || len(manifest.Credentials) != 0 || len(manifest.MailDomains) > 0 && target.mail == nil || len(manifest.Containers) > 1 || len(manifest.Containers) > 0 && target.container == nil {
+	if len(manifest.Sites) != 1 || len(manifest.Credentials) != 0 || len(manifest.MailDomains) > 0 && target.mail == nil || len(manifest.Containers) > 1 || len(manifest.Containers) > 0 && target.container == nil || len(manifest.AccessPrincipals) > 0 && target.access == nil {
 		return manifest, fmt.Errorf("%w: credential principal authority, mail handler, or protected container ingress unavailable", migration.ErrBlocked)
 	}
 	linked := manifest.Sites[0].ContainerApplicationIDs
@@ -453,6 +472,18 @@ func (target *migrationHostTarget) unchangedDelta(ctx context.Context, scope mig
 		generation = observed.TargetGeneration
 		bytes = observed.BytesWritten
 		objects = observed.ObjectsWritten
+	case migration.ImportCredential:
+		if target.access == nil {
+			return migrationHostFailure(intent, migration.ErrBlocked)
+		}
+		var observed migration.ImportEffect
+		observed, err = target.access.Observe(ctx, prior)
+		if observed.Status != migration.ImportEffectApplied {
+			err = errors.Join(migration.ErrBlocked, err)
+		}
+		proof = observed.EvidenceDigest
+		generation = observed.TargetGeneration
+		objects = observed.ObjectsWritten
 	case migration.ImportContainer:
 		if target.container == nil {
 			return migrationHostFailure(intent, migration.ErrBlocked)
@@ -513,7 +544,12 @@ func (target *migrationHostTarget) VerifyDark(ctx context.Context, value migrati
 	if err != nil {
 		return migration.Verification{}, err
 	}
-	evidence := []string{migrationHostDigest(struct{ Root, AbsentDomains string }{value.ManifestRoot, "access_credentials"})}
+	evidence := []string{migrationHostDigest(struct{ Root, AbsentDomains string }{value.ManifestRoot, "legacy_access_credentials"})}
+	accessProofs, err := target.access.proofs(ctx, entries, false)
+	if err != nil {
+		return migration.Verification{}, err
+	}
+	evidence = append(evidence, accessProofs...)
 	auxiliary, err := target.auxiliaryProofs(ctx, entries, false)
 	if err != nil {
 		return migration.Verification{}, err
@@ -641,6 +677,16 @@ func (target *migrationHostTarget) CompensateCanonicalImport(ctx context.Context
 	}
 	if state == "active" {
 		return migrationHostFailure(intent, migration.ErrWriteFrontier)
+	}
+	if intent.Kind == migration.ImportCredential {
+		if target.access == nil {
+			return migrationHostFailure(intent, migration.ErrBlocked)
+		}
+		compensated, cleanupErr := target.access.Compensate(ctx, intent)
+		if cleanupErr != nil || compensated.Status != migration.ImportEffectCompensated || compensated.EvidenceDigest == "" {
+			return migrationHostFailure(intent, errors.Join(migration.ErrAmbiguous, cleanupErr))
+		}
+		return target.saveCompensation(ctx, intent, compensated)
 	}
 	if intent.Kind == migration.ImportCertificate {
 		origin, loadErr := target.auxiliaryOrigin(ctx, intent)

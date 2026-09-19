@@ -15,8 +15,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/migration"
@@ -44,6 +46,81 @@ func(s *HostSource)Collect(ctx context.Context,request CollectRequest)(Snapshot,
 
 type HostSupplementalConfig struct { Artifacts *MaterializedCatalog; HomeRoot,CertificateRoot,DKIMRoot,CronRoot,DebianCronRoot string; Clock func()time.Time }
 type HostSupplemental struct { artifacts *MaterializedCatalog; homeRoot,certificateRoot,dkimRoot,cronRoot,debianCronRoot string; clock func()time.Time; mu sync.RWMutex; secrets map[SecretRef][]byte }
+
+type localLoginAccount struct {
+	Username string
+	UID      uint32
+	GID      uint32
+	Home     string
+	Shell    string
+	Locked   bool
+}
+
+func localLoginAccounts(ctx context.Context) (map[string]localLoginAccount, error) {
+	passwd, err := readStableRegular(ctx, "/etc/passwd", 8<<20)
+	if err != nil {
+		return nil, err
+	}
+	shadow, err := readStableRegular(ctx, "/etc/shadow", 8<<20)
+	if err != nil {
+		return nil, err
+	}
+	defer wipe(shadow)
+	shadowConfirmation, err := readStableRegular(ctx, "/etc/shadow", 8<<20)
+	if err != nil {
+		return nil, err
+	}
+	defer wipe(shadowConfirmation)
+	confirmation, err := readStableRegular(ctx, "/etc/passwd", 8<<20)
+	if err != nil || !bytes.Equal(passwd, confirmation) || !bytes.Equal(shadow, shadowConfirmation) {
+		return nil, errors.Join(err, ErrChanged)
+	}
+	locks := map[string]bool{}
+	scanner := bufio.NewScanner(bytes.NewReader(shadow))
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	for scanner.Scan() {
+		fields := strings.Split(scanner.Text(), ":")
+		if len(fields) < 2 || fields[0] == "" {
+			return nil, ErrInvalid
+		}
+		if _, duplicate := locks[fields[0]]; duplicate {
+			return nil, ErrInvalid
+		}
+		locks[fields[0]] = strings.HasPrefix(fields[1], "!") || strings.HasPrefix(fields[1], "*")
+	}
+	if err = scanner.Err(); err != nil {
+		return nil, err
+	}
+	accounts := map[string]localLoginAccount{}
+	scanner = bufio.NewScanner(bytes.NewReader(passwd))
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	for scanner.Scan() {
+		fields := strings.Split(scanner.Text(), ":")
+		if len(fields) != 7 || fields[0] == "" {
+			return nil, ErrInvalid
+		}
+		uid, uidErr := strconv.ParseUint(fields[2], 10, 32)
+		gid, gidErr := strconv.ParseUint(fields[3], 10, 32)
+		locked, hasShadow := locks[fields[0]]
+		if uidErr != nil || gidErr != nil || !hasShadow {
+			return nil, ErrInvalid
+		}
+		if _, duplicate := accounts[fields[0]]; duplicate {
+			return nil, ErrInvalid
+		}
+		accounts[fields[0]] = localLoginAccount{Username: fields[0], UID: uint32(uid), GID: uint32(gid), Home: fields[5], Shell: fields[6], Locked: locked}
+	}
+	if err = scanner.Err(); err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
+func loginShellEnabled(shell string) bool {
+	shell = strings.TrimSpace(shell)
+	return shell != "" && shell != "/usr/sbin/nologin" && shell != "/sbin/nologin" && shell != "/bin/false" && shell != "/usr/bin/false"
+}
+
 func NewHostSupplemental(config HostSupplementalConfig)(*HostSupplemental,error){if config.Artifacts==nil||!secureRootPath(config.HomeRoot)||!secureRootPath(config.CertificateRoot)||!secureRootPath(config.DKIMRoot)||!secureRootPath(config.CronRoot)||!secureRootPath(config.DebianCronRoot){return nil,ErrInvalid};if config.Clock==nil{config.Clock=time.Now};return &HostSupplemental{artifacts:config.Artifacts,homeRoot:config.HomeRoot,certificateRoot:config.CertificateRoot,dkimRoot:config.DKIMRoot,cronRoot:config.CronRoot,debianCronRoot:config.DebianCronRoot,clock:config.Clock,secrets:map[SecretRef][]byte{}},nil}
 func(s *HostSupplemental)Close()error{if s==nil{return nil};s.mu.Lock();defer s.mu.Unlock();for ref,value:=range s.secrets{wipe(value);delete(s.secrets,ref)};return nil}
 
@@ -81,7 +158,76 @@ func(s *HostSupplemental)CollectCertificates(ctx context.Context,sites []SiteRec
 	return values,nil
 }
 
-func(s *HostSupplemental)CollectCredentials(ctx context.Context,sites []SiteRecord,existing []CredentialRecord)([]CredentialRecord,error){if s==nil||ctx==nil{return nil,ErrInvalid};values:=append([]CredentialRecord(nil),existing...);for _,site:=range sites{if site.ParentSourceID!=""{continue};home,err:=fixedJoin(s.homeRoot,site.PrimaryHostname);if err!=nil{return nil,err};home,err=existingDirectoryWithin(s.homeRoot,home);if errors.Is(err,os.ErrNotExist){continue};if err!=nil{return nil,err};path,err:=fixedJoin(home,".ssh","authorized_keys");if err!=nil{return nil,err};raw,readErr:=readStableRegularFollowing(ctx,path,home,8<<20);if errors.Is(readErr,os.ErrNotExist){continue};if readErr!=nil{return nil,readErr};keys,err:=ParseAuthorizedKeys(raw);if err!=nil{return nil,err};for _,key:=range keys{label:=key.Label;if label==""{label=firstNonEmptyString(site.RuntimeUser,key.Fingerprint[:16])};values=append(values,CredentialRecord{SourceID:"ssh-key:"+safeOpaqueID(site.SourceID)+":"+key.Fingerprint[:32],SiteSourceID:site.SourceID,Kind:"ssh-public-key",Label:label,RootRelative:site.DocumentRootRelative,PublicKey:key.PublicKey})}};return values,nil}
+func (s *HostSupplemental) CollectCredentials(ctx context.Context, sites []SiteRecord, existing []CredentialRecord) ([]CredentialRecord, error) {
+	if s == nil || ctx == nil {
+		return nil, ErrInvalid
+	}
+	values := append([]CredentialRecord(nil), existing...)
+	usernames := map[string]struct{}{}
+	for _, value := range values {
+		if value.Username == "" {
+			continue
+		}
+		name := strings.ToLower(value.Username)
+		if _, duplicate := usernames[name]; duplicate {
+			return nil, ErrInvalid
+		}
+		usernames[name] = struct{}{}
+	}
+	accounts, err := localLoginAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, site := range sites {
+		if site.ParentSourceID != "" || site.RuntimeUser == "" {
+			continue
+		}
+		home, err := fixedJoin(s.homeRoot, site.PrimaryHostname)
+		if err != nil {
+			return nil, err
+		}
+		home, err = existingDirectoryWithin(s.homeRoot, home)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		account, present := accounts[site.RuntimeUser]
+		if !present || account.UID == 0 || account.GID == 0 || filepath.Clean(account.Home) != home {
+			return nil, ErrChanged
+		}
+		if err := validateOwnedDirectory(home, account.UID, account.GID); err != nil {
+			return nil, err
+		}
+		path, err := fixedJoin(home, ".ssh", "authorized_keys")
+		if err != nil {
+			return nil, err
+		}
+		raw, readErr := readStableAuthorizedKeys(ctx, path, home, account.UID, account.GID, 8<<20)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+		keys, err := ParseAuthorizedKeys(raw)
+		if err != nil {
+			return nil, err
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		name := strings.ToLower(site.RuntimeUser)
+		if _, duplicate := usernames[name]; duplicate {
+			return nil, ErrInvalid
+		}
+		usernames[name] = struct{}{}
+		sourceID := "ssh-principal:" + safeOpaqueID(site.SourceID) + ":" + safeOpaqueID(site.RuntimeUser)
+		values = append(values, CredentialRecord{SourceID: sourceID, SiteSourceID: site.SourceID, TenantSourceID: site.OwnerSourceID, PrincipalSourceID: sourceID, Kind: "ssh", Policy: "shell", Username: site.RuntimeUser, UID: account.UID, GID: account.GID, AuthorizedKeys: keys, Enabled: site.Enabled && !account.Locked && loginShellEnabled(account.Shell)})
+	}
+	return values, nil
+}
 
 func(s *HostSupplemental)CollectSchedules(ctx context.Context,sites []SiteRecord)([]ScheduleRecord,error){if s==nil||ctx==nil{return nil,ErrInvalid};values:=[]ScheduleRecord{};for _,site:=range sites{if site.RuntimeUser==""{continue};path,err:=fixedJoin(s.cronRoot,site.RuntimeUser);if err!=nil{return nil,err};raw,readErr:=readStableRegular(ctx,path,8<<20);if errors.Is(readErr,os.ErrNotExist){path,err=fixedJoin(s.debianCronRoot,site.RuntimeUser);if err!=nil{return nil,err};raw,readErr=readStableRegular(ctx,path,8<<20)};if errors.Is(readErr,os.ErrNotExist){continue};if readErr!=nil{return nil,readErr};scanner:=bufio.NewScanner(bytes.NewReader(raw));scanner.Buffer(make([]byte,4096),1<<20);counter:=0;timezone:="source-local";for scanner.Scan(){line:=strings.TrimSpace(scanner.Text());if line==""||strings.HasPrefix(line,"#"){continue};if value,present:=cronEnvironmentValue(line,"CRON_TZ");present{timezone=value;continue};if cronEnvironment(line){continue};expression,command,present,parseErr:=ParseLegacyCronEntry(line);if parseErr!=nil{return nil,parseErr};if !present{continue};sum:=sha256.Sum256([]byte(command));counter++;values=append(values,ScheduleRecord{SourceID:"cron:"+safeOpaqueID(site.SourceID)+":"+hex.EncodeToString(sum[:8])+":"+safeCounter(counter),SiteSourceID:site.SourceID,Kind:"legacy-command",Expression:expression,Timezone:timezone,InvocationID:"legacy_invocation_"+hex.EncodeToString(sum[:16]),Enabled:true})};if err:=scanner.Err();err!=nil{return nil,err}};return values,nil}
 
@@ -153,6 +299,81 @@ func siteContentRoot(homeRoot string,site SiteRecord,hostnames map[string]string
 func fixedJoin(root string,segments ...string)(string,error){if !secureRootPath(root){return "",ErrInvalid};value:=root;for _,segment:=range segments{if segment==""||segment=="."||segment==".."||strings.ContainsAny(segment,"/\\\x00"){return "",ErrInvalid};value=filepath.Join(value,segment)};relative,err:=filepath.Rel(root,value);if err!=nil||relative==".."||strings.HasPrefix(relative,".."+string(filepath.Separator)){return "",ErrDenied};return value,nil}
 func secureRootPath(value string)bool{return value!=""&&filepath.IsAbs(value)&&filepath.Clean(value)==value}
 func existingDirectoryWithin(approvedRoot,path string)(string,error){if !secureRootPath(approvedRoot)||!secureRootPath(path){return "",ErrInvalid};resolvedRoot,err:=filepath.EvalSymlinks(approvedRoot);if err!=nil{return "",err};resolvedPath,err:=filepath.EvalSymlinks(path);if err!=nil{return "",err};relative,err:=filepath.Rel(resolvedRoot,resolvedPath);if err!=nil||relative==".."||strings.HasPrefix(relative,".."+string(filepath.Separator)){return "",ErrDenied};info,err:=os.Stat(resolvedPath);if err!=nil{return "",err};if !info.IsDir(){return "",ErrDenied};return filepath.Clean(resolvedPath),nil}
+func validateOwnedDirectory(path string, uid, gid uint32) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || stat.Uid != uid || stat.Gid != gid || info.Mode().Perm()&0022 != 0 {
+		return ErrDenied
+	}
+	return nil
+}
+func readStableAuthorizedKeys(ctx context.Context, path, allowedRoot string, uid, gid uint32, limit int64) ([]byte, error) {
+	if ctx == nil || !secureRootPath(path) || !secureRootPath(allowedRoot) || limit < 1 {
+		return nil, ErrInvalid
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(allowedRoot)
+	if err != nil {
+		return nil, err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, ErrDenied
+	}
+	original, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	originalParent, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	parent, err := os.Stat(filepath.Dir(resolvedPath))
+	if err != nil {
+		return nil, err
+	}
+	parentStat, parentOK := parent.Sys().(*syscall.Stat_t)
+	if !parentOK || !originalParent.IsDir() || !parent.IsDir() || !os.SameFile(originalParent, parent) || parentStat.Uid != uid || parentStat.Gid != gid || parent.Mode().Perm()&0022 != 0 {
+		return nil, ErrDenied
+	}
+	before, err := os.Stat(resolvedPath)
+	if err != nil || !original.Mode().IsRegular() || !os.SameFile(original, before) || before.Size() < 0 || before.Size() > limit {
+		return nil, errors.Join(err, ErrDenied)
+	}
+	beforeStat, ok := before.Sys().(*syscall.Stat_t)
+	if !ok || beforeStat.Uid != uid || beforeStat.Gid != gid || beforeStat.Nlink != 1 || before.Mode().Perm()&0022 != 0 {
+		return nil, ErrDenied
+	}
+	file, err := os.Open(resolvedPath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !sameFileState(before, opened) {
+		return nil, errors.Join(err, ErrChanged)
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || int64(len(raw)) != opened.Size() {
+		return nil, errors.Join(err, ErrChanged)
+	}
+	final, err := file.Stat()
+	if err != nil || !sameFileState(opened, final) {
+		return nil, errors.Join(err, ErrChanged)
+	}
+	return raw, nil
+}
 func mailboxLocalPart(address,domain string)(string,bool){suffix:="@"+strings.ToLower(domain);address=strings.ToLower(address);if !strings.HasSuffix(address,suffix){return "",false};local:=strings.TrimSuffix(address,suffix);return local,validSafeToken(local)}
 func validSafeToken(value string)bool{if len(value)<1||len(value)>191{return false};for _,character:=range value{if(character<'a'||character>'z')&&(character<'A'||character>'Z')&&(character<'0'||character>'9')&&character!='.'&&character!='@'&&character!='-'&&character!='_'{return false}};return !strings.Contains(value,"..")}
 func safeOpaqueID(value string)string{canonical:=strings.TrimSpace(value);normalized:=strings.ToLower(canonical);var output strings.Builder;for _,character:=range normalized{if(character>='a'&&character<='z')||(character>='0'&&character<='9')||character=='.'||character=='-'||character=='_'{output.WriteRune(character)}else{output.WriteByte('-')}};slug:=strings.Trim(output.String(),"-.");if len(slug)>48{slug=slug[:48]};if len(slug)<3{slug="id"};sum:=sha256.Sum256([]byte(canonical));return slug+"-"+hex.EncodeToString(sum[:16])}

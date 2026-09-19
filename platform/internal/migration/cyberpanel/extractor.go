@@ -288,6 +288,7 @@ func (e *Extractor) manifest(plan SourcePlan, snapshot Snapshot, descriptors map
 			if runtimeKind == "" { runtimeKind = "php_lsapi" }
 			site := migration.Site{
 				SourceID: mappedID("site", value.SourceID),
+				TenantID: mappedID("tenant", siteTenantSourceID(snapshot.Sites, value.SourceID)),
 				PrimaryHostname: normalizeHostname(value.PrimaryHostname),
 				Aliases: normalizedHostnames(value.Aliases),
 				Redirects: append([]string(nil), value.Redirects...),
@@ -352,6 +353,30 @@ func (e *Extractor) manifest(plan SourcePlan, snapshot Snapshot, descriptors map
 	}
 	if plan.Selection.Credentials {
 		for _, value := range snapshot.Credentials {
+			if value.PrincipalSourceID != "" {
+				principal := migration.AccessPrincipal{
+					SourceID: mappedID("cred", value.SourceID),
+					PrincipalID: mappedID("principal", value.TenantSourceID+"\x00"+value.SiteSourceID+"\x00"+value.PrincipalSourceID),
+					TenantID: mappedID("tenant", value.TenantSourceID),
+					SiteID: mappedID("site", value.SiteSourceID),
+					Kind: migration.AccessPrincipalKind(value.Kind),
+					Policy: migration.AccessPrincipalPolicy(value.Policy),
+					Username: value.Username,
+					HomeRelative: value.RootRelative,
+					UID: value.UID,
+					GID: value.GID,
+					Enabled: value.Enabled,
+					Provenance: provenance("access-principal", value.SourceID),
+				}
+				for _, key := range value.AuthorizedKeys {
+					principal.AuthorizedKeys = append(principal.AuthorizedKeys, migration.AccessAuthorizedKey{KeyID: mappedID("sshkey", value.PrincipalSourceID+"\x00"+key.Fingerprint), Algorithm: key.Algorithm, PublicKey: key.PublicKey, Fingerprint: key.Fingerprint, Label: key.Label})
+				}
+				if value.Secret != "" {
+					principal.Credential = &migration.AccessCredentialReference{SecretID: secretIDs[value.Secret], Format: value.CredentialFormat}
+				}
+				manifest.AccessPrincipals = append(manifest.AccessPrincipals, principal)
+				continue
+			}
 			secretID:=secretIDs[value.Secret]
 			disposition:=migration.CredentialResetRequired
 			if secretID!=""{disposition=migration.CredentialPreserved}else if strings.TrimSpace(value.PublicKey)!=""{disposition=migration.CredentialPublicOnly}
@@ -378,6 +403,18 @@ func (e *Extractor) manifest(plan SourcePlan, snapshot Snapshot, descriptors map
 		for _, value := range snapshot.BackupPolicies { manifest.BackupPolicies = append(manifest.BackupPolicies, migration.BackupPolicy{SourceID: mappedID("backup", value.SourceID), SiteID: mappedID("site", value.SiteSourceID), Schedule: value.Schedule, Retention: value.Retention, Provider: value.Provider, Repository: value.Repository, CredentialSecretID: secretIDs[value.Credential], Provenance: provenance("backup-policy", value.SourceID)}) }
 	}
 	return manifest, nil
+}
+
+func siteTenantSourceID(sites []SiteRecord, sourceID string) string {
+	byID := make(map[string]SiteRecord, len(sites))
+	for _, site := range sites {
+		byID[site.SourceID] = site
+	}
+	current := byID[sourceID]
+	for current.OwnerSourceID == "" && current.ParentSourceID != "" {
+		current = byID[current.ParentSourceID]
+	}
+	return current.OwnerSourceID
 }
 
 func sourceGeneration(snapshot Snapshot, descriptors map[ArtifactID]migration.Chunk,secretDigests map[SecretRef]string) (uint64, error) {
@@ -422,7 +459,7 @@ func audienceDigest(plan SourcePlan, material SecretMaterial) string {
 	return digestText(plan.MigrationID.String()+"\x00"+plan.TargetInstallationID+"\x00"+material.Purpose+"\x00"+string(material.Ref))
 }
 
-func resettableCredentialPurpose(purpose string)bool{return purpose=="database-principal"||purpose=="mailbox-credential"||purpose=="access-credential"}
+func resettableCredentialPurpose(purpose string)bool{return purpose=="database-principal"||purpose=="mailbox-credential"}
 
 func digestText(value string) string {
 	sum := sha256.Sum256([]byte(value))

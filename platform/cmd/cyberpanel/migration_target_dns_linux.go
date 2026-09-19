@@ -216,6 +216,11 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 				}
 			}
 		}
+		if state == "activating" && target.access != nil {
+			if _, activateErr := target.access.Activate(ctx, value, plan, entries, true); activateErr != nil {
+				return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, activateErr)
+			}
+		}
 		if state != "active" {
 			return migration.ActivationReceipt{}, migration.ErrAmbiguous
 		}
@@ -248,7 +253,7 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 		case migration.ImportContainer:
 			return migration.ActivationReceipt{}, fmt.Errorf("%w: exact tenant-owned container route binding and staged workload activation transaction are unbound", migration.ErrBlocked)
 		default:
-			if !migrationAuxiliaryKind(intent.Kind) && intent.Kind != migration.ImportCertificate && intent.Kind != migration.ImportMailDomain {
+			if !migrationAuxiliaryKind(intent.Kind) && intent.Kind != migration.ImportCertificate && intent.Kind != migration.ImportMailDomain && intent.Kind != migration.ImportCredential {
 				return migration.ActivationReceipt{}, migration.ErrBlocked
 			}
 		}
@@ -262,11 +267,22 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 	if _, err = target.mailProofs(ctx, entries, false); err != nil {
 		return migration.ActivationReceipt{}, err
 	}
+	if _, err = target.access.proofs(ctx, entries, false); err != nil {
+		return migration.ActivationReceipt{}, err
+	}
+	if _, err = target.access.Activate(ctx, value, plan, entries, false); err != nil {
+		return migration.ActivationReceipt{}, err
+	}
 	if _, err = target.db.ExecContext(ctx, `INSERT INTO panel_migration_host_activations(migration_id,plan_digest,fence,state,receipt_json) VALUES(?,?,?,'activating','{}')`, value.ID.String(), plan.DryRunDigest, value.Fence); err != nil {
 		return migration.ActivationReceipt{}, err
 	}
 	routing := []string{}
 	dnsProofs := []string{}
+	accessProof, accessErr := target.access.Activate(ctx, value, plan, entries, true)
+	if accessErr != nil {
+		return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, accessErr)
+	}
+	routing = append(routing, accessProof)
 	for _, intent := range entries {
 		if intent.Kind != migration.ImportMailDomain {
 			continue
@@ -427,7 +443,12 @@ func (target *migrationHostTarget) VerifyActive(ctx context.Context, value migra
 		return migration.Verification{}, err
 	}
 	proofs = append(proofs, mailProofs...)
-	proofs = append(proofs, migrationHostDigest(struct{ Root, AbsentDomains string }{value.ManifestRoot, "access_credentials,containers"}))
+	accessProofs, err := target.access.proofs(ctx, entries, true)
+	if err != nil {
+		return migration.Verification{}, err
+	}
+	proofs = append(proofs, accessProofs...)
+	proofs = append(proofs, migrationHostDigest(struct{ Root, AbsentDomains string }{value.ManifestRoot, "legacy_access_credentials,containers"}))
 	verification := migration.Verification{HTTP: true, Files: true, Database: true, DNS: true, Mail: true, Cron: true, Containers: true, Backups: true, EvidenceDigest: migrationHostDigest(proofs), ObservedAt: time.Now().UTC()}
 	if target.applicationProbe == nil {
 		return verification, migration.ErrBlocked

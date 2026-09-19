@@ -110,6 +110,9 @@ func migrationCertificateResource(mid, target migration.ID) string {
 }
 
 func (target *migrationSecretTarget) resourceAudience(ctx context.Context, manifest migration.Manifest, plan migration.Plan, scope migration.RuntimeScope, envelope migration.SecretEnvelope) (secrets.ID, secrets.Purpose, secrets.AudienceBinding, error) {
+	if envelope.Purpose == "access-credential" {
+		return target.accessAudience(ctx, manifest, plan, scope, envelope)
+	}
 	if envelope.Purpose == "mailbox-credential" || envelope.Purpose == "mail-dkim-private-key" {
 		return target.mailAudience(ctx, manifest, plan, scope, envelope)
 	}

@@ -179,6 +179,9 @@ func normalizeManifest(manifest *Manifest) {
 	sort.Slice(manifest.MailDomains, func(i, j int) bool { return manifest.MailDomains[i].SourceID < manifest.MailDomains[j].SourceID })
 	sort.Slice(manifest.Certificates, func(i, j int) bool { return manifest.Certificates[i].SourceID < manifest.Certificates[j].SourceID })
 	sort.Slice(manifest.Credentials, func(i, j int) bool { return manifest.Credentials[i].SourceID < manifest.Credentials[j].SourceID })
+	sort.Slice(manifest.AccessPrincipals, func(i, j int) bool {
+		return manifest.AccessPrincipals[i].SourceID < manifest.AccessPrincipals[j].SourceID
+	})
 	sort.Slice(manifest.Schedules, func(i, j int) bool { return manifest.Schedules[i].SourceID < manifest.Schedules[j].SourceID })
 	sort.Slice(manifest.Repositories, func(i, j int) bool { return manifest.Repositories[i].SourceID < manifest.Repositories[j].SourceID })
 	sort.Slice(manifest.Containers, func(i, j int) bool { return manifest.Containers[i].SourceID < manifest.Containers[j].SourceID })
@@ -193,7 +196,9 @@ func normalizeManifest(manifest *Manifest) {
 		sort.Strings(manifest.Sites[index].Aliases)
 		sort.Strings(manifest.Sites[index].Redirects)
 		sort.Strings(manifest.Sites[index].Children)
-		sort.Slice(manifest.Sites[index].Content, func(i, j int) bool { return manifest.Sites[index].Content[i].Digest < manifest.Sites[index].Content[j].Digest })
+		sort.Slice(manifest.Sites[index].Content, func(i, j int) bool {
+			return manifest.Sites[index].Content[i].Digest < manifest.Sites[index].Content[j].Digest
+		})
 	}
 }
 
@@ -202,7 +207,7 @@ func manifestSignatureMessage(schemaHash, root, targetInstallation, sourceInstal
 }
 
 func resourceCount(manifest Manifest) int {
-	count := len(manifest.Sites) + len(manifest.Databases) + len(manifest.DNSZones) + len(manifest.MailDomains) + len(manifest.Certificates) + len(manifest.Credentials) + len(manifest.Schedules) + len(manifest.Repositories) + len(manifest.Containers) + len(manifest.BackupPolicies)
+	count := len(manifest.Sites) + len(manifest.Databases) + len(manifest.DNSZones) + len(manifest.MailDomains) + len(manifest.Certificates) + len(manifest.Credentials) + len(manifest.AccessPrincipals) + len(manifest.Schedules) + len(manifest.Repositories) + len(manifest.Containers) + len(manifest.BackupPolicies)
 	for _, domain := range manifest.MailDomains {
 		count += len(domain.Mailboxes)
 	}
