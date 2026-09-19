@@ -22,6 +22,84 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Results
 
+### Application database provisioning replay — installed broker verified in QEMU
+
+`TestQEMULiveApplicationDatabaseProvisionReplay` now exercises the current
+provisioner against the installed Ubuntu ARM64 QEMU management socket and
+encrypted secret store, with a real temporary SQLite database repository.
+Database command effects are controlled in this test; this is not an additional
+MariaDB end-to-end claim. Before the fix, the first provision succeeded and
+enrolled both audience-bound credentials. The identical second call failed
+with `secrets: conflict` before database commands: the provisioner generated
+fresh random material on each invocation, whereas `PutExact` correctly required
+the original material. Both fixture credentials are revoked on test exit using
+captured metadata only, without reading stored plaintext.
+
+Reproduction (inside QEMU, as an authorized management peer):
+`CYBERPANEL_QEMU_LIVE_APP_DATABASE=1 go test ./internal/apps -run TestQEMULiveApplicationDatabaseProvisionReplay -count=1 -v`.
+The provisioner now calls the broker's write-only `ProvisionPasswordPair`.
+The broker generates one random password, independently encrypts it for the two
+existing consumer/tenant bindings, and commits both envelopes plus immutable
+pair intent in one SQLite transaction. Exact retries return the original
+metadata; they cannot rotate, rebind, adopt unrelated existing secrets, or
+resurrect a revoked member. No plaintext or password-derived digest is stored
+in the pairing table or returned in management responses. `PutExact` is unchanged.
+
+The regression passes with `CYBERPANEL_QEMU_APP_DATABASE_ISOLATED=1`, which
+starts the current real management server over a private Unix socket in QEMU,
+using its real UID peer authorizer, FileKEK and encrypted SQLite store. It
+injects loss of the first successful response and proves replay proceeds with
+the same pair before database commands. After the signed sequence-11 upgrade
+below, the default installed-socket mode also passes against the running
+`panel-secretd.service`, without the isolated-server override.
+
+`TestPasswordPairAtomicReplay` also passes in QEMU: a forced failure inserting
+the second envelope leaves zero pair/head/record rows; both encrypted records
+contain the same generated password; concurrent replay after SQLite reopen
+preserves both ciphertexts; malformed requests, altered owners/IDs/adapters/
+release bindings, unrelated pre-enrolled secrets and revoked members are
+rejected. The secrets/apps package suites and panel-secretd/core builds pass
+on the current Ubuntu ARM64 source snapshot. No other OS/architecture or
+installed full-stack claim is made for this change.
+
+The broker primitive is committed in `a051bccab`; the independently isolated
+application call-site and configuration-secret failure cleanup are committed
+in `04bb4fd`. The latter's exact staged source (without unfinished external
+placement) passed the real-socket lost-response regression, the apps package
+suite, and core/broker builds in QEMU at
+`/home/harness/pair-commit.DLhDvE/platform`. Pending placement edits were
+preserved in the working tree rather than included in that commit.
+
+The installed component fixture is now `qemu-provider-3.1.10`, sequence 11.
+Only its broker binary changed; the existing auth/provider binaries and all
+service units were retained. A new, disposable QEMU signing authority
+`qemu-password-pair-20260919` was explicitly provisioned with sequence range
+11–20 and seven-day validity. The original authority and retained releases
+remain present for recovery. Before provisioning that trust record, the new
+bundle was rejected as untrusted. After normal installation committed, the old
+sequence-10 bundle was rejected by the sequence/source frontier; the frontier
+remained 11 and the broker remained active. No journal or frontier was edited.
+
+- Manifest: `076578f9d015aa2b064211f23d7f0a52a5ad04ee03331f7307fee9b4372bc366`.
+- Bundle: `259c1ef7a6e14083cee4a6d1250066150716fd0db7fe8bcc9356d1f52f01341e`.
+- Installed broker/build SHA256: `75595097c10e40d525f3ebf144428e91f6cc051a680a3c7d5ee786c388672e45`.
+- Installed-broker checks passed: application database provisioning replay,
+  application secret issuance/replay/binding/revocation, and secret management
+  enrollment/rotation/revocation. Fixture credentials were revoked on exit.
+- `panel-secretd` is active/running, UID `cyberpanel-secrets`, empty capability
+  bounding set, zero restarts. Auth and provider services are also active.
+
+The guest-only fixture is under `/home/harness/password-pair-release-20260919`;
+its signing seed never left QEMU. This is still a three-daemon component
+qualification, **not** installation of the complete panel or verification of
+material delivery to other process UIDs. The pending privilege-design choice
+and full hosting/application lifecycles remain unresolved. No downloads were
+needed for this upgrade.
+
+The same working-tree snapshot passed the focused install-secret-failure and
+compensation tests in QEMU (cleanup success/failure, canceled request, and
+journal failures). Those checks are separate from the broker replay regression.
+
 ### Application secret management through the installed broker
 
 `TestQEMULiveApplicationSecretLease` uses the real installed management socket,
@@ -116,6 +194,20 @@ inventory showed zero `cp_qemu_` databases or users. External TLS, the installed
 execd broker endpoint, and other OS/architecture combinations remain unqualified.
 
 ### External application database qualification gap
+
+The WordPress integration point has been checked against primary documentation:
+[`wpdb::db_connect`](https://developer.wordpress.org/reference/classes/wpdb/db_connect/)
+uses client flags but does not set the selected instance's pinned CA before
+connecting. PHP's [`mysqli::ssl_set`](https://www.php.net/manual/en/mysqli.ssl-set.php)
+must be applied before connection, and WordPress's
+[`require_wp_db`](https://developer.wordpress.org/reference/functions/require_wp_db/)
+supports a managed `db.php` replacement. A flags-only change is insufficient.
+The remaining implementation must preserve WordPress connection initialization
+and reconnection behavior, fail rather than overwrite an unrelated database
+drop-in, and verify real WordPress queries against trusted/untrusted endpoints.
+For mutual TLS, a tenant application must receive its own client identity, not
+the external instance administrator's private key. These are implementation
+requirements, not claims that this application integration exists yet.
 
 Source inspection of the unfinished placement changes found that the selected
 instance reaches install/clone requests and the provisioner, but does not yet
@@ -429,8 +521,9 @@ A user choice is pending for material-consumer verification: constrained root
 broker (permitted by the design) versus a separate privileged inspection helper
 while retaining the dedicated key UID. No extra privilege, new helper or weakened
 material verification has been implemented pending that decision. The disposable
-test signing key's admitted sequence range ends at 10; further test releases
-will need explicit test-authority provisioning, not disabled frontier checks.
+original test signing key's admitted sequence range ends at 10. The later
+sequence-11 upgrade documented above explicitly provisions a separate bounded
+test authority; frontier checks remain enabled.
 
 ### Remaining product gates
 
