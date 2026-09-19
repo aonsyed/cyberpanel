@@ -768,6 +768,32 @@ func safeMailToken(value string) bool {
 	}
 	return true
 }
+func validateWebmailSession(session mail.MailSession) error {
+	if !safeMailOpaque(session.ID) || len(session.Token) < 64 || len(session.Token) > 4096 || !safeMailToken(session.Token) || session.ExpiresAt.IsZero() || session.ExpiresAt.Before(time.Now().Add(-time.Minute)) || session.ExpiresAt.After(time.Now().Add(31*time.Minute)) {
+		return invalid("mail session")
+	}
+	return nil
+}
+func validOptionalMailbox(value mail.MailboxID) bool {
+	return value == "" || safeMailOpaque(string(value))
+}
+func mailSession(inv Invocation, session mail.MailSession) mail.MailSession {
+	session.TenantID = inv.Request.TenantID
+	session.PrincipalID = inv.Actor.PrincipalID.String()
+	session.AuthzEpoch = inv.Actor.AuthzEpoch
+	return session
+}
+func boundWebmailSession(ctx context.Context, service *mail.WebmailService, inv Invocation, session mail.MailSession, selected mail.MailboxID) (mail.MailSession, error) {
+	bound := mailSession(inv, session)
+	verified, err := service.ResolveSession(ctx, bound)
+	if err != nil {
+		return mail.MailSession{}, mapMailError(err)
+	}
+	if string(verified.MailboxID) != inv.Request.ResourceID || selected != "" && selected != verified.MailboxID {
+		return mail.MailSession{}, ErrForbidden
+	}
+	return bound, nil
+}
 func safeMailLabel(value string, maximum int) bool {
 	if value == "" || len(value) > maximum {
 		return false
