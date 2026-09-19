@@ -152,7 +152,7 @@ func TestComposeMapsChildAliasPreviewAndRedirectRelationships(t *testing.T) {
 	}
 }
 
-func TestComposeUsesSystemDefaultAndRequiresOwnedTLSMaterial(t *testing.T) {
+func TestComposeUsesSystemDefaultAndRestrictsTLSMaterialToOwner(t *testing.T) {
 	plain := composePlan(t, webengine.EditionOpenLiteSpeed, activeSite(t, "acme", "shop", "shop.example.test"))
 	plain.DefaultTLS = nil
 	plain.Engine.Listeners = []ListenerInput{{Ref: "listener/http", Addresses: []string{"127.0.0.1"}, Port: 80, TLSMode: webengine.TLSModeClear, Protocols: []webengine.Protocol{webengine.ProtocolHTTP1}}}
@@ -174,8 +174,13 @@ func TestComposeUsesSystemDefaultAndRequiresOwnedTLSMaterial(t *testing.T) {
 
 	missingTenant := composePlan(t, webengine.EditionOpenLiteSpeed, activeSite(t, "acme", "shop", "shop.example.test"))
 	missingTenant.Sites[0].TLS = nil
-	if _, err := Compose(missingTenant); err == nil {
-		t.Fatal("Compose(TLS tenant binding without owned TLS material) succeeded")
+	missingTenantResult, err := Compose(missingTenant)
+	if err != nil {
+		t.Fatalf("Compose(clear-only tenant without owned TLS material) error = %v", err)
+	}
+	clearOnlyBinding := bindingsByHostname(missingTenantResult.Desired)["shop.example.test"]
+	if clearOnlyBinding.TLSPolicyRef != "" || len(clearOnlyBinding.ListenerRefs) != 1 || clearOnlyBinding.ListenerRefs[0] != "listener/http" {
+		t.Fatalf("tenant without owned TLS material is not clear-only: %#v", clearOnlyBinding)
 	}
 
 	owned := composePlan(t, webengine.EditionOpenLiteSpeed, activeSite(t, "acme", "shop", "shop.example.test"))
