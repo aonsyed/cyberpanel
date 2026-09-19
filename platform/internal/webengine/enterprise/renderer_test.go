@@ -177,14 +177,14 @@ func TestRenderDerivesUniqueEnterpriseVHostLSAPIAndTLSIdentityPerSite(t *testing
 		"<maxConns>8</maxConns>",
 		"<autoStart>0</autoStart>",
 		"<vhssl>",
-		"<keyFile>/var/lib/cyberpanel/webengine/generations/g42/tls/cert-site-a/g9/privkey.pem</keyFile>",
-		"<certFile>/var/lib/cyberpanel/webengine/generations/g42/tls/cert-site-a/g9/fullchain.pem</certFile>",
+		"<keyFile>/var/lib/cyberpanel/certificates/consumers/webengine/cert-site-a/current/private.key</keyFile>",
+		"<certFile>/var/lib/cyberpanel/certificates/consumers/webengine/cert-site-a/current/fullchain.pem</certFile>",
 	)
 	assertContainsAll(t, siteB,
 		"<docRoot>/var/lib/cyberpanel/sites/site-b/roots/g13/releases/current/public</docRoot>",
 		"<handler>pool_site_b_g5</handler>",
 		"<address>uds:///run/cyberpanel/site-runtime/site-b/php/pool-site-b/g5.sock</address>",
-		"<keyFile>/var/lib/cyberpanel/webengine/generations/g42/tls/cert-site-b/g11/privkey.pem</keyFile>",
+		"<keyFile>/var/lib/cyberpanel/certificates/consumers/webengine/cert-site-b/current/private.key</keyFile>",
 	)
 	assertContainsNone(t, siteA,
 		"pool_site_b_g5",
@@ -193,8 +193,9 @@ func TestRenderDerivesUniqueEnterpriseVHostLSAPIAndTLSIdentityPerSite(t *testing
 		"<extUser>",
 		"<extGroup>",
 		"/bin/lsphp",
+		"/var/lib/cyberpanel/webengine/generations/",
 	)
-	assertContainsNone(t, siteB, "pool_site_a_g3", "/site-a/")
+	assertContainsNone(t, siteB, "pool_site_a_g3", "/site-a/", "/var/lib/cyberpanel/webengine/generations/")
 }
 
 func TestRenderUsesProductOwnedEnterpriseMaintenanceAndSuspendedRoutes(t *testing.T) {
