@@ -114,7 +114,7 @@ func Scan(root, modulePath string) ([]Diagnostic, error) {
 			if err != nil {
 				return fmt.Errorf("parse import in %s: %w", relativeName, err)
 			}
-			rule := classifyImport(sourcePackage, importPath, modulePath, vendored)
+			rule := classifyImport(relativeName, sourcePackage, importPath, modulePath, vendored)
 			if rule == "" {
 				continue
 			}
@@ -147,12 +147,15 @@ func Scan(root, modulePath string) ([]Diagnostic, error) {
 	return diagnostics, nil
 }
 
-func classifyImport(sourcePackage, importPath, modulePath string, vendored map[string]struct{}) Rule {
+func classifyImport(sourceFile, sourcePackage, importPath, modulePath string, vendored map[string]struct{}) Rule {
 	if matchesImportPath(importPath, modulePath) {
 		if isPythonSubprocessWrapper(importPath, modulePath) {
 			return RulePythonSubprocessWrapper
 		}
 		if isDomainPackage(sourcePackage, modulePath) && isHostExecutor(importPath, modulePath) {
+			if allowedDomainHostExecutorImport(sourceFile, importPath, modulePath) {
+				return ""
+			}
 			return RuleDomainHostExecutor
 		}
 		return ""
@@ -169,7 +172,41 @@ func classifyImport(sourcePackage, importPath, modulePath string, vendored map[s
 	if _, ok := vendored[importPath]; ok {
 		return ""
 	}
+	if _, ok := approvedExternalImports[importPath]; ok {
+		return ""
+	}
 	return RuleUnapprovedExternal
+}
+
+// These are direct, pinned platform dependencies. Package paths are listed
+// exactly so a newly imported subpackage remains forbidden by default.
+var approvedExternalImports = map[string]struct{}{
+	"github.com/jackc/pgx/v5":         {},
+	"github.com/jackc/pgx/v5/pgconn":  {},
+	"github.com/jackc/pgx/v5/stdlib":  {},
+	"golang.org/x/crypto/argon2":       {},
+	"golang.org/x/crypto/bcrypt":       {},
+	"modernc.org/sqlite":               {},
+}
+
+type exactImportAllowance struct {
+	file       string
+	importPath string
+}
+
+// Maildir mutation runs inside the privileged mail host and resolves the
+// exact durable site runtime identity before touching a mailbox. Keep this
+// exception file-specific rather than opening mail as an executor client.
+var domainHostExecutorImportAllowances = map[exactImportAllowance]struct{}{
+	{"internal/mail/daemon_linux.go", "internal/executor/siteops"}:            {},
+	{"internal/mail/maildir_transfer_linux.go", "internal/executor/siteops"}:  {},
+	{"internal/mail/migration_maildir_linux.go", "internal/executor/siteops"}: {},
+}
+
+func allowedDomainHostExecutorImport(sourceFile, importPath, modulePath string) bool {
+	relativeImport := strings.TrimPrefix(importPath, modulePath+"/")
+	_, ok := domainHostExecutorImportAllowances[exactImportAllowance{file: sourceFile, importPath: relativeImport}]
+	return ok
 }
 
 func legacyRepositoryPaths(modulePath string) []string {
