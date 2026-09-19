@@ -22,6 +22,71 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Results
 
+### Live local MariaDB execution
+
+MariaDB 10.11.14 was installed from the configured Ubuntu guest package
+repository (`--no-install-recommends`). Only QEMU was modified; the service is
+active and its database listener is `127.0.0.1:3306`. Installation evidence is
+`current-ubuntu-arm64-20260919-smoke/mariadb-install.log`.
+
+As root inside this guest, `CYBERPANEL_QEMU_LIVE_MARIADB=1 go test
+./internal/database -run TestQEMULiveMariaDBCreateReplayDelete -count=1 -v`
+passed. This exercises the actual Linux executor and actual MariaDB, with real
+SQLite command persistence: create a uniquely named disposable database, observe
+its presence through an independent client query, reopen SQLite and replay,
+delete the fixture, observe absence, and replay deletion. The disposable database
+was removed by the tested deletion; executor receipts remain for diagnosis.
+No secret material source was exercised. Principal authentication, grants,
+external TLS, the installed execd broker endpoint, and other OS/architecture
+combinations are not qualified by this check.
+
+### External application database qualification gap
+
+Source inspection of the unfinished placement changes found that the selected
+instance reaches install/clone requests and the provisioner, but does not yet
+establish secure application connectivity. `linux_runtime.go` passes the remote
+endpoint to WordPress `config create` without configuring a pinned CA or peer
+verification; `linux_staging.go` does the same for cloned WordPress. The binding's
+`TLSRequired` boolean is therefore not evidence of enforced transport security.
+`applicationDatabaseHost` in `linux_certified_runtime.go` rejects external hosts
+for the other certified runtimes. No external application lifecycle is qualified.
+Completion requires carrying the selected instance's trust/identity settings
+through protected application configuration, enforcing verified TLS in each
+supported runtime, and testing valid and wrong-CA/wrong-server cases against a
+real QEMU database. Do not commit or advertise the unfinished placement slice
+as complete based on binding-validation or controlled-effect tests.
+
+### Installation cancellation cleanup
+
+The real application SQL repository also reproduced lost terminal journal writes:
+both failed/recovery-required paths left the persisted operation `executing`
+when their request context was canceled. Those writes now have an independent
+30-second deadline; ordinary failure reporting also exposes journal-write
+errors as recovery-required instead of discarding them. The regression reopens
+SQLite and checks the recorded state, stage, and cause. Ubuntu ARM64 QEMU
+database/application tests and command builds pass with this correction.
+
+Database cleanup retry qualification additionally exposed an idempotency failure:
+after a completed deletion and SQLite reopen, the adapter reused its command ID
+with the incremented generation (`database command ID was reused with another
+payload`). The adapter now recovers the original expected generation from the
+stored deletion request and lets the coordinator validate/replay that command.
+QEMU checks exercise real SQLite and coordinator persistence for both completed
+and interrupted/ambiguous cleanup, reopen storage, resume cleanup, and confirm
+that terminal replays perform no additional effects. Database/application tests
+and command builds pass. MariaDB effects remain controlled in these tests.
+
+The current uncommitted application changes also fix canceled-request cleanup.
+QEMU first reproduced `TestInstallCompensationSurvivesRequestCancellation`
+failing with repeated `context canceled` and `application requires recovery`:
+the canceled request prevented both revocation and journal writes. Cleanup now
+preserves context values but uses its own two-minute deadline. The regression
+checks both secret revocations, database revocation, the compensated journal
+state, original cancellation error, and the finite cleanup deadline.
+`go test ./internal/apps -count=1 -v` passes in Ubuntu ARM64 QEMU, including
+existing cleanup-error/journal-error cases. These are coordinator tests with
+controlled adapters, not a live application install or MariaDB certification.
+
 ### Database persistence correction
 
 Ubuntu ARM64 QEMU reproduced rejection of valid database-wide grants during
