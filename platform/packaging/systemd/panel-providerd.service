@@ -40,7 +40,7 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 ReadOnlyPaths=/etc/cyberpanel
 ReadWritePaths=/run/cyberpanel-provider
-InaccessiblePaths=/var/lib/cyberpanel/control /var/lib/cyberpanel-auth /var/lib/cyberpanel-secrets /var/lib/cyberpanel/siteops /var/lib/cyberpanel/sites /var/lib/cyberpanel/quarantine /var/lib/cyberpanel/tombstones /run/docker.sock /var/run/docker.sock
+InaccessiblePaths=/var/lib/cyberpanel/control /var/lib/cyberpanel-auth /var/lib/cyberpanel-secrets /var/lib/cyberpanel/siteops /var/lib/cyberpanel/sites /var/lib/cyberpanel/quarantine /var/lib/cyberpanel/tombstones -/run/docker.sock -/var/run/docker.sock
 LimitNOFILE=1024
 TasksMax=128
 

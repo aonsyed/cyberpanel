@@ -126,6 +126,7 @@ func NewInstaller() (*Installer, error) {
 	if os.Geteuid() != 0 || os.Getuid() != 0 {
 		return nil, fmt.Errorf("%w: panel-node-install must run as real and effective root", ErrUnsupported)
 	}
+	if err := ensureNodeStateParent(filepath.Dir(StateRoot)); err != nil { return nil, err }
 	for _, entry := range []struct {
 		path string
 		mode os.FileMode
@@ -135,6 +136,20 @@ func NewInstaller() (*Installer, error) {
 		}
 	}
 	return &Installer{}, nil
+}
+
+// The parent is shared with non-root control-plane services. Only the node
+// installer's own state subtree is private. Repair the old root-only parent
+// mode without changing any private child or accepting unsafe ownership.
+func ensureNodeStateParent(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path { return ErrInvalid }
+	if err := validateRootOwnedAncestors(filepath.Dir(path)); err != nil { return err }
+	if err := os.Mkdir(path, 0755); err != nil && !os.IsExist(err) { return err }
+	info, err := os.Lstat(path)
+	metadata, ok := entryMetadata(info)
+	if err != nil || !ok || metadata.Uid != 0 || metadata.Gid != 0 || !info.IsDir() || (info.Mode().Perm() != 0700 && info.Mode().Perm() != 0755) { return ErrIntegrity }
+	if info.Mode().Perm() == 0700 { return os.Chmod(path, 0755) }
+	return nil
 }
 
 func (installer *Installer) Apply(ctx context.Context, bundlePath string) (InstallReceipt, error) {

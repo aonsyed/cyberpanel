@@ -236,6 +236,46 @@ Do not treat management success as proof that material delivery works.
 
 ### Outstanding full-product gates
 
+### Provider startup and shared-state permissions — Ubuntu ARM64
+
+The signed component fixture now includes the actual provider worker. Sequence 8
+reproduced a Docker-socket namespace failure and rolled back to the healthy
+auth/secret-broker release. Sequence 10 contains the final unit: only absent
+Docker sockets are optional; private state paths remain mandatory and hidden.
+Required private directories were provisioned in the guest before activation.
+An intermediate sequence 9 with broader optional paths is not the final fix.
+
+The sandbox check also exposed `/var/lib/cyberpanel` being created as root-only
+0700 by the node installer, preventing the control account reaching its own
+state. The installer now creates/repairs that root-owned shared parent as 0755,
+while its own `node-release` subtree remains root-owned 0700 and `control`
+remains control-account-owned 0700. Unsafe ownership, writable modes and symlink
+parents are rejected. Root QEMU regression cases passed. After the repair,
+`cyberpanel` could list its control directory outside the provider namespace,
+but the same UID was denied inside the running provider's mount namespace.
+
+`TestQEMULiveProviderWorkerBoundary`, run as `cyberpanel`, passed a real socket
+request returning `unsupported_provider` and rejection of an invalid protocol
+version. No external provider request or credential was used. All three daemons
+are active/running with zero restarts; full Go suite/build passed in Ubuntu
+ARM64. External provider operations are **not** qualified by these checks.
+
+Installed release: `qemu-provider-3.1.9`, sequence 10.
+Manifest: `d3720281bf65048fee1e8d53a36172a616b8aff873dd84d58dfe31bedc359703`.
+Bundle SHA256: `fc2d4aa12f6ed6fa08765a0da35066667e26db45fb02626459bdfe37870609d5`.
+Evidence: `signed-provider-suite.log`, `provider-installed-status.json`,
+`provider-journal.log` in the current Ubuntu ARM64 run directory and the task
+transcript for socket and namespace checks. No additional downloads occurred.
+
+A user choice is pending for material-consumer verification: constrained root
+broker (permitted by the design) versus a separate privileged inspection helper
+while retaining the dedicated key UID. No extra privilege, new helper or weakened
+material verification has been implemented pending that decision. The disposable
+test signing key's admitted sequence range ends at 10; further test releases
+will need explicit test-authority provisioning, not disabled frontier checks.
+
+### Remaining product gates
+
 - Assemble and install a genuine signed release with its package/artifact
   catalog and trust material in disposable guests. Do not bypass signature
   checks or infer installation from a successful Go build.

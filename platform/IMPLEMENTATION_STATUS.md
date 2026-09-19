@@ -61,6 +61,14 @@ executable-identity check cannot inspect another UID's `/proc/PID/exe` from the
 isolated secret account. Do not weaken that boundary or mistake management
 qualification for delivery qualification. Full panel/service testing remains.
 
+The installed QEMU fixture also runs the provider worker. Its socket boundary
+and mount-namespace denial of control.db's directory are verified; external
+provider operations are not. The node installer now preserves shared-parent
+traversal while retaining private child permissions. A user decision is pending
+on constrained root broker versus a separate privileged inspection helper for
+material-consumer verification. Do not infer approval from the preselected
+answer in the asynchronous question; continue independent work meanwhile.
+
 ### Verified checkpoint, 2026-09-19
 
 - Saved QEMU Go-suite exits are zero for Ubuntu/AlmaLinux ARM64 at
