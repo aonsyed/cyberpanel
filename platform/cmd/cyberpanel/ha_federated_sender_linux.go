@@ -151,7 +151,8 @@ func (sender *haFederatedSender) BindAndSend(ctx context.Context, draft federati
 	if err = sender.request(ctx, http.MethodPost, "/v1/intents", raw, &bound); err != nil { return sender.recoverClaim(ctx, draft, grantID, key, plan) }
 	if err = sender.validateBound(draft, bound, grantID, plan, true); err != nil { return federation.Intent{}, federation.Receipt{}, errors.Join(ha.ErrReconciliationRequired, err) }
 	expectedApproval, _ := json.Marshal(approval)
-	actualApproval, _ := json.Marshal(bound.Approval)
+	var actualApproval []byte
+	if len(bound.Approvals) == 1 { actualApproval, _ = json.Marshal(bound.Approvals[0]) }
 	if !bytes.Equal(expectedApproval, actualApproval) || bound.AuthorityEpoch != grant.AuthorityEpoch { return federation.Intent{}, federation.Receipt{}, ha.ErrForbidden }
 	encoded, err := json.Marshal(bound)
 	if err != nil { return bound, federation.Receipt{}, ha.ErrReconciliationRequired }
@@ -234,13 +235,15 @@ func (sender *haFederatedSender) validateGrant(draft federation.Intent, id feder
 }
 
 func (sender *haFederatedSender) validateBound(draft, bound federation.Intent, grant federation.ID, plan string, fresh bool) error {
-	if bound.NodeID != draft.NodeID || bound.GrantID != grant || bound.PeerID != sender.config.PeerID || bound.TenantID != draft.TenantID || bound.ProtocolVersion != draft.ProtocolVersion || bound.CommandType != draft.CommandType || bound.SchemaHash != draft.SchemaHash || bound.PayloadDigest != draft.PayloadDigest || !bytes.Equal(bound.Payload, draft.Payload) || bound.ResourceKind != draft.ResourceKind || bound.ResourceID != draft.ResourceID || bound.ExpectedGeneration != draft.ExpectedGeneration || bound.IdempotencyKey != draft.IdempotencyKey || bound.Risk != draft.Risk || len(bound.ActorChain) != 1 || bound.ActorChain[0].TenantID != draft.TenantID || bound.ActorChain[0].PrincipalID != sender.config.PrincipalID || bound.ActorChain[0].AuthzEpoch == 0 || bound.Approval == nil || bound.Approval.PlanDigest != plan || bound.Approval.PolicyVersion != ha.FederatedHAApprovalPolicyVersion { return ha.ErrForbidden }
-	if fresh && (bound.ActorChain[0].SessionID != sender.sessionID || bound.ActorChain[0].Assurance != "phishing_resistant" && bound.ActorChain[0].Assurance != "hardware_bound") { return ha.ErrForbidden }
+	if bound.NodeID != draft.NodeID || bound.GrantID != grant || bound.PeerID != sender.config.PeerID || bound.TenantID != draft.TenantID || bound.ProtocolVersion != draft.ProtocolVersion || bound.CommandType != draft.CommandType || bound.SchemaHash != draft.SchemaHash || bound.PayloadDigest != draft.PayloadDigest || !bytes.Equal(bound.Payload, draft.Payload) || bound.ResourceKind != draft.ResourceKind || bound.ResourceID != draft.ResourceID || bound.ExpectedGeneration != draft.ExpectedGeneration || bound.IdempotencyKey != draft.IdempotencyKey || bound.Risk != draft.Risk || bound.ActorAssertion.Subject != sender.config.PrincipalID || bound.ActorAssertion.Audience != bound.NodeID.String() || bound.ActorAssertion.AuthorizationEpoch == 0 || len(bound.Approvals) != 1 || bound.Approvals[0].PlanDigest != plan || bound.Approvals[0].PolicyVersion != ha.FederatedHAApprovalPolicyVersion { return ha.ErrForbidden }
+	if fresh && !haSenderAuthenticationMethod(bound.ActorAssertion.AuthenticationMethods, "phishing_resistant") && !haSenderAuthenticationMethod(bound.ActorAssertion.AuthenticationMethods, "hardware_bound") { return ha.ErrForbidden }
 	now := sender.now().UTC()
 	if !fresh { now = bound.IssuedAt }
 	if bound.Validate(now) != nil { return ha.ErrForbidden }
 	return nil
 }
+
+func haSenderAuthenticationMethod(methods []string,want string)bool{for _,method:=range methods{if method==want{return true}};return false}
 
 func (sender *haFederatedSender) Observe(ctx context.Context, bound federation.Intent) (federation.Receipt, error) {
 	if sender == nil || ctx == nil || !bound.ID.Valid() || bound.TenantID != sender.config.TenantID || bound.PeerID != sender.config.PeerID || sender.config.NodeGrants[bound.NodeID] != bound.GrantID { return federation.Receipt{}, ha.ErrForbidden }

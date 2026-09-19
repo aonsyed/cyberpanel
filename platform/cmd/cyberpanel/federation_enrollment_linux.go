@@ -424,7 +424,7 @@ func (exchange *federationEnrollmentHTTPExchange) Enroll(ctx context.Context, re
 		ProtocolVersion       uint32            `json:"protocol_version"`
 		NodeID                federation.ID     `json:"node_id"`
 		PeerID                federation.ID     `json:"peer_id"`
-		PeerSigningKeys      map[string][]byte `json:"peer_signing_keys"`
+		PeerSigningKeys      map[string]federation.SigningKeyTrust `json:"peer_signing_keys"`
 		NodeCertificate      []byte            `json:"node_certificate"`
 		CertificateExpiresAt time.Time         `json:"certificate_expires_at"`
 		AuthorityEpoch       uint64            `json:"authority_epoch"`
@@ -439,7 +439,7 @@ func (exchange *federationEnrollmentHTTPExchange) Enroll(ctx context.Context, re
 		return federation.EnrollmentResponse{}, federation.ErrForbidden
 	}
 	for identifier, key := range result.PeerSigningKeys {
-		if _, keyErr := federation.NewID(identifier); keyErr != nil || len(key) != ed25519.PublicKeySize {
+		if _, keyErr := federation.NewID(identifier); keyErr != nil || key.ID != identifier || key.Validate() != nil {
 			return federation.EnrollmentResponse{}, federation.ErrForbidden
 		}
 	}

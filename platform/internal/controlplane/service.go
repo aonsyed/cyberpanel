@@ -135,26 +135,34 @@ func (s *Service) CreateIntent(ctx context.Context, operator Operator, request I
 		return federation.Intent{}, err
 	}
 	effectID := "fed-" + digest([]byte("cyberpanel-central-effect-v1\x00" + node.ID.String() + "\x00" + request.IdempotencyKey + "\x00" + admissionDigest))
+	assertion := federation.CentralActorAssertion{Issuer: federation.CentralOperatorIssuer, Subject: operator.PrincipalID, Audience: node.ID.String(), AuthenticatedAt: now, AuthenticationMethods: []string{"mtls", operator.Assurance}, Nonce: "intent:" + id.String(), ExpiresAt: now.Add(15 * time.Minute), AuthorizationEpoch: operator.AuthzEpoch}
+	approvals := make([]federation.Approval, 0, 1)
+	if request.Approval != nil {
+		approvals = append(approvals, *request.Approval)
+	}
 	intent := federation.Intent{
 		ID:                 id,
 		PeerID:             s.peerID,
 		NodeID:             node.ID,
 		GrantID:            request.GrantID,
 		AuthorityEpoch:     node.AuthorityEpoch,
+		CapabilityEpoch:    node.Capabilities.AuthorityEpoch,
 		ProtocolVersion:    capability.Version,
 		CommandType:        request.CommandType,
 		SchemaHash:         request.SchemaHash,
+		PayloadTypeURL:     request.CommandType,
 		Payload:            canonical,
 		PayloadDigest:      digest(canonical),
 		TenantID:           request.TenantID,
 		ResourceKind:       request.ResourceKind,
 		ResourceID:         request.ResourceID,
+		TargetScope:        request.TenantID,
 		ExpectedGeneration: request.ExpectedGeneration,
 		IdempotencyKey:     request.IdempotencyKey,
 		EffectID:           effectID,
 		Risk:               request.Risk,
-		ActorChain:         []federation.Actor{actor},
-		Approval:           request.Approval,
+		ActorAssertion:     assertion,
+		Approvals:          approvals,
 		IssuedAt:           now,
 		ExpiresAt:          now.Add(15 * time.Minute),
 	}
@@ -163,6 +171,22 @@ func (s *Service) CreateIntent(ctx context.Context, operator Operator, request I
 		return federation.Intent{}, err
 	}
 	intent.SigningKeyID = key
+	keyTrust, ok := currentGrantSigningKey(grant, key, now)
+	if !ok {
+		return federation.Intent{}, ErrForbidden
+	}
+	intent.SigningAlgorithm = keyTrust.Algorithm
+	intent.SigningKeyEpoch = keyTrust.Epoch
+	bindingOK := false
+	for _, binding := range grant.PrincipalBindings {
+		if binding.Allows(assertion, intent, now) {
+			bindingOK = true
+			break
+		}
+	}
+	if !bindingOK {
+		return federation.Intent{}, ErrForbidden
+	}
 	intent.Signature, err = s.signer.SignIntent(ctx, key, intent.SigStructure())
 	if err != nil {
 		return federation.Intent{}, err
@@ -187,6 +211,8 @@ func (s *Service) CreateIntent(ctx context.Context, operator Operator, request I
 	_ = s.audit.Record(ctx, "federation.intent.queued", operator, node.ID, request.ResourceKind, request.ResourceID, intent.EffectID)
 	return intent, nil
 }
+
+func currentGrantSigningKey(grant federation.MutationGrant,keyID string,now time.Time)(federation.SigningKeyTrust,bool){current:=uint64(0);for _,key:=range grant.SigningKeys{if key.Epoch>current{current=key.Epoch}};for _,key:=range grant.SigningKeys{if key.ID==keyID&&key.Epoch==current&&key.Validate()==nil&&!now.Before(key.ValidFrom)&&now.Before(key.ValidUntil)&&key.RevokedAt==nil&&(key.RevocationEpoch==0||grant.AuthorityEpoch<key.RevocationEpoch){return key,true}};return federation.SigningKeyTrust{},false}
 
 func (s *Service) HandleReceipt(ctx context.Context, nodeID federation.ID, receipt federation.Receipt) error {
 	_, err := s.AdmitReceipt(ctx, nodeID, receipt)

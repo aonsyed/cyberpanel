@@ -61,7 +61,7 @@ func (s *Store) LookupHAIntent(ctx context.Context, tenant string, node, grant f
 		if err = rows.Scan(&raw); err != nil { return federation.Intent{}, err }
 		if json.Unmarshal(raw, &found) != nil || found.TenantID != tenant || found.NodeID != node || found.GrantID != grant || found.IdempotencyKey != idempotency || found.PeerID != record.PeerID { return federation.Intent{}, ErrConflict }
 		digest, digestErr := ha.FederatedHAApprovalPlanDigest(found, tenant, grant)
-		if digestErr != nil || digest != requestDigest || found.Approval == nil || found.Approval.PlanDigest != requestDigest || found.Approval.PolicyVersion != ha.FederatedHAApprovalPolicyVersion || found.Validate(found.IssuedAt) != nil { return federation.Intent{}, ErrConflict }
+		if digestErr != nil || digest != requestDigest || len(found.Approvals) != 1 || found.Approvals[0].PlanDigest != requestDigest || found.Approvals[0].PolicyVersion != ha.FederatedHAApprovalPolicyVersion || found.Validate(found.IssuedAt) != nil { return federation.Intent{}, ErrConflict }
 	}
 	if err = rows.Err(); err != nil { return federation.Intent{}, err }
 	if count == 0 { return federation.Intent{}, ErrNotFound }

@@ -137,18 +137,20 @@ func (ingress *federatedHAIngress) VerifyGrant(ctx context.Context, grant federa
 func (ingress *federatedHAIngress) VerifyApproval(ctx context.Context, intent federation.Intent) error {
 	trust, err := ingress.trust(ctx)
 	if err != nil { return err }
-	if intent.TenantID != trust.TenantID || intent.NodeID != trust.NodeID || intent.PeerID != trust.PeerID || intent.Approval == nil || !ingress.now().UTC().Before(intent.Approval.ExpiresAt) { return ha.ErrForbidden }
+	if intent.TenantID != trust.TenantID || intent.NodeID != trust.NodeID || intent.PeerID != trust.PeerID || len(intent.Approvals) != 1 { return ha.ErrForbidden }
+	approval := intent.Approvals[0]
+	if approval.Validate(ingress.now().UTC()) != nil || approval.AuthorizationEpoch != intent.ActorAssertion.AuthorizationEpoch { return ha.ErrForbidden }
 	plan, err := ha.FederatedHAApprovalPlanDigest(intent, trust.TenantID, intent.GrantID)
-	if err != nil || intent.Approval.PlanDigest != plan { return ha.ErrForbidden }
-	message, err := ha.FederatedHAApprovalSignaturePayload(*intent.Approval)
-	key := trust.ApprovalKeys[intent.Approval.SigningKeyID]
-	if err != nil || len(key) != ed25519.PublicKeySize || !ed25519.Verify(ed25519.PublicKey(key), message, intent.Approval.Signature) { return ha.ErrForbidden }
+	if err != nil || approval.PlanDigest != plan { return ha.ErrForbidden }
+	message, err := ha.FederatedHAApprovalSignaturePayload(approval)
+	key := trust.ApprovalKeys[approval.SigningKeyID]
+	if err != nil || len(key) != ed25519.PublicKeySize || !ed25519.Verify(ed25519.PublicKey(key), message, approval.Signature) { return ha.ErrForbidden }
 	return nil
 }
 
 func (ingress *federatedHAIngress) AuthorizeFederated(ctx context.Context, intent federation.Intent, grant federation.MutationGrant, decoded any) error {
 	payload, ok := decoded.(*haIngressPayload)
-	if !ok || payload == nil || payload.kind != intent.CommandType || !bytes.Equal(payload.raw, intent.Payload) || intent.ResourceKind != "ha" || intent.ResourceID != ha.LocalMariaDBResourceID || intent.ExpectedGeneration == 0 || intent.Risk != federation.RiskCritical || len(intent.ActorChain) != 1 || intent.ActorChain[0].TenantID != intent.TenantID || intent.ActorChain[0].PrincipalID == "" || intent.ActorChain[0].AuthzEpoch == 0 || intent.ActorChain[0].Assurance != "phishing_resistant" && intent.ActorChain[0].Assurance != "hardware_bound" { return ha.ErrForbidden }
+	if !ok || payload == nil || payload.kind != intent.CommandType || !bytes.Equal(payload.raw, intent.Payload) || intent.ResourceKind != "ha" || intent.ResourceID != ha.LocalMariaDBResourceID || intent.ExpectedGeneration == 0 || intent.Risk != federation.RiskCritical || intent.ActorAssertion.Validate(ingress.now().UTC()) != nil { return ha.ErrForbidden }
 	if err := ingress.VerifyGrant(ctx, grant); err != nil { return err }
 	if grant.ID != intent.GrantID || grant.AuthorityEpoch != intent.AuthorityEpoch { return ha.ErrForbidden }
 	if err := ingress.VerifyApproval(ctx, intent); err != nil { return err }
@@ -262,7 +264,7 @@ func (ingress *federatedHAIngress) SubmitFederated(ctx context.Context, command 
 	var raw []byte
 	if err := ingress.db.QueryRowContext(ctx, `SELECT intent_json FROM federation_intents WHERE id=? AND effect_id=?`, command.IntentID, command.EffectID).Scan(&raw); err != nil { return ambiguous, err }
 	var intent federation.Intent
-	if decodeHAFederationJSON(raw, &intent) != nil || intent.Validate(ingress.now().UTC()) != nil || intent.PeerID != command.PeerID || intent.TenantID != command.TenantID || intent.ResourceKind != command.ResourceKind || intent.ResourceID != command.ResourceID || intent.ExpectedGeneration != command.ExpectedGeneration || intent.IdempotencyKey != command.IdempotencyKey || intent.Risk != command.Risk || !haIngressSameJSON(intent.ActorChain, command.ActorChain) || !haIngressSameJSON(intent.Approval, command.Approval) { return ambiguous, ha.ErrForbidden }
+	if decodeHAFederationJSON(raw, &intent) != nil || intent.Validate(ingress.now().UTC()) != nil || intent.PeerID != command.PeerID || intent.TenantID != command.TenantID || intent.ResourceKind != command.ResourceKind || intent.ResourceID != command.ResourceID || intent.ExpectedGeneration != command.ExpectedGeneration || intent.IdempotencyKey != command.IdempotencyKey || intent.Risk != command.Risk || !haIngressSameJSON(intent.ActorAssertion, command.ActorAssertion) || !haIngressSameJSON(intent.Approvals, command.Approvals) || !command.PrincipalBinding.Allows(intent.ActorAssertion, intent, ingress.now().UTC()) { return ambiguous, ha.ErrForbidden }
 	payload, err := ingress.Decode(intent.CommandType, intent.SchemaHash, intent.Payload)
 	if err != nil { return ambiguous, err }
 	passed, ok := command.Payload.(*haIngressPayload)

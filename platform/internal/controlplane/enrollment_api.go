@@ -91,6 +91,21 @@ func (issuer *EnrollmentIssuer) PublicSigningKeys() map[string][]byte {
 	return keys
 }
 
+func (issuer *EnrollmentIssuer) TrustedSigningKeys(grant federation.MutationGrant) (map[string]federation.SigningKeyTrust, error) {
+	if issuer == nil || len(grant.SigningKeys) != len(issuer.peerSigningKeys) {
+		return nil, ErrForbidden
+	}
+	keys := make(map[string]federation.SigningKeyTrust, len(grant.SigningKeys))
+	for _, trust := range grant.SigningKeys {
+		publicKey, ok := issuer.peerSigningKeys[trust.ID]
+		if !ok || trust.Validate() != nil || !bytes.Equal(publicKey, trust.PublicKey) {
+			return nil, ErrForbidden
+		}
+		keys[trust.ID] = trust
+	}
+	return keys, nil
+}
+
 func (issuer *EnrollmentIssuer) Issue(node federation.ID, signingPublicKey []byte, requestDigest string, issuedAt time.Time) (IssuedEnrollmentCertificate, error) {
 	var issued IssuedEnrollmentCertificate
 	if issuer == nil || issuer.ca == nil || !node.Valid() || len(signingPublicKey) != ed25519.PublicKeySize || len(issuer.privateKey) != ed25519.PrivateKeySize || !validSHA256(requestDigest) || issuedAt.IsZero() || issuedAt.After(issuer.clock().UTC().Add(5*time.Minute)) {
@@ -153,7 +168,7 @@ type enrollmentHTTPResponse struct {
 	ProtocolVersion       uint32            `json:"protocol_version"`
 	NodeID                federation.ID     `json:"node_id"`
 	PeerID                federation.ID     `json:"peer_id"`
-	PeerSigningKeys       map[string][]byte `json:"peer_signing_keys"`
+	PeerSigningKeys       map[string]federation.SigningKeyTrust `json:"peer_signing_keys"`
 	NodeCertificate       []byte            `json:"node_certificate"`
 	CertificateExpiresAt time.Time         `json:"certificate_expires_at"`
 	AuthorityEpoch       uint64            `json:"authority_epoch"`
@@ -222,7 +237,13 @@ func (api *EnrollmentAPI) serveHTTP(writer http.ResponseWriter, request *http.Re
 	enrollment.Node.CertificateFingerprint = issued.Fingerprint
 	enrollment.Node.State = NodeEnrolling
 	enrollment.EvidenceKeys = []NodeEvidenceKey{{KeyID: "fedcert_" + issued.Fingerprint[:48], PublicKey: append([]byte(nil), payload.SigningPublicKey...), State: "current", NotBefore: issued.NotBefore, ExpiresAt: issued.ExpiresAt}}
-	response := enrollmentHTTPResponse{enrollmentProtocolVersion, payload.NodeID, api.issuer.peer, api.issuer.PublicSigningKeys(), issued.PEM, issued.ExpiresAt, enrollment.Node.AuthorityEpoch}
+	trustedKeys, err := api.issuer.TrustedSigningKeys(enrollment.Grant)
+	if err != nil {
+		_ = api.store.RecordEnrollmentFailure(request.Context(), payload.TokenID, "signing_trust_rejected")
+		writeEnrollmentFailure(writer, err)
+		return
+	}
+	response := enrollmentHTTPResponse{enrollmentProtocolVersion, payload.NodeID, api.issuer.peer, trustedKeys, issued.PEM, issued.ExpiresAt, enrollment.Node.AuthorityEpoch}
 	encodedResponse, err := json.Marshal(response)
 	if err != nil || len(encodedResponse) > enrollmentMaximumResponseBytes {
 		_ = api.store.RecordEnrollmentFailure(request.Context(), payload.TokenID, "persistence_failed")

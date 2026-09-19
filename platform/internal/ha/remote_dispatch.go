@@ -481,7 +481,7 @@ func validateBoundFederatedHAIntent(draft, bound federation.Intent, now time.Tim
 	}
 	// An expired submitted intent may still have a durable terminal receipt.
 	// Validate its original envelope without extending its execution authority.
-	if !bound.ID.Valid() || !bound.PeerID.Valid() || !bound.GrantID.Valid() || bound.AuthorityEpoch == 0 || bound.EffectID == "" || len(bound.ActorChain) != 1 || bound.Approval == nil || bound.IssuedAt.After(now.Add(time.Minute)) || bound.Validate(bound.IssuedAt) != nil {
+	if !bound.ID.Valid() || !bound.PeerID.Valid() || !bound.GrantID.Valid() || bound.AuthorityEpoch == 0 || bound.EffectID == "" || bound.ActorAssertion.Validate(bound.IssuedAt) != nil || len(bound.Approvals) != 1 || bound.IssuedAt.After(now.Add(time.Minute)) || bound.Validate(bound.IssuedAt) != nil {
 		return ErrForbidden
 	}
 	return nil
