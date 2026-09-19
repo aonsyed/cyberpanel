@@ -53,6 +53,14 @@ daemon. This closes a component integration gate, not full panel installation.
 See RUN-REPORT.md for source changes, failed-install evidence, the disposable
 fixture reset, and the precise remaining qualification limits.
 
+The signed component fixture now also runs the secret broker. Its live management
+enroll/replay/rotate/revoke checks and unauthorized-peer rejection pass; a failed
+signed upgrade now restores the previous auth-only release. Both current
+services have zero restarts. Material delivery is still unresolved: its retained
+executable-identity check cannot inspect another UID's `/proc/PID/exe` from the
+isolated secret account. Do not weaken that boundary or mistake management
+qualification for delivery qualification. Full panel/service testing remains.
+
 ### Verified checkpoint, 2026-09-19
 
 - Saved QEMU Go-suite exits are zero for Ubuntu/AlmaLinux ARM64 at

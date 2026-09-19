@@ -897,6 +897,13 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 		if err = updateJournal(journal, installer.now()); err != nil {
 			return InstallReceipt{}, err
 		}
+		// Retire units while their files still resolve through the old active
+		// generation. After the switch a removed unit becomes a dangling link.
+		if journal.Previous != nil {
+			if err = retireRemovedServices(ctx, journal.Previous.Services, journal.Candidate.Services); err != nil {
+				return installer.rollbackLocked(ctx, journal, trust, err)
+			}
+		}
 		if err = switchActiveRelease(journal.Candidate.ReleasePath); err != nil {
 			return installer.rollbackLocked(ctx, journal, trust, err)
 		}
@@ -919,9 +926,6 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 	}
 	if journal.Previous != nil {
 		if err = cleanupManagedLinks(journal.Previous.Destinations, journal.Candidate.Destinations); err != nil {
-			return installer.rollbackLocked(ctx, journal, trust, err)
-		}
-		if err = retireRemovedServices(ctx, journal.Previous.Services, journal.Candidate.Services); err != nil {
 			return installer.rollbackLocked(ctx, journal, trust, err)
 		}
 	}
@@ -1048,11 +1052,11 @@ func (installer *Installer) rollbackLocked(ctx context.Context, journal *Journal
 		if err = ensureManagedLinks(journal.Previous.Destinations); err != nil {
 			return installer.markRecovery(journal, "previous_link_restore_failed")
 		}
-		if err = switchActiveRelease(journal.Previous.ReleasePath); err != nil {
-			return installer.markRecovery(journal, "previous_release_activation_failed")
-		}
 		if err = retireRemovedServices(ctx, journal.Candidate.Services, journal.Previous.Services); err != nil {
 			return installer.markRecovery(journal, "candidate_service_disable_failed")
+		}
+		if err = switchActiveRelease(journal.Previous.ReleasePath); err != nil {
+			return installer.markRecovery(journal, "previous_release_activation_failed")
 		}
 		if err = cleanupManagedLinks(journal.Candidate.Destinations, journal.Previous.Destinations); err != nil {
 			return installer.markRecovery(journal, "candidate_link_cleanup_failed")

@@ -182,6 +182,60 @@ three OS/architecture combinations.
 
 ### Remaining full-product qualification
 
+### Signed auth + secret-broker upgrade — Ubuntu ARM64
+
+The next component bundle adds the real secret broker and its packaged hardened
+unit to the installed auth service. It exposed an absent Docker socket causing
+systemd namespace setup to fail, and rollback disabling a newly-added service
+only after its unit file disappeared behind the previous-generation link.
+
+Changes and live results:
+
+- Optional absent paths in the secret-broker `InaccessiblePaths` list no longer
+  prevent startup; existing paths retain their isolation restriction.
+- Removed services are disabled before changing the active generation, on both
+  upgrade and rollback. The original failing sequence-5 bundle was replayed and
+  now returned `rolled_back`, with the prior sequence-4 auth service running.
+- The KEK reader has a separate, exact-path systemd-credential constructor for
+  the root-owned/root-group `0400` or `0440` mount. Ordinary key files still
+  require their specified owner and `0400`. Reads are bounded and check the
+  opened file identity. Root fixture checks and real broker encryption passed.
+- The management socket now uses kernel UID/PID peer credentials with the same
+  root/control-plane UID allowlist. It does not claim executable verification,
+  which management never used. The material socket retains its independent
+  executable/process-start verification. No ptrace capability was added.
+- Live management calls as `cyberpanel` passed enroll, exact replay, conflicting
+  replay rejection, rotation, stale-version rejection and revocation. Calls
+  as `cyberpanel-secrets` could open the socket but were rejected as unauthorized
+  administrative peers. The auth password/API-key lifecycle also passed again.
+- Both installed services report active/running and zero restarts. Full current
+  Go tests/build passed in Ubuntu ARM64; root KEK cases were executed explicitly.
+
+Installed component release: `qemu-control-3.1.6`, sequence 7.
+Manifest: `5137f236e065ad0f649f5695b711fc53a58da38ba75657bf289c455271f31d0c`.
+Bundle SHA256: `28f95fb3a36617597907881c0247cb8d1d4c0956f510739dc9a04314691c6097`.
+
+The original sequence-5 manual-recovery state was preserved by moving this
+disposable fixture's installer state, releases and links to
+`/root/qemu-control-failed-install-20260919`. The auth-only sequence 4 was then
+installed fresh before replaying the same failing sequence 5 with corrected
+ordering, followed by sequences 6 and 7. No journals were edited to manufacture
+success. This proves the corrected rollback on a new attempt, not automatic
+repair of already-existing `recovery_required` journals.
+
+Evidence: `signed-control-suite.log`, `control-rollback-status.json`,
+`control-installed-status.json`, `control-secretd-journal.log` under the current
+Ubuntu ARM64 evidence directory, plus live test output in the task transcript.
+No additional packages/images were downloaded. Both daemons remain running.
+
+**Remaining material-delivery issue:** the isolated secret-service UID cannot
+read `/proc/<other-account-PID>/exe`. This was confirmed directly in the guest.
+Management no longer depends on that unrelated check, but actual secret delivery
+to privileged executors still requires a secure solution and live qualification.
+Do not treat management success as proof that material delivery works.
+
+### Outstanding full-product gates
+
 - Assemble and install a genuine signed release with its package/artifact
   catalog and trust material in disposable guests. Do not bypass signature
   checks or infer installation from a successful Go build.

@@ -46,12 +46,48 @@ func wipe(value []byte){for index:=range value{value[index]=0};runtime.KeepAlive
 
 // FileKEK is the standalone fallback when TPM/HSM sealing is unavailable. The
 // key file must be owned by the broker account and mode 0400.
-type FileKEK struct{path string;epoch uint64;ownerUID int}
-func NewFileKEK(path string,epoch uint64,ownerUID int)(*FileKEK,error){if !strings.HasPrefix(path,"/")||epoch==0||ownerUID<0{return nil,ErrInvalid};info,err:=os.Lstat(path);if err!=nil{return nil,err};stat,ok:=info.Sys().(*syscall.Stat_t);if !ok||!info.Mode().IsRegular()||info.Mode().Perm()!=0400||int(stat.Uid)!=ownerUID{return nil,ErrForbidden};return &FileKEK{path:path,epoch:epoch,ownerUID:ownerUID},nil}
+type FileKEK struct{path string;epoch uint64;ownerUID int;systemdCredential bool}
+func NewFileKEK(path string,epoch uint64,ownerUID int)(*FileKEK,error){return newFileKEK(path,epoch,ownerUID,false)}
+
+// NewSystemdCredentialKEK accepts only the broker's registered credential mount.
+// Ordinary key files retain the stricter owner/0400 contract above.
+func NewSystemdCredentialKEK(path string, epoch uint64) (*FileKEK, error) {
+	if path != "/run/credentials/panel-secretd.service/wrapping.key" { return nil, ErrInvalid }
+	return newFileKEK(path, epoch, 0, true)
+}
+
+func newFileKEK(path string, epoch uint64, ownerUID int, systemdCredential bool) (*FileKEK, error) {
+	if !strings.HasPrefix(path, "/") || epoch == 0 || ownerUID < 0 { return nil, ErrInvalid }
+	key := &FileKEK{path:path, epoch:epoch, ownerUID:ownerUID, systemdCredential:systemdCredential}
+	info, err := os.Lstat(path)
+	if err != nil { return nil, err }
+	if !key.validFile(info) { return nil, ErrForbidden }
+	return key, nil
+}
+
+func (f *FileKEK) validFile(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || int(stat.Uid) != f.ownerUID { return false }
+	if f.systemdCredential { return stat.Gid == 0 && (info.Mode().Perm() == 0400 || info.Mode().Perm() == 0440) }
+	return info.Mode().Perm() == 0400
+}
 func(f *FileKEK)Epoch(context.Context)(uint64,error){if f==nil{return 0,ErrInvalid};return f.epoch,nil}
 func(f *FileKEK)Wrap(ctx context.Context,epoch uint64,plaintext,aad []byte)([]byte,error){return f.seal(epoch,plaintext,aad)}
 func(f *FileKEK)Unwrap(ctx context.Context,epoch uint64,ciphertext,aad []byte)([]byte,error){key,err:=f.key();if err!=nil{return nil,err};defer wipe(key);block,err:=aes.NewCipher(key);if err!=nil{return nil,err};aead,err:=cipher.NewGCM(block);if err!=nil{return nil,err};if len(ciphertext)<aead.NonceSize(){return nil,ErrInvalid};return aead.Open(nil,ciphertext[:aead.NonceSize()],ciphertext[aead.NonceSize():],wrapAAD(aad,epoch))}
 func(f *FileKEK)seal(epoch uint64,plaintext,aad []byte)([]byte,error){if f==nil||epoch!=f.epoch{return nil,ErrRollback};key,err:=f.key();if err!=nil{return nil,err};defer wipe(key);block,err:=aes.NewCipher(key);if err!=nil{return nil,err};aead,err:=cipher.NewGCM(block);if err!=nil{return nil,err};nonce:=make([]byte,aead.NonceSize());if _,err=rand.Read(nonce);err!=nil{return nil,err};return aead.Seal(nonce,nonce,plaintext,wrapAAD(aad,epoch)),nil}
 func wrapAAD(aad []byte,epoch uint64)[]byte{return append(append([]byte(nil),aad...),[]byte(fmt.Sprintf("\x00kek-epoch:%d",epoch))...)}
-func(f *FileKEK)key()([]byte,error){info,err:=os.Lstat(f.path);if err!=nil{return nil,err};stat,ok:=info.Sys().(*syscall.Stat_t);if !ok||!info.Mode().IsRegular()||info.Mode().Perm()!=0400||int(stat.Uid)!=f.ownerUID{return nil,ErrForbidden};raw,err:=os.ReadFile(f.path);if err!=nil{return nil,err};if len(raw)!=32{wipe(raw);return nil,ErrInvalid};return raw,nil}
+func (f *FileKEK) key() ([]byte, error) {
+	if f == nil { return nil, ErrInvalid }
+	info, err := os.Lstat(f.path)
+	if err != nil { return nil, err }
+	if !f.validFile(info) { return nil, ErrForbidden }
+	file, err := os.Open(f.path)
+	if err != nil { return nil, err }
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) || !f.validFile(opened) { return nil, ErrForbidden }
+	raw, err := io.ReadAll(io.LimitReader(file, 33))
+	if err != nil || len(raw) != 32 { wipe(raw); return nil, ErrInvalid }
+	return raw, nil
+}
 var _=errors.Is

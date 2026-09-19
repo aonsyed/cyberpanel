@@ -7,9 +7,35 @@ import (
 	"errors"
 	"net"
 	"os"
+	"syscall"
 )
 
 const ManagementSocketPath = "/run/cyberpanel-secrets/manage.sock"
+
+// Management admits only the configured administrative UIDs. It returns no
+// material and does not use executable identity. Keep it separate from the
+// material socket, where executable and process-start binding are mandatory.
+type LinuxManagementPeerAuthorizer struct { allowed map[uint32]struct{} }
+
+func NewLinuxManagementPeerAuthorizer(allowedUIDs ...uint32) (*LinuxManagementPeerAuthorizer, error) {
+	if len(allowedUIDs) == 0 { return nil, ErrInvalid }
+	policy := &LinuxManagementPeerAuthorizer{allowed:make(map[uint32]struct{})}
+	for _, uid := range allowedUIDs { policy.allowed[uid] = struct{}{} }
+	return policy, nil
+}
+
+func (policy *LinuxManagementPeerAuthorizer) Authorize(connection net.Conn) (VerifiedPeer, error) {
+	if policy == nil { return VerifiedPeer{}, ErrForbidden }
+	unixConnection, ok := connection.(*net.UnixConn)
+	if !ok { return VerifiedPeer{}, ErrForbidden }
+	raw, err := unixConnection.SyscallConn()
+	if err != nil { return VerifiedPeer{}, ErrForbidden }
+	var credential *syscall.Ucred
+	var credentialErr error
+	if err := raw.Control(func(fd uintptr) { credential, credentialErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED) }); err != nil || credentialErr != nil || credential == nil || credential.Pid <= 1 { return VerifiedPeer{}, ErrForbidden }
+	if _, allowed := policy.allowed[credential.Uid]; !allowed { return VerifiedPeer{}, ErrForbidden }
+	return VerifiedPeer{UID:credential.Uid, PID:uint32(credential.Pid)}, nil
+}
 
 type LocalManagementDialer struct{}
 
