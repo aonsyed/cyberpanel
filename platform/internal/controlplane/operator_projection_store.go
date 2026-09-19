@@ -106,16 +106,35 @@ const projectionInventoryColumns = `n.id,n.state,n.authority_epoch,n.projection_
 const projectionInventoryJoins = ` LEFT JOIN fleet_projection_snapshot_receipts_v1 r ON r.node_id=n.id LEFT JOIN fleet_projection_snapshots_v1 s ON s.node_id=n.id `
 const projectionRecordColumns = `p.node_id,p.tenant_id,p.resource_kind,p.resource_id,p.generation,p.event_sequence,p.digest,p.observed_at,p.stale,CASE WHEN octet_length(p.status_json)<=262144 THEN p.status_json ELSE NULL END,`
 
-func finishProjectionInventory(value *ProjectionInventoryState) {
+func finishProjectionTransport(value *ProjectionInventoryState) {
 	value.TransportSnapshotComplete = !value.SnapshotPending && value.SnapshotGeneration > 0 && value.SnapshotReceiptGeneration == value.SnapshotGeneration && value.SnapshotWatermark <= value.ProjectionSequence
-	// A transport snapshot receipt does not attest the node-local publisher's
-	// current-epoch baseline/source-complete records. Generic event payloads are
-	// observations, not a substitute for an admitted central baseline record.
+}
+
+func applyProjectionBaseline(value *ProjectionInventoryState, baseline ProjectionBaselineStatus) {
+	finishProjectionTransport(value)
 	value.BaselineGeneration = nil
 	value.BaselineComplete = false
 	value.Authoritative = false
 	value.InventoryState = "baseline_incomplete"
-	value.BaselineReason = "current_epoch_node_baseline_not_attested_at_central"
+	value.BaselineReason = baseline.Reason
+	if baseline.NodeID != value.NodeID || baseline.AuthorityEpoch != value.AuthorityEpoch || baseline.SnapshotGeneration != value.SnapshotGeneration {
+		value.BaselineReason = "baseline_scope_mismatch"
+		return
+	}
+	if !baseline.ObservedAt.IsZero() {
+		generation := baseline.SnapshotGeneration
+		value.BaselineGeneration = &generation
+	}
+	if !baseline.Authoritative {
+		if value.BaselineReason == "" {
+			value.BaselineReason = "baseline_not_authoritative"
+		}
+		return
+	}
+	value.BaselineComplete = true
+	value.Authoritative = true
+	value.InventoryState = "authoritative"
+	value.BaselineReason = "authoritative"
 }
 
 func projectionInventoryForNode(ctx context.Context, tx *authorityTx, tenant, node string) (ProjectionInventoryState, error) {
@@ -123,7 +142,9 @@ func projectionInventoryForNode(ctx context.Context, tx *authorityTx, tenant, no
 	err := tx.QueryRowContext(ctx, `SELECT `+projectionInventoryColumns+` FROM fleet_nodes n `+projectionInventoryJoins+` WHERE n.owner_tenant_id=? AND n.id=?`, tenant, node).Scan(&value.NodeID,&value.NodeState,&value.AuthorityEpoch,&value.ProjectionSequence,&value.SnapshotGeneration,&value.SnapshotReceiptGeneration,&value.SnapshotWatermark,&value.SnapshotPending)
 	if errors.Is(err, sql.ErrNoRows) { return value, ErrNotFound }
 	if err != nil { return value, err }
-	finishProjectionInventory(&value)
+	baseline, err := projectionBaselineStatusTx(ctx, tx, federation.ID(tenant), value.NodeID)
+	if err != nil { return value, err }
+	applyProjectionBaseline(&value, baseline)
 	return value, nil
 }
 
@@ -135,7 +156,7 @@ func scanResourceProjection(scanner projectionRowScanner) (ResourceProjectionRec
 	var stale int
 	node := &value.NodeInventory
 	if err := scanner.Scan(&value.NodeID,&value.TenantID,&value.ResourceKind,&value.ResourceID,&value.Generation,&value.EventSequence,&value.Digest,&value.ObservedAt,&stale,&raw,&node.NodeID,&node.NodeState,&node.AuthorityEpoch,&node.ProjectionSequence,&node.SnapshotGeneration,&node.SnapshotReceiptGeneration,&node.SnapshotWatermark,&node.SnapshotPending); err != nil { return value, err }
-	finishProjectionInventory(node)
+	finishProjectionTransport(node)
 	value.Status = json.RawMessage(`{}`)
 	value.StatusSanitized = true
 	value.Stale = stale != 0 || node.NodeState != NodeOnline || node.SnapshotPending || value.EventSequence == 0 || value.EventSequence > node.ProjectionSequence
@@ -182,16 +203,47 @@ func (s *Store) ProjectionInventory(ctx context.Context, tenant, node, kind, enc
 		page.Rows = page.Rows[:limit]
 		page.NextCursor = encodeProjectionCursor(tenant, node, kind, page.Rows[len(page.Rows)-1])
 	}
+	if page.Node != nil {
+		for index := range page.Rows {
+			page.Rows[index].NodeInventory = *page.Node
+		}
+		page.InventoryAuthoritative = page.Node.Authoritative
+		page.InventoryComplete = page.Node.BaselineComplete
+	} else {
+		// The keyset page is capped at 100 rows, so baseline evaluation is also
+		// capped at 100 distinct nodes rather than growing per stored row.
+		baselines := make(map[federation.ID]ProjectionBaselineStatus, len(page.Rows))
+		for index := range page.Rows {
+			nodeID := page.Rows[index].NodeID
+			baseline, exists := baselines[nodeID]
+			if !exists {
+				baseline, err = projectionBaselineStatusTx(ctx, tx, federation.ID(tenant), nodeID)
+				if err != nil { return page, err }
+				baselines[nodeID] = baseline
+			}
+			applyProjectionBaseline(&page.Rows[index].NodeInventory, baseline)
+		}
+		// Unfiltered pages can omit nodes with no rows and are not frozen across
+		// cursors, so they never claim tenant-wide inventory completeness.
+		page.InventoryAuthoritative = false
+		page.InventoryComplete = false
+	}
 	return page, tx.Commit()
 }
 
 func (s *Store) ResourceProjection(ctx context.Context, tenant, node, kind, resource string) (ResourceProjectionRecord, error) {
 	var value ResourceProjectionRecord
 	if s == nil || ctx == nil || !federation.ID(tenant).Valid() || !federation.ID(node).Valid() || !projectionResourceKindAllowed(kind) || !validProjectionResourceID(resource) { return value, ErrInvalid }
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable, ReadOnly: true})
+	if err != nil { return value, err }; defer tx.Rollback()
 	query := `SELECT `+projectionRecordColumns+projectionInventoryColumns+` FROM fleet_projections p JOIN fleet_nodes n ON n.id=p.node_id `+projectionInventoryJoins+` WHERE p.tenant_id=? AND n.owner_tenant_id=? AND p.node_id=? AND p.resource_kind=? AND p.resource_id=? LIMIT 1`
-	value, err := scanResourceProjection(s.db.QueryRowContext(ctx, query, tenant, tenant, node, kind, resource))
+	value, err = scanResourceProjection(tx.QueryRowContext(ctx, query, tenant, tenant, node, kind, resource))
 	if errors.Is(err, sql.ErrNoRows) { return value, ErrNotFound }
-	return value, err
+	if err != nil { return value, err }
+	baseline, err := projectionBaselineStatusTx(ctx, tx, federation.ID(tenant), value.NodeID)
+	if err != nil { return value, err }
+	applyProjectionBaseline(&value.NodeInventory, baseline)
+	return value, tx.Commit()
 }
 
 // Only bounded scalar/identifier summary fields are exposed. Nested specs,
