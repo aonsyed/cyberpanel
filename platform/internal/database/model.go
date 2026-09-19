@@ -91,6 +91,9 @@ func (id SQLIdentifier) MarshalJSON() ([]byte, error) { return json.Marshal(id.v
 func (id *ResourceID) UnmarshalJSON(data []byte) error {
 	var raw string
 	if err := json.Unmarshal(data, &raw); err != nil { return err }
+	// Optional resource IDs serialize as empty strings. Required IDs are
+	// checked by resource and command validation, not by JSON decoding.
+	if raw == "" { *id = ResourceID{}; return nil }
 	parsed, err := NewResourceID(raw)
 	if err == nil { *id = parsed }
 	return err
@@ -105,6 +108,9 @@ func (ref *SecretRef) UnmarshalJSON(data []byte) error {
 func (id *SQLIdentifier) UnmarshalJSON(data []byte) error {
 	var raw string
 	if err := json.Unmarshal(data, &raw); err != nil { return err }
+	// Database-wide grants have no object name. Required identifiers remain
+	// enforced by resource validation and ParseSQLIdentifier.
+	if raw == "" { *id = SQLIdentifier{}; return nil }
 	parsed, err := ParseSQLIdentifier(raw)
 	if err == nil { *id = parsed }
 	return err

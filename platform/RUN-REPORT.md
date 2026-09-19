@@ -22,6 +22,24 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Results
 
+### Database persistence correction
+
+Ubuntu ARM64 QEMU reproduced rejection of valid database-wide grants during
+JSON decoding: their intentionally empty object name was rejected by the SQL
+identifier decoder. Optional identifiers now round-trip while constructors and
+resource validators still reject missing required names and unsafe identifiers.
+The associated optional resource-ID correction also preserves local principals
+without a network-policy ID.
+
+`TestSQLCoordinatorResourcesAndReplayAfterReopen` exercises the actual SQLite
+repository and coordinator: create database, create local principal, assign
+database-wide grants, close/reopen storage, replay without repeated effects,
+reject changed-payload replay, and exclude another tenant's inventory.
+The MariaDB effect boundary is controlled; this is not live MariaDB qualification.
+The focused database/application tests and full Go suite/build pass in this
+guest. Evidence: `current-ubuntu-arm64-20260919-smoke/database-persistence-suite.log`.
+Other matrix guests have not yet run this correction.
+
 | Guest / check | Result | Evidence beneath evidence root |
 |---|---|---|
 | Ubuntu ARM64 Go suite/build, startup fixes included | Pass | `current-ubuntu-arm64-20260919-smoke/full-startup-fixed.log` |
