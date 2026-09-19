@@ -9,14 +9,30 @@ interface MetricProjection { name?:string;label?:string;value?:number;unit?:stri
 interface UsageProjection { dimension?:string;used?:number;limit?:number;unit?:string;available?:boolean;limit_state?:string;missing_reason?:string;updated_at?:string }
 const api=inject<APIClient>("api")!;const loading=ref(true);const error=ref("");const raw=ref<Record<string,unknown>>({});
 const node=computed(()=>record(raw.value.node));
-const metrics=computed(()=>list(raw.value.metrics) as unknown as MetricProjection[]);
+const metrics=computed(()=>{
+  const generatedAt=String(raw.value.generated_at||"");
+  const counts=Object.entries(record(raw.value.counts)).flatMap(([name,value])=>Number.isFinite(Number(value))?[{name:`count.${name}`,label:humanize(name),value:Number(value),unit:"count",available:true,complete:true,observed_at:generatedAt}]:[]);
+  return [...counts,...list(raw.value.metrics)] as unknown as MetricProjection[];
+});
 const usage=computed(()=>list(raw.value.usage) as unknown as UsageProjection[]);
 const services=computed(()=>list(raw.value.services));
 const alerts=computed(()=>list(raw.value.alerts));
 const warnings=computed(()=>Array.isArray(raw.value.warnings)?raw.value.warnings.map((item)=>String(item)):[]);
 onMounted(()=>void load());
-async function load():Promise<void>{loading.value=true;error.value="";try{if(!api.available("observability.dashboard.get"))throw new Error("The cached observability projection is not enabled on this node.");const response=await api.invoke<unknown>("observability.dashboard.get",{tenantId:sessionStore.state.tenantId||undefined,payload:{}});raw.value=isRecord(response.result)?response.result:{}}catch(cause){raw.value={};error.value=cause instanceof Error?cause.message:"Dashboard projection failed."}finally{loading.value=false}}
+async function load():Promise<void>{
+  loading.value=true;error.value="";
+  const operations=["dashboard.summary","observability.dashboard.get"].filter((operation)=>api.available(operation));
+  if(!operations.length){raw.value={};error.value="No dashboard projection is enabled on this node.";loading.value=false;return}
+  const responses=await Promise.allSettled(operations.map(async(operation)=>({operation,result:(await api.invoke<unknown>(operation,{tenantId:sessionStore.state.tenantId||undefined,payload:{}})).result})));
+  const fulfilled=responses.flatMap((response)=>response.status==="fulfilled"?[response.value]:[]);
+  if(!fulfilled.length){const rejected=responses.find((response)=>response.status==="rejected");raw.value={};error.value=rejected&&rejected.status==="rejected"&&rejected.reason instanceof Error?rejected.reason.message:"Dashboard projection failed.";loading.value=false;return}
+  const summary=record(fulfilled.find((entry)=>entry.operation==="dashboard.summary")?.result);
+  const observability=record(fulfilled.find((entry)=>entry.operation==="observability.dashboard.get")?.result);
+  raw.value={...summary,...observability,node:{...record(summary.node),...record(observability.node)},counts:record(summary.counts),warnings:[...strings(summary.warnings),...strings(observability.warnings)]};
+  loading.value=false;
+}
 function list(value:unknown):Record<string,unknown>[]{return Array.isArray(value)?value.filter(isRecord):[]}function record(value:unknown):Record<string,unknown>{return isRecord(value)?value:{}}function isRecord(value:unknown):value is Record<string,unknown>{return Boolean(value)&&typeof value==="object"&&!Array.isArray(value)}
+function strings(value:unknown):string[]{return Array.isArray(value)?value.map(String):[]}
 function text(value:unknown,fallback="—"):string{return value===undefined||value===null||value===""?fallback:String(value)}
 function metricValue(metric:MetricProjection):string{if(!metric.available||!Number.isFinite(metric.value))return"—";const value=Number(metric.value);if(metric.unit==="percent")return`${value.toFixed(value>=10?0:1)}%`;if(metric.unit==="ratio")return`${(value*100).toFixed(value>=.1?0:1)}%`;if(metric.unit==="bytes")return formatBytes(value);if(metric.unit==="bytes_per_second")return`${formatBytes(value)}/s`;return new Intl.NumberFormat(undefined,{maximumFractionDigits:2}).format(value)}
 function metricDetail(metric:MetricProjection):string{if(!metric.available)return humanize(metric.missing_reason||"missing data");const coverage=metric.complete?"complete interval":"partial interval";return`${coverage} · ${date(metric.observed_at)}`}

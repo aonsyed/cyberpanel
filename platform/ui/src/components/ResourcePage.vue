@@ -27,6 +27,7 @@ const availableGlobalActions = computed(() => (props.definition.globalActions ||
 const availableRowActions = computed(() => (props.definition.rowActions || []).filter((action) => api.available(action.operation)));
 const listAvailable = computed(() => api.available(props.definition.listOperation));
 const tenantID = computed(() => props.definition.scope === "installation" ? undefined : sessionStore.state.tenantId || undefined);
+const activeTenantID = computed(() => activeAction.value?.scope === "installation" ? undefined : activeAction.value?.scope === "tenant" ? sessionStore.state.tenantId || undefined : tenantID.value);
 const visibleRows = computed(() => {
   const term = search.value.trim().toLocaleLowerCase();
   const filtered = term ? rows.value.filter((row) => Object.values(row).some((value) => primitiveText(value).toLocaleLowerCase().includes(term))) : rows.value.slice();
@@ -124,7 +125,7 @@ function isRecord(value: unknown): value is Record<string, unknown> { return Boo
       <footer v-if="nextCursor || previousCursors.length" class="pagination"><button class="button button-small" type="button" :disabled="!previousCursors.length" @click="previousPage">Previous</button><span class="mono">CURSOR PAGE {{ previousCursors.length + 1 }}</span><button class="button button-small" type="button" :disabled="!nextCursor" @click="nextPage">Next</button></footer>
     </template>
 
-    <ActionDrawer v-if="activeAction" :action="activeAction" :tenant-id="tenantID" :resource="activeResource" :expected-generation="Number(activeResource?.generation || 0)" @close="activeAction=null;activeResource=null" @complete="complete"/>
+    <ActionDrawer v-if="activeAction" :action="activeAction" :tenant-id="activeTenantID" :resource="activeResource" :expected-generation="Number(activeResource?.generation || 0)" @close="activeAction=null;activeResource=null" @complete="complete"/>
   </main>
 </template>
 

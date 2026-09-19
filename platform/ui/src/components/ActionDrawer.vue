@@ -47,10 +47,12 @@ function validate():boolean{
 function actionPayload():Record<string,unknown>{
   const payload:Record<string,unknown>={};
   for(const field of props.action.fields||[]){
+    if(field.key===props.action.tenantIdField||field.key===props.action.resourceIdField||field.key===props.action.expectedGenerationField)continue;
     const value=values[field.key];
     if(field.type==="json"){
       if(String(value??"").trim()!=="")payload[field.key]=JSON.parse(String(value));
-    }else payload[field.key]=value;
+    }else if(field.type==="number"&&String(value??"").trim()!=="")payload[field.key]=Number(value);
+    else payload[field.key]=value;
   }
   return payload;
 }
@@ -58,19 +60,23 @@ async function submit():Promise<void>{
   if(!validate()||(props.action.mutating&&!confirmation.value))return;
   submitting.value=true;failure.value="";
   try{
-    const resourceID=props.resource?String(props.resource.id||props.resource.resource_id||props.resource.site_id||""):undefined;
-    const explicitGeneration=Number(props.expectedGeneration||0);
+    const fieldResourceID=props.action.resourceIdField?String(values[props.action.resourceIdField]||"").trim():"";
+    const resourceID=fieldResourceID||(props.resource?String(props.resource.id||props.resource.resource_id||props.resource.site_id||""):undefined);
+    const fieldGeneration=props.action.expectedGenerationField?Number(values[props.action.expectedGenerationField]||0):0;
+    const explicitGeneration=fieldGeneration||Number(props.expectedGeneration||0);
+    const fieldTenantID=props.action.tenantIdField?String(values[props.action.tenantIdField]||"").trim():"";
+    const tenantID=fieldTenantID||props.tenantId;
     const resourceGeneration=Number(props.action.generationField==="revision"?(props.resource?.revision||0):(props.resource?.generation||0));
     const generation=props.action.mutating?(explicitGeneration||resourceGeneration||undefined):undefined;
     if(props.action.operation==="container.exec.issue"){
       const token=oneTimeToken();
       const argumentsValue=String(values.arguments||"").split("\n").map((value)=>value.trim()).filter(Boolean);
-      const issued=await api.invoke<Record<string,unknown>>(props.action.operation,{tenantId:props.tenantId,resourceId:resourceID,expectedGeneration:generation,payload:{command_id:values.command_id,arguments:argumentsValue,ttl_seconds:Number(values.ttl_seconds)||60,token}});
+      const issued=await api.invoke<Record<string,unknown>>(props.action.operation,{tenantId:tenantID,resourceId:resourceID,expectedGeneration:generation,payload:{command_id:values.command_id,arguments:argumentsValue,ttl_seconds:Number(values.ttl_seconds)||60,token}});
       const grantID=String(issued.result.id||"");
       if(!grantID)throw new Error("The node did not return a valid one-time exec grant.");
       const exchanged=await api.exchangeContainerExec<unknown>(grantID,token);result.value=exchanged.result;
     }else{
-      const response=await api.invoke<unknown>(props.action.operation,{tenantId:props.tenantId,resourceId:resourceID,expectedGeneration:generation,payload:actionPayload()});result.value=response.result;
+      const response=await api.invoke<unknown>(props.action.operation,{tenantId:tenantID,resourceId:resourceID,expectedGeneration:generation,payload:actionPayload()});result.value=response.result;
     }
     completed.value=true;
     if(props.action.mutating){sessionStore.notify({tone:"healthy",title:`${props.action.label} accepted`,body:"The durable operation was admitted and will continue if this browser disconnects."});emit("complete",result.value)}
