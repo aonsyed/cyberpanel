@@ -65,7 +65,10 @@ func digestJSON(domain string, value any) string {
 }
 
 func validHostname(value string) bool {
-	if value == "" || len(value) > 253 || value != strings.ToLower(value) || strings.HasSuffix(value, ".") || !strings.Contains(value, ".") || netip.ParseAddr(value).IsValid() {
+	if value == "" || len(value) > 253 || value != strings.ToLower(value) || strings.HasSuffix(value, ".") || !strings.Contains(value, ".") {
+		return false
+	}
+	if _, err := netip.ParseAddr(value); err == nil {
 		return false
 	}
 	for _, label := range strings.Split(value, ".") {

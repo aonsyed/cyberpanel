@@ -248,6 +248,10 @@ func (service *Service) clock() time.Time {
 	return service.now().UTC()
 }
 
+func (service *Service) authorize(ctx context.Context, request AuthorizationRequest) (AuthorizationDecision, error) {
+	return service.authorizer.AuthorizeSitePreview(ctx, request)
+}
+
 func (service *Service) Issue(ctx context.Context, request IssueRequest) (IssuedPreview, error) {
 	if service == nil || request.Actor.Validate() != nil || !validID(string(request.TenantID)) || !validID(string(request.SiteID)) || request.ExpectedGeneration == 0 ||
 		request.Audience.Validate() != nil || (request.GrantMode != GrantOneUse && request.GrantMode != GrantShortLived) || !validHostname(request.RequestedHostname) ||
