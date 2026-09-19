@@ -22,6 +22,23 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Results
 
+### Live external MariaDB TLS adapter
+
+`TestQEMULiveMariaDBExternalTLS` passed as root inside Ubuntu ARM64 QEMU.
+It starts a separate disposable MariaDB process on a loopback ephemeral TCP
+port, with a generated CA/server identity and `require_secure_transport=ON`.
+The production external connection builder and query runner accept the trusted
+IP certificate, reject a different CA and a hostname missing from the server
+certificate, and then accept the valid connection again. Negative cases also
+check MariaDB client TLS error 2026, rather than counting arbitrary failures.
+Evidence: `current-ubuntu-arm64-20260919-smoke/mariadb-tls.log`.
+The fixture process, data directory, keys, and account are removed by cleanup;
+the primary local MariaDB configuration is unchanged. The initial fixture setup
+needed an explicit mysql-writable TMPDIR rather than inheriting root's TMPDIR.
+This qualifies server-authenticated TLS at the database adapter only. It does
+not qualify mutual TLS, secret-broker delivery, external-instance enrollment,
+or the still-incomplete application TLS configuration described below.
+
 ### Live local MariaDB execution
 
 MariaDB 10.11.14 was installed from the configured Ubuntu guest package
