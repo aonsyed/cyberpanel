@@ -274,6 +274,27 @@ func (service *StaticDeploymentService) Admit(ctx context.Context, bundle Static
 		clusterRaw, _ := json.Marshal(bundle.Cluster)
 		if err = insertStaticJSON(ctx, tx, `SELECT cluster_json FROM ha_database_clusters WHERE id=?`, []any{bundle.Cluster.ID}, clusterRaw, `INSERT INTO ha_database_clusters(id,group_id,topology,state,generation,cluster_json,updated_at) VALUES(?,?,?,?,?,?,?)`, bundle.Cluster.ID, bundle.Cluster.GroupID, bundle.Cluster.Topology, bundle.Cluster.State, bundle.Cluster.Generation, clusterRaw, bundle.Cluster.UpdatedAt); err != nil { return StaticDeploymentReceipt{}, err }
 	}
+	bindings := make(map[string]federation.FederatedPrincipalBinding)
+	for _, grant := range bundle.Grants {
+		for _, binding := range grant.PrincipalBindings {
+			identity := binding.PeerID.String()+"\x00"+binding.Issuer+"\x00"+binding.Subject
+			if prior, exists := bindings[identity]; exists {
+				priorRaw, priorErr := json.Marshal(prior); bindingRaw, bindingErr := json.Marshal(binding)
+				if priorErr != nil || bindingErr != nil || !sameStaticJSON(priorRaw,bindingRaw) { return StaticDeploymentReceipt{}, ErrConflict }
+				continue
+			}
+			bindings[identity] = binding
+		}
+	}
+	if peer.Valid() {
+		if _, err = tx.ExecContext(ctx, `UPDATE federation_principal_bindings SET state='staged',updated_at=? WHERE peer_id=? AND state='active'`, time.Now().UTC(), peer); err != nil { return StaticDeploymentReceipt{}, err }
+		for _, binding := range bindings {
+			raw, marshalErr := json.Marshal(binding); if marshalErr != nil { return StaticDeploymentReceipt{}, marshalErr }
+			result, execErr := tx.ExecContext(ctx, `INSERT INTO federation_principal_bindings(id,peer_id,issuer,subject,authorization_epoch,state,binding_json,expires_at,updated_at) VALUES(?,?,?,?,?,'active',?,?,?) ON CONFLICT(peer_id,issuer,subject) DO UPDATE SET id=excluded.id,authorization_epoch=excluded.authorization_epoch,state='active',binding_json=excluded.binding_json,expires_at=excluded.expires_at,updated_at=excluded.updated_at WHERE federation_principal_bindings.authorization_epoch<=excluded.authorization_epoch`, binding.ID,binding.PeerID,binding.Issuer,binding.Subject,binding.AuthorizationEpoch,raw,binding.ExpiresAt,time.Now().UTC())
+			if execErr != nil { return StaticDeploymentReceipt{}, execErr }; if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 { return StaticDeploymentReceipt{}, ErrConflict }
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE federation_principal_bindings SET state='revoked',updated_at=? WHERE peer_id=? AND state='staged'`, time.Now().UTC(), peer); err != nil { return StaticDeploymentReceipt{}, err }
+	}
 	for _, grant := range bundle.Grants {
 		raw, _ := json.Marshal(grant)
 		var stored []byte
