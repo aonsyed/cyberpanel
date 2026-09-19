@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,16 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/executor/webactivation"
+	hostingservice "github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/catalog"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/composer"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/enterprise"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/native"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/ols"
 )
 
 const (
@@ -35,6 +46,7 @@ const (
 	linuxChromeIsolateArgument  = "--cyberpanel-sitepreview-isolate"
 	linuxUnshareExecutable      = "/usr/bin/unshare"
 	linuxIPExecutable           = "/usr/sbin/ip"
+	linuxControlDatabase        = "/var/lib/cyberpanel/control/control.db"
 )
 
 type LinuxRouteRuntime struct {
@@ -478,6 +490,15 @@ func applyRouteHelper(ctx context.Context, request linuxRouteHelperRequest, spec
 	if err := ensureLinuxPrivateDirectory(stateRoot); err != nil {
 		return RouteEffectReceipt{}, err
 	}
+	route, err := exactPreviewProxyRoute(spec)
+	if err != nil {
+		return RouteEffectReceipt{}, err
+	}
+	webCatalog, database, err := openExactPreviewCatalog(ctx)
+	if err != nil {
+		return RouteEffectReceipt{}, err
+	}
+	defer database.Close()
 	path := filepath.Join(stateRoot, "route-"+request.SpecDigest+".json")
 	stored, found, err := loadRouteEffect(path, spec)
 	if err != nil {
@@ -487,25 +508,46 @@ func applyRouteHelper(ctx context.Context, request linuxRouteHelperRequest, spec
 		if request.Lease != (RouteLease{}) {
 			return RouteEffectReceipt{}, ErrInvalid
 		}
-		if found {
-			if stored.Outcome != RouteApplied {
-				return RouteEffectReceipt{}, ErrConflict
-			}
-			return stored, nil
-		}
 		if !time.Now().UTC().Before(spec.ExpiresAt) {
 			return RouteEffectReceipt{}, ErrExpired
 		}
-		proof, probeErr := probeExactRoute(ctx, spec)
+		if found && stored.Outcome != RouteApplied {
+			return RouteEffectReceipt{}, ErrConflict
+		}
+		installed, plan, err := exactPreviewRouteState(ctx, webCatalog, route)
+		if err != nil {
+			return RouteEffectReceipt{}, err
+		}
+		installedBefore := installed
+		if !installed {
+			plan, err = applyExactPreviewRoute(ctx, webCatalog, route, false, request.SpecDigest)
+			if err != nil {
+				return RouteEffectReceipt{}, err
+			}
+		}
+		proof, probeErr := probeInstalledPreviewRoute(ctx, spec, plan)
 		if probeErr != nil {
-			return RouteEffectReceipt{}, probeErr
+			var rollbackErr error
+			if !installedBefore {
+				_, rollbackErr = applyExactPreviewRoute(ctx, webCatalog, route, true, request.SpecDigest)
+			}
+			return RouteEffectReceipt{}, errors.Join(probeErr, rollbackErr)
+		}
+		if found {
+			stored.Proof = proof
+			stored.EvidenceDigest = routeHelperReceipt(RouteApplied, stored.Lease, proof).EvidenceDigest
+			if err = saveRouteEffect(path, stored, spec); err != nil {
+				return RouteEffectReceipt{}, err
+			}
+			return stored, nil
 		}
 		now := proof.ObservedAt
 		lease := RouteLease{ID: RouteLeaseID("lease-" + request.SpecDigest[:48]), SessionID: spec.SessionID, SpecDigest: request.SpecDigest,
 			RuntimeToken: "route-" + request.SpecDigest[:48], State: "active", Generation: 1, ExpiresAt: spec.ExpiresAt.UTC(), RollbackUntil: spec.ExpiresAt.UTC().Add(15 * time.Minute), UpdatedAt: now}
 		receipt := routeHelperReceipt(RouteApplied, lease, proof)
 		if err = saveRouteEffect(path, receipt, spec); err != nil {
-			return RouteEffectReceipt{}, err
+			_, rollbackErr := applyExactPreviewRoute(ctx, webCatalog, route, true, request.SpecDigest)
+			return RouteEffectReceipt{}, errors.Join(err, rollbackErr)
 		}
 		return receipt, nil
 	}
@@ -533,9 +575,26 @@ func applyRouteHelper(ctx context.Context, request linuxRouteHelperRequest, spec
 		if stored.Lease.State != "active" || !time.Now().UTC().Before(spec.ExpiresAt) {
 			return RouteEffectReceipt{}, ErrExpired
 		}
-		proof, err = probeExactRoute(ctx, spec)
+		installed, plan, stateErr := exactPreviewRouteState(ctx, webCatalog, route)
+		if stateErr != nil || !installed {
+			return RouteEffectReceipt{}, errors.Join(ErrIntegrity, stateErr)
+		}
+		proof, err = probeInstalledPreviewRoute(ctx, spec, plan)
 		if err != nil {
 			return RouteEffectReceipt{}, err
+		}
+	} else {
+		installed, _, stateErr := exactPreviewRouteState(ctx, webCatalog, route)
+		if stateErr != nil {
+			return RouteEffectReceipt{}, stateErr
+		}
+		if installed {
+			if _, err = applyExactPreviewRoute(ctx, webCatalog, route, true, request.SpecDigest); err != nil {
+				return RouteEffectReceipt{}, err
+			}
+		}
+		if installed, _, err = exactPreviewRouteState(ctx, webCatalog, route); err != nil || installed {
+			return RouteEffectReceipt{}, errors.Join(ErrAmbiguous, err)
 		}
 	}
 	lease := stored.Lease
@@ -548,6 +607,182 @@ func applyRouteHelper(ctx context.Context, request linuxRouteHelperRequest, spec
 		return RouteEffectReceipt{}, err
 	}
 	return receipt, nil
+}
+
+type deniedSiteInputResolver struct{}
+
+func (deniedSiteInputResolver) Resolve(context.Context, hostingservice.SiteEffectRequest) (composer.SiteInput, error) {
+	return composer.SiteInput{}, ErrPolicyDenied
+}
+
+func exactPreviewProxyRoute(spec RouteSpec) (composer.ProxyRouteInput, error) {
+	preview, previewErr := webengine.ParseHostname(spec.PreviewHostname)
+	host, hostErr := webengine.ParseHostname(spec.HostHeader)
+	if previewErr != nil || hostErr != nil || spec.Backend.Protocol != BackendHTTP || !spec.Backend.Address.IsLoopback() || spec.Backend.Address.Zone() != "" || spec.SNI != spec.HostHeader {
+		return composer.ProxyRouteInput{}, ErrPolicyDenied
+	}
+	return composer.ProxyRouteInput{Ref: webengine.ResourceRef("sitepreview/" + string(spec.SessionID)), Hostname: preview, UpstreamAddress: spec.Backend.Address.Unmap(), UpstreamPort: spec.Backend.Port, HostHeader: host, Generation: spec.SiteGeneration}, nil
+}
+
+func openExactPreviewCatalog(ctx context.Context) (*catalog.SQLCatalog, *sql.DB, error) {
+	info, err := os.Lstat(linuxControlDatabase)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
+		return nil, nil, errors.Join(ErrPolicyDenied, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Nlink != 1 || int(stat.Uid) != os.Geteuid() {
+		return nil, nil, ErrPolicyDenied
+	}
+	database, err := sql.Open("sqlite", "file:"+linuxControlDatabase+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=trusted_schema(0)")
+	if err != nil {
+		return nil, nil, err
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	if err = database.PingContext(ctx); err != nil {
+		database.Close()
+		return nil, nil, err
+	}
+	opened, err := os.Stat(linuxControlDatabase)
+	if err != nil || !os.SameFile(info, opened) {
+		database.Close()
+		return nil, nil, errors.Join(ErrPolicyDenied, err)
+	}
+	webCatalog, err := catalog.New(database, deniedSiteInputResolver{})
+	if err != nil {
+		database.Close()
+		return nil, nil, err
+	}
+	return webCatalog, database, nil
+}
+
+func exactPreviewRouteState(ctx context.Context, webCatalog *catalog.SQLCatalog, wanted composer.ProxyRouteInput) (bool, composer.Plan, error) {
+	plan, err := webCatalog.CurrentPlan(ctx)
+	if err != nil {
+		return false, composer.Plan{}, err
+	}
+	found := false
+	for _, route := range plan.ProxyRoutes {
+		if route.Ref == wanted.Ref {
+			if found || route != wanted {
+				return false, composer.Plan{}, ErrConflict
+			}
+			found = true
+		} else if route.Hostname == wanted.Hostname {
+			return false, composer.Plan{}, ErrConflict
+		}
+	}
+	return found, plan, nil
+}
+
+func applyExactPreviewRoute(ctx context.Context, webCatalog *catalog.SQLCatalog, route composer.ProxyRouteInput, withdraw bool, specDigest string) (composer.Plan, error) {
+	current, err := webCatalog.CurrentPlan(ctx)
+	if err != nil {
+		return composer.Plan{}, err
+	}
+	operation := "install"
+	if withdraw {
+		operation = "withdraw"
+	}
+	effectID := "sitepreview-" + operation + "-" + specDigest[:32] + "-g" + strconv.FormatUint(current.SnapshotGeneration, 10)
+	prepared, err := webCatalog.PrepareProxyRoute(ctx, effectID, route, withdraw)
+	if err != nil {
+		return composer.Plan{}, err
+	}
+	request, digest, err := renderExactPreviewPlan(ctx, prepared.Plan)
+	if err != nil {
+		_ = webCatalog.RejectProxyRoute(ctx, prepared)
+		return composer.Plan{}, err
+	}
+	client, err := webactivation.NewLocalClient()
+	if err != nil {
+		_ = webCatalog.RejectProxyRoute(ctx, prepared)
+		return composer.Plan{}, err
+	}
+	receipt, activateErr := client.ApplyVerified(ctx, request, digest)
+	if activateErr != nil || receipt.Status != activation.Applied || !receipt.Confirmed || receipt.Digest != digest {
+		return composer.Plan{}, errors.Join(ErrAmbiguous, activateErr)
+	}
+	if err = webCatalog.FinalizeProxyRoute(ctx, prepared, receipt.Digest); err != nil {
+		return composer.Plan{}, errors.Join(ErrAmbiguous, err)
+	}
+	return prepared.Plan, nil
+}
+
+func renderExactPreviewPlan(ctx context.Context, plan composer.Plan) (native.RenderRequest, string, error) {
+	composed, err := composer.Compose(plan)
+	if err != nil {
+		return native.RenderRequest{}, "", err
+	}
+	request := native.RenderRequest{Desired: composed.Desired, Snapshot: composed.Snapshot}
+	var renderer native.Renderer
+	switch composed.Desired.Engine.Edition {
+	case webengine.EditionOpenLiteSpeed:
+		renderer = ols.New()
+	case webengine.EditionLiteSpeedEnterprise:
+		renderer = enterprise.New()
+	default:
+		return native.RenderRequest{}, "", ErrPolicyDenied
+	}
+	generation, err := renderer.Render(ctx, request)
+	if err != nil {
+		return native.RenderRequest{}, "", err
+	}
+	return request, generation.ContentDigest, nil
+}
+
+func probeInstalledPreviewRoute(ctx context.Context, spec RouteSpec, plan composer.Plan) (RouteProof, error) {
+	_, activeDigest, err := renderExactPreviewPlan(ctx, plan)
+	if err != nil {
+		return RouteProof{}, err
+	}
+	port := uint16(0)
+	for _, listener := range plan.Engine.Listeners {
+		if listener.Ref == webengine.ResourceRef("listener/https") && listener.TLSMode == webengine.TLSModeTLS {
+			if port != 0 {
+				return RouteProof{}, ErrIntegrity
+			}
+			port = listener.Port
+		}
+	}
+	if port == 0 {
+		return RouteProof{}, ErrIntegrity
+	}
+	endpoint := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+	transport := &http.Transport{Proxy: nil, DisableCompression: true, ForceAttemptHTTP2: false,
+		DialContext: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(dialCtx, network, endpoint)
+		},
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: spec.PreviewHostname}, ResponseHeaderTimeout: 10 * time.Second}
+	defer transport.CloseIdleConnections()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+net.JoinHostPort(spec.PreviewHostname, strconv.Itoa(int(port)))+"/", nil)
+	if err != nil {
+		return RouteProof{}, err
+	}
+	request.Host = spec.PreviewHostname
+	response, err := transport.RoundTrip(request)
+	if err != nil {
+		return RouteProof{}, err
+	}
+	_, readErr := io.CopyN(io.Discard, response.Body, 1)
+	closeErr := response.Body.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) || closeErr != nil || response.StatusCode < 200 || response.StatusCode >= 500 {
+		return RouteProof{}, errors.Join(ErrPolicyDenied, readErr, closeErr)
+	}
+	now := time.Now().UTC()
+	evidence := digestJSON("cyberpanel:sitepreview:installed-route:v1", struct {
+		SpecDigest   string
+		ActiveDigest string
+		Status       int
+		ObservedAt   time.Time
+	}{specDigest(spec), activeDigest, response.StatusCode, now})
+	proof := RouteProof{SpecDigest: specDigest(spec), Engine: spec.Engine, HostProved: true, SNIProved: response.TLS != nil,
+		PHPGeneration: spec.PHPGeneration, TLSGeneration: spec.TLSGeneration, CacheGeneration: spec.CacheGeneration, WAFGeneration: spec.WAFGeneration,
+		SiteGeneration: spec.SiteGeneration, ObservedAt: now, EvidenceDigest: evidence}
+	if !proof.ValidFor(spec) {
+		return RouteProof{}, ErrIntegrity
+	}
+	return proof, nil
 }
 
 func sameRouteLeaseIdentity(left, right RouteLease) bool {

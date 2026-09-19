@@ -65,7 +65,15 @@ type Plan struct {
 	AccessPolicies     []AccessPolicyInput
 }
 
-type ProxyRouteInput struct{Ref webengine.ResourceRef;Hostname webengine.Hostname;ListenerRef webengine.ResourceRef;UpstreamPort uint16;Generation uint64}
+type ProxyRouteInput struct {
+	Ref             webengine.ResourceRef
+	Hostname        webengine.Hostname
+	ListenerRef     webengine.ResourceRef
+	UpstreamAddress netip.Addr
+	UpstreamPort    uint16
+	HostHeader      webengine.Hostname
+	Generation      uint64
+}
 
 type AccessPrincipalInput struct {
 	Ref      webengine.ResourceRef `json:"ref"`
@@ -245,7 +253,62 @@ func Compose(plan Plan) (Result, error) {
 			}
 		}
 	}
-	proxyRoutes:=append([]ProxyRouteInput(nil),plan.ProxyRoutes...);sort.Slice(proxyRoutes,func(i,j int)bool{return proxyRoutes[i].Ref<proxyRoutes[j].Ref});for _,route:=range proxyRoutes{if !safeResourceRef(route.Ref)||route.Hostname.String()==""||!safeResourceRef(route.ListenerRef)||route.UpstreamPort<1024||route.Generation==0{return Result{},fmt.Errorf("invalid container proxy route %q",route.Ref)};listenerFound:=false;for _,listener:=range listeners{if listener.Ref==route.ListenerRef{if listener.TLSMode==webengine.TLSModeTLS{return Result{},fmt.Errorf("container proxy route %q requires an owned TLS policy",route.Ref)};listenerFound=true;break}};if !listenerFound{return Result{},fmt.Errorf("container proxy route %q references an unknown listener",route.Ref)};token:="proxy-"+shortHash(string(route.Ref));siteRef:=webengine.ResourceRef("site/"+token);identityRef:=webengine.ResourceRef("identity/"+token);applicationRef:=webengine.ResourceRef("application/"+token);bindingRef:=webengine.ResourceRef("binding/"+token);snapshot.Sites=append(snapshot.Sites,native.SiteRuntime{SiteRef:siteRef,IdentityRef:identityRef,SiteKey:native.SiteKey(token),RootGeneration:route.Generation});desired.Applications=append(desired.Applications,webengine.WebApplicationSpec{Ref:applicationRef,SiteRef:siteRef,IdentityRef:identityRef,ApplicationRoot:"proxy",DocumentRoot:"proxy/public",Indexes:[]string{"index.html"},PHPProfileRef:"php/proxy",ResourceProfileRef:"resource/proxy",LogPolicyRef:"logs/proxy",ReverseProxy:&webengine.ReverseProxySpec{Address:netip.MustParseAddr("127.0.0.1"),Port:route.UpstreamPort}});desired.Bindings=append(desired.Bindings,webengine.WebBindingSpec{Ref:bindingRef,ApplicationRef:applicationRef,Hostnames:[]webengine.Hostname{route.Hostname},ListenerRefs:[]webengine.ResourceRef{route.ListenerRef},Relationship:webengine.BindingPrimary,RoutingState:webengine.RoutingServe})}
+	proxyRoutes := append([]ProxyRouteInput(nil), plan.ProxyRoutes...)
+	sort.Slice(proxyRoutes, func(i, j int) bool { return proxyRoutes[i].Ref < proxyRoutes[j].Ref })
+	for _, route := range proxyRoutes {
+		if !safeResourceRef(route.Ref) || route.Hostname.String() == "" || route.UpstreamPort < 1024 || route.Generation == 0 {
+			return Result{}, fmt.Errorf("invalid proxy route %q", route.Ref)
+		}
+		address := route.UpstreamAddress
+		if !address.IsValid() {
+			address = netip.MustParseAddr("127.0.0.1")
+		}
+		listenerRefs := []webengine.ResourceRef{route.ListenerRef}
+		relationship := webengine.BindingPrimary
+		policy := webengine.ResourceRef("")
+		if route.HostHeader.String() == "" {
+			if !safeResourceRef(route.ListenerRef) || route.UpstreamAddress.IsValid() {
+				return Result{}, fmt.Errorf("invalid container proxy route %q", route.Ref)
+			}
+			listenerFound := false
+			for _, listener := range listeners {
+				if listener.Ref == route.ListenerRef {
+					if listener.TLSMode == webengine.TLSModeTLS {
+						return Result{}, fmt.Errorf("container proxy route %q requires an owned TLS policy", route.Ref)
+					}
+					listenerFound = true
+					break
+				}
+			}
+			if !listenerFound {
+				return Result{}, fmt.Errorf("container proxy route %q references an unknown listener", route.Ref)
+			}
+		} else {
+			if route.ListenerRef != "" || !address.IsLoopback() || address.Zone() != "" || plan.DefaultTLS == nil {
+				return Result{}, fmt.Errorf("invalid exact preview route %q", route.Ref)
+			}
+			listenerRefs = nil
+			for _, listener := range listeners {
+				if (listener.Ref == webengine.ResourceRef("listener/http") && listener.TLSMode == webengine.TLSModeClear) ||
+					(listener.Ref == webengine.ResourceRef("listener/https") && listener.TLSMode == webengine.TLSModeTLS) {
+					listenerRefs = append(listenerRefs, listener.Ref)
+				}
+			}
+			if len(listenerRefs) != 2 {
+				return Result{}, fmt.Errorf("exact preview route %q requires clear and TLS listeners", route.Ref)
+			}
+			relationship = webengine.BindingPreview
+			policy = defaultPolicy
+		}
+		token := "proxy-" + shortHash(string(route.Ref))
+		siteRef := webengine.ResourceRef("site/" + token)
+		identityRef := webengine.ResourceRef("identity/" + token)
+		applicationRef := webengine.ResourceRef("application/" + token)
+		bindingRef := webengine.ResourceRef("binding/" + token)
+		snapshot.Sites = append(snapshot.Sites, native.SiteRuntime{SiteRef: siteRef, IdentityRef: identityRef, SiteKey: native.SiteKey(token), RootGeneration: route.Generation})
+		desired.Applications = append(desired.Applications, webengine.WebApplicationSpec{Ref: applicationRef, SiteRef: siteRef, IdentityRef: identityRef, ApplicationRoot: "proxy", DocumentRoot: "proxy/public", Indexes: []string{"index.html"}, PHPProfileRef: "php/proxy", ResourceProfileRef: "resource/proxy", LogPolicyRef: "logs/proxy", ReverseProxy: &webengine.ReverseProxySpec{Address: address, Port: route.UpstreamPort, HostHeader: route.HostHeader}})
+		desired.Bindings = append(desired.Bindings, webengine.WebBindingSpec{Ref: bindingRef, ApplicationRef: applicationRef, Hostnames: []webengine.Hostname{route.Hostname}, ListenerRefs: listenerRefs, TLSPolicyRef: policy, Relationship: relationship, RoutingState: webengine.RoutingServe})
+	}
 	policies := append([]AccessPolicyInput(nil), plan.AccessPolicies...)
 	sort.Slice(policies, func(i, j int) bool { return policies[i].PolicyRef < policies[j].PolicyRef })
 	for _, policy := range policies {

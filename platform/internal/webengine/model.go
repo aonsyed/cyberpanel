@@ -175,7 +175,11 @@ type WebApplicationSpec struct {
 	ReverseProxy       *ReverseProxySpec
 }
 
-type ReverseProxySpec struct{Address netip.Addr;Port uint16}
+type ReverseProxySpec struct {
+	Address    netip.Addr
+	Port       uint16
+	HostHeader Hostname
+}
 
 type WebBindingSpec struct {
 	Ref            ResourceRef
@@ -354,7 +358,17 @@ func Validate(state DesiredState) []Finding {
 			add("WEBENGINE_LOG_POLICY_REQUIRED", applicationPath+".logPolicyRef")
 		}
 		validateRef(application.LogPolicyRef, applicationPath+".logPolicyRef")
-		if application.ReverseProxy!=nil{if !application.ReverseProxy.Address.IsLoopback()||application.ReverseProxy.Address.Zone()!=""||application.ReverseProxy.Port<1024{add("WEBENGINE_PROXY_TARGET_INVALID",applicationPath+".reverseProxy")}}
+		if application.ReverseProxy != nil {
+			proxy := application.ReverseProxy
+			if !proxy.Address.IsLoopback() || proxy.Address.Zone() != "" || proxy.Port < 1024 {
+				add("WEBENGINE_PROXY_TARGET_INVALID", applicationPath+".reverseProxy")
+			}
+			if proxy.HostHeader.String() != "" {
+				if parsed, err := ParseHostname(proxy.HostHeader.String()); err != nil || parsed != proxy.HostHeader {
+					add("WEBENGINE_PROXY_HOST_INVALID", applicationPath+".reverseProxy.hostHeader")
+				}
+			}
+		}
 	}
 
 	hostsByListener := make(map[ResourceRef]map[string]struct{})

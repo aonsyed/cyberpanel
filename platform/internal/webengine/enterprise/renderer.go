@@ -247,7 +247,11 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 	if binding.Relationship == webengine.BindingPreview {
 		output.WriteString("  <rewrite>\n")
 		writeElement(&output,2,"enable","1")
-		writeElement(&output,2,"rules","RewriteCond %{HTTPS} !=on\nRewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=308,L,NE]")
+		rules := "RewriteCond %{HTTPS} !=on\nRewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=308,L,NE]"
+		if application.ReverseProxy != nil && application.ReverseProxy.HostHeader.String() != "" {
+			rules += "\nRewriteRule ^ - [E=Proxy-Host:" + application.ReverseProxy.HostHeader.String() + "]"
+		}
+		writeElement(&output,2,"rules",rules)
 		output.WriteString("  </rewrite>\n")
 	}
 	output.WriteString("  <index>\n")

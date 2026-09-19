@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/sitepreview"
+	_ "modernc.org/sqlite"
 )
 
 func main() {

@@ -269,7 +269,13 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 	output.WriteString(nativeBool(compression))
 	output.WriteString("\n\n")
 	if binding.Relationship == webengine.BindingPreview {
-		output.WriteString("rewrite {\n  enable 1\n  rules <<<END_preview_rules\nRewriteCond %{HTTPS} !=on\nRewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=308,L,NE]\nEND_preview_rules\n}\n\n")
+		output.WriteString("rewrite {\n  enable 1\n  rules <<<END_preview_rules\nRewriteCond %{HTTPS} !=on\nRewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=308,L,NE]\n")
+		if application.ReverseProxy != nil && application.ReverseProxy.HostHeader.String() != "" {
+			output.WriteString("RewriteRule ^ - [E=Proxy-Host:")
+			output.WriteString(application.ReverseProxy.HostHeader.String())
+			output.WriteString("]\n")
+		}
+		output.WriteString("END_preview_rules\n}\n\n")
 	}
 
 	output.WriteString("index {\n")
