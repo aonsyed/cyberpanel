@@ -52,6 +52,7 @@ const (
 	BrokerStats BrokerMethod = "workload.stats"
 	BrokerSnapshotVolumes BrokerMethod = "volume.snapshot"
 	BrokerRestoreVolumes BrokerMethod = "volume.restore"
+	BrokerMigrationContainer BrokerMethod = "migration.container"
 )
 
 // BrokerWireRequest is deliberately a closed union. Exactly one field is
@@ -78,12 +79,13 @@ type BrokerWireRequest struct {
 	Logs *LogRequest `json:"logs,omitempty"`
 	VolumeSnapshot *VolumeSnapshotRequest `json:"volume_snapshot,omitempty"`
 	VolumeRestore *VolumeRestoreRequest `json:"volume_restore,omitempty"`
+	MigrationContainer *MigrationContainerRequest `json:"migration_container,omitempty"`
 }
 
 func (request BrokerWireRequest) Validate(now time.Time) error {
 	if request.Version != ContainerBrokerProtocolVersion || !validBrokerRequestID(request.RequestID) || request.Deadline.IsZero() || !request.Deadline.After(now) || request.Deadline.After(now.Add(10*time.Minute)) { return ErrContainerBrokerProtocol }
 	count := 0
-	for _, present := range []bool{request.InstallRuntime!=nil,request.RuntimeMutation!=nil,request.ResolveImage!=nil,request.PullImage!=nil,request.ImageMutation!=nil,request.VolumeMutation!=nil,request.NetworkMutation!=nil,request.WorkloadMutation!=nil,request.WorkloadObservation!=nil,request.WorkloadLifecycle!=nil,request.WorkloadRestart!=nil,request.ExposureMutation!=nil,request.Exec!=nil,request.Logs!=nil,request.VolumeSnapshot!=nil,request.VolumeRestore!=nil} { if present { count++ } }
+	for _, present := range []bool{request.InstallRuntime!=nil,request.RuntimeMutation!=nil,request.ResolveImage!=nil,request.PullImage!=nil,request.ImageMutation!=nil,request.VolumeMutation!=nil,request.NetworkMutation!=nil,request.WorkloadMutation!=nil,request.WorkloadObservation!=nil,request.WorkloadLifecycle!=nil,request.WorkloadRestart!=nil,request.ExposureMutation!=nil,request.Exec!=nil,request.Logs!=nil,request.VolumeSnapshot!=nil,request.VolumeRestore!=nil,request.MigrationContainer!=nil} { if present { count++ } }
 	if request.Method == BrokerInspectRuntime { if count != 0 { return ErrContainerBrokerProtocol }; return nil }
 	if count != 1 { return ErrContainerBrokerProtocol }
 	switch request.Method {
@@ -104,6 +106,7 @@ func (request BrokerWireRequest) Validate(now time.Time) error {
 		if request.Logs == nil || request.Logs.MaxBytes == 0 || request.Logs.MaxBytes > ContainerBrokerMaximumLogBytes || request.Logs.TailLines > 10000 || request.Logs.Deadline.IsZero() || request.Logs.Deadline.After(request.Deadline) { return ErrContainerBrokerProtocol }
 	case BrokerSnapshotVolumes: if request.VolumeSnapshot==nil||validateSnapshotRequest(*request.VolumeSnapshot)!=nil{return ErrContainerBrokerProtocol}
 	case BrokerRestoreVolumes: if request.VolumeRestore==nil||validateRestoreRequest(*request.VolumeRestore)!=nil{return ErrContainerBrokerProtocol}
+	case BrokerMigrationContainer: if request.MigrationContainer==nil||request.MigrationContainer.Validate(now)!=nil{return ErrContainerBrokerProtocol}
 	default: return ErrContainerBrokerProtocol
 	}
 	return nil
@@ -126,12 +129,13 @@ type BrokerWireResponse struct {
 	Log *StreamChunk `json:"log,omitempty"`
 	Observation *WorkloadObservation `json:"observation,omitempty"`
 	VolumeSnapshot *VolumeSnapshotReceipt `json:"volume_snapshot,omitempty"`
+	MigrationContainer *MigrationContainerReceipt `json:"migration_container,omitempty"`
 }
 
 func (response BrokerWireResponse) Validate(request BrokerWireRequest, now time.Time) error {
 	if response.Version != ContainerBrokerProtocolVersion || response.RequestID != request.RequestID || response.Method != request.Method || response.CompletedAt.IsZero() || response.CompletedAt.After(now.Add(time.Minute)) || !validBrokerErrorCode(response.ErrorCode) { return ErrContainerBrokerProtocol }
 	count := 0
-	for _, present := range []bool{response.Capability!=nil,response.Runtime!=nil,response.Image!=nil,response.Pull!=nil,response.Volume!=nil,response.Network!=nil,response.Exposure!=nil,response.Exec!=nil,response.Log!=nil,response.Observation!=nil,response.VolumeSnapshot!=nil} { if present { count++ } }
+	for _, present := range []bool{response.Capability!=nil,response.Runtime!=nil,response.Image!=nil,response.Pull!=nil,response.Volume!=nil,response.Network!=nil,response.Exposure!=nil,response.Exec!=nil,response.Log!=nil,response.Observation!=nil,response.VolumeSnapshot!=nil,response.MigrationContainer!=nil} { if present { count++ } }
 	if count != 1 { return ErrContainerBrokerProtocol }
 	switch request.Method {
 	case BrokerInspectRuntime: if response.Capability == nil { return ErrContainerBrokerProtocol }
@@ -147,6 +151,7 @@ func (response BrokerWireResponse) Validate(request BrokerWireRequest, now time.
 	case BrokerStats: if response.Observation == nil { return ErrContainerBrokerProtocol }
 	case BrokerSnapshotVolumes:if response.VolumeSnapshot==nil||validateVolumeSnapshotReceipt(request,*response.VolumeSnapshot,response.ErrorCode)!=nil{return ErrContainerBrokerProtocol}
 	case BrokerRestoreVolumes:if response.VolumeSnapshot==nil{return ErrContainerBrokerProtocol}
+	case BrokerMigrationContainer: if response.MigrationContainer==nil||response.ErrorCode==""&&validateMigrationContainerReceipt(request,*response.MigrationContainer)!=nil{return ErrContainerBrokerProtocol}
 	default: return ErrContainerBrokerProtocol
 	}
 	return nil
@@ -159,6 +164,27 @@ func validateVolumeReceipt(request BrokerWireRequest,receipt VolumeReceipt,error
 func validateNetworkReceipt(request BrokerWireRequest,receipt NetworkReceipt,errorCode string)error{value:=request.NetworkMutation;if value==nil||receipt.NetworkID!=value.NetworkID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||!validEffectOutcome(receipt.EffectID,value.EffectID,receipt.Outcome,errorCode){return ErrContainerBrokerProtocol};if errorCode==""&&(receipt.RuntimeObjectID==""||len(receipt.ConfigurationDigest)!=64||receipt.Generation!=value.ExpectedGeneration+1||!receipt.Internal){return ErrContainerBrokerProtocol};return nil}
 func validateExposureReceipt(request BrokerWireRequest,receipt ExposureReceipt,errorCode string)error{value:=request.ExposureMutation;if value==nil||receipt.ExposureID!=value.Exposure.ID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||!validEffectOutcome(receipt.EffectID,value.EffectID,receipt.Outcome,errorCode){return ErrContainerBrokerProtocol};expected:=value.ExpectedGeneration+1;if request.Method==BrokerDeleteExposure&&strings.HasSuffix(string(value.EffectID),"-compensate"){expected++};if errorCode==""&&(len(receipt.ConfigurationDigest)!=64||receipt.Generation!=expected||receipt.BoundAddress!="127.0.0.1"||receipt.BoundPort==0||receipt.Public!=value.Exposure.Public){return ErrContainerBrokerProtocol};return nil}
 func validateVolumeSnapshotReceipt(request BrokerWireRequest,receipt VolumeSnapshotReceipt,errorCode string)error{value:=request.VolumeSnapshot;if value==nil||receipt.SnapshotID!=value.SnapshotID||receipt.ApplicationID!=value.ApplicationID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||receipt.CompletedAt.IsZero()||receipt.EffectID!=value.EffectID{return ErrContainerBrokerProtocol};if errorCode==""&&(receipt.Outcome!="confirmed"||len(receipt.ManifestDigest)!=64||receipt.Bytes==0||!sameProtocolIDs(receipt.VolumeIDs,value.VolumeIDs)){return ErrContainerBrokerProtocol};return nil}
+func validateMigrationContainerReceipt(request BrokerWireRequest,receipt MigrationContainerReceipt)error{
+	if request.MigrationContainer==nil{return ErrContainerBrokerProtocol};plan:=request.MigrationContainer.Plan
+	if receipt.EffectID!=request.MigrationContainer.EffectID||receipt.EffectID!=plan.EffectID()||receipt.PlanDigest!=digestValue(plan)||receipt.ArchiveDigest!=plan.Digest||receipt.MigrationID!=plan.MigrationID||receipt.ApplicationID!=plan.ApplicationID||receipt.VolumeID!=plan.VolumeID||receipt.WorkloadID!=plan.WorkloadID||receipt.Bytes!=plan.Bytes||receipt.Received>plan.Bytes||receipt.ObservedAt.IsZero()||len(receipt.EvidenceDigest)!=64{return ErrContainerBrokerProtocol}
+	evidence:=receipt;evidence.ObservedAt=time.Time{};evidence.EvidenceDigest="";if receipt.EvidenceDigest!=digestValue(evidence){return ErrContainerBrokerProtocol}
+	switch request.MigrationContainer.Action{
+	case "begin":if receipt.State!="receiving"&&receipt.State!="sealed"&&receipt.State!="staged"{return ErrContainerBrokerProtocol}
+	case "chunk":if receipt.State!="receiving"{return ErrContainerBrokerProtocol}
+	case "seal","observe":if receipt.State!="sealed"&&receipt.State!="staged"{return ErrContainerBrokerProtocol}
+	case "stage":if receipt.State!="staged"{return ErrContainerBrokerProtocol}
+	case "discard":if receipt.State!="discarded"{return ErrContainerBrokerProtocol}
+	default:return ErrContainerBrokerProtocol
+	}
+	switch receipt.State{
+	case "receiving":if receipt.TreeDigest!=""||receipt.RuntimeObjectID!=""||receipt.Files!=0{return ErrContainerBrokerProtocol}
+	case "sealed":if receipt.Received!=plan.Bytes||len(receipt.TreeDigest)!=64||receipt.RuntimeObjectID!=""||receipt.Files==0{return ErrContainerBrokerProtocol}
+	case "staged":if receipt.Received!=plan.Bytes||len(receipt.TreeDigest)!=64||receipt.RuntimeObjectID==""||receipt.Files==0{return ErrContainerBrokerProtocol}
+	case "discarded":if receipt.RuntimeObjectID!=""{return ErrContainerBrokerProtocol}
+	default:return ErrContainerBrokerProtocol
+	}
+	return nil
+}
 func sameProtocolIDs(left,right []ID)bool{if len(left)!=len(right){return false};for index:=range left{if left[index]!=right[index]{return false}};return true}
 func validateWorkloadRuntimeReceipt(request BrokerWireRequest,receipt RuntimeReceipt,errorCode string)error{if !receipt.ResourceID.Valid()||receipt.ObservedAt.IsZero()||receipt.Outcome!="confirmed"&&receipt.Outcome!="rejected"&&receipt.Outcome!="ambiguous"||errorCode==""&&receipt.Outcome!="confirmed"||errorCode!=""&&receipt.Outcome=="confirmed"{return ErrContainerBrokerProtocol};var effect EffectID;var expected uint64;switch request.Method{case BrokerApplyWorkload,BrokerDeleteWorkload:effect=request.WorkloadMutation.EffectID;expected=request.WorkloadMutation.ExpectedGeneration;case BrokerSetLifecycle:effect=request.WorkloadLifecycle.EffectID;expected=request.WorkloadLifecycle.ExpectedGeneration;case BrokerRestartWorkload:effect=request.WorkloadRestart.EffectID;expected=request.WorkloadRestart.ExpectedGeneration;case BrokerObserveWorkload:if receipt.EffectID!=""||receipt.ResourceID!=request.WorkloadObservation.WorkloadID{return ErrContainerBrokerProtocol};expected=request.WorkloadObservation.ExpectedGeneration;default:return ErrContainerBrokerProtocol};if request.Method!=BrokerObserveWorkload&&receipt.EffectID!=effect{return ErrContainerBrokerProtocol};if receipt.Outcome=="confirmed"{if receipt.Generation!=expected+1&&request.Method!=BrokerObserveWorkload||request.Method==BrokerObserveWorkload&&receipt.Generation!=expected||receipt.RuntimeObjectID==""||!validLifecycle(receipt.Lifecycle)||!validWorkloadHealth(receipt.Health){return ErrContainerBrokerProtocol}};return nil}
 
@@ -232,6 +258,7 @@ func(server *ContainerBrokerServer)dispatch(ctx context.Context,request BrokerWi
 	case BrokerStats:var v WorkloadObservation;v,err=server.Broker.Stats(ctx,*request.WorkloadObservation);response.Observation=&v
 	case BrokerSnapshotVolumes:var v VolumeSnapshotReceipt;v,err=server.Broker.SnapshotVolumes(ctx,*request.VolumeSnapshot);response.VolumeSnapshot=&v
 	case BrokerRestoreVolumes:var v VolumeSnapshotReceipt;v,err=server.Broker.RestoreVolumes(ctx,*request.VolumeRestore);response.VolumeSnapshot=&v
+	case BrokerMigrationContainer:var v MigrationContainerReceipt;if broker,ok:=server.Broker.(MigrationContainerBroker);ok{v,err=broker.MigrationContainer(ctx,*request.MigrationContainer)}else{err=ErrPolicy};response.MigrationContainer=&v
 	};response.ErrorCode=classifyContainerBrokerError(err);return response}
 
 func brokerRequestEffect(request BrokerWireRequest)EffectID{switch request.Method{case BrokerInstallRuntime:return request.InstallRuntime.EffectID;case BrokerRemoveRuntime:return request.RuntimeMutation.EffectID;case BrokerResolveImage:return request.ResolveImage.EffectID;case BrokerPullImage:return request.PullImage.EffectID;case BrokerDeleteImage:return request.ImageMutation.EffectID;case BrokerEnsureVolume,BrokerDeleteVolume:return request.VolumeMutation.EffectID;case BrokerEnsureNetwork,BrokerDeleteNetwork:return request.NetworkMutation.EffectID;case BrokerApplyWorkload,BrokerDeleteWorkload:return request.WorkloadMutation.EffectID;case BrokerSetLifecycle:return request.WorkloadLifecycle.EffectID;case BrokerRestartWorkload:return request.WorkloadRestart.EffectID;case BrokerApplyExposure,BrokerDeleteExposure:return request.ExposureMutation.EffectID;case BrokerExec:return request.Exec.EffectID;case BrokerSnapshotVolumes:return request.VolumeSnapshot.EffectID;case BrokerRestoreVolumes:return request.VolumeRestore.EffectID};return ""}
@@ -247,3 +274,4 @@ func writeContainerBrokerAll(writer io.Writer,content []byte)error{for len(conte
 func readContainerBrokerFrame(reader io.Reader,target any)error{var header [4]byte;if _,err:=io.ReadFull(reader,header[:]);err!=nil{return err};size:=binary.BigEndian.Uint32(header[:]);if size==0||size>ContainerBrokerMaximumFrameBytes{return ErrContainerBrokerProtocol};content:=make([]byte,size);if _,err:=io.ReadFull(reader,content);err!=nil{return err};decoder:=json.NewDecoder(bytes.NewReader(content));decoder.DisallowUnknownFields();if err:=decoder.Decode(target);err!=nil||decoder.Decode(&struct{}{})!=io.EOF{return ErrContainerBrokerProtocol};return nil}
 
 var _ Broker=(*ContainerBrokerClient)(nil)
+var _ MigrationContainerBroker=(*ContainerBrokerClient)(nil)

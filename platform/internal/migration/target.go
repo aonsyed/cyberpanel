@@ -493,7 +493,7 @@ func manifestResources(manifest Manifest) ([]manifestResource, error) {
 		if err := appendResource(ImportRepository, value.SourceID, value, nil, compactStrings([]string{value.CredentialSecretID}), nil); err != nil { return nil, err }
 	}
 	for _, value := range manifest.Containers {
-		chunks := append(append([]Chunk(nil), value.Descriptor...), value.VolumeData...)
+		chunks := value.Artifacts()
 		if err := appendResource(ImportContainer, value.SourceID, value, chunks, compactStrings(value.SecretIDs), map[string]uint64{"container_bytes": chunkBytes(chunks)}); err != nil { return nil, err }
 	}
 	for _, value := range manifest.BackupPolicies {

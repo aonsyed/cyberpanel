@@ -17,6 +17,7 @@ var (
 	ErrInvalid = errors.New("cyberpanel extractor: invalid value")
 	ErrDenied = errors.New("cyberpanel extractor: source plan not locally approved")
 	ErrChanged = errors.New("cyberpanel extractor: source changed while collecting")
+	containerVolumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 )
 
 var opaqueIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_.:@-]{2,191}$`)
@@ -250,8 +251,12 @@ type ContainerRecord struct {
 	RecipeVersion string
 	DescriptorArtifact ArtifactID
 	VolumeArtifacts []ArtifactID
+	Volumes []ContainerVolumeRecord
+	SecretBindings []ContainerSecretRecord
 	Secrets []SecretRef
 }
+type ContainerVolumeRecord struct {SourceName,RecipeVolume string; Artifact ArtifactID}
+type ContainerSecretRecord struct {Slot string;Secret SecretRef}
 
 type BackupPolicyRecord struct {
 	SourceID string
@@ -346,7 +351,7 @@ func (s Snapshot) validate(plan SourcePlan) error {
 	for _,credential:=range s.Credentials{if !validSourceID(credential.SourceID)||!validSourceID(credential.SiteSourceID)||credential.Kind==""||credential.Label==""||filepathUnsafe(credential.RootRelative)||(credential.Secret!=""&&!credential.Secret.Valid())||(credential.Secret!=""&&strings.TrimSpace(credential.PublicKey)!=""){return ErrInvalid};if _,duplicate:=seen["credential:"+credential.SourceID];duplicate{return ErrInvalid};seen["credential:"+credential.SourceID]=struct{}{}}
 	for _,schedule:=range s.Schedules{if !validSourceID(schedule.SourceID)||!validSourceID(schedule.SiteSourceID)||schedule.Kind==""||schedule.Expression==""||schedule.InvocationID==""||strings.ContainsAny(schedule.Expression,"\r\n"){return ErrInvalid};if _,duplicate:=seen["schedule:"+schedule.SourceID];duplicate{return ErrInvalid};seen["schedule:"+schedule.SourceID]=struct{}{}}
 	for _,repository:=range s.Repositories{if !validSourceID(repository.SourceID)||!validSourceID(repository.SiteSourceID)||repository.Provider==""||repository.Origin==""||strings.ContainsAny(repository.Origin,"\r\n\x00")||(repository.Credential!=""&&!repository.Credential.Valid()){return ErrInvalid};if _,duplicate:=seen["repository:"+repository.SourceID];duplicate{return ErrInvalid};seen["repository:"+repository.SourceID]=struct{}{}}
-	for _,container:=range s.Containers{if !validSourceID(container.SourceID)||!validSourceID(container.SiteSourceID)||container.RecipeID==""||container.RecipeVersion==""||(container.DescriptorArtifact!=""&&!container.DescriptorArtifact.Valid()){return ErrInvalid};for _,artifact:=range container.VolumeArtifacts{if !artifact.Valid(){return ErrInvalid}};for _,secret:=range container.Secrets{if !secret.Valid(){return ErrInvalid}};if _,duplicate:=seen["container:"+container.SourceID];duplicate{return ErrInvalid};seen["container:"+container.SourceID]=struct{}{}}
+	for _,container:=range s.Containers{if !validSourceID(container.SourceID)||!validSourceID(container.SiteSourceID)||!migration.ID(container.RecipeID).Valid()||container.RecipeVersion==""||container.DescriptorArtifact!=""||len(container.VolumeArtifacts)!=0||len(container.Volumes)!=1||len(container.Secrets)!=0||len(container.SecretBindings)!=0{return ErrInvalid};volume:=container.Volumes[0];if !containerVolumeNamePattern.MatchString(volume.SourceName)||!containerVolumeNamePattern.MatchString(volume.RecipeVolume)||!volume.Artifact.Valid(){return ErrInvalid};if _,duplicate:=seen["container:"+container.SourceID];duplicate{return ErrInvalid};seen["container:"+container.SourceID]=struct{}{}}
 	for _,policy:=range s.BackupPolicies{if !validSourceID(policy.SourceID)||!validSourceID(policy.SiteSourceID)||policy.Schedule==""||policy.Provider==""||(policy.Credential!=""&&!policy.Credential.Valid()){return ErrInvalid};if _,duplicate:=seen["backup:"+policy.SourceID];duplicate{return ErrInvalid};seen["backup:"+policy.SourceID]=struct{}{}}
 	return nil
 }
@@ -376,6 +381,7 @@ func (s Snapshot) artifactIDs(plan SourcePlan) []ArtifactID {
 		for _, value := range s.Containers {
 			add(value.DescriptorArtifact)
 			for _, artifact := range value.VolumeArtifacts { add(artifact) }
+			for _, volume := range value.Volumes { add(volume.Artifact) }
 		}
 	}
 	out := make([]ArtifactID, 0, len(set))
@@ -412,6 +418,7 @@ func (s Snapshot) secrets(plan SourcePlan) []SecretMaterial {
 	if plan.Selection.Containers {
 		for _, container := range s.Containers {
 			for _, secret := range container.Secrets { add(secret, "container-secret") }
+			for _, binding := range container.SecretBindings { add(binding.Secret, "container-secret") }
 		}
 	}
 	if plan.Selection.BackupPolicies {

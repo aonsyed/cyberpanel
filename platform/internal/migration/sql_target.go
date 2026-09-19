@@ -310,7 +310,7 @@ func decodeCanonicalPayload(kind ImportResourceKind, payload json.RawMessage, ch
 		if err := StrictCanonicalPayload(payload, &value); err != nil || !validateContainers([]ContainerApplication{value}, chunks) {
 			return canonicalPayloadShape{}, ErrInvalid
 		}
-		artifacts := append(append([]Chunk(nil), value.Descriptor...), value.VolumeData...)
+		artifacts := value.Artifacts()
 		purposes := map[string]string{}
 		for _, identifier := range value.SecretIDs {
 			bindSecretPurpose(purposes, identifier, "container-secret")

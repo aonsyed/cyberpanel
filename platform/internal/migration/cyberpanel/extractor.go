@@ -367,9 +367,10 @@ func (e *Extractor) manifest(plan SourcePlan, snapshot Snapshot, descriptors map
 	if plan.Selection.Containers {
 		for _, value := range snapshot.Containers {
 			container := migration.ContainerApplication{SourceID: mappedID("app", value.SourceID), SiteID: mappedID("site", value.SiteSourceID), RecipeID: value.RecipeID, RecipeVersion: value.RecipeVersion, Provenance: provenance("container", value.SourceID)}
-			if descriptor, exists := descriptors[value.DescriptorArtifact]; exists { container.Descriptor = []migration.Chunk{descriptor} }
-			for _, artifact := range value.VolumeArtifacts { if descriptor, exists := descriptors[artifact]; exists { container.VolumeData = append(container.VolumeData, descriptor) } }
-			for _, secret := range value.Secrets { if id := secretIDs[secret]; id != "" { container.SecretIDs = append(container.SecretIDs, id) } }
+			// Generic legacy Docker records have no named volume/recipe contract.
+			// Never infer mount ownership from artifact order or a host pathname.
+			if value.DescriptorArtifact!=""||len(value.VolumeArtifacts)!=0||len(value.Volumes)!=1||len(value.Secrets)!=0||len(value.SecretBindings)!=0{return migration.Manifest{},ErrInvalid}
+			for _,volume:=range value.Volumes{descriptor,exists:=descriptors[volume.Artifact];if !exists||volume.SourceName==""||volume.RecipeVolume==""{return migration.Manifest{},ErrInvalid};container.Volumes=append(container.Volumes,migration.ContainerVolume{SchemaVersion:1,SourceName:volume.SourceName,RecipeVolume:volume.RecipeVolume,Chunks:[]migration.Chunk{descriptor},Size:descriptor.Size,Digest:descriptor.Digest})}
 			manifest.Containers = append(manifest.Containers, container)
 		}
 	}

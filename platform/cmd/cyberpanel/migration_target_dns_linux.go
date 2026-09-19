@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -244,6 +245,8 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 			if observeErr != nil || effect.Status != migration.ImportEffectApplied {
 				return migration.ActivationReceipt{}, errors.Join(migration.ErrBlocked, observeErr)
 			}
+		case migration.ImportContainer:
+			return migration.ActivationReceipt{}, fmt.Errorf("%w: exact tenant-owned container route binding and staged workload activation transaction are unbound", migration.ErrBlocked)
 		default:
 			if !migrationAuxiliaryKind(intent.Kind) && intent.Kind != migration.ImportCertificate && intent.Kind != migration.ImportMailDomain {
 				return migration.ActivationReceipt{}, migration.ErrBlocked
@@ -405,6 +408,8 @@ func (target *migrationHostTarget) VerifyActive(ctx context.Context, value migra
 				return migration.Verification{}, errors.Join(migration.ErrBlocked, probeErr)
 			}
 			proofs = append(proofs, effect.EvidenceDigest)
+		case migration.ImportContainer:
+			return migration.Verification{}, fmt.Errorf("%w: container activation has no tenant-owned route binding", migration.ErrBlocked)
 		}
 	}
 	auxiliary, err := target.auxiliaryProofs(ctx, entries, true)

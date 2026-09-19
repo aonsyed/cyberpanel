@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/access"
+	"github.com/aonsyed/cyberpanel/platform/internal/containers"
 	"github.com/aonsyed/cyberpanel/platform/internal/dns"
 	hostingservice "github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
@@ -46,13 +47,14 @@ type migrationHostTarget struct {
 	auxiliary        *migrationAuxiliaryTarget
 	certificate      *migrationCertificateTarget
 	mail             *migrationMailTarget
+	container        *migrationContainerTarget
 	applicationProbe migration.TargetProbe
 	mu               sync.Mutex
 }
 
-func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repository, files *access.FileService, dnsClient *dns.TenantZoneAuthority, repository *migration.SQLRepository, applicationProbe migration.TargetProbe, secretsFactory func(context.Context, *sql.DB, *migration.RuntimeScopeStore) (migration.MigrationSecretGateway, error), databaseFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (migration.CanonicalImportHandler, error), auxiliaryServices migrationAuxiliaryServices, certificateFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (*migrationCertificateTarget, error), mailStore mailcontrol.SQLControlRepository, mailProjector mailcontrol.RepositorySnapshotProjector, mailRuntime *mailcontrol.MailDaemonClient) localmigration.TargetFactory {
+func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repository, files *access.FileService, dnsClient *dns.TenantZoneAuthority, repository *migration.SQLRepository, applicationProbe migration.TargetProbe, containerApplications *containers.ApplicationService, secretsFactory func(context.Context, *sql.DB, *migration.RuntimeScopeStore) (migration.MigrationSecretGateway, error), databaseFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (migration.CanonicalImportHandler, error), auxiliaryServices migrationAuxiliaryServices, certificateFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (*migrationCertificateTarget, error), mailStore mailcontrol.SQLControlRepository, mailProjector mailcontrol.RepositorySnapshotProjector, mailRuntime *mailcontrol.MailDaemonClient) localmigration.TargetFactory {
 	return func(ctx context.Context, db *sql.DB, chunks *migration.ChunkStore, capacity migration.TargetCapacityProvider, scopes *migration.RuntimeScopeStore) (*migration.CanonicalTargetImporter, error) {
-		if sites == nil || files == nil || files.Executor == nil || dnsClient == nil || repository == nil || applicationProbe == nil || secretsFactory == nil || databaseFactory == nil || mailStore.DB == nil || mailProjector.Store == nil || mailRuntime == nil {
+		if sites == nil || files == nil || files.Executor == nil || dnsClient == nil || repository == nil || applicationProbe == nil || containerApplications == nil || secretsFactory == nil || databaseFactory == nil || mailStore.DB == nil || mailProjector.Store == nil || mailRuntime == nil {
 			return nil, migration.ErrBlocked
 		}
 		ledger, err := migration.NewSQLImportLedger(db)
@@ -84,6 +86,10 @@ func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repos
 			return nil, migration.ErrBlocked
 		}
 		target.certificate, err = certificateFactory(ctx, db, chunks, scopes)
+		if err != nil {
+			return nil, err
+		}
+		target.container, err = newMigrationContainerTarget(target, containerApplications)
 		if err != nil {
 			return nil, err
 		}
@@ -243,6 +249,10 @@ func (target *migrationHostTarget) apply(ctx context.Context, intent migration.I
 		if target.mail == nil {
 			return migrationHostFailure(intent, fmt.Errorf("%w: mail import adapter unbound", migration.ErrBlocked))
 		}
+	case migration.ImportContainer:
+		if target.container == nil {
+			return migrationHostFailure(intent, fmt.Errorf("%w: protected container ingress unbound", migration.ErrBlocked))
+		}
 	case migration.ImportDatabase:
 		if target.database == nil {
 			return migrationHostFailure(intent, fmt.Errorf("%w: database import adapter unbound", migration.ErrBlocked))
@@ -267,6 +277,8 @@ func (target *migrationHostTarget) apply(ctx context.Context, intent migration.I
 		effect, err = target.certificate.Apply(ctx, intent)
 	case migration.ImportMailDomain:
 		effect, err = target.mail.Apply(ctx, intent)
+	case migration.ImportContainer:
+		effect, err = target.container.Apply(ctx, intent)
 	default:
 		effect, err = target.auxiliary.Apply(ctx, intent)
 	}
@@ -309,7 +321,7 @@ func (target *migrationHostTarget) entries(ctx context.Context, value migration.
 			return nil, migration.ErrBlocked
 		}
 		kind := migration.ImportResourceKind(mapping.SourceKind)
-		if kind != migration.ImportSite && kind != migration.ImportDNSZone && (kind != migration.ImportDatabase || target.database == nil) && (kind != migration.ImportCertificate || target.certificate == nil) && (kind != migration.ImportMailDomain || target.mail == nil) && (!migrationAuxiliaryKind(kind) || target.auxiliary == nil) {
+		if kind != migration.ImportSite && kind != migration.ImportDNSZone && (kind != migration.ImportDatabase || target.database == nil) && (kind != migration.ImportCertificate || target.certificate == nil) && (kind != migration.ImportMailDomain || target.mail == nil) && (kind != migration.ImportContainer || target.container == nil) && (!migrationAuxiliaryKind(kind) || target.auxiliary == nil) {
 			return nil, fmt.Errorf("%w: target kind %s is not bound", migration.ErrBlocked, kind)
 		}
 		if kind == migration.ImportSite {
@@ -330,7 +342,7 @@ func (target *migrationHostTarget) entries(ctx context.Context, value migration.
 		}
 		entries = append(entries, intent)
 	}
-	if siteCount != 1 || len(entries) != len(manifest.Sites)+len(manifest.Databases)+len(manifest.DNSZones)+len(manifest.MailDomains)+len(manifest.Schedules)+len(manifest.Repositories)+len(manifest.BackupPolicies)+len(manifest.Certificates) {
+	if siteCount != 1 || len(entries) != len(manifest.Sites)+len(manifest.Databases)+len(manifest.DNSZones)+len(manifest.MailDomains)+len(manifest.Schedules)+len(manifest.Repositories)+len(manifest.BackupPolicies)+len(manifest.Certificates)+len(manifest.Containers) {
 		return nil, fmt.Errorf("%w: this target adapter requires one site and complete supported mappings", migration.ErrBlocked)
 	}
 	return entries, nil
@@ -346,8 +358,19 @@ func (target *migrationHostTarget) supportedManifest(ctx context.Context, value 
 	if manifest.MigrationID != value.ID || manifest.MerkleRoot != value.ManifestRoot || manifest.Validate() != nil {
 		return manifest, migration.ErrInvalid
 	}
-	if len(manifest.Sites) != 1 || len(manifest.Credentials) != 0 || len(manifest.Containers) != 0 || len(manifest.MailDomains) > 0 && target.mail == nil {
+	if len(manifest.Sites) != 1 || len(manifest.Credentials) != 0 || len(manifest.MailDomains) > 0 && target.mail == nil || len(manifest.Containers) > 1 || len(manifest.Containers) > 0 && target.container == nil {
 		return manifest, fmt.Errorf("%w: credential principal authority, mail handler, or protected container ingress unavailable", migration.ErrBlocked)
+	}
+	linked := manifest.Sites[0].ContainerApplicationIDs
+	if len(manifest.Containers) == 0 {
+		if len(linked) != 0 {
+			return manifest, migration.ErrConflict
+		}
+		return manifest, nil
+	}
+	container := manifest.Containers[0]
+	if container.SiteID != manifest.Sites[0].SourceID || len(linked) != 1 || linked[0] != container.SourceID {
+		return manifest, fmt.Errorf("%w: container workload is not exactly linked to its tenant-owned site", migration.ErrBlocked)
 	}
 	return manifest, nil
 }
@@ -391,7 +414,7 @@ func (target *migrationHostTarget) unchangedDelta(ctx context.Context, scope mig
 		return migrationHostFailure(intent, err)
 	}
 	var prior migration.ImportIntent
-	if json.Unmarshal(raw, &prior) != nil || state != "dark" || prior.TargetID != intent.TargetID || migrationHostDigest(prior.Payload) != migrationHostDigest(intent.Payload) || migrationHostDigest(prior.Chunks) != migrationHostDigest(intent.Chunks) || migrationHostDigest(prior.SecretIDs) != migrationHostDigest(intent.SecretIDs) {
+	if json.Unmarshal(raw, &prior) != nil || state != "dark" || prior.TargetID != intent.TargetID || intent.Kind == migration.ImportContainer && prior.SourceGeneration != intent.SourceGeneration || migrationHostDigest(prior.Payload) != migrationHostDigest(intent.Payload) || migrationHostDigest(prior.Chunks) != migrationHostDigest(intent.Chunks) || migrationHostDigest(prior.SecretIDs) != migrationHostDigest(intent.SecretIDs) {
 		return migrationHostFailure(intent, fmt.Errorf("%w: changed final delta requires guarded resource replacement", migration.ErrBlocked))
 	}
 	var proof string
@@ -423,6 +446,19 @@ func (target *migrationHostTarget) unchangedDelta(ctx context.Context, scope mig
 	case migration.ImportMailDomain:
 		var observed migration.ImportEffect
 		observed, err = target.observeMail(ctx, prior)
+		if observed.Status != migration.ImportEffectApplied {
+			err = errors.Join(migration.ErrBlocked, err)
+		}
+		proof = observed.EvidenceDigest
+		generation = observed.TargetGeneration
+		bytes = observed.BytesWritten
+		objects = observed.ObjectsWritten
+	case migration.ImportContainer:
+		if target.container == nil {
+			return migrationHostFailure(intent, migration.ErrBlocked)
+		}
+		var observed migration.ImportEffect
+		observed, err = target.container.Observe(ctx, prior)
 		if observed.Status != migration.ImportEffectApplied {
 			err = errors.Join(migration.ErrBlocked, err)
 		}
@@ -477,7 +513,7 @@ func (target *migrationHostTarget) VerifyDark(ctx context.Context, value migrati
 	if err != nil {
 		return migration.Verification{}, err
 	}
-	evidence := []string{migrationHostDigest(struct{ Root, AbsentDomains string }{value.ManifestRoot, "access_credentials,containers"})}
+	evidence := []string{migrationHostDigest(struct{ Root, AbsentDomains string }{value.ManifestRoot, "access_credentials"})}
 	auxiliary, err := target.auxiliaryProofs(ctx, entries, false)
 	if err != nil {
 		return migration.Verification{}, err
@@ -493,6 +529,7 @@ func (target *migrationHostTarget) VerifyDark(ctx context.Context, value migrati
 		return migration.Verification{}, err
 	}
 	evidence = append(evidence, mailProofs...)
+	containerState := "validated-absent"
 	for _, intent := range entries {
 		switch intent.Kind {
 		case migration.ImportSite:
@@ -513,8 +550,19 @@ func (target *migrationHostTarget) VerifyDark(ctx context.Context, value migrati
 				return migration.Verification{}, errors.Join(migration.ErrBlocked, probeErr)
 			}
 			evidence = append(evidence, effect.EvidenceDigest)
+		case migration.ImportContainer:
+			if target.container == nil {
+				return migration.Verification{}, migration.ErrBlocked
+			}
+			effect, probeErr := target.container.Observe(ctx, intent)
+			if probeErr != nil || effect.Status != migration.ImportEffectApplied {
+				return migration.Verification{}, errors.Join(migration.ErrBlocked, probeErr)
+			}
+			evidence = append(evidence, effect.EvidenceDigest)
+			containerState = "staged-unstarted-unexposed"
 		}
 	}
+	evidence = append(evidence, migrationHostDigest(struct{ Domain, State string }{"containers", containerState}))
 	// Files and maintenance routing were observed. Do not substitute an engine
 	// generation hash for execution of the imported PHP application or TLS.
 	verification := migration.Verification{HTTP: true, Files: true, Database: true, DNS: true, Mail: true, Cron: true, Containers: true, Backups: true, EvidenceDigest: migrationHostDigest(evidence), ObservedAt: time.Now().UTC()}
@@ -547,6 +595,11 @@ func (target *migrationHostTarget) ActivateMigration(ctx context.Context, value 
 	scope, err := target.scopes.LoadByMigration(ctx, value.ID)
 	if err != nil {
 		return migration.ActivationReceipt{}, err
+	}
+	for _, intent := range entries {
+		if intent.Kind == migration.ImportContainer {
+			return migration.ActivationReceipt{}, fmt.Errorf("%w: exact tenant-owned container route binding and staged workload activation transaction are unbound", migration.ErrBlocked)
+		}
 	}
 	// Re-probe the actual candidate immediately before making it public. An old
 	// SQL-only verification record is deliberately not sufficient authority.
@@ -608,6 +661,18 @@ func (target *migrationHostTarget) CompensateCanonicalImport(ctx context.Context
 			return migrationHostFailure(intent, loadErr)
 		}
 		compensated, cleanupErr := target.mail.Compensate(ctx, origin, effect)
+		if cleanupErr != nil || compensated.Status != migration.ImportEffectCompensated || compensated.EvidenceDigest == "" {
+			return migrationHostFailure(intent, errors.Join(migration.ErrAmbiguous, cleanupErr))
+		}
+		compensated.EffectID = intent.EffectID
+		compensated.InputDigest = intent.InputDigest
+		return target.saveCompensation(ctx, intent, compensated)
+	}
+	if intent.Kind == migration.ImportContainer && target.container != nil {
+		if intent.Disposition != migration.DispositionCreate {
+			return migrationHostFailure(intent, migration.ErrBlocked)
+		}
+		compensated, cleanupErr := target.container.Compensate(ctx, intent, effect)
 		if cleanupErr != nil || compensated.Status != migration.ImportEffectCompensated || compensated.EvidenceDigest == "" {
 			return migrationHostFailure(intent, errors.Join(migration.ErrAmbiguous, cleanupErr))
 		}

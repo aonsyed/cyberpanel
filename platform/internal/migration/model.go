@@ -20,6 +20,7 @@ var (
 )
 
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{2,95}$`)
+var containerVolumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 type ID string
 
@@ -252,6 +253,9 @@ type RepositoryBinding struct {
 	Provenance        []Provenance
 }
 
+// ContainerApplication names a target-local signed recipe; it deliberately
+// carries no runtime WorkloadSpec or broker CommandID. The target resolves and
+// validates the catalog workload before deriving its privileged effect IDs.
 type ContainerApplication struct {
 	SourceID     ID
 	TargetID     ID
@@ -260,10 +264,19 @@ type ContainerApplication struct {
 	RecipeVersion string
 	Descriptor   []Chunk
 	VolumeData   []Chunk
+	Volumes      []ContainerVolume
+	SecretBindings []ContainerSecretBinding
 	SecretIDs    []string
 	Provenance   []Provenance
 	Conflicts    []Conflict
 }
+
+// ContainerVolume is an ordered byte stream. Chunks are never digest-sorted:
+// SourceName and RecipeVolume identify the signed source and catalog mount.
+// VolumeData is retained only to reject old positional manifests explicitly.
+type ContainerVolume struct { SchemaVersion uint32; SourceName,RecipeVolume string; Chunks []Chunk; Size uint64; Digest string }
+type ContainerSecretBinding struct { Slot,SecretID string }
+func (value ContainerApplication) Artifacts()[]Chunk{chunks:=append([]Chunk(nil),value.Descriptor...);for _,volume:=range value.Volumes{chunks=append(chunks,volume.Chunks...)};return chunks}
 
 type BackupPolicy struct {
 	SourceID          ID
@@ -544,7 +557,21 @@ func validateRepositories(values []RepositoryBinding) bool {
 func validateContainers(values []ContainerApplication, chunks map[string]Chunk) bool {
 	seen := map[ID]struct{}{}
 	for _, value := range values {
-		if !uniqueID(value.SourceID, seen) || !validOptionalID(value.TargetID) || !value.SiteID.Valid() || value.RecipeID == "" || value.RecipeVersion == "" || !validChunkReferences(value.Descriptor, chunks) || !validChunkReferences(value.VolumeData, chunks) || !validConflicts(value.Conflicts) {
+		if !uniqueID(value.SourceID, seen) || !validOptionalID(value.TargetID) || !value.SiteID.Valid() || !ID(value.RecipeID).Valid() || value.RecipeVersion == "" || len(value.Descriptor) != 0 || len(value.VolumeData) != 0 || len(value.Volumes) != 1 || len(value.SecretBindings) != 0 || len(value.SecretIDs) != 0 || !validConflicts(value.Conflicts) {
+			return false
+		}
+		volume := value.Volumes[0]
+		if volume.SchemaVersion != 1 || !containerVolumeNamePattern.MatchString(volume.SourceName) || !containerVolumeNamePattern.MatchString(volume.RecipeVolume) || volume.Size == 0 || volume.Size > 64<<30 || !isDigest(volume.Digest) || len(volume.Chunks) == 0 || len(volume.Chunks) > 65536 || !validChunkReferences(volume.Chunks, chunks) {
+			return false
+		}
+		var size uint64
+		for _, chunk := range volume.Chunks {
+			if chunk.MediaType != "application/vnd.cyberpanel.migration.container-volume+tar" || chunk.Compression != "tar" || chunk.Size > volume.Size-size {
+				return false
+			}
+			size += chunk.Size
+		}
+		if size != volume.Size {
 			return false
 		}
 	}
