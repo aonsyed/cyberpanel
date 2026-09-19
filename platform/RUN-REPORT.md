@@ -22,6 +22,19 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Results
 
+### Secret material identity privilege decision
+
+Read-only transient systemd probes in the Ubuntu ARM64 guest inspected the
+actual installed provider process's `/proc/<pid>/exe`. A root process with an
+empty capability bounding set exited 1; the same probe with only
+`CAP_SYS_PTRACE` in its bounding set exited 0 and resolved the signed provider
+generation. Merely changing the broker UID to root is therefore insufficient.
+The installed secret broker remains `User=cyberpanel-secrets`, empty capability
+set, same MainPID. No persistent service privilege change was made.
+The pending design choice is a constrained root broker with the required
+inspection capability versus a dedicated broker with a privileged identity
+inspection helper. Neither option permits dropping executable verification.
+
 ### Live external MariaDB TLS adapter
 
 `TestQEMULiveMariaDBExternalTLS` passed as root inside Ubuntu ARM64 QEMU.
