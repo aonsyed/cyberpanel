@@ -23,6 +23,8 @@ import (
 	mailcontrol "github.com/aonsyed/cyberpanel/platform/internal/mail"
 	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 	localmigration "github.com/aonsyed/cyberpanel/platform/internal/migration/localruntime"
+	webcatalog "github.com/aonsyed/cyberpanel/platform/internal/webengine/catalog"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/containerproxy"
 )
 
 const migrationHostSchema = `CREATE TABLE IF NOT EXISTS panel_migration_host_effects(
@@ -30,7 +32,10 @@ const migrationHostSchema = `CREATE TABLE IF NOT EXISTS panel_migration_host_eff
  intent_json BLOB NOT NULL,domain_intent_json BLOB NOT NULL,scope_digest TEXT NOT NULL,state TEXT NOT NULL,evidence_json BLOB NOT NULL,
  PRIMARY KEY(migration_id,kind,source_id),UNIQUE(target_id));
  CREATE TABLE IF NOT EXISTS panel_migration_host_activations(
- migration_id TEXT PRIMARY KEY,plan_digest TEXT NOT NULL,fence INTEGER NOT NULL,state TEXT NOT NULL,receipt_json BLOB NOT NULL);`
+ migration_id TEXT PRIMARY KEY,plan_digest TEXT NOT NULL,fence INTEGER NOT NULL,state TEXT NOT NULL,receipt_json BLOB NOT NULL);
+ CREATE TABLE IF NOT EXISTS panel_migration_container_activations(
+ migration_id TEXT PRIMARY KEY,reservation_id TEXT NOT NULL UNIQUE,authority_digest TEXT NOT NULL UNIQUE,
+ state TEXT NOT NULL,journal_json BLOB NOT NULL,updated_at TIMESTAMP NOT NULL);`
 
 // Domain receipts and desired state are journaled here. SQL is never used as
 // proof that a file, process, route, database or DNS record exists on the host.
@@ -53,9 +58,9 @@ type migrationHostTarget struct {
 	mu               sync.Mutex
 }
 
-func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repository, files *access.FileService, accessExecutor access.MigrationPrincipalExecutor, dnsClient *dns.TenantZoneAuthority, repository *migration.SQLRepository, applicationProbe migration.TargetProbe, containerApplications *containers.ApplicationService, secretsFactory func(context.Context, *sql.DB, *migration.RuntimeScopeStore) (migration.MigrationSecretGateway, error), databaseFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (migration.CanonicalImportHandler, error), auxiliaryServices migrationAuxiliaryServices, certificateFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (*migrationCertificateTarget, error), mailStore mailcontrol.SQLControlRepository, mailProjector mailcontrol.RepositorySnapshotProjector, mailRuntime *mailcontrol.MailDaemonClient) localmigration.TargetFactory {
+func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repository, files *access.FileService, accessExecutor access.MigrationPrincipalExecutor, dnsClient *dns.TenantZoneAuthority, repository *migration.SQLRepository, applicationProbe migration.TargetProbe, containerApplications *containers.ApplicationService, webCatalog *webcatalog.SQLCatalog, routeActivator containerproxy.VerifiedActivator, secretsFactory func(context.Context, *sql.DB, *migration.RuntimeScopeStore) (migration.MigrationSecretGateway, error), databaseFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (migration.CanonicalImportHandler, error), auxiliaryServices migrationAuxiliaryServices, certificateFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (*migrationCertificateTarget, error), mailStore mailcontrol.SQLControlRepository, mailProjector mailcontrol.RepositorySnapshotProjector, mailRuntime *mailcontrol.MailDaemonClient) localmigration.TargetFactory {
 	return func(ctx context.Context, db *sql.DB, chunks *migration.ChunkStore, capacity migration.TargetCapacityProvider, scopes *migration.RuntimeScopeStore) (*migration.CanonicalTargetImporter, error) {
-		if sites == nil || files == nil || files.Executor == nil || accessExecutor == nil || dnsClient == nil || repository == nil || applicationProbe == nil || containerApplications == nil || secretsFactory == nil || databaseFactory == nil || mailStore.DB == nil || mailProjector.Store == nil || mailRuntime == nil {
+		if sites == nil || files == nil || files.Executor == nil || accessExecutor == nil || dnsClient == nil || repository == nil || applicationProbe == nil || containerApplications == nil || webCatalog == nil || routeActivator == nil || secretsFactory == nil || databaseFactory == nil || mailStore.DB == nil || mailProjector.Store == nil || mailRuntime == nil {
 			return nil, migration.ErrBlocked
 		}
 		ledger, err := migration.NewSQLImportLedger(db)
@@ -90,7 +95,7 @@ func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repos
 		if err != nil {
 			return nil, err
 		}
-		target.container, err = newMigrationContainerTarget(target, containerApplications)
+		target.container, err = newMigrationContainerTarget(target, containerApplications, webCatalog, routeActivator)
 		if err != nil {
 			return nil, err
 		}
@@ -388,32 +393,38 @@ func (target *migrationHostTarget) supportedManifest(ctx context.Context, value 
 		return manifest, nil
 	}
 	container := manifest.Containers[0]
-	if container.SiteID != manifest.Sites[0].SourceID || len(linked) != 1 || linked[0] != container.SourceID {
-		return manifest, fmt.Errorf("%w: container workload is not exactly linked to its tenant-owned site", migration.ErrBlocked)
+	siteValue := manifest.Sites[0]
+	if container.SiteID != siteValue.SourceID || len(linked) != 1 || linked[0] != container.SourceID || len(siteValue.Aliases) != 0 || len(siteValue.Redirects) != 0 || len(siteValue.Children) != 0 || len(manifest.Certificates) != 0 {
+		return manifest, fmt.Errorf("%w: container workload requires one clear primary site binding with no aliases, redirects, children, or certificates", migration.ErrBlocked)
 	}
 	return manifest, nil
 }
 
 func (target *migrationHostTarget) sourceFence(ctx context.Context, value migration.Migration) error {
+	_, err := target.currentSourceFence(ctx, value)
+	return err
+}
+
+func (target *migrationHostTarget) currentSourceFence(ctx context.Context, value migration.Migration) (migration.SourceFence, error) {
 	current, err := target.repository.Migration(ctx, value.ID)
 	if err != nil {
-		return err
+		return migration.SourceFence{}, err
 	}
 	if current.Phase != value.Phase || current.Fence != value.Fence || current.SourceGeneration != value.SourceGeneration || current.PlanDigest != value.PlanDigest {
-		return migration.ErrConflict
+		return migration.SourceFence{}, migration.ErrConflict
 	}
 	if current.Phase != migration.PhaseFinalSync && current.Phase != migration.PhaseCutoverCommitting {
-		return migration.ErrBlocked
+		return migration.SourceFence{}, migration.ErrBlocked
 	}
 	var fence migration.SourceFence
 	if err = target.repository.Receipt(ctx, value.ID, "source_fence", &fence); err != nil {
-		return err
+		return migration.SourceFence{}, err
 	}
 	digest, parseErr := hex.DecodeString(fence.Digest)
 	if parseErr != nil || len(digest) != sha256.Size || fence.MigrationID != value.ID || fence.Generation != value.SourceGeneration || fence.Fence != value.Fence || fence.Fence == 0 || !fence.ExpiresAt.After(time.Now().UTC()) {
-		return migration.ErrBlocked
+		return migration.SourceFence{}, migration.ErrBlocked
 	}
-	return nil
+	return fence, nil
 }
 
 // An immutable backup still passes through final sync. Rebind an identical
@@ -566,6 +577,7 @@ func (target *migrationHostTarget) VerifyDark(ctx context.Context, value migrati
 	}
 	evidence = append(evidence, mailProofs...)
 	containerState := "validated-absent"
+	hasContainer := false
 	for _, intent := range entries {
 		switch intent.Kind {
 		case migration.ImportSite:
@@ -587,6 +599,7 @@ func (target *migrationHostTarget) VerifyDark(ctx context.Context, value migrati
 			}
 			evidence = append(evidence, effect.EvidenceDigest)
 		case migration.ImportContainer:
+			hasContainer = true
 			if target.container == nil {
 				return migration.Verification{}, migration.ErrBlocked
 			}
@@ -602,6 +615,12 @@ func (target *migrationHostTarget) VerifyDark(ctx context.Context, value migrati
 	// Files and maintenance routing were observed. Do not substitute an engine
 	// generation hash for execution of the imported PHP application or TLS.
 	verification := migration.Verification{HTTP: true, Files: true, Database: true, DNS: true, Mail: true, Cron: true, Containers: true, Backups: true, EvidenceDigest: migrationHostDigest(evidence), ObservedAt: time.Now().UTC()}
+	if hasContainer {
+		verification.PHP = true
+		verification.TLS = true
+		verification.EvidenceDigest = migrationHostDigest([]string{verification.EvidenceDigest, "container-route-http-only-php-tls-inapplicable"})
+		return verification, nil
+	}
 	if target.applicationProbe == nil {
 		return verification, fmt.Errorf("%w: shadow PHP/TLS rehearsal probes are not bound", migration.ErrBlocked)
 	}
@@ -632,21 +651,24 @@ func (target *migrationHostTarget) ActivateMigration(ctx context.Context, value 
 	if err != nil {
 		return migration.ActivationReceipt{}, err
 	}
+	hasContainer := false
 	for _, intent := range entries {
 		if intent.Kind == migration.ImportContainer {
-			return migration.ActivationReceipt{}, fmt.Errorf("%w: exact tenant-owned container route binding and staged workload activation transaction are unbound", migration.ErrBlocked)
+			hasContainer = true
 		}
 	}
 	// Re-probe the actual candidate immediately before making it public. An old
 	// SQL-only verification record is deliberately not sufficient authority.
-	if target.applicationProbe == nil {
-		return migration.ActivationReceipt{}, migration.ErrBlocked
-	}
-	probeValue := value
-	probeValue.Phase = migration.PhaseBaseSync
-	application, err := target.applicationProbe.VerifyDark(ctx, probeValue, plan)
-	if err != nil || !application.HTTP || !application.PHP || !application.TLS || application.EvidenceDigest == "" {
-		return migration.ActivationReceipt{}, errors.Join(migration.ErrBlocked, err)
+	if !hasContainer {
+		if target.applicationProbe == nil {
+			return migration.ActivationReceipt{}, migration.ErrBlocked
+		}
+		probeValue := value
+		probeValue.Phase = migration.PhaseBaseSync
+		application, probeErr := target.applicationProbe.VerifyDark(ctx, probeValue, plan)
+		if probeErr != nil || !application.HTTP || !application.PHP || !application.TLS || application.EvidenceDigest == "" {
+			return migration.ActivationReceipt{}, errors.Join(migration.ErrBlocked, probeErr)
+		}
 	}
 	return target.activateEntries(ctx, value, plan, scope, entries)
 }

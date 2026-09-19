@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -191,15 +190,32 @@ func (target *migrationHostTarget) observeDNS(ctx context.Context, scope migrati
 }
 
 func (target *migrationHostTarget) activateEntries(ctx context.Context, value migration.Migration, plan migration.Plan, scope migration.RuntimeScope, entries []migration.ImportIntent) (migration.ActivationReceipt, error) {
+	hasContainer := false
+	for _, intent := range entries {
+		if intent.Kind == migration.ImportContainer {
+			hasContainer = true
+		}
+	}
 	var raw []byte
 	var state, planDigest string
 	var fence uint64
 	err := target.db.QueryRowContext(ctx, `SELECT state,plan_digest,fence,receipt_json FROM panel_migration_host_activations WHERE migration_id=?`, value.ID.String()).Scan(&state, &planDigest, &fence, &raw)
+	newActivation := errors.Is(err, sql.ErrNoRows)
 	if err == nil {
 		if planDigest != plan.DryRunDigest || fence != value.Fence {
 			return migration.ActivationReceipt{}, migration.ErrConflict
 		}
-		if state == "activating" && target.mail != nil {
+		if state == "active" {
+			var receipt migration.ActivationReceipt
+			if json.Unmarshal(raw, &receipt) != nil {
+				return receipt, migration.ErrConflict
+			}
+			return receipt, nil
+		}
+		if state != "activating" {
+			return migration.ActivationReceipt{}, migration.ErrAmbiguous
+		}
+		if !hasContainer && target.mail != nil {
 			// Re-enter only the receipt-bound mail publisher so a crash-held
 			// maintenance journal can converge while unrelated publication
 			// remains conservatively ambiguous.
@@ -216,71 +232,92 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 				}
 			}
 		}
-		if state == "activating" && target.access != nil {
-			if _, activateErr := target.access.Activate(ctx, value, plan, entries, true); activateErr != nil {
-				return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, activateErr)
+		if !hasContainer {
+			if target.access != nil {
+				if _, activateErr := target.access.Activate(ctx, value, plan, entries, true); activateErr != nil {
+					return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, activateErr)
+				}
 			}
-		}
-		if state != "active" {
 			return migration.ActivationReceipt{}, migration.ErrAmbiguous
 		}
-		var receipt migration.ActivationReceipt
-		if json.Unmarshal(raw, &receipt) != nil {
-			return receipt, migration.ErrConflict
+	} else if !newActivation {
+		return migration.ActivationReceipt{}, err
+	}
+	if newActivation {
+		// Preflight every staged effect before routing or DNS changes. The durable
+		// activating marker makes a crash conservative: observe, never blind replay.
+		for _, intent := range entries {
+			switch intent.Kind {
+			case migration.ImportSite:
+				if _, err = target.probeSite(ctx, scope, intent, false); err != nil {
+					return migration.ActivationReceipt{}, err
+				}
+			case migration.ImportDNSZone:
+				if _, err = target.observeDNS(ctx, scope, intent, false); err != nil {
+					return migration.ActivationReceipt{}, err
+				}
+			case migration.ImportDatabase:
+				effect, observeErr := target.observeDatabase(ctx, intent)
+				if observeErr != nil || effect.Status != migration.ImportEffectApplied {
+					return migration.ActivationReceipt{}, errors.Join(migration.ErrBlocked, observeErr)
+				}
+			case migration.ImportContainer:
+				effect, observeErr := target.container.Observe(ctx, intent)
+				if observeErr != nil || effect.Status != migration.ImportEffectApplied {
+					return migration.ActivationReceipt{}, errors.Join(migration.ErrBlocked, observeErr)
+				}
+			default:
+				if !migrationAuxiliaryKind(intent.Kind) && intent.Kind != migration.ImportCertificate && intent.Kind != migration.ImportMailDomain && intent.Kind != migration.ImportCredential {
+					return migration.ActivationReceipt{}, migration.ErrBlocked
+				}
+			}
 		}
-		return receipt, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return migration.ActivationReceipt{}, err
-	}
-	// Preflight every staged effect before routing or DNS changes. The durable
-	// activating marker makes a crash conservative: observe, never blind replay.
-	for _, intent := range entries {
-		switch intent.Kind {
-		case migration.ImportSite:
-			if _, err = target.probeSite(ctx, scope, intent, false); err != nil {
-				return migration.ActivationReceipt{}, err
-			}
-		case migration.ImportDNSZone:
-			if _, err = target.observeDNS(ctx, scope, intent, false); err != nil {
-				return migration.ActivationReceipt{}, err
-			}
-		case migration.ImportDatabase:
-			effect, observeErr := target.observeDatabase(ctx, intent)
-			if observeErr != nil || effect.Status != migration.ImportEffectApplied {
-				return migration.ActivationReceipt{}, errors.Join(migration.ErrBlocked, observeErr)
-			}
-		case migration.ImportContainer:
-			return migration.ActivationReceipt{}, fmt.Errorf("%w: exact tenant-owned container route binding and staged workload activation transaction are unbound", migration.ErrBlocked)
-		default:
-			if !migrationAuxiliaryKind(intent.Kind) && intent.Kind != migration.ImportCertificate && intent.Kind != migration.ImportMailDomain && intent.Kind != migration.ImportCredential {
-				return migration.ActivationReceipt{}, migration.ErrBlocked
-			}
+		if _, err = target.auxiliaryProofs(ctx, entries, false); err != nil {
+			return migration.ActivationReceipt{}, err
 		}
-	}
-	if _, err = target.auxiliaryProofs(ctx, entries, false); err != nil {
-		return migration.ActivationReceipt{}, err
-	}
-	if _, err = target.certificateProofs(ctx, entries); err != nil {
-		return migration.ActivationReceipt{}, err
-	}
-	if _, err = target.mailProofs(ctx, entries, false); err != nil {
-		return migration.ActivationReceipt{}, err
-	}
-	if _, err = target.access.proofs(ctx, entries, false); err != nil {
-		return migration.ActivationReceipt{}, err
-	}
-	if _, err = target.access.Activate(ctx, value, plan, entries, false); err != nil {
-		return migration.ActivationReceipt{}, err
-	}
-	if _, err = target.db.ExecContext(ctx, `INSERT INTO panel_migration_host_activations(migration_id,plan_digest,fence,state,receipt_json) VALUES(?,?,?,'activating','{}')`, value.ID.String(), plan.DryRunDigest, value.Fence); err != nil {
-		return migration.ActivationReceipt{}, err
+		if _, err = target.certificateProofs(ctx, entries); err != nil {
+			return migration.ActivationReceipt{}, err
+		}
+		if _, err = target.mailProofs(ctx, entries, false); err != nil {
+			return migration.ActivationReceipt{}, err
+		}
+		if _, err = target.access.proofs(ctx, entries, false); err != nil {
+			return migration.ActivationReceipt{}, err
+		}
+		if _, err = target.access.Activate(ctx, value, plan, entries, false); err != nil {
+			return migration.ActivationReceipt{}, err
+		}
+		if _, err = target.db.ExecContext(ctx, `INSERT INTO panel_migration_host_activations(migration_id,plan_digest,fence,state,receipt_json) VALUES(?,?,?,'activating','{}')`, value.ID.String(), plan.DryRunDigest, value.Fence); err != nil {
+			return migration.ActivationReceipt{}, err
+		}
 	}
 	routing := []string{}
 	dnsProofs := []string{}
+	containerPublic := false
+	for _, intent := range entries {
+		if intent.Kind != migration.ImportContainer {
+			continue
+		}
+		proof, activateErr := target.container.Activate(ctx, intent)
+		if activateErr != nil || proof == "" {
+			if !errors.Is(activateErr, migration.ErrWriteFrontier) {
+				_, deleteErr := target.db.ExecContext(ctx, `DELETE FROM panel_migration_host_activations WHERE migration_id=? AND state='activating'`, value.ID.String())
+				return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, activateErr, deleteErr)
+			}
+			return migration.ActivationReceipt{}, errors.Join(migration.ErrWriteFrontier, migration.ErrAmbiguous, activateErr)
+		}
+		containerPublic = true
+		routing = append(routing, proof)
+	}
+	frontier := func(err error) error {
+		if containerPublic {
+			return errors.Join(migration.ErrWriteFrontier, migration.ErrAmbiguous, err)
+		}
+		return errors.Join(migration.ErrAmbiguous, err)
+	}
 	accessProof, accessErr := target.access.Activate(ctx, value, plan, entries, true)
 	if accessErr != nil {
-		return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, accessErr)
+		return migration.ActivationReceipt{}, frontier(accessErr)
 	}
 	routing = append(routing, accessProof)
 	for _, intent := range entries {
@@ -289,11 +326,11 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 		}
 		origin, loadErr := target.auxiliaryOrigin(ctx, intent)
 		if loadErr != nil {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, loadErr)
+			return migration.ActivationReceipt{}, frontier(loadErr)
 		}
 		effect, applyErr := target.mail.Activate(ctx, origin)
 		if applyErr != nil || effect.Status != migration.ImportEffectApplied || effect.EvidenceDigest == "" {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, applyErr)
+			return migration.ActivationReceipt{}, frontier(applyErr)
 		}
 		routing = append(routing, effect.EvidenceDigest)
 	}
@@ -303,11 +340,11 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 		}
 		origin, loadErr := target.auxiliaryOrigin(ctx, intent)
 		if loadErr != nil {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, loadErr)
+			return migration.ActivationReceipt{}, frontier(loadErr)
 		}
 		effect, applyErr := target.certificate.Activate(ctx, origin)
 		if applyErr != nil || effect.Status != migration.ImportEffectApplied || effect.EvidenceDigest == "" {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, applyErr)
+			return migration.ActivationReceipt{}, frontier(applyErr)
 		}
 		routing = append(routing, effect.EvidenceDigest)
 	}
@@ -317,76 +354,93 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 		}
 		origin, loadErr := target.auxiliaryOrigin(ctx, intent)
 		if loadErr != nil {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, loadErr)
+			return migration.ActivationReceipt{}, frontier(loadErr)
 		}
 		effect, applyErr := target.auxiliary.Activate(ctx, origin)
 		if applyErr != nil || effect.Status != migration.ImportEffectApplied || effect.EvidenceDigest == "" {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, applyErr)
+			return migration.ActivationReceipt{}, frontier(applyErr)
 		}
 		routing = append(routing, effect.EvidenceDigest)
 	}
-	for _, intent := range entries {
-		if intent.Kind != migration.ImportSite {
-			continue
+	if !hasContainer {
+		for _, intent := range entries {
+			if intent.Kind != migration.ImportSite {
+				continue
+			}
+			if err = target.sourceFence(ctx, value); err != nil {
+				return migration.ActivationReceipt{}, frontier(err)
+			}
+			tenant, _ := site.NewTenantID(scope.TenantID)
+			id, _ := site.NewSiteID(intent.TargetID.String())
+			aggregate, loadErr := target.sites.Load(ctx, tenant, id)
+			if loadErr != nil {
+				return migration.ActivationReceipt{}, frontier(loadErr)
+			}
+			receipt, applyErr := target.hosting.Handle(ctx, hostingservice.MarkProvisioned{CommandID: "migration-activate-" + intent.EffectID, Actor: hostingservice.Actor{TenantID: tenant}, TenantID: tenant, SiteID: id, ExpectedGeneration: aggregate.Generation()})
+			if applyErr != nil || receipt.Effect.Outcome != hostingservice.EffectConfirmed || receipt.Effect.ProbeDigest == "" {
+				return migration.ActivationReceipt{}, frontier(applyErr)
+			}
+			proof, probeErr := target.probeSite(ctx, scope, intent, true)
+			if probeErr != nil {
+				return migration.ActivationReceipt{}, frontier(probeErr)
+			}
+			routing = append(routing, receipt.Effect.ProbeDigest, proof)
 		}
-		if err = target.sourceFence(ctx, value); err != nil {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, err)
-		}
-		tenant, _ := site.NewTenantID(scope.TenantID)
-		id, _ := site.NewSiteID(intent.TargetID.String())
-		aggregate, loadErr := target.sites.Load(ctx, tenant, id)
-		if loadErr != nil {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, loadErr)
-		}
-		receipt, applyErr := target.hosting.Handle(ctx, hostingservice.MarkProvisioned{CommandID: "migration-activate-" + intent.EffectID, Actor: hostingservice.Actor{TenantID: tenant}, TenantID: tenant, SiteID: id, ExpectedGeneration: aggregate.Generation()})
-		if applyErr != nil || receipt.Effect.Outcome != hostingservice.EffectConfirmed || receipt.Effect.ProbeDigest == "" {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, applyErr)
-		}
-		proof, probeErr := target.probeSite(ctx, scope, intent, true)
-		if probeErr != nil {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, probeErr)
-		}
-		routing = append(routing, receipt.Effect.ProbeDigest, proof)
 	}
 	for _, intent := range entries {
 		if intent.Kind != migration.ImportDNSZone {
 			continue
 		}
 		if err = target.sourceFence(ctx, value); err != nil {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, err)
+			return migration.ActivationReceipt{}, frontier(err)
 		}
 		zone, sets, parseErr := migrationDNSIntent(scope, intent)
 		if parseErr != nil {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, parseErr)
+			return migration.ActivationReceipt{}, frontier(parseErr)
 		}
 		receipt, applyErr := target.dns.ApplyZoneForTenant(ctx, scope.TenantID, "migration-dns-"+intent.EffectID, zone, sets, nil)
 		if applyErr != nil || receipt.EffectID != "migration-dns-"+intent.EffectID || receipt.ZoneID != zone.ID || receipt.Serial == 0 || receipt.ObservedAt.IsZero() {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, applyErr)
+			return migration.ActivationReceipt{}, frontier(applyErr)
 		}
 		proof, probeErr := target.observeDNS(ctx, scope, intent, true)
 		if probeErr != nil {
-			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, probeErr)
+			return migration.ActivationReceipt{}, frontier(probeErr)
 		}
 		dnsProofs = append(dnsProofs, migrationHostDigest(receipt), proof)
 	}
-	receipt := migration.ActivationReceipt{MigrationID: value.ID, TargetGeneration: value.TargetGeneration + 1, RoutingDigest: migrationHostDigest(routing), DNSDigest: migrationHostDigest(dnsProofs), ActivatedAt: time.Now().UTC()}
+	writeWatermark := ""
+	if containerPublic {
+		writeWatermark = migrationHostDigest(struct {
+			Migration  migration.ID
+			RouteProof string
+		}{value.ID, routing[0]})
+	}
+	receipt := migration.ActivationReceipt{MigrationID: value.ID, TargetGeneration: value.TargetGeneration + 1, RoutingDigest: migrationHostDigest(routing), DNSDigest: migrationHostDigest(dnsProofs), WriteWatermark: writeWatermark, ActivatedAt: time.Now().UTC()}
 	receipt.EvidenceDigest = migrationHostDigest(receipt)
 	raw, err = json.Marshal(receipt)
 	if err != nil {
-		return receipt, errors.Join(migration.ErrAmbiguous, err)
+		return receipt, frontier(err)
 	}
 	transaction, err := target.db.BeginTx(ctx, nil)
 	if err != nil {
-		return receipt, errors.Join(migration.ErrAmbiguous, err)
+		return receipt, frontier(err)
 	}
 	defer transaction.Rollback()
 	if _, err = transaction.ExecContext(ctx, `UPDATE panel_migration_host_effects SET state='active' WHERE migration_id=? AND state='dark'`, value.ID.String()); err != nil {
-		return receipt, errors.Join(migration.ErrAmbiguous, err)
+		return receipt, frontier(err)
+	}
+	if hasContainer {
+		if err = target.container.finalizePublication(ctx, transaction, value.ID); err != nil {
+			return receipt, frontier(err)
+		}
 	}
 	if _, err = transaction.ExecContext(ctx, `UPDATE panel_migration_host_activations SET state='active',receipt_json=? WHERE migration_id=? AND state='activating'`, raw, value.ID.String()); err != nil {
-		return receipt, errors.Join(migration.ErrAmbiguous, err)
+		return receipt, frontier(err)
 	}
-	return receipt, transaction.Commit()
+	if err = transaction.Commit(); err != nil {
+		return receipt, frontier(err)
+	}
+	return receipt, nil
 }
 
 func (target *migrationHostTarget) VerifyActive(ctx context.Context, value migration.Migration, plan migration.Plan, receipt migration.ActivationReceipt) (migration.Verification, error) {
@@ -403,10 +457,19 @@ func (target *migrationHostTarget) VerifyActive(ctx context.Context, value migra
 	if err != nil {
 		return migration.Verification{}, err
 	}
+	hasContainer := false
+	for _, intent := range entries {
+		if intent.Kind == migration.ImportContainer {
+			hasContainer = true
+		}
+	}
 	proofs := []string{}
 	for _, intent := range entries {
 		switch intent.Kind {
 		case migration.ImportSite:
+			if hasContainer {
+				continue
+			}
 			proof, probeErr := target.probeSite(ctx, scope, intent, true)
 			if probeErr != nil {
 				return migration.Verification{}, probeErr
@@ -425,7 +488,11 @@ func (target *migrationHostTarget) VerifyActive(ctx context.Context, value migra
 			}
 			proofs = append(proofs, effect.EvidenceDigest)
 		case migration.ImportContainer:
-			return migration.Verification{}, fmt.Errorf("%w: container activation has no tenant-owned route binding", migration.ErrBlocked)
+			proof, probeErr := target.container.ObserveActive(ctx, intent)
+			if probeErr != nil || proof == "" {
+				return migration.Verification{}, errors.Join(migration.ErrWriteFrontier, migration.ErrAmbiguous, probeErr)
+			}
+			proofs = append(proofs, proof)
 		}
 	}
 	auxiliary, err := target.auxiliaryProofs(ctx, entries, true)
@@ -448,8 +515,18 @@ func (target *migrationHostTarget) VerifyActive(ctx context.Context, value migra
 		return migration.Verification{}, err
 	}
 	proofs = append(proofs, accessProofs...)
-	proofs = append(proofs, migrationHostDigest(struct{ Root, AbsentDomains string }{value.ManifestRoot, "legacy_access_credentials,containers"}))
+	absentDomains := "legacy_access_credentials"
+	if !hasContainer {
+		absentDomains += ",containers"
+	}
+	proofs = append(proofs, migrationHostDigest(struct{ Root, AbsentDomains string }{value.ManifestRoot, absentDomains}))
 	verification := migration.Verification{HTTP: true, Files: true, Database: true, DNS: true, Mail: true, Cron: true, Containers: true, Backups: true, EvidenceDigest: migrationHostDigest(proofs), ObservedAt: time.Now().UTC()}
+	if hasContainer {
+		verification.PHP = true
+		verification.TLS = true
+		verification.EvidenceDigest = migrationHostDigest([]string{verification.EvidenceDigest, "container-route-http-only-php-tls-inapplicable"})
+		return verification, nil
+	}
 	if target.applicationProbe == nil {
 		return verification, migration.ErrBlocked
 	}

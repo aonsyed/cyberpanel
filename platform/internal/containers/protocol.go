@@ -164,24 +164,90 @@ func validateVolumeReceipt(request BrokerWireRequest,receipt VolumeReceipt,error
 func validateNetworkReceipt(request BrokerWireRequest,receipt NetworkReceipt,errorCode string)error{value:=request.NetworkMutation;if value==nil||receipt.NetworkID!=value.NetworkID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||!validEffectOutcome(receipt.EffectID,value.EffectID,receipt.Outcome,errorCode){return ErrContainerBrokerProtocol};if errorCode==""&&(receipt.RuntimeObjectID==""||len(receipt.ConfigurationDigest)!=64||receipt.Generation!=value.ExpectedGeneration+1||!receipt.Internal){return ErrContainerBrokerProtocol};return nil}
 func validateExposureReceipt(request BrokerWireRequest,receipt ExposureReceipt,errorCode string)error{value:=request.ExposureMutation;if value==nil||receipt.ExposureID!=value.Exposure.ID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||!validEffectOutcome(receipt.EffectID,value.EffectID,receipt.Outcome,errorCode){return ErrContainerBrokerProtocol};expected:=value.ExpectedGeneration+1;if request.Method==BrokerDeleteExposure&&strings.HasSuffix(string(value.EffectID),"-compensate"){expected++};if errorCode==""&&(len(receipt.ConfigurationDigest)!=64||receipt.Generation!=expected||receipt.BoundAddress!="127.0.0.1"||receipt.BoundPort==0||receipt.Public!=value.Exposure.Public){return ErrContainerBrokerProtocol};return nil}
 func validateVolumeSnapshotReceipt(request BrokerWireRequest,receipt VolumeSnapshotReceipt,errorCode string)error{value:=request.VolumeSnapshot;if value==nil||receipt.SnapshotID!=value.SnapshotID||receipt.ApplicationID!=value.ApplicationID||receipt.Fence!=value.Fence||receipt.ObservedAt.IsZero()||receipt.CompletedAt.IsZero()||receipt.EffectID!=value.EffectID{return ErrContainerBrokerProtocol};if errorCode==""&&(receipt.Outcome!="confirmed"||len(receipt.ManifestDigest)!=64||receipt.Bytes==0||!sameProtocolIDs(receipt.VolumeIDs,value.VolumeIDs)){return ErrContainerBrokerProtocol};return nil}
-func validateMigrationContainerReceipt(request BrokerWireRequest,receipt MigrationContainerReceipt)error{
-	if request.MigrationContainer==nil{return ErrContainerBrokerProtocol};plan:=request.MigrationContainer.Plan
-	if receipt.EffectID!=request.MigrationContainer.EffectID||receipt.EffectID!=plan.EffectID()||receipt.PlanDigest!=digestValue(plan)||receipt.ArchiveDigest!=plan.Digest||receipt.MigrationID!=plan.MigrationID||receipt.ApplicationID!=plan.ApplicationID||receipt.VolumeID!=plan.VolumeID||receipt.WorkloadID!=plan.WorkloadID||receipt.Bytes!=plan.Bytes||receipt.Received>plan.Bytes||receipt.ObservedAt.IsZero()||len(receipt.EvidenceDigest)!=64{return ErrContainerBrokerProtocol}
-	evidence:=receipt;evidence.ObservedAt=time.Time{};evidence.EvidenceDigest="";if receipt.EvidenceDigest!=digestValue(evidence){return ErrContainerBrokerProtocol}
-	switch request.MigrationContainer.Action{
-	case "begin":if receipt.State!="receiving"&&receipt.State!="sealed"&&receipt.State!="staged"{return ErrContainerBrokerProtocol}
-	case "chunk":if receipt.State!="receiving"{return ErrContainerBrokerProtocol}
-	case "seal","observe":if receipt.State!="sealed"&&receipt.State!="staged"{return ErrContainerBrokerProtocol}
-	case "stage":if receipt.State!="staged"{return ErrContainerBrokerProtocol}
-	case "discard":if receipt.State!="discarded"{return ErrContainerBrokerProtocol}
-	default:return ErrContainerBrokerProtocol
+func validateMigrationContainerReceipt(request BrokerWireRequest, receipt MigrationContainerReceipt) error {
+	if request.MigrationContainer == nil {
+		return ErrContainerBrokerProtocol
 	}
-	switch receipt.State{
-	case "receiving":if receipt.TreeDigest!=""||receipt.RuntimeObjectID!=""||receipt.Files!=0{return ErrContainerBrokerProtocol}
-	case "sealed":if receipt.Received!=plan.Bytes||len(receipt.TreeDigest)!=64||receipt.RuntimeObjectID!=""||receipt.Files==0{return ErrContainerBrokerProtocol}
-	case "staged":if receipt.Received!=plan.Bytes||len(receipt.TreeDigest)!=64||receipt.RuntimeObjectID==""||receipt.Files==0{return ErrContainerBrokerProtocol}
-	case "discarded":if receipt.RuntimeObjectID!=""{return ErrContainerBrokerProtocol}
-	default:return ErrContainerBrokerProtocol
+	plan := request.MigrationContainer.Plan
+	if receipt.EffectID != request.MigrationContainer.EffectID || receipt.EffectID != plan.EffectID() || receipt.PlanDigest != digestValue(plan) || receipt.ArchiveDigest != plan.Digest || receipt.MigrationID != plan.MigrationID || receipt.ApplicationID != plan.ApplicationID || receipt.VolumeID != plan.VolumeID || receipt.WorkloadID != plan.WorkloadID || receipt.Bytes != plan.Bytes || receipt.Received > plan.Bytes || receipt.ObservedAt.IsZero() || len(receipt.EvidenceDigest) != 64 {
+		return ErrContainerBrokerProtocol
+	}
+	evidence := receipt
+	evidence.ObservedAt = time.Time{}
+	evidence.EvidenceDigest = ""
+	if receipt.EvidenceDigest != digestValue(evidence) {
+		return ErrContainerBrokerProtocol
+	}
+	switch request.MigrationContainer.Action {
+	case "begin":
+		if receipt.State != "receiving" && receipt.State != "sealed" && receipt.State != "staged" {
+			return ErrContainerBrokerProtocol
+		}
+	case "chunk":
+		if receipt.State != "receiving" {
+			return ErrContainerBrokerProtocol
+		}
+	case "seal", "observe":
+		if receipt.State != "sealed" && receipt.State != "staged" {
+			return ErrContainerBrokerProtocol
+		}
+	case "stage":
+		if receipt.State != "staged" {
+			return ErrContainerBrokerProtocol
+		}
+	case "promote":
+		if receipt.State != "promoted" && receipt.State != "running" {
+			return ErrContainerBrokerProtocol
+		}
+	case "start", "observe-active":
+		if receipt.State != "running" {
+			return ErrContainerBrokerProtocol
+		}
+	case "discard":
+		if receipt.State != "discarded" {
+			return ErrContainerBrokerProtocol
+		}
+	case "cancel":
+		if receipt.State != "discarded" {
+			return ErrContainerBrokerProtocol
+		}
+	default:
+		return ErrContainerBrokerProtocol
+	}
+	switch receipt.State {
+	case "receiving":
+		if receipt.TreeDigest != "" || receipt.RuntimeObjectID != "" || receipt.Files != 0 || receipt.ActivationAuthorityDigest != "" || receipt.PublicationAbsenceDigest != "" {
+			return ErrContainerBrokerProtocol
+		}
+	case "sealed":
+		if receipt.Received != plan.Bytes || len(receipt.TreeDigest) != 64 || receipt.RuntimeObjectID != "" || receipt.Files == 0 || receipt.ActivationAuthorityDigest != "" || receipt.PublicationAbsenceDigest != "" {
+			return ErrContainerBrokerProtocol
+		}
+	case "staged":
+		if receipt.Received != plan.Bytes || len(receipt.TreeDigest) != 64 || receipt.RuntimeObjectID == "" || receipt.Files == 0 || receipt.SpecDigest != digestValue(plan.WorkloadSpec()) || receipt.RecipeDigest != plan.Recipe.Digest || receipt.ImageDigest != plan.WorkloadSpec().Image.Digest || receipt.ActivationAuthorityDigest != "" || receipt.PublicationAbsenceDigest != "" || receipt.BoundAddress != "" || receipt.BoundPort != 0 || receipt.Lifecycle != LifecycleCreating || receipt.Health != HealthUnavailable {
+			return ErrContainerBrokerProtocol
+		}
+	case "promoted":
+		if receipt.Received != plan.Bytes || len(receipt.TreeDigest) != 64 || receipt.RuntimeObjectID == "" || receipt.Files == 0 || receipt.SpecDigest != digestValue(plan.WorkloadSpec()) || receipt.RecipeDigest != plan.Recipe.Digest || receipt.ImageDigest != plan.WorkloadSpec().Image.Digest || receipt.ActivationAuthorityDigest != request.MigrationContainer.ActivationAuthorityDigest || receipt.PublicationAbsenceDigest != "" || receipt.BoundAddress != "" || receipt.BoundPort != 0 || receipt.Lifecycle != LifecycleCreating || receipt.Health != HealthUnavailable {
+			return ErrContainerBrokerProtocol
+		}
+	case "running":
+		if receipt.Received != plan.Bytes || len(receipt.TreeDigest) != 64 || receipt.RuntimeObjectID == "" || receipt.Files == 0 || receipt.SpecDigest != digestValue(plan.WorkloadSpec()) || receipt.RecipeDigest != plan.Recipe.Digest || receipt.ImageDigest != plan.WorkloadSpec().Image.Digest || receipt.ActivationAuthorityDigest != request.MigrationContainer.ActivationAuthorityDigest || receipt.PublicationAbsenceDigest != "" || receipt.BoundAddress != "127.0.0.1" || receipt.BoundPort != LoopbackExposurePort(plan.WorkloadID, plan.Recipe.Workloads[0].RoutePortName) || receipt.Lifecycle != LifecycleRunning || receipt.Health != HealthHealthy {
+			return ErrContainerBrokerProtocol
+		}
+	case "discarded":
+		if receipt.RuntimeObjectID != "" || receipt.SpecDigest != "" || receipt.RecipeDigest != "" || receipt.ImageDigest != "" || receipt.BoundAddress != "" || receipt.BoundPort != 0 || receipt.Lifecycle != "" || receipt.Health != "" {
+			return ErrContainerBrokerProtocol
+		}
+		if request.MigrationContainer.Action == "cancel" {
+			if receipt.ActivationAuthorityDigest != request.MigrationContainer.ActivationAuthorityDigest || receipt.PublicationAbsenceDigest != request.MigrationContainer.PublicationAbsenceDigest {
+				return ErrContainerBrokerProtocol
+			}
+		} else if receipt.ActivationAuthorityDigest != "" || receipt.PublicationAbsenceDigest != "" {
+			return ErrContainerBrokerProtocol
+		}
+	default:
+		return ErrContainerBrokerProtocol
 	}
 	return nil
 }

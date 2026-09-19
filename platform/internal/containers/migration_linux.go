@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -23,12 +25,14 @@ import (
 )
 
 type migrationVolumeJournal struct {
-	Plan       MigrationVolumePlan
-	State      string
-	Received   uint64
-	Files      uint64
-	TreeDigest string
-	Workload   linuxRuntimeResource
+	Plan                      MigrationVolumePlan
+	State                     string
+	Received                  uint64
+	Files                     uint64
+	TreeDigest                string
+	ActivationAuthorityDigest string
+	PublicationAbsenceDigest  string
+	Workload                  linuxRuntimeResource
 }
 
 // This journal intentionally lives outside the generic broker effect cache:
@@ -45,7 +49,7 @@ func (runtime *LinuxContainerRuntime) MigrationContainer(ctx context.Context, re
 	if err = verifier.Verify(ctx, request.Plan.Recipe); err != nil {
 		return MigrationContainerReceipt{}, err
 	}
-	if request.Action == "stage" {
+	if request.Action == "stage" || request.Action == "promote" || request.Action == "start" || request.Action == "observe-active" {
 		capability, inspectErr := runtime.InspectRuntime(ctx)
 		if inspectErr != nil || !capability.Rootless || !capability.UserNamespaces || !capability.CgroupV2 || !capability.Seccomp || !capability.MAC {
 			return MigrationContainerReceipt{}, errors.Join(ErrPolicy, inspectErr)
@@ -88,7 +92,7 @@ func (runtime *LinuxContainerRuntime) MigrationContainer(ctx context.Context, re
 		if !exists || volume.TenantID != request.Plan.TenantID || volume.Generation != 1 || volume.QuotaBytes != request.Plan.Recipe.Volumes[0].QuotaBytes || volume.InodeLimit != request.Plan.Recipe.Volumes[0].InodeLimit {
 			return MigrationContainerReceipt{}, ErrConflict
 		}
-		if err = runtime.migrationUnusedVolume(ctx, volume, ""); err != nil {
+		if err = runtime.migrationOwnedVolume(ctx, volume, "", false); err != nil {
 			return MigrationContainerReceipt{}, err
 		}
 		mount, mountErr := runtime.migrationMount(ctx, volume)
@@ -104,19 +108,35 @@ func (runtime *LinuxContainerRuntime) MigrationContainer(ctx context.Context, re
 		}
 	}
 	if journal.State == "discarded" {
-		if request.Action != "discard" {
+		if request.Action == "cancel" {
+			if journal.ActivationAuthorityDigest != request.ActivationAuthorityDigest || journal.PublicationAbsenceDigest != request.PublicationAbsenceDigest {
+				return MigrationContainerReceipt{}, ErrConflict
+			}
+		} else if request.Action != "discard" || journal.ActivationAuthorityDigest != "" || journal.PublicationAbsenceDigest != "" {
 			return MigrationContainerReceipt{}, ErrConflict
 		}
 		return runtime.migrationReceipt(journal), nil
 	}
-	if journal.State == "discarding" && request.Action != "discard" {
+	if (journal.State == "discarding" || journal.State == "canceling") && request.Action != "discard" && request.Action != "cancel" {
 		return MigrationContainerReceipt{}, ErrConflict
+	}
+	if request.ActivationAuthorityDigest != "" {
+		if journal.ActivationAuthorityDigest != "" && journal.ActivationAuthorityDigest != request.ActivationAuthorityDigest {
+			return MigrationContainerReceipt{}, ErrConflict
+		}
+		if journal.ActivationAuthorityDigest == "" {
+			journal.ActivationAuthorityDigest = request.ActivationAuthorityDigest
+			if err = saveMigrationVolume(journalPath, journal); err != nil {
+				return MigrationContainerReceipt{}, err
+			}
+		}
 	}
 	volume, exists := runtime.state.Volumes[request.Plan.VolumeID]
 	if !exists || volume.TenantID != request.Plan.TenantID || volume.Generation != 1 || volume.QuotaBytes != request.Plan.Recipe.Volumes[0].QuotaBytes || volume.InodeLimit != request.Plan.Recipe.Volumes[0].InodeLimit {
 		return MigrationContainerReceipt{}, ErrConflict
 	}
-	if err = runtime.migrationUnusedVolume(ctx, volume, journal.Workload.RuntimeObjectID); err != nil {
+	allowRunning := journal.State == "starting" || journal.State == "running" || journal.State == "canceling"
+	if err = runtime.migrationOwnedVolume(ctx, volume, journal.Workload.RuntimeObjectID, allowRunning); err != nil {
 		return MigrationContainerReceipt{}, err
 	}
 
@@ -161,8 +181,24 @@ func (runtime *LinuxContainerRuntime) MigrationContainer(ctx context.Context, re
 		if err = runtime.stageMigrationWorkload(ctx, journalPath, request.Grant, &journal); err != nil {
 			return MigrationContainerReceipt{}, err
 		}
+	case "promote":
+		if err = runtime.promoteMigrationWorkload(ctx, journalPath, &journal); err != nil {
+			return MigrationContainerReceipt{}, err
+		}
+	case "start":
+		if err = runtime.startMigrationWorkload(ctx, journalPath, &journal); err != nil {
+			return MigrationContainerReceipt{}, err
+		}
+	case "observe-active":
+		if err = runtime.observeActiveMigration(ctx, journalPath, &journal); err != nil {
+			return MigrationContainerReceipt{}, err
+		}
 	case "discard":
 		if err = runtime.discardMigrationVolume(ctx, directory, journalPath, volume, &journal); err != nil {
+			return MigrationContainerReceipt{}, err
+		}
+	case "cancel":
+		if err = runtime.cancelMigrationActivation(ctx, directory, journalPath, volume, request.PublicationAbsenceDigest, &journal); err != nil {
 			return MigrationContainerReceipt{}, err
 		}
 	default:
@@ -172,13 +208,29 @@ func (runtime *LinuxContainerRuntime) MigrationContainer(ctx context.Context, re
 		if err = runtime.observeStagedMigration(ctx, journal); err != nil {
 			return MigrationContainerReceipt{}, err
 		}
+	} else if journal.State == "promoted" || journal.State == "running" {
+		if err = runtime.observePromotedMigration(ctx, journal); err != nil {
+			return MigrationContainerReceipt{}, err
+		}
 	}
 	return runtime.migrationReceipt(journal), nil
 }
 
 func (runtime *LinuxContainerRuntime) migrationReceipt(journal migrationVolumeJournal) MigrationContainerReceipt {
 	plan := journal.Plan
-	receipt := MigrationContainerReceipt{EffectID: plan.EffectID(), PlanDigest: digestContainerValue(plan), State: journal.State, ArchiveDigest: plan.Digest, TreeDigest: journal.TreeDigest, RuntimeObjectID: journal.Workload.RuntimeObjectID, MigrationID: plan.MigrationID, ApplicationID: plan.ApplicationID, VolumeID: plan.VolumeID, WorkloadID: plan.WorkloadID, Received: journal.Received, Bytes: plan.Bytes, Files: journal.Files, ObservedAt: runtime.clock().UTC()}
+	receipt := MigrationContainerReceipt{EffectID: plan.EffectID(), PlanDigest: digestContainerValue(plan), State: journal.State, ArchiveDigest: plan.Digest, TreeDigest: journal.TreeDigest, RuntimeObjectID: journal.Workload.RuntimeObjectID, ActivationAuthorityDigest: journal.ActivationAuthorityDigest, PublicationAbsenceDigest: journal.PublicationAbsenceDigest, MigrationID: plan.MigrationID, ApplicationID: plan.ApplicationID, VolumeID: plan.VolumeID, WorkloadID: plan.WorkloadID, Received: journal.Received, Bytes: plan.Bytes, Files: journal.Files, ObservedAt: runtime.clock().UTC()}
+	if journal.Workload.RuntimeObjectID != "" {
+		receipt.SpecDigest = journal.Workload.SpecDigest
+		receipt.RecipeDigest = plan.Recipe.Digest
+		receipt.ImageDigest = plan.WorkloadSpec().Image.Digest
+		receipt.Lifecycle = journal.Workload.Lifecycle
+		receipt.Health = HealthUnavailable
+		if journal.State == "running" {
+			receipt.BoundAddress = "127.0.0.1"
+			receipt.BoundPort = LoopbackExposurePort(plan.WorkloadID, plan.Recipe.Workloads[0].RoutePortName)
+			receipt.Health = HealthHealthy
+		}
+	}
 	evidence := receipt
 	// Evidence is stable across observation retries; freshness stays in ObservedAt.
 	evidence.ObservedAt = time.Time{}
@@ -264,7 +316,7 @@ func receiveMigrationVolume(directory string, journal *migrationVolumeJournal, r
 	return nil
 }
 
-func (runtime *LinuxContainerRuntime) migrationUnusedVolume(ctx context.Context, record linuxRuntimeResource, allowed string) error {
+func (runtime *LinuxContainerRuntime) migrationOwnedVolume(ctx context.Context, record linuxRuntimeResource, allowed string, allowRunning bool) error {
 	if err := runtime.inspectManagedVolume(ctx, record); err != nil {
 		return err
 	}
@@ -280,7 +332,8 @@ func (runtime *LinuxContainerRuntime) migrationUnusedVolume(ctx context.Context,
 		return ErrInvalid
 	}
 	for _, row := range rows {
-		if allowed == "" || len(row.Names) != 1 || row.Names[0] != allowed || (row.State != "created" && row.State != "configured") {
+		stateAllowed := row.State == "created" || row.State == "configured" || allowRunning && row.State == "running"
+		if allowed == "" || len(row.Names) != 1 || row.Names[0] != allowed || !stateAllowed {
 			return ErrInUse
 		}
 	}
@@ -374,7 +427,7 @@ func (runtime *LinuxContainerRuntime) sealMigrationVolume(ctx context.Context, d
 	if err = saveMigrationVolume(journalPath, *journal); err != nil {
 		return err
 	}
-	if err = runtime.migrationUnusedVolume(ctx, volume, ""); err != nil {
+	if err = runtime.migrationOwnedVolume(ctx, volume, "", false); err != nil {
 		return err
 	}
 	current, err := parent.OpenRoot("_data")
@@ -618,6 +671,18 @@ func sameMigrationRuntimeResource(left, right linuxRuntimeResource) bool {
 	return left.TenantID == right.TenantID && left.ResourceID == right.ResourceID && left.RuntimeObjectID == right.RuntimeObjectID && left.Tier == right.Tier && left.Generation == right.Generation && left.Fence == right.Fence && left.SpecDigest == right.SpecDigest && left.Lifecycle == right.Lifecycle
 }
 
+func sameMigrationRuntimeIdentity(left, right linuxRuntimeResource) bool {
+	if left.TenantID != right.TenantID || left.ResourceID != right.ResourceID || left.RuntimeObjectID != right.RuntimeObjectID || left.Tier != right.Tier || left.Generation != right.Generation || left.Fence != right.Fence || left.SpecDigest != right.SpecDigest || left.QuotaBytes != right.QuotaBytes || left.InodeLimit != right.InodeLimit || len(left.Ports) != len(right.Ports) {
+		return false
+	}
+	for index := range left.Ports {
+		if left.Ports[index] != right.Ports[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func (runtime *LinuxContainerRuntime) observeStagedMigration(ctx context.Context, journal migrationVolumeJournal) error {
 	reserved, exists := runtime.state.MigrationWorkloads[journal.Plan.WorkloadID]
 	if !exists || !sameMigrationRuntimeResource(reserved, journal.Workload) {
@@ -627,7 +692,24 @@ func (runtime *LinuxContainerRuntime) observeStagedMigration(ctx context.Context
 	if err != nil || lifecycle != LifecycleCreating || digest != journal.Workload.SpecDigest || image != journal.Plan.WorkloadSpec().Image.Digest {
 		return errors.Join(ErrAmbiguous, err)
 	}
-	return runtime.observeStagedMigrationConfiguration(ctx, journal)
+	if err = runtime.observeStagedMigrationConfiguration(ctx, journal); err != nil {
+		return err
+	}
+	return runtime.requireMigrationEndpointAbsent(ctx, journal)
+}
+
+func (runtime *LinuxContainerRuntime) requireMigrationEndpointAbsent(ctx context.Context, journal migrationVolumeJournal) error {
+	port := LoopbackExposurePort(journal.Plan.WorkloadID, journal.Plan.Recipe.Workloads[0].RoutePortName)
+	dialer := net.Dialer{Timeout: 250 * time.Millisecond}
+	connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10)))
+	if err == nil {
+		connection.Close()
+		return ErrInUse
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
 }
 
 func (runtime *LinuxContainerRuntime) observeStagedMigrationConfiguration(ctx context.Context, journal migrationVolumeJournal) error {
@@ -643,8 +725,11 @@ func (runtime *LinuxContainerRuntime) observeStagedMigrationConfiguration(ctx co
 			RestartPolicy struct {
 				Name string `json:"Name"`
 			} `json:"RestartPolicy"`
-			PortBindings map[string]json.RawMessage `json:"PortBindings"`
-			NetworkMode  string                     `json:"NetworkMode"`
+			PortBindings map[string][]struct {
+				HostIP   string `json:"HostIp"`
+				HostPort string `json:"HostPort"`
+			} `json:"PortBindings"`
+			NetworkMode string `json:"NetworkMode"`
 		} `json:"HostConfig"`
 		NetworkSettings struct {
 			Networks map[string]json.RawMessage `json:"Networks"`
@@ -661,7 +746,14 @@ func (runtime *LinuxContainerRuntime) observeStagedMigrationConfiguration(ctx co
 	}
 	spec := journal.Plan.WorkloadSpec()
 	expectedUser := strconv.FormatUint(uint64(spec.User.UID), 10) + ":" + strconv.FormatUint(uint64(spec.User.GID), 10)
-	if rows[0].Config.User != expectedUser || (rows[0].HostConfig.RestartPolicy.Name != "" && rows[0].HostConfig.RestartPolicy.Name != "no") || len(rows[0].HostConfig.PortBindings) != 0 {
+	if rows[0].Config.User != expectedUser || (rows[0].HostConfig.RestartPolicy.Name != "" && rows[0].HostConfig.RestartPolicy.Name != "no") {
+		return ErrPolicy
+	}
+	port := spec.Ports[0]
+	key := strconv.FormatUint(uint64(port.ContainerPort), 10) + "/" + string(port.Protocol)
+	bindings, exists := rows[0].HostConfig.PortBindings[key]
+	expectedHostPort := strconv.FormatUint(uint64(LoopbackExposurePort(journal.Plan.WorkloadID, port.Name)), 10)
+	if !exists || len(rows[0].HostConfig.PortBindings) != 1 || len(bindings) != 1 || bindings[0].HostIP != "127.0.0.1" || bindings[0].HostPort != expectedHostPort {
 		return ErrPolicy
 	}
 	volume := runtime.state.Volumes[journal.Plan.VolumeID]
@@ -745,25 +837,9 @@ func (runtime *LinuxContainerRuntime) stageMigrationWorkload(ctx context.Context
 		return err
 	}
 	defer cleanup()
-	// A staged object has no host port binding. Route preparation and the
-	// loopback publish are part of the deliberately unimplemented activation
-	// transaction, not an attribute of protected staging.
-	stagedArguments := make([]string, 0, len(arguments))
-	options := true
-	for index := 0; index < len(arguments); index++ {
-		if options && arguments[index] == "--publish" {
-			if index+1 >= len(arguments) {
-				return ErrPolicy
-			}
-			index++
-			continue
-		}
-		stagedArguments = append(stagedArguments, arguments[index])
-		if options && arguments[index] == "--" {
-			options = false
-		}
-	}
-	arguments = stagedArguments
+	// Podman fixes port mappings at create time. The exact loopback mapping is
+	// therefore reserved while stopped; it cannot accept traffic until the
+	// fenced activation journal starts this same object.
 	userNamespace, restart := 0, 0
 	for index := range arguments {
 		if arguments[index] == "--" {
@@ -803,6 +879,235 @@ func (runtime *LinuxContainerRuntime) stageMigrationWorkload(ctx context.Context
 	return saveMigrationVolume(journalPath, *journal)
 }
 
+func (runtime *LinuxContainerRuntime) promoteMigrationWorkload(ctx context.Context, journalPath string, journal *migrationVolumeJournal) error {
+	if journal.ActivationAuthorityDigest == "" {
+		return ErrPolicy
+	}
+	switch journal.State {
+	case "staged", "promoting", "promoted", "starting", "running":
+	default:
+		return ErrConflict
+	}
+	if err := runtime.observeMigrationVolume(ctx, runtime.state.Volumes[journal.Plan.VolumeID], *journal); err != nil {
+		return err
+	}
+	if journal.State == "staged" {
+		journal.State = "promoting"
+		if err := saveMigrationVolume(journalPath, *journal); err != nil {
+			return err
+		}
+	}
+	reserved, reservedFound := runtime.state.MigrationWorkloads[journal.Plan.WorkloadID]
+	owned, ownedFound := runtime.state.Workloads[journal.Plan.WorkloadID]
+	if reservedFound && ownedFound {
+		return ErrConflict
+	}
+	if ownedFound {
+		if !sameMigrationRuntimeIdentity(owned, journal.Workload) || owned.Lifecycle != LifecycleCreating && owned.Lifecycle != LifecycleRunning {
+			return ErrConflict
+		}
+		journal.Workload = owned
+	} else {
+		if !reservedFound || !sameMigrationRuntimeResource(reserved, journal.Workload) || reserved.Lifecycle != LifecycleCreating {
+			return ErrConflict
+		}
+		runtime.state.Workloads[journal.Plan.WorkloadID] = reserved
+		delete(runtime.state.MigrationWorkloads, journal.Plan.WorkloadID)
+		if err := runtime.saveLocked(); err != nil {
+			return errors.Join(ErrAmbiguous, err)
+		}
+	}
+	if journal.State == "promoting" || journal.State == "staged" {
+		if journal.Workload.Lifecycle != LifecycleCreating {
+			return ErrAmbiguous
+		}
+		journal.State = "promoted"
+		return saveMigrationVolume(journalPath, *journal)
+	}
+	return nil
+}
+
+func (runtime *LinuxContainerRuntime) startMigrationWorkload(ctx context.Context, journalPath string, journal *migrationVolumeJournal) error {
+	if err := runtime.promoteMigrationWorkload(ctx, journalPath, journal); err != nil {
+		return err
+	}
+	if journal.State == "running" {
+		return runtime.observeActiveMigration(ctx, journalPath, journal)
+	}
+	if journal.State != "promoted" && journal.State != "starting" {
+		return ErrConflict
+	}
+	if journal.State == "promoted" {
+		journal.State = "starting"
+		if err := saveMigrationVolume(journalPath, *journal); err != nil {
+			return err
+		}
+	}
+	record, exists := runtime.state.Workloads[journal.Plan.WorkloadID]
+	if !exists || !sameMigrationRuntimeIdentity(record, journal.Workload) || record.Lifecycle != LifecycleCreating && record.Lifecycle != LifecycleRunning {
+		return ErrConflict
+	}
+	lifecycle, digest, image, _, err := runtime.inspectWorkload(ctx, record)
+	if err != nil || digest != record.SpecDigest || image != journal.Plan.WorkloadSpec().Image.Digest {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	if lifecycle == LifecycleCreating {
+		if _, _, err = runtime.run(ctx, record.Tier, runtime.config.PodmanPath, []string{"start", "--", record.RuntimeObjectID}, nil); err != nil {
+			return errors.Join(ErrAmbiguous, err)
+		}
+	} else if lifecycle != LifecycleRunning {
+		return ErrAmbiguous
+	}
+	lifecycle, digest, image, _, err = runtime.inspectWorkload(ctx, record)
+	if err != nil || lifecycle != LifecycleRunning || digest != record.SpecDigest || image != journal.Plan.WorkloadSpec().Image.Digest {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	if err = runtime.observeStagedMigrationConfiguration(ctx, *journal); err != nil {
+		return err
+	}
+	if err = runtime.requireMigrationHTTPHealthy(ctx, *journal); err != nil {
+		return err
+	}
+	record.Lifecycle = LifecycleRunning
+	record.UpdatedAt = runtime.clock().UTC()
+	runtime.state.Workloads[journal.Plan.WorkloadID] = record
+	if err = runtime.saveLocked(); err != nil {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	journal.Workload = record
+	journal.State = "running"
+	return saveMigrationVolume(journalPath, *journal)
+}
+
+func (runtime *LinuxContainerRuntime) requireMigrationHTTPHealthy(ctx context.Context, journal migrationVolumeJournal) error {
+	check := journal.Plan.WorkloadSpec().Health
+	port := LoopbackExposurePort(journal.Plan.WorkloadID, check.PortName)
+	address := net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: check.Timeout}).DialContext(dialCtx, "tcp", address)
+		},
+		DisableKeepAlives: true,
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   check.Timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	attempts := int(check.Successes) + int(check.Failures)
+	if attempts < 2 {
+		attempts = 2
+	}
+	deadline := runtime.clock().UTC().Add(30 * time.Second)
+	consecutive := 0
+	for attempt := 0; attempt < attempts && runtime.clock().UTC().Before(deadline); attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1"+check.Path, nil)
+		if err != nil {
+			return err
+		}
+		response, requestErr := client.Do(request)
+		if requestErr == nil {
+			_, copyErr := io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+			closeErr := response.Body.Close()
+			if copyErr == nil && closeErr == nil && response.StatusCode >= 200 && response.StatusCode < 400 {
+				consecutive++
+				if consecutive >= int(check.Successes) {
+					return nil
+				}
+			} else {
+				consecutive = 0
+			}
+		} else {
+			consecutive = 0
+		}
+		if attempt+1 < attempts {
+			delay := check.Interval
+			if delay > 2*time.Second {
+				delay = 2 * time.Second
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return ErrAmbiguous
+}
+
+func (runtime *LinuxContainerRuntime) observeActiveMigration(ctx context.Context, journalPath string, journal *migrationVolumeJournal) error {
+	if journal.State != "starting" && journal.State != "running" {
+		return ErrConflict
+	}
+	record, exists := runtime.state.Workloads[journal.Plan.WorkloadID]
+	if !exists || !sameMigrationRuntimeIdentity(record, journal.Workload) || record.Lifecycle != LifecycleCreating && record.Lifecycle != LifecycleRunning {
+		return ErrConflict
+	}
+	if _, exists = runtime.state.MigrationWorkloads[journal.Plan.WorkloadID]; exists {
+		return ErrConflict
+	}
+	lifecycle, digest, image, _, err := runtime.inspectWorkload(ctx, record)
+	if err != nil || lifecycle != LifecycleRunning || digest != record.SpecDigest || image != journal.Plan.WorkloadSpec().Image.Digest {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	if err = runtime.observeMigrationVolume(ctx, runtime.state.Volumes[journal.Plan.VolumeID], *journal); err != nil {
+		return err
+	}
+	if err = runtime.observeStagedMigrationConfiguration(ctx, *journal); err != nil {
+		return err
+	}
+	if err = runtime.requireMigrationHTTPHealthy(ctx, *journal); err != nil {
+		return err
+	}
+	record.Lifecycle = LifecycleRunning
+	record.UpdatedAt = runtime.clock().UTC()
+	if !sameMigrationRuntimeResource(record, runtime.state.Workloads[journal.Plan.WorkloadID]) {
+		runtime.state.Workloads[journal.Plan.WorkloadID] = record
+		if err = runtime.saveLocked(); err != nil {
+			return errors.Join(ErrAmbiguous, err)
+		}
+	}
+	journal.Workload = record
+	if journal.State != "running" {
+		journal.State = "running"
+		return saveMigrationVolume(journalPath, *journal)
+	}
+	return nil
+}
+
+func (runtime *LinuxContainerRuntime) observePromotedMigration(ctx context.Context, journal migrationVolumeJournal) error {
+	record, exists := runtime.state.Workloads[journal.Plan.WorkloadID]
+	if !exists || !sameMigrationRuntimeResource(record, journal.Workload) {
+		return ErrConflict
+	}
+	if _, exists = runtime.state.MigrationWorkloads[journal.Plan.WorkloadID]; exists {
+		return ErrConflict
+	}
+	lifecycle, digest, image, _, err := runtime.inspectWorkload(ctx, record)
+	if err != nil || digest != record.SpecDigest || image != journal.Plan.WorkloadSpec().Image.Digest {
+		return errors.Join(ErrAmbiguous, err)
+	}
+	if err = runtime.observeStagedMigrationConfiguration(ctx, journal); err != nil {
+		return err
+	}
+	if journal.State == "promoted" {
+		if lifecycle != LifecycleCreating || record.Lifecycle != LifecycleCreating {
+			return ErrAmbiguous
+		}
+		return runtime.requireMigrationEndpointAbsent(ctx, journal)
+	}
+	if journal.State != "running" || lifecycle != LifecycleRunning || record.Lifecycle != LifecycleRunning {
+		return ErrAmbiguous
+	}
+	return runtime.requireMigrationHTTPHealthy(ctx, journal)
+}
+
 func (runtime *LinuxContainerRuntime) migrationWorkloadAbsent(ctx context.Context, name string) (bool, error) {
 	output, _, err := runtime.run(ctx, TierTenantRootless, runtime.config.PodmanPath, []string{"ps", "--all", "--filter", "name=" + name, "--format", "json"}, nil)
 	if err != nil {
@@ -823,7 +1128,7 @@ func (runtime *LinuxContainerRuntime) migrationWorkloadAbsent(ctx context.Contex
 }
 
 func (runtime *LinuxContainerRuntime) clearMigrationVolume(ctx context.Context, volume linuxRuntimeResource, plan MigrationVolumePlan) error {
-	if err := runtime.migrationUnusedVolume(ctx, volume, ""); err != nil {
+	if err := runtime.migrationOwnedVolume(ctx, volume, "", false); err != nil {
 		return err
 	}
 	mount, err := runtime.migrationMount(ctx, volume)
@@ -913,6 +1218,88 @@ func (runtime *LinuxContainerRuntime) discardMigrationVolume(ctx context.Context
 			}
 			delete(runtime.state.MigrationWorkloads, journal.Plan.WorkloadID)
 			if err := runtime.saveLocked(); err != nil {
+				return errors.Join(ErrAmbiguous, err)
+			}
+		}
+		journal.Workload = linuxRuntimeResource{}
+		if err := saveMigrationVolume(journalPath, *journal); err != nil {
+			return err
+		}
+	}
+	if err := runtime.clearMigrationVolume(ctx, volume, journal.Plan); err != nil {
+		return err
+	}
+	if err := removeMigrationArchive(directory); err != nil {
+		return err
+	}
+	journal.State = "discarded"
+	return saveMigrationVolume(journalPath, *journal)
+}
+
+func (runtime *LinuxContainerRuntime) cancelMigrationActivation(ctx context.Context, directory, journalPath string, volume linuxRuntimeResource, absenceDigest string, journal *migrationVolumeJournal) error {
+	if journal.ActivationAuthorityDigest == "" || len(absenceDigest) != 64 {
+		return ErrPolicy
+	}
+	if journal.PublicationAbsenceDigest != "" && journal.PublicationAbsenceDigest != absenceDigest {
+		return ErrConflict
+	}
+	if journal.State != "canceling" {
+		switch journal.State {
+		case "staged", "promoting", "promoted", "starting", "running":
+		default:
+			return ErrConflict
+		}
+		if err := runtime.observeMigrationVolume(ctx, volume, *journal); err != nil {
+			return err
+		}
+		journal.PublicationAbsenceDigest = absenceDigest
+		journal.State = "canceling"
+		if err := saveMigrationVolume(journalPath, *journal); err != nil {
+			return err
+		}
+	}
+	if journal.PublicationAbsenceDigest != absenceDigest {
+		return ErrConflict
+	}
+	if journal.Workload.RuntimeObjectID != "" {
+		reserved, reservedFound := runtime.state.MigrationWorkloads[journal.Plan.WorkloadID]
+		owned, ownedFound := runtime.state.Workloads[journal.Plan.WorkloadID]
+		if reservedFound && ownedFound {
+			return ErrConflict
+		}
+		if reservedFound && !sameMigrationRuntimeIdentity(reserved, journal.Workload) || ownedFound && !sameMigrationRuntimeIdentity(owned, journal.Workload) {
+			return ErrConflict
+		}
+		if reservedFound || ownedFound {
+			record := reserved
+			if ownedFound {
+				record = owned
+			}
+			lifecycle, digest, image, _, inspectErr := runtime.inspectWorkload(ctx, record)
+			if inspectErr == nil {
+				if lifecycle != LifecycleCreating && lifecycle != LifecycleRunning && lifecycle != LifecycleStopped && lifecycle != LifecyclePaused {
+					return ErrInUse
+				}
+				if digest != journal.Workload.SpecDigest || image != journal.Plan.WorkloadSpec().Image.Digest {
+					return ErrConflict
+				}
+				if _, _, err := runtime.run(ctx, record.Tier, runtime.config.PodmanPath, []string{"rm", "--force", "--ignore", "--", record.RuntimeObjectID}, nil); err != nil {
+					return errors.Join(ErrAmbiguous, err)
+				}
+			} else {
+				absent, absentErr := runtime.migrationWorkloadAbsent(ctx, record.RuntimeObjectID)
+				if absentErr != nil || !absent {
+					return errors.Join(ErrAmbiguous, inspectErr, absentErr)
+				}
+			}
+			delete(runtime.state.MigrationWorkloads, journal.Plan.WorkloadID)
+			delete(runtime.state.Workloads, journal.Plan.WorkloadID)
+			if err := runtime.saveLocked(); err != nil {
+				return errors.Join(ErrAmbiguous, err)
+			}
+		} else {
+			absent, err := runtime.migrationWorkloadAbsent(ctx, journal.Workload.RuntimeObjectID)
+			if err != nil || !absent {
 				return errors.Join(ErrAmbiguous, err)
 			}
 		}

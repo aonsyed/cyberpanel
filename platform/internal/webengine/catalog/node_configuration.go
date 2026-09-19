@@ -289,7 +289,7 @@ func (catalog *SQLCatalog) RejectNodeConfiguration(ctx context.Context, prepared
 }
 
 func loadCompletePlan(ctx context.Context, tx *sql.Tx, configuration NodeConfiguration, snapshotGeneration uint64) (composer.Plan, error) {
-	sites, err := loadAllSiteInputsForProxy(ctx, tx)
+	sites, err := loadAllSiteInputsForProxy(ctx, tx, nil)
 	if err != nil {
 		return composer.Plan{}, err
 	}

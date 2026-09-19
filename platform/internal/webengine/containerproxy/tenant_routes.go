@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/containers"
+	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/catalog"
@@ -46,17 +47,29 @@ const (
 // binding. Reserve normalizes Hostname and rejects any non-loopback endpoint;
 // neither later activation nor observation accepts replacement values.
 type TenantWorkloadRouteSpec struct {
-	TenantID                  containers.ID         `json:"tenant_id"`
-	SiteID                    containers.ID         `json:"site_id"`
-	DomainID                  containers.ID         `json:"domain_id"`
-	Hostname                  string                `json:"hostname"`
-	ListenerRef               webengine.ResourceRef `json:"listener_ref"`
-	WorkloadID                containers.ID         `json:"workload_id"`
-	RecipeDigest              string                `json:"recipe_digest"`
-	ImageDigest               string                `json:"image_digest"`
-	Generation                uint64                `json:"generation"`
-	TargetEndpoint            netip.AddrPort        `json:"target_endpoint"`
-	ActivationAuthorityDigest string                `json:"activation_authority_digest"`
+	TenantID                  containers.ID             `json:"tenant_id"`
+	SiteID                    containers.ID             `json:"site_id"`
+	DomainID                  containers.ID             `json:"domain_id"`
+	Hostname                  string                    `json:"hostname"`
+	ListenerRef               webengine.ResourceRef     `json:"listener_ref"`
+	WorkloadID                containers.ID             `json:"workload_id"`
+	RecipeDigest              string                    `json:"recipe_digest"`
+	ImageDigest               string                    `json:"image_digest"`
+	Generation                uint64                    `json:"generation"`
+	TargetEndpoint            netip.AddrPort            `json:"target_endpoint"`
+	ActivationAuthorityDigest string                    `json:"activation_authority_digest"`
+	SiteHandoff               TenantWorkloadSiteHandoff `json:"site_handoff"`
+}
+
+// TenantWorkloadSiteHandoff fixes the exact non-serving site projection that
+// owns the hostname before it is atomically replaced by the workload route.
+// It is not a generic route takeover token: all four values are compared with
+// the current tenant/site catalog row and node generation.
+type TenantWorkloadSiteHandoff struct {
+	ProjectionGeneration    uint64 `json:"projection_generation"`
+	ProjectionDigest        string `json:"projection_digest"`
+	ConfigurationGeneration uint64 `json:"configuration_generation"`
+	ConfigurationDigest     string `json:"configuration_digest"`
 }
 
 type TenantWorkloadRouteReference struct {
@@ -237,8 +250,8 @@ func (authority *TenantRouteAuthority) ReserveTenantWorkloadRoute(ctx context.Co
 		}
 		return TenantWorkloadRouteReservation{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO webengine_tenant_workload_routes_v1(reservation_id,tenant_id,site_id,domain_id,hostname,listener_ref,workload_id,recipe_digest,image_digest,generation,target_endpoint,activation_authority_digest,reservation_digest,route_ref,activation_effect_id,state,activation_generation,candidate_digest,observation_digest,receipt_json,activated_at,created_at,updated_at,discarded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'reserved',0,'',?,?,NULL,?,?,NULL)`,
-		reservation.ID, spec.TenantID, spec.SiteID, spec.DomainID, spec.Hostname, spec.ListenerRef, spec.WorkloadID, spec.RecipeDigest, spec.ImageDigest, spec.Generation, spec.TargetEndpoint.String(), spec.ActivationAuthorityDigest, reservation.Digest, reservation.RouteRef, reservation.ActivationEffectID, observation.EvidenceDigest, receiptJSON, now, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO webengine_tenant_workload_routes_v1(reservation_id,tenant_id,site_id,domain_id,hostname,listener_ref,workload_id,recipe_digest,image_digest,generation,target_endpoint,activation_authority_digest,site_projection_generation,site_projection_digest,site_configuration_generation,site_configuration_digest,reservation_digest,route_ref,activation_effect_id,state,activation_generation,candidate_digest,observation_digest,receipt_json,activated_at,created_at,updated_at,discarded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'reserved',0,'',?,?,NULL,?,?,NULL)`,
+		reservation.ID, spec.TenantID, spec.SiteID, spec.DomainID, spec.Hostname, spec.ListenerRef, spec.WorkloadID, spec.RecipeDigest, spec.ImageDigest, spec.Generation, spec.TargetEndpoint.String(), spec.ActivationAuthorityDigest, spec.SiteHandoff.ProjectionGeneration, spec.SiteHandoff.ProjectionDigest, spec.SiteHandoff.ConfigurationGeneration, spec.SiteHandoff.ConfigurationDigest, reservation.Digest, reservation.RouteRef, reservation.ActivationEffectID, observation.EvidenceDigest, receiptJSON, now, now)
 	if err != nil {
 		_ = tx.Rollback()
 		if existing, retryErr := authority.load(ctx, spec.TenantID, reservation.ID); retryErr == nil && existing.Digest == reservation.Digest && existing.Spec == spec {
@@ -622,8 +635,8 @@ func (authority *TenantRouteAuthority) load(ctx context.Context, tenantID contai
 	var endpoint string
 	var receiptJSON []byte
 	var activatedAt, discardedAt sql.NullTime
-	row := authority.database.QueryRowContext(ctx, `SELECT reservation_id,tenant_id,site_id,domain_id,hostname,listener_ref,workload_id,recipe_digest,image_digest,generation,target_endpoint,activation_authority_digest,reservation_digest,route_ref,activation_effect_id,state,activation_generation,candidate_digest,observation_digest,receipt_json,activated_at,created_at,updated_at,discarded_at FROM webengine_tenant_workload_routes_v1 WHERE reservation_id=? AND tenant_id=?`, reservationID, tenantID)
-	err := row.Scan(&reservation.ID, &reservation.Spec.TenantID, &reservation.Spec.SiteID, &reservation.Spec.DomainID, &reservation.Spec.Hostname, &reservation.Spec.ListenerRef, &reservation.Spec.WorkloadID, &reservation.Spec.RecipeDigest, &reservation.Spec.ImageDigest, &reservation.Spec.Generation, &endpoint, &reservation.Spec.ActivationAuthorityDigest, &reservation.Digest, &reservation.RouteRef, &reservation.ActivationEffectID, &reservation.State, &reservation.ActivationGeneration, &reservation.CandidateDigest, &reservation.ObservationDigest, &receiptJSON, &activatedAt, &reservation.CreatedAt, &reservation.UpdatedAt, &discardedAt)
+	row := authority.database.QueryRowContext(ctx, `SELECT reservation_id,tenant_id,site_id,domain_id,hostname,listener_ref,workload_id,recipe_digest,image_digest,generation,target_endpoint,activation_authority_digest,site_projection_generation,site_projection_digest,site_configuration_generation,site_configuration_digest,reservation_digest,route_ref,activation_effect_id,state,activation_generation,candidate_digest,observation_digest,receipt_json,activated_at,created_at,updated_at,discarded_at FROM webengine_tenant_workload_routes_v1 WHERE reservation_id=? AND tenant_id=?`, reservationID, tenantID)
+	err := row.Scan(&reservation.ID, &reservation.Spec.TenantID, &reservation.Spec.SiteID, &reservation.Spec.DomainID, &reservation.Spec.Hostname, &reservation.Spec.ListenerRef, &reservation.Spec.WorkloadID, &reservation.Spec.RecipeDigest, &reservation.Spec.ImageDigest, &reservation.Spec.Generation, &endpoint, &reservation.Spec.ActivationAuthorityDigest, &reservation.Spec.SiteHandoff.ProjectionGeneration, &reservation.Spec.SiteHandoff.ProjectionDigest, &reservation.Spec.SiteHandoff.ConfigurationGeneration, &reservation.Spec.SiteHandoff.ConfigurationDigest, &reservation.Digest, &reservation.RouteRef, &reservation.ActivationEffectID, &reservation.State, &reservation.ActivationGeneration, &reservation.CandidateDigest, &reservation.ObservationDigest, &receiptJSON, &activatedAt, &reservation.CreatedAt, &reservation.UpdatedAt, &discardedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return reservation, ErrTenantRouteNotFound
 	}
@@ -657,7 +670,7 @@ func (authority *TenantRouteAuthority) now() time.Time {
 
 func normalizeTenantWorkloadRouteSpec(spec TenantWorkloadRouteSpec) (TenantWorkloadRouteSpec, error) {
 	hostname, err := webengine.ParseHostname(spec.Hostname)
-	if err != nil || !spec.TenantID.Valid() || !spec.SiteID.Valid() || !spec.DomainID.Valid() || !spec.WorkloadID.Valid() || !safeRouteRef(spec.ListenerRef) || !validRouteDigest(spec.RecipeDigest) || !strings.HasPrefix(spec.ImageDigest, "sha256:") || !validRouteDigest(strings.TrimPrefix(spec.ImageDigest, "sha256:")) || spec.Generation == 0 || !spec.TargetEndpoint.IsValid() || spec.TargetEndpoint.Addr() != netip.MustParseAddr("127.0.0.1") || spec.TargetEndpoint.Port() < 1024 || !validRouteDigest(spec.ActivationAuthorityDigest) {
+	if err != nil || !spec.TenantID.Valid() || !spec.SiteID.Valid() || !spec.DomainID.Valid() || !spec.WorkloadID.Valid() || !safeRouteRef(spec.ListenerRef) || !validRouteDigest(spec.RecipeDigest) || !strings.HasPrefix(spec.ImageDigest, "sha256:") || !validRouteDigest(strings.TrimPrefix(spec.ImageDigest, "sha256:")) || spec.Generation == 0 || !spec.TargetEndpoint.IsValid() || spec.TargetEndpoint.Addr() != netip.MustParseAddr("127.0.0.1") || spec.TargetEndpoint.Port() < 1024 || !validRouteDigest(spec.ActivationAuthorityDigest) || spec.SiteHandoff.ProjectionGeneration == 0 || !validRouteDigest(spec.SiteHandoff.ProjectionDigest) || spec.SiteHandoff.ConfigurationGeneration == 0 || !validRouteDigest(spec.SiteHandoff.ConfigurationDigest) {
 		return TenantWorkloadRouteSpec{}, ErrTenantRouteInvalid
 	}
 	spec.Hostname = hostname.String()
@@ -675,6 +688,17 @@ func newTenantWorkloadRouteReservation(spec TenantWorkloadRouteSpec) TenantWorkl
 		RouteRef:           webengine.ResourceRef("tenant-workload/" + digest[:48]),
 		ActivationEffectID: "tenant-workload-route-" + digest,
 	}
+}
+
+// TenantWorkloadRouteReferenceForSpec exposes only the deterministic identity
+// needed to journal a route before Reserve performs its first live observation.
+func TenantWorkloadRouteReferenceForSpec(spec TenantWorkloadRouteSpec) (TenantWorkloadRouteReference, error) {
+	normalized, err := normalizeTenantWorkloadRouteSpec(spec)
+	if err != nil {
+		return TenantWorkloadRouteReference{}, err
+	}
+	reservation := newTenantWorkloadRouteReservation(normalized)
+	return TenantWorkloadRouteReference{TenantID: normalized.TenantID, ReservationID: reservation.ID, ExpectedGeneration: normalized.Generation, ReservationDigest: reservation.Digest}, nil
 }
 
 func validateTenantWorkloadRouteReference(reference TenantWorkloadRouteReference) error {
@@ -785,22 +809,34 @@ func ensureTenantWorkloadRouteAvailable(ctx context.Context, tx *sql.Tx, reserva
 		return err
 	}
 	_ = rows.Close()
-	rows, err = tx.QueryContext(ctx, `SELECT input_json FROM webengine_site_inputs`)
+	rows, err = tx.QueryContext(ctx, `SELECT tenant_id,site_id,projection_generation,projection_digest,input_json FROM webengine_site_inputs`)
 	if err != nil {
 		return err
 	}
+	handoffMatched := false
 	for rows.Next() {
+		var tenantID, siteID, projectionDigest string
+		var projectionGeneration uint64
 		var raw []byte
 		var input composer.SiteInput
-		if err = rows.Scan(&raw); err != nil || json.Unmarshal(raw, &input) != nil {
+		if err = rows.Scan(&tenantID, &siteID, &projectionGeneration, &projectionDigest, &raw); err != nil || json.Unmarshal(raw, &input) != nil {
 			_ = rows.Close()
 			return errors.Join(ErrTenantRouteConflict, err)
 		}
 		for _, binding := range input.Projection.Bindings {
-			if binding.Hostname.String() == reservation.Spec.Hostname {
-				_ = rows.Close()
-				return ErrTenantRouteConflict
+			if binding.Hostname.String() != reservation.Spec.Hostname {
+				continue
 			}
+			if tenantID == reservation.Spec.TenantID.String() && siteID == reservation.Spec.SiteID.String() && input.Scope.TenantID.String() == tenantID && input.Scope.SiteID.String() == siteID && !input.Withdraw && input.Projection.Lifecycle == site.LifecycleProvisioning && len(input.Projection.Bindings) == 1 && binding.Kind == site.BindingPrimary && projectionGeneration == reservation.Spec.SiteHandoff.ProjectionGeneration && projectionDigest == reservation.Spec.SiteHandoff.ProjectionDigest {
+				if handoffMatched {
+					_ = rows.Close()
+					return ErrTenantRouteConflict
+				}
+				handoffMatched = true
+				continue
+			}
+			_ = rows.Close()
+			return ErrTenantRouteConflict
 		}
 	}
 	if err = rows.Err(); err != nil {
@@ -808,6 +844,13 @@ func ensureTenantWorkloadRouteAvailable(ctx context.Context, tx *sql.Tx, reserva
 		return err
 	}
 	_ = rows.Close()
+	if !handoffMatched {
+		return ErrTenantRouteConflict
+	}
+	var policies int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM webengine_access_policies WHERE tenant_id=? AND site_id=?`, reservation.Spec.TenantID, reservation.Spec.SiteID).Scan(&policies); err != nil || policies != 0 {
+		return errors.Join(ErrTenantRouteConflict, err)
+	}
 	var priorChange string
 	err = tx.QueryRowContext(ctx, `SELECT effect_id FROM webengine_proxy_changes WHERE effect_id=? OR route_ref=? LIMIT 1`, reservation.ActivationEffectID, reservation.RouteRef).Scan(&priorChange)
 	if err == nil {
@@ -825,17 +868,19 @@ func ensureTenantWorkloadRouteAvailable(ctx context.Context, tx *sql.Tx, reserva
 		return err
 	}
 	var configurationJSON []byte
-	if err = tx.QueryRowContext(ctx, `SELECT config_json FROM webengine_node_config WHERE singleton_id=1`).Scan(&configurationJSON); err != nil {
+	var configurationGeneration uint64
+	var configurationDigest string
+	if err = tx.QueryRowContext(ctx, `SELECT snapshot_generation,applied_digest,config_json FROM webengine_node_config WHERE singleton_id=1`).Scan(&configurationGeneration, &configurationDigest, &configurationJSON); err != nil {
 		return err
 	}
 	var configuration catalog.NodeConfiguration
-	if json.Unmarshal(configurationJSON, &configuration) != nil {
+	if json.Unmarshal(configurationJSON, &configuration) != nil || configurationGeneration != reservation.Spec.SiteHandoff.ConfigurationGeneration || configurationDigest != reservation.Spec.SiteHandoff.ConfigurationDigest {
 		return ErrTenantRouteConflict
 	}
 	matched := false
 	for _, listener := range configuration.Engine.Listeners {
 		if listener.Ref == reservation.Spec.ListenerRef {
-			if matched || listener.TLSMode != webengine.TLSModeClear {
+			if matched || listener.TLSMode != webengine.TLSModeClear || listener.Port == 0 || len(listener.Protocols) != 1 || listener.Protocols[0] != webengine.ProtocolHTTP1 {
 				return ErrTenantRouteConflict
 			}
 			matched = true

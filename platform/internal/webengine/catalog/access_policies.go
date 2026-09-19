@@ -110,7 +110,7 @@ func (catalog *SQLCatalog) PrepareAccessPolicy(ctx context.Context, effectID str
 	if err != nil {
 		return PreparedAccessPolicy{}, err
 	}
-	sites, err := loadAllSiteInputsForProxy(ctx, tx)
+	sites, err := loadAllSiteInputsForProxy(ctx, tx, nil)
 	if err != nil {
 		return PreparedAccessPolicy{}, err
 	}

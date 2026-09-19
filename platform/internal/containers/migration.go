@@ -39,30 +39,41 @@ type MigrationVolumePiece struct {
 }
 
 type MigrationContainerRequest struct {
-	Action   string
-	EffectID EffectID
-	Grant    Grant
-	Plan     MigrationVolumePlan
-	Offset   uint64
-	Data     []byte
+	Action                    string
+	EffectID                  EffectID
+	Grant                     Grant
+	Plan                      MigrationVolumePlan
+	ActivationAuthorityDigest string
+	PublicationAbsenceDigest  string
+	Offset                    uint64
+	Data                      []byte
 }
 
 type MigrationContainerReceipt struct {
-	EffectID        EffectID
-	PlanDigest      string
-	State           string
-	ArchiveDigest   string
-	TreeDigest      string
-	RuntimeObjectID string
-	EvidenceDigest  string
-	MigrationID     ID
-	ApplicationID   ID
-	VolumeID        ID
-	WorkloadID      ID
-	Received        uint64
-	Bytes           uint64
-	Files           uint64
-	ObservedAt      time.Time
+	EffectID                  EffectID
+	PlanDigest                string
+	State                     string
+	ArchiveDigest             string
+	TreeDigest                string
+	RuntimeObjectID           string
+	SpecDigest                string
+	RecipeDigest              string
+	ImageDigest               string
+	ActivationAuthorityDigest string
+	PublicationAbsenceDigest  string
+	BoundAddress              string
+	BoundPort                 uint16
+	Lifecycle                 Lifecycle
+	Health                    WorkloadHealth
+	EvidenceDigest            string
+	MigrationID               ID
+	ApplicationID             ID
+	VolumeID                  ID
+	WorkloadID                ID
+	Received                  uint64
+	Bytes                     uint64
+	Files                     uint64
+	ObservedAt                time.Time
 }
 
 type MigrationContainerBroker interface {
@@ -129,7 +140,7 @@ func (plan MigrationVolumePlan) Validate() error {
 	if mountTarget == "/run" || strings.HasPrefix(mountTarget, "/run/") || mountTarget == "/etc" || strings.HasPrefix(mountTarget, "/etc/") {
 		return ErrPolicy
 	}
-	if len(spec.Ports) != 1 || spec.Ports[0].Name != workload.RoutePortName || spec.Ports[0].Protocol != ProtocolTCP {
+	if len(spec.Ports) != 1 || spec.Ports[0].Name != workload.RoutePortName || spec.Ports[0].Protocol != ProtocolTCP || spec.Health.Kind != "http" || spec.Health.PortName != workload.RoutePortName {
 		return ErrPolicy
 	}
 	// No generic legacy environment/credential translation. Until a recipe slot
@@ -186,13 +197,22 @@ func (request MigrationContainerRequest) Validate(now time.Time) error {
 	if request.Plan.Validate() != nil || request.EffectID != request.Plan.EffectID() || grantFor(request.Grant, "application.migrate", request.Plan.ApplicationID, now) != nil || request.Grant.TenantID != request.Plan.TenantID || request.Grant.AuthzEpoch != request.Plan.SourceGeneration {
 		return ErrForbidden
 	}
+	validDigest := func(value string) bool { return len(value) == 64 && strings.Trim(value, "0123456789abcdef") == "" }
 	switch request.Action {
 	case "begin", "seal", "observe", "stage", "discard":
-		if request.Offset != 0 || len(request.Data) != 0 {
+		if request.Offset != 0 || len(request.Data) != 0 || request.ActivationAuthorityDigest != "" || request.PublicationAbsenceDigest != "" {
 			return ErrInvalid
 		}
 	case "chunk":
-		if len(request.Data) == 0 || len(request.Data) > MigrationVolumeMaximumChunk || request.Offset > request.Plan.Bytes || uint64(len(request.Data)) > request.Plan.Bytes-request.Offset {
+		if len(request.Data) == 0 || len(request.Data) > MigrationVolumeMaximumChunk || request.Offset > request.Plan.Bytes || uint64(len(request.Data)) > request.Plan.Bytes-request.Offset || request.ActivationAuthorityDigest != "" || request.PublicationAbsenceDigest != "" {
+			return ErrInvalid
+		}
+	case "promote", "start", "observe-active":
+		if request.Offset != 0 || len(request.Data) != 0 || !validDigest(request.ActivationAuthorityDigest) || request.PublicationAbsenceDigest != "" {
+			return ErrInvalid
+		}
+	case "cancel":
+		if request.Offset != 0 || len(request.Data) != 0 || !validDigest(request.ActivationAuthorityDigest) || !validDigest(request.PublicationAbsenceDigest) {
 			return ErrInvalid
 		}
 	default:
@@ -261,7 +281,11 @@ func (a *ApplicationService) verifyMigrationPlan(ctx context.Context, plan Migra
 }
 
 func migrationApplicationMatches(application ContainerApplication, plan MigrationVolumePlan) bool {
-	if application.ID != plan.ApplicationID || application.TenantID != plan.TenantID || application.SiteID != plan.SiteID || application.RecipeID != plan.Recipe.ID || application.RecipeVersion != plan.Recipe.Version || application.ActiveGeneration != 1 || (application.CandidateGeneration != 1 && !(application.State == "migration-discarded" && application.CandidateGeneration == 0)) || len(application.VolumeIDs) != 1 || application.VolumeIDs[0] != plan.VolumeID || len(application.WorkloadIDs) != 1 || application.WorkloadIDs[0] != plan.WorkloadID {
+	candidateValid := application.CandidateGeneration == 1
+	if application.State == "active" || application.State == "migration-discarded" {
+		candidateValid = application.CandidateGeneration == 0
+	}
+	if application.ID != plan.ApplicationID || application.TenantID != plan.TenantID || application.SiteID != plan.SiteID || application.RecipeID != plan.Recipe.ID || application.RecipeVersion != plan.Recipe.Version || application.ActiveGeneration != 1 || !candidateValid || len(application.VolumeIDs) != 1 || application.VolumeIDs[0] != plan.VolumeID || len(application.WorkloadIDs) != 1 || application.WorkloadIDs[0] != plan.WorkloadID {
 		return false
 	}
 	if plan.NetworkID == "" {
@@ -420,9 +444,306 @@ func (a *ApplicationService) DiscardMigration(ctx context.Context, meta CommandM
 	return receipt, a.repository.Complete(ctx, effect, "applied", application, receipt)
 }
 
-// Route ownership cannot be inferred from a hostname. The normal proxy seam
-// currently has no tenant-owned site-binding replacement operation; do not run
-// a candidate writer while that prerequisite is missing.
-func (a *ApplicationService) ActivateMigration(context.Context, MigrationVolumePlan) (MigrationContainerReceipt, error) {
-	return MigrationContainerReceipt{}, fmt.Errorf("%w: exact tenant-owned route activation and durable source-fence transaction are unbound", ErrPolicy)
+func (a *ApplicationService) migrationActivationRequest(ctx context.Context, meta CommandMeta, plan MigrationVolumePlan, action, authorityDigest, absenceDigest string) (MigrationContainerReceipt, error) {
+	if err := a.verifyMigrationPlan(ctx, plan); err != nil {
+		return MigrationContainerReceipt{}, err
+	}
+	if meta.Validate("application.migrate", plan.ApplicationID, a.clock().UTC()) != nil || meta.Grant.TenantID != plan.TenantID || meta.Grant.AuthzEpoch != plan.SourceGeneration || meta.CommandID != plan.CommandID() {
+		return MigrationContainerReceipt{}, ErrPolicy
+	}
+	application, err := a.repository.Application(ctx, plan.TenantID, plan.ApplicationID)
+	if err != nil {
+		return MigrationContainerReceipt{}, err
+	}
+	staged := application.State == "migration-staged" && application.FirstWriteAt == nil
+	observingCommitted := action == "observe-active" && application.State == "active" && application.FirstWriteAt != nil
+	replayingCanceled := action == "cancel" && application.State == "migration-discarded" && application.FirstWriteAt == nil
+	if !migrationApplicationMatches(application, plan) || !staged && !observingCommitted && !replayingCanceled {
+		return MigrationContainerReceipt{}, ErrPolicy
+	}
+	if action == "promote" || action == "start" || action == "observe-active" {
+		current, loadErr := a.repository.Workload(ctx, plan.TenantID, plan.WorkloadID)
+		if errors.Is(loadErr, ErrNotFound) && action == "promote" {
+			// The first promotion must create lifecycle ownership; it never adopts
+			// a pre-existing workload row.
+		} else {
+			observedExact := current.ObservedLifecycle == LifecycleCreating && current.ObservedHealth == HealthUnavailable || current.ObservedLifecycle == LifecycleRunning && current.ObservedHealth == HealthHealthy
+			promoteEffect := EffectID("migration-workload-promote-" + digestValue(struct{ Plan, Authority string }{digestValue(plan), authorityDigest}))
+			promoteDigest := digestValue(struct {
+				Domain, Action, Authority string
+				Plan                      MigrationVolumePlan
+			}{"container-migration-workload-v1", "promote", authorityDigest, plan})
+			promote, promoted, operationErr := a.repository.Operation(ctx, promoteEffect)
+			statusAllowed := action == "promote" && (promote.Status == "accepted" || promote.Status == "ambiguous") || promote.Status == "applied"
+			if loadErr != nil || operationErr != nil || !promoted || !statusAllowed || promote.CommandDigest != promoteDigest || promote.TenantID != plan.TenantID || promote.ResourceID != plan.WorkloadID || current.ID != plan.WorkloadID || current.TenantID != plan.TenantID || current.SiteID != plan.SiteID || current.Name != plan.Recipe.Workloads[0].Name || current.Tier != TierTenantRootless || current.Generation != 1 || current.ObservedGeneration != 1 || current.SpecDigest != digestValue(plan.WorkloadSpec()) || digestValue(current.Spec) != digestValue(plan.WorkloadSpec()) || current.RuntimeObjectID == "" || current.ObservedDigest != current.SpecDigest || current.DesiredLifecycle != LifecycleRunning || current.DeletedAt != nil || !observedExact {
+				return MigrationContainerReceipt{}, errors.Join(ErrConflict, loadErr, operationErr)
+			}
+		}
+	}
+	broker, ok := a.containers.broker.(MigrationContainerBroker)
+	if !ok {
+		return MigrationContainerReceipt{}, ErrPolicy
+	}
+	request := MigrationContainerRequest{Action: action, EffectID: plan.EffectID(), Grant: meta.Grant, Plan: plan, ActivationAuthorityDigest: authorityDigest, PublicationAbsenceDigest: absenceDigest}
+	if err = request.Validate(a.clock().UTC()); err != nil {
+		return MigrationContainerReceipt{}, err
+	}
+	receipt, err := broker.MigrationContainer(ctx, request)
+	if err != nil {
+		return receipt, err
+	}
+	if validateMigrationContainerReceipt(BrokerWireRequest{Method: BrokerMigrationContainer, MigrationContainer: &request}, receipt) != nil {
+		return receipt, ErrAmbiguous
+	}
+	return receipt, nil
+}
+
+func migrationWorkloadMatches(workload Workload, plan MigrationVolumePlan, receipt MigrationContainerReceipt) bool {
+	spec := plan.WorkloadSpec()
+	return workload.ID == plan.WorkloadID && workload.TenantID == plan.TenantID && workload.SiteID == plan.SiteID && workload.Name == plan.Recipe.Workloads[0].Name && workload.Tier == TierTenantRootless && workload.Generation == 1 && workload.SpecDigest == digestValue(spec) && digestValue(workload.Spec) == digestValue(spec) && workload.RuntimeObjectID == receipt.RuntimeObjectID && workload.ObservedDigest == receipt.SpecDigest && workload.DesiredLifecycle == LifecycleRunning && workload.ObservedLifecycle == receipt.Lifecycle && workload.ObservedHealth == receipt.Health
+}
+
+func (a *ApplicationService) persistMigrationWorkload(ctx context.Context, plan MigrationVolumePlan, action, authorityDigest string, receipt MigrationContainerReceipt) error {
+	if receipt.RuntimeObjectID == "" || receipt.SpecDigest != digestValue(plan.WorkloadSpec()) || receipt.RecipeDigest != plan.Recipe.Digest || receipt.ImageDigest != plan.WorkloadSpec().Image.Digest || receipt.ActivationAuthorityDigest != authorityDigest || receipt.Lifecycle != LifecycleCreating && receipt.Lifecycle != LifecycleRunning || !validWorkloadHealth(receipt.Health) {
+		return ErrAmbiguous
+	}
+	now := a.clock().UTC()
+	workload := Workload{ID: plan.WorkloadID, TenantID: plan.TenantID, SiteID: plan.SiteID, Name: plan.Recipe.Workloads[0].Name, Tier: TierTenantRootless, Spec: plan.WorkloadSpec(), DesiredLifecycle: LifecycleRunning, ObservedLifecycle: receipt.Lifecycle, ObservedHealth: receipt.Health, RuntimeObjectID: receipt.RuntimeObjectID, SpecDigest: receipt.SpecDigest, ObservedDigest: receipt.SpecDigest, Generation: 1, ObservedGeneration: 1, CreatedAt: now, UpdatedAt: now}
+	current, loadErr := a.repository.Workload(ctx, plan.TenantID, plan.WorkloadID)
+	currentFound := loadErr == nil
+	if loadErr != nil && !errors.Is(loadErr, ErrNotFound) {
+		return loadErr
+	}
+	effect := EffectID("migration-workload-" + action + "-" + digestValue(struct{ Plan, Authority string }{digestValue(plan), authorityDigest}))
+	digest := digestValue(struct {
+		Domain, Action, Authority string
+		Plan                      MigrationVolumePlan
+	}{"container-migration-workload-v1", action, authorityDigest, plan})
+	operation := Operation{EffectID: effect, TenantID: plan.TenantID, ResourceID: plan.WorkloadID, CommandDigest: digest, Status: "accepted", CreatedAt: now}
+	existing, found, err := a.repository.Operation(ctx, effect)
+	if err != nil {
+		return err
+	}
+	if found {
+		if existing.CommandDigest != digest || existing.TenantID != plan.TenantID || existing.ResourceID != plan.WorkloadID {
+			return ErrConflict
+		}
+		current, loadErr := a.repository.Workload(ctx, plan.TenantID, plan.WorkloadID)
+		if loadErr != nil || !migrationWorkloadMatches(current, plan, receipt) {
+			return errors.Join(ErrAmbiguous, loadErr)
+		}
+		if existing.Status == "applied" {
+			return nil
+		}
+		return a.repository.Complete(ctx, effect, "applied", current, receipt)
+	}
+	expected := uint64(0)
+	if currentFound {
+		// A first promotion never replaces a workload row. Later lifecycle steps
+		// may update only the exact row created by the applied promote operation
+		// for this plan and activation authority.
+		observedExact := current.ObservedLifecycle == LifecycleCreating && current.ObservedHealth == HealthUnavailable || current.ObservedLifecycle == LifecycleRunning && current.ObservedHealth == HealthHealthy
+		if action == "promote" || current.ID != plan.WorkloadID || current.TenantID != plan.TenantID || current.SiteID != plan.SiteID || current.Name != plan.Recipe.Workloads[0].Name || current.Tier != TierTenantRootless || current.Generation != 1 || current.ObservedGeneration != 1 || current.SpecDigest != digestValue(plan.WorkloadSpec()) || digestValue(current.Spec) != digestValue(plan.WorkloadSpec()) || current.RuntimeObjectID != receipt.RuntimeObjectID || current.ObservedDigest != current.SpecDigest || current.DesiredLifecycle != LifecycleRunning || current.DeletedAt != nil || !observedExact {
+			return ErrConflict
+		}
+		promoteEffect := EffectID("migration-workload-promote-" + digestValue(struct{ Plan, Authority string }{digestValue(plan), authorityDigest}))
+		promoteDigest := digestValue(struct {
+			Domain, Action, Authority string
+			Plan                      MigrationVolumePlan
+		}{"container-migration-workload-v1", "promote", authorityDigest, plan})
+		promote, promoted, operationErr := a.repository.Operation(ctx, promoteEffect)
+		if operationErr != nil || !promoted || promote.Status != "applied" || promote.CommandDigest != promoteDigest || promote.TenantID != plan.TenantID || promote.ResourceID != plan.WorkloadID {
+			return errors.Join(ErrConflict, operationErr)
+		}
+		workload.CreatedAt = current.CreatedAt
+		expected = 1
+	}
+	admitted, err := a.repository.Admit(ctx, operation, workload, expected)
+	if err != nil {
+		return err
+	}
+	if !admitted {
+		return ErrAmbiguous
+	}
+	return a.repository.Complete(ctx, effect, "applied", workload, receipt)
+}
+
+// ActivateMigration performs one closed workload-journal transition. The host
+// coordinator deliberately calls promote and start separately so it can read
+// the durable source fence immediately before each mutation.
+func (a *ApplicationService) ActivateMigration(ctx context.Context, meta CommandMeta, plan MigrationVolumePlan, action, authorityDigest string) (MigrationContainerReceipt, error) {
+	if action != "promote" && action != "start" && action != "observe-active" {
+		return MigrationContainerReceipt{}, ErrPolicy
+	}
+	receipt, err := a.migrationActivationRequest(ctx, meta, plan, action, authorityDigest, "")
+	if err != nil {
+		return receipt, err
+	}
+	if receipt.State != "promoted" && receipt.State != "running" {
+		return receipt, ErrAmbiguous
+	}
+	if err = a.persistMigrationWorkload(ctx, plan, action, authorityDigest, receipt); err != nil {
+		return receipt, err
+	}
+	return receipt, nil
+}
+
+func (a *ApplicationService) CommitMigration(ctx context.Context, meta CommandMeta, plan MigrationVolumePlan, authorityDigest, publicationEvidence string) (ContainerApplication, error) {
+	if err := a.verifyMigrationPlan(ctx, plan); err != nil {
+		return ContainerApplication{}, err
+	}
+	if meta.Validate("application.migrate", plan.ApplicationID, a.clock().UTC()) != nil || meta.Grant.TenantID != plan.TenantID || meta.Grant.AuthzEpoch != plan.SourceGeneration || meta.CommandID != plan.CommandID() || len(authorityDigest) != 64 || len(publicationEvidence) != 64 {
+		return ContainerApplication{}, ErrPolicy
+	}
+	application, err := a.repository.Application(ctx, plan.TenantID, plan.ApplicationID)
+	if err != nil || !migrationApplicationMatches(application, plan) {
+		return application, errors.Join(ErrConflict, err)
+	}
+	now := a.clock().UTC()
+	effect := EffectID("migration-publish-" + digestValue(struct{ Plan, Authority, Evidence string }{digestValue(plan), authorityDigest, publicationEvidence}))
+	digest := digestValue(struct {
+		Domain, Authority, Evidence string
+		Plan                        MigrationVolumePlan
+	}{"container-migration-publish-v1", authorityDigest, publicationEvidence, plan})
+	if application.State == "active" {
+		if application.FirstWriteAt == nil || application.CandidateGeneration != 0 {
+			return application, ErrAmbiguous
+		}
+		existing, found, operationErr := a.repository.Operation(ctx, effect)
+		if operationErr != nil || !found || existing.CommandDigest != digest || existing.TenantID != plan.TenantID || existing.ResourceID != plan.ApplicationID {
+			return application, errors.Join(ErrConflict, operationErr)
+		}
+		if existing.Status == "applied" {
+			return application, nil
+		}
+		if existing.Status != "accepted" && existing.Status != "ambiguous" {
+			return application, ErrConflict
+		}
+		return application, a.repository.Complete(ctx, effect, "applied", application, map[string]string{"authority": authorityDigest, "publication": publicationEvidence})
+	}
+	if application.State != "migration-staged" || application.FirstWriteAt != nil {
+		return application, ErrPolicy
+	}
+	proposal := application
+	proposal.State = "active"
+	proposal.CandidateGeneration = 0
+	proposal.FirstWriteAt = &now
+	proposal.UpdatedAt = now
+	operation := Operation{EffectID: effect, TenantID: plan.TenantID, ResourceID: plan.ApplicationID, CommandDigest: digest, Status: "accepted", CreatedAt: now}
+	admitted, err := a.repository.Admit(ctx, operation, proposal, application.ActiveGeneration)
+	if err != nil {
+		return application, err
+	}
+	if !admitted {
+		current, loadErr := a.repository.Application(ctx, plan.TenantID, plan.ApplicationID)
+		if loadErr != nil || !migrationApplicationMatches(current, plan) || current.State != "active" || current.FirstWriteAt == nil {
+			return current, errors.Join(ErrAmbiguous, loadErr)
+		}
+		existing, found, operationErr := a.repository.Operation(ctx, effect)
+		if operationErr != nil || !found || existing.CommandDigest != digest || existing.TenantID != plan.TenantID || existing.ResourceID != plan.ApplicationID {
+			return current, errors.Join(ErrConflict, operationErr)
+		}
+		if existing.Status == "applied" {
+			return current, nil
+		}
+		if existing.Status != "accepted" && existing.Status != "ambiguous" {
+			return current, ErrConflict
+		}
+		return current, a.repository.Complete(ctx, effect, "applied", current, map[string]string{"authority": authorityDigest, "publication": publicationEvidence})
+	}
+	return proposal, a.repository.Complete(ctx, effect, "applied", proposal, map[string]string{"authority": authorityDigest, "publication": publicationEvidence})
+}
+
+func (a *ApplicationService) CancelMigrationActivation(ctx context.Context, meta CommandMeta, plan MigrationVolumePlan, authorityDigest, publicationAbsenceDigest string) (MigrationContainerReceipt, error) {
+	receipt, err := a.migrationActivationRequest(ctx, meta, plan, "cancel", authorityDigest, publicationAbsenceDigest)
+	if err != nil || receipt.State != "discarded" || receipt.RuntimeObjectID != "" {
+		return receipt, errors.Join(ErrAmbiguous, err)
+	}
+	if current, loadErr := a.repository.Workload(ctx, plan.TenantID, plan.WorkloadID); loadErr == nil {
+		promoteEffect := EffectID("migration-workload-promote-" + digestValue(struct{ Plan, Authority string }{digestValue(plan), authorityDigest}))
+		promoteDigest := digestValue(struct {
+			Domain, Action, Authority string
+			Plan                      MigrationVolumePlan
+		}{"container-migration-workload-v1", "promote", authorityDigest, plan})
+		promote, promoted, operationErr := a.repository.Operation(ctx, promoteEffect)
+		if operationErr != nil {
+			return receipt, operationErr
+		}
+		if !promoted {
+			goto application
+		}
+		ownedRunning := current.DesiredLifecycle == LifecycleRunning && current.RuntimeObjectID != "" && (current.ObservedLifecycle == LifecycleCreating || current.ObservedLifecycle == LifecycleRunning)
+		ownedCanceled := current.DesiredLifecycle == LifecycleDeleted && current.ObservedLifecycle == LifecycleDeleted && current.ObservedHealth == HealthUnavailable && current.RuntimeObjectID == ""
+		if promote.CommandDigest != promoteDigest || promote.TenantID != plan.TenantID || promote.ResourceID != plan.WorkloadID || promote.Status != "accepted" && promote.Status != "ambiguous" && promote.Status != "applied" || current.ID != plan.WorkloadID || current.TenantID != plan.TenantID || current.SiteID != plan.SiteID || current.Name != plan.Recipe.Workloads[0].Name || current.Tier != TierTenantRootless || current.Generation != 1 || current.SpecDigest != digestValue(plan.WorkloadSpec()) || digestValue(current.Spec) != digestValue(plan.WorkloadSpec()) || current.ObservedDigest != current.SpecDigest || current.DeletedAt != nil || !ownedRunning && !ownedCanceled {
+			return receipt, ErrConflict
+		}
+		proposal := current
+		proposal.DesiredLifecycle = LifecycleDeleted
+		proposal.ObservedLifecycle = LifecycleDeleted
+		proposal.ObservedHealth = HealthUnavailable
+		proposal.RuntimeObjectID = ""
+		proposal.UpdatedAt = a.clock().UTC()
+		effect := EffectID("migration-cancel-workload-" + digestValue(struct{ Plan, Absence string }{digestValue(plan), publicationAbsenceDigest}))
+		commandDigest := digestValue(struct{ Domain, Authority, Absence string }{"container-migration-cancel-workload-v1", authorityDigest, publicationAbsenceDigest})
+		operation := Operation{EffectID: effect, TenantID: plan.TenantID, ResourceID: plan.WorkloadID, CommandDigest: commandDigest, Status: "accepted", CreatedAt: a.clock().UTC()}
+		admitted, admitErr := a.repository.Admit(ctx, operation, proposal, current.Generation)
+		if admitErr != nil {
+			return receipt, admitErr
+		}
+		if !admitted {
+			existing, found, operationErr := a.repository.Operation(ctx, effect)
+			if operationErr != nil || !found || existing.CommandDigest != commandDigest || existing.TenantID != plan.TenantID || existing.ResourceID != plan.WorkloadID {
+				return receipt, errors.Join(ErrAmbiguous, operationErr)
+			}
+			proposal, loadErr = a.repository.Workload(ctx, plan.TenantID, plan.WorkloadID)
+			if loadErr != nil || proposal.ID != plan.WorkloadID || proposal.TenantID != plan.TenantID || proposal.Generation != 1 || proposal.SpecDigest != digestValue(plan.WorkloadSpec()) || proposal.DesiredLifecycle != LifecycleDeleted || proposal.ObservedLifecycle != LifecycleDeleted || proposal.RuntimeObjectID != "" {
+				return receipt, errors.Join(ErrAmbiguous, loadErr)
+			}
+			if existing.Status == "applied" {
+				goto application
+			}
+			if existing.Status != "accepted" && existing.Status != "ambiguous" {
+				return receipt, ErrConflict
+			}
+		}
+		if completeErr := a.repository.Complete(ctx, effect, "applied", proposal, receipt); completeErr != nil {
+			return receipt, completeErr
+		}
+	} else if !errors.Is(loadErr, ErrNotFound) {
+		return receipt, loadErr
+	}
+
+application:
+	application, err := a.repository.Application(ctx, plan.TenantID, plan.ApplicationID)
+	if err != nil || !migrationApplicationMatches(application, plan) || application.State == "active" || application.FirstWriteAt != nil {
+		return receipt, errors.Join(ErrPolicy, err)
+	}
+	proposal := application
+	proposal.State = "migration-discarded"
+	proposal.CandidateGeneration = 0
+	proposal.UpdatedAt = a.clock().UTC()
+	effect := EffectID("migration-cancel-" + digestValue(struct{ Plan, Absence string }{digestValue(plan), publicationAbsenceDigest}))
+	commandDigest := digestValue(struct{ Domain, Authority, Absence string }{"container-migration-cancel-v1", authorityDigest, publicationAbsenceDigest})
+	operation := Operation{EffectID: effect, TenantID: plan.TenantID, ResourceID: plan.ApplicationID, CommandDigest: commandDigest, Status: "accepted", CreatedAt: a.clock().UTC()}
+	admitted, err := a.repository.Admit(ctx, operation, proposal, application.ActiveGeneration)
+	if err != nil {
+		return receipt, err
+	}
+	if !admitted {
+		existing, found, operationErr := a.repository.Operation(ctx, effect)
+		if operationErr != nil || !found || existing.CommandDigest != commandDigest || existing.TenantID != plan.TenantID || existing.ResourceID != plan.ApplicationID {
+			return receipt, errors.Join(ErrAmbiguous, operationErr)
+		}
+		proposal, err = a.repository.Application(ctx, plan.TenantID, plan.ApplicationID)
+		if err != nil || !migrationApplicationMatches(proposal, plan) || proposal.State != "migration-discarded" || proposal.FirstWriteAt != nil {
+			return receipt, errors.Join(ErrAmbiguous, err)
+		}
+		if existing.Status == "applied" {
+			return receipt, nil
+		}
+		if existing.Status != "accepted" && existing.Status != "ambiguous" {
+			return receipt, ErrConflict
+		}
+	}
+	return receipt, a.repository.Complete(ctx, effect, "applied", proposal, receipt)
 }
