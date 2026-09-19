@@ -27,7 +27,26 @@ const (
 type localArtifactCatalog struct {
 	SchemaVersion uint32 `json:"schema_version"`
 	Digest string `json:"digest"`
+	Sequence uint64 `json:"sequence"`
 	Entries []localArtifactCatalogEntry `json:"entries"`
+}
+
+type engineCatalogPayload struct {
+	SchemaVersion uint32 `json:"schema_version"`
+	Sequence uint64 `json:"sequence"`
+	IssuedAt time.Time `json:"issued_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	KeyID string `json:"key_id"`
+	Entries []localArtifactCatalogEntry `json:"entries"`
+}
+type signedEngineCatalog struct {
+	SchemaVersion uint32 `json:"schema_version"`
+	Sequence uint64 `json:"sequence"`
+	IssuedAt time.Time `json:"issued_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	KeyID string `json:"key_id"`
+	Entries []localArtifactCatalogEntry `json:"entries"`
+	Signature string `json:"signature"`
 }
 
 type localArtifactCatalogEntry struct {
@@ -223,7 +242,29 @@ func resolveLocalArtifact(ctx context.Context, request ArtifactRequest, requireR
 	return selected, nil
 }
 
-func readLocalArtifactCatalog(requireRoot bool)(localArtifactCatalog,error){info,err:=os.Lstat(localArtifactCatalogPath);if err!=nil{return localArtifactCatalog{},err};if !info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()&0o022!=0||info.Size()<=0||info.Size()>localArtifactCatalogLimit||requireRoot&&!rootOwnedFile(info){return localArtifactCatalog{},ErrInvalid};content,err:=os.ReadFile(localArtifactCatalogPath);if err!=nil{return localArtifactCatalog{},err};if len(content)==0||len(content)>localArtifactCatalogLimit{return localArtifactCatalog{},ErrInvalid};decoder:=json.NewDecoder(bytes.NewReader(content));decoder.DisallowUnknownFields();var catalog localArtifactCatalog;if err=decoder.Decode(&catalog);err!=nil||decoder.Decode(&struct{}{})!=io.EOF||catalog.SchemaVersion!=1||!validSHA256(catalog.Digest)||len(catalog.Entries)==0||len(catalog.Entries)>1024{return localArtifactCatalog{},ErrInvalid};if digestJSON(catalog.Entries)!=catalog.Digest{return localArtifactCatalog{},ErrConflict};for _,entry:=range catalog.Entries{if !validLifecycleTuple(entry.OS,entry.OSVersion,entry.Architecture)||!validChannel(entry.Channel)||validateArtifactPlan(entry.Plan)!=nil{return localArtifactCatalog{},ErrInvalid}};return catalog,nil}
+func readLocalArtifactCatalog(requireRoot bool)(localArtifactCatalog,error){
+	info,err:=os.Lstat(localArtifactCatalogPath);if err!=nil{return localArtifactCatalog{},err}
+	if !safeLocalCatalogFile(info,localArtifactCatalogLimit,requireRoot){return localArtifactCatalog{},ErrInvalid}
+	content,err:=os.ReadFile(localArtifactCatalogPath);if err!=nil{return localArtifactCatalog{},err}
+	decoder:=json.NewDecoder(bytes.NewReader(content));decoder.DisallowUnknownFields()
+	var signed signedEngineCatalog
+	if decoder.Decode(&signed)!=nil||decoder.Decode(&struct{}{})!=io.EOF{return localArtifactCatalog{},ErrInvalid}
+	now:=time.Now().UTC()
+	if signed.SchemaVersion!=2||signed.Sequence==0||signed.IssuedAt.IsZero()||signed.IssuedAt.After(now.Add(5*time.Minute))||!signed.ExpiresAt.After(now)||!signed.ExpiresAt.After(signed.IssuedAt)||signed.ExpiresAt.Sub(signed.IssuedAt)>370*24*time.Hour||!safeLifecycleToken(signed.KeyID)||len(signed.Entries)==0||len(signed.Entries)>1024{return localArtifactCatalog{},ErrInvalid}
+	payload:=engineCatalogPayload{signed.SchemaVersion,signed.Sequence,signed.IssuedAt,signed.ExpiresAt,signed.KeyID,signed.Entries}
+	canonical,err:=json.Marshal(payload);if err!=nil{return localArtifactCatalog{},err}
+	key,err:=readLocalPHPTrustKey(signed.KeyID,requireRoot);if err!=nil{return localArtifactCatalog{},err}
+	signature,err:=base64.StdEncoding.DecodeString(signed.Signature)
+	message:=append([]byte("cyberpanel:webengine-artifact-catalog:v2\x00"),canonical...)
+	if err!=nil||len(signature)!=ed25519.SignatureSize||!ed25519.Verify(key,message,signature){return localArtifactCatalog{},ErrConflict}
+	seen:=map[string]bool{}
+	for _,entry:=range signed.Entries{
+		if !validLifecycleTuple(entry.OS,entry.OSVersion,entry.Architecture)||!validChannel(entry.Channel)||validateArtifactPlan(entry.Plan)!=nil{return localArtifactCatalog{},ErrInvalid}
+		key:=entry.OS+"\x00"+entry.OSVersion+"\x00"+entry.Architecture+"\x00"+string(entry.Channel)+"\x00"+string(entry.Plan.Edition)+"\x00"+entry.Plan.Version
+		if seen[key]{return localArtifactCatalog{},ErrConflict};seen[key]=true
+	}
+	return localArtifactCatalog{SchemaVersion:2,Digest:linuxManagementDigest(canonical),Sequence:signed.Sequence,Entries:signed.Entries},nil
+}
 
 func validateArtifactPlan(plan ArtifactPlan) error {
 	if plan.Edition != webengine.EditionOpenLiteSpeed && plan.Edition != webengine.EditionLiteSpeedEnterprise || !safeLifecycleVersion(plan.Version) || !validSHA256(plan.ArtifactDigest) || !validSHA256(plan.RepositorySnapshotDigest) || len(plan.Packages) == 0 || len(plan.Packages) > 32 || plan.ServiceProfileID != "systemd-lsws-v1" { return ErrInvalid }

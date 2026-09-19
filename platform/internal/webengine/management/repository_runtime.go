@@ -9,7 +9,8 @@ import (
 
 // EnsureInstallation creates the projection for the installer-owned engine or
 // advances it to a newer catalog-observed tuning generation after recovery.
-// It never changes the installed edition or invents artifact/license facts.
+// Edition changes require the broker's exact terminal conversion receipt and
+// the matching admitted control operation; observation alone cannot authorize one.
 func (repository *SQLRepository) EnsureInstallation(ctx context.Context, observed Installation) (Installation, error) {
 	if repository == nil || repository.db == nil || observed.ID != "node-webengine" || observed.Generation == 0 ||
 		observed.Edition != "openlitespeed" && observed.Edition != "litespeed_enterprise" ||
@@ -19,6 +20,7 @@ func (repository *SQLRepository) EnsureInstallation(ctx context.Context, observe
 	if observed.InstalledAt.IsZero() {
 		observed.InstalledAt = observed.UpdatedAt
 	}
+	if observed.Transition != nil && !conversionInstallationMatches(observed, *observed.Transition) { return Installation{}, ErrConflict }
 	tx, err := repository.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return Installation{}, err
@@ -28,6 +30,7 @@ func (repository *SQLRepository) EnsureInstallation(ctx context.Context, observe
 	var generation uint64
 	err = tx.QueryRowContext(ctx, `SELECT generation,value_json FROM webengine_installation WHERE singleton_id=1`).Scan(&generation, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
+		if observed.Transition != nil { return Installation{}, ErrConflict }
 		encoded, encodeErr := json.Marshal(observed)
 		if encodeErr != nil {
 			return Installation{}, encodeErr
@@ -43,9 +46,59 @@ func (repository *SQLRepository) EnsureInstallation(ctx context.Context, observe
 		return Installation{}, err
 	}
 	var current Installation
-	if json.Unmarshal(raw, &current) != nil || current.Generation != generation || current.ID != observed.ID || current.Edition != observed.Edition {
+	if json.Unmarshal(raw, &current) != nil || current.Generation != generation || current.ID != observed.ID {
 		return Installation{}, ErrConflict
 	}
+	if observed.Transition != nil {
+		receipt := *observed.Transition
+		if !conversionInstallationMatches(observed, receipt) || current.Generation != receipt.Fence && current.Generation+1 != receipt.Fence {
+			return Installation{}, ErrConflict
+		}
+		var kind, requestDigest string
+		var expected uint64
+		if err = tx.QueryRowContext(ctx, `SELECT kind,request_digest,expected_generation FROM webengine_management_operations WHERE id=?`, receipt.EffectID).Scan(&kind, &requestDigest, &expected); err != nil {
+			return Installation{}, errors.Join(ErrConflict, err)
+		}
+		if kind != "convert" || requestDigest != receipt.ConversionDigest || expected+1 != receipt.Fence ||
+			current.Edition != receipt.Previous && current.Edition != receipt.Target ||
+			current.Generation == expected && (current.Edition != receipt.Previous || current.ActiveConfigDigest != receipt.PreviousConfigDigest) {
+			return Installation{}, ErrConflict
+		}
+		var tuningRaw []byte
+		var tuningGeneration uint64
+		if err = tx.QueryRowContext(ctx, `SELECT generation,value_json FROM webengine_global_tuning WHERE singleton_id=1`).Scan(&tuningGeneration, &tuningRaw); err != nil {
+			return Installation{}, errors.Join(ErrConflict, err)
+		}
+		var tuning GlobalTuning
+		if json.Unmarshal(tuningRaw, &tuning) != nil || tuning.Generation != tuningGeneration || tuningGeneration != expected && tuningGeneration != receipt.Fence {
+			return Installation{}, ErrConflict
+		}
+		if tuningGeneration == expected {
+			tuning.Generation = receipt.Fence
+			tuningRaw, err = json.Marshal(tuning)
+			if err != nil { return Installation{}, err }
+			result, updateErr := tx.ExecContext(ctx, `UPDATE webengine_global_tuning SET generation=?,value_json=?,updated_at=? WHERE singleton_id=1 AND generation=?`, receipt.Fence, tuningRaw, repository.clock().UTC(), expected)
+			if updateErr != nil { return Installation{}, updateErr }
+			changed, rowsErr := result.RowsAffected()
+			if rowsErr != nil || changed != 1 { return Installation{}, errors.Join(ErrConflict, rowsErr) }
+		}
+		observed.InstalledAt = current.InstalledAt
+		observed.PreviousConfigDigest = receipt.PreviousConfigDigest
+		encoded, encodeErr := json.Marshal(observed)
+		if encodeErr != nil { return Installation{}, encodeErr }
+		result, updateErr := tx.ExecContext(ctx, `UPDATE webengine_installation SET generation=?,state=?,value_json=?,updated_at=? WHERE singleton_id=1 AND generation=?`, observed.Generation, observed.State, encoded, repository.clock().UTC(), current.Generation)
+		if updateErr != nil { return Installation{}, updateErr }
+		changed, rowsErr := result.RowsAffected()
+		if rowsErr != nil || changed != 1 { return Installation{}, errors.Join(ErrConflict, rowsErr) }
+		status := "applied"; if receipt.Restored { status = "rolled_back" }
+		receiptJSON, encodeErr := json.Marshal(receipt); if encodeErr != nil { return Installation{}, encodeErr }
+		operationResult, operationErr := tx.ExecContext(ctx, `UPDATE webengine_management_operations SET status=?,installation_json=?,receipt_json=?,updated_at=? WHERE id=? AND request_digest=?`, status, encoded, receiptJSON, repository.clock().UTC(), receipt.EffectID, receipt.ConversionDigest)
+		if operationErr != nil { return Installation{}, operationErr }
+		operationChanged, rowsErr := operationResult.RowsAffected()
+		if rowsErr != nil || operationChanged != 1 { return Installation{}, errors.Join(ErrConflict, rowsErr) }
+		return observed, tx.Commit()
+	}
+	if current.Edition != observed.Edition { return Installation{}, ErrConflict }
 	if observed.Generation < current.Generation {
 		return Installation{}, ErrConflict
 	}
@@ -109,6 +162,13 @@ func (repository *SQLRepository) EnsureInstallation(ctx context.Context, observe
 	return observed, tx.Commit()
 }
 
+func conversionInstallationMatches(observed Installation, receipt SwitchReceipt) bool {
+	if !validConversionReceipt(receipt) || observed.Generation != receipt.Fence || receipt.LicenseDigest != digestJSON(observed.License) || receipt.LicenseDigest != digestJSON(receipt.License) { return false }
+	plan, config, channel := receipt.TargetPlan, receipt.TargetConfigDigest, receipt.TargetChannel
+	if receipt.Restored { plan, config, channel = receipt.PreviousPlan, receipt.PreviousConfigDigest, receipt.PreviousChannel }
+	return observed.Edition == plan.Edition && observed.Version == plan.Version && observed.ArtifactDigest == plan.ArtifactDigest && observed.RepositorySnapshotDigest == plan.RepositorySnapshotDigest && observed.Channel == channel && observed.ActiveConfigDigest == config
+}
+
 // EnsureGlobalTuning seeds the typed tuning projection or reconciles it from a
 // newer canonical catalog generation after an ambiguous control-db commit.
 func (repository *SQLRepository) EnsureGlobalTuning(ctx context.Context, observed GlobalTuning) (GlobalTuning, error) {
@@ -146,6 +206,15 @@ func (repository *SQLRepository) EnsureGlobalTuning(ctx context.Context, observe
 		return GlobalTuning{}, ErrConflict
 	}
 	if observed.Generation < current.Generation {
+		rolledBack := observed.Generation+1 == current.Generation
+		left, right := observed, current
+		left.Generation, right.Generation = 0, 0
+		if rolledBack && left == right {
+			var count uint64
+			if queryErr := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM webengine_management_operations WHERE kind='convert' AND status='rolled_back' AND expected_generation=?`, observed.Generation).Scan(&count); queryErr == nil && count == 1 {
+				return current, tx.Commit()
+			}
+		}
 		return GlobalTuning{}, ErrConflict
 	}
 	if observed.Generation == current.Generation {

@@ -72,7 +72,16 @@ type lifecycleGenerationInput struct {
 	Render native.RenderRequest `json:"render"`
 	ConfigDigest string `json:"config_digest"`
 }
-type lifecycleConvertInput struct{Request EffectRequest `json:"request"`;Plan ArtifactPlan `json:"plan"`;Generation native.ConfigGeneration `json:"generation"`;RollbackWindow time.Duration `json:"rollback_window"`}
+type lifecycleConvertInput struct {
+	Request EffectRequest `json:"request"`
+	Plan ArtifactPlan `json:"plan"`
+	Generation native.ConfigGeneration `json:"generation"`
+	RollbackWindow time.Duration `json:"rollback_window"`
+	License LicenseRequest `json:"license"`
+	Target native.RenderRequest `json:"target"`
+	Previous native.RenderRequest `json:"previous"`
+	PreviousConfigDigest string `json:"previous_config_digest"`
+}
 type lifecycleRemoveInput struct{Request EffectRequest `json:"request"`;Edition webengine.Edition `json:"edition"`}
 type licenseConfigureInput struct{Request EffectRequest `json:"request"`;License LicenseRequest `json:"license"`}
 type licenseRefreshInput struct{Request EffectRequest `json:"request"`}
@@ -138,7 +147,7 @@ func(client *LinuxManagementClient)call(ctx context.Context,operation LinuxManag
 func(client *LinuxManagementClient)Inspect(ctx context.Context,edition webengine.Edition)(output Installation,err error){err=client.call(ctx,LinuxManagementInspect,struct{Edition webengine.Edition `json:"edition"`}{edition},&output);return}
 func(client *LinuxManagementClient)Install(ctx context.Context,request EffectRequest,plan ArtifactPlan)(output EffectReceipt,err error){err=client.call(ctx,LinuxManagementInstall,lifecyclePlanInput{request,plan},&output);return}
 func(client *LinuxManagementClient)Upgrade(ctx context.Context,request EffectRequest,plan ArtifactPlan)(output EffectReceipt,err error){err=client.call(ctx,LinuxManagementUpgrade,lifecyclePlanInput{request,plan},&output);return}
-func(client *LinuxManagementClient)ConvertEdition(ctx context.Context,request EffectRequest,plan ArtifactPlan,generation native.ConfigGeneration,window time.Duration)(output SwitchReceipt,err error){err=client.call(ctx,LinuxManagementConvert,lifecycleConvertInput{request,plan,generation,window},&output);return}
+func(client *LinuxManagementClient)ConvertEdition(ctx context.Context,request EffectRequest,plan ArtifactPlan,generation native.ConfigGeneration,window time.Duration)(output SwitchReceipt,err error){err=client.call(ctx,LinuxManagementConvert,lifecycleConvertInput{Request:request,Plan:plan,Generation:generation,RollbackWindow:window,License:conversionLicense(request)},&output);return}
 func(client *LinuxManagementClient)Remove(ctx context.Context,request EffectRequest,edition webengine.Edition)(output EffectReceipt,err error){err=client.call(ctx,LinuxManagementRemove,lifecycleRemoveInput{request,edition},&output);return}
 func(client *LinuxManagementClient)ApplyLicense(ctx context.Context,request EffectRequest,license LicenseRequest)(output LicenseStatus,err error){err=client.call(ctx,LinuxManagementLicenseConfigure,licenseConfigureInput{request,license},&output);return}
 func(client *LinuxManagementClient)RefreshLicense(ctx context.Context,request EffectRequest)(output LicenseStatus,err error){err=client.call(ctx,LinuxManagementLicenseRefresh,licenseRefreshInput{request},&output);return}

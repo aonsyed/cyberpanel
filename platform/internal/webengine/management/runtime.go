@@ -54,7 +54,7 @@ func NewRuntime(catalogValue *catalog.SQLCatalog, activator VerifiedActivator, r
 }
 
 func (*Runtime) ManagementCapabilities() Capabilities {
-	return Capabilities{Inspect: true, Install: true, Convert: false, Upgrade: true, Remove: true, RefreshLicense: true, InstallPHP: true, Tune: true}
+	return Capabilities{Inspect: true, Install: true, Convert: true, Upgrade: true, Remove: true, RefreshLicense: true, InstallPHP: true, Tune: true}
 }
 
 func DefaultGlobalTuning() GlobalTuning {
@@ -132,6 +132,14 @@ func (runtime *Runtime) Inspect(ctx context.Context, edition webengine.Edition) 
 	}
 	observed, err := runtime.lifecycle.Inspect(ctx, edition)
 	if err != nil { return Installation{}, err }
+	if observed.Transition != nil {
+		if !validConversionReceipt(*observed.Transition) { return Installation{}, ErrAmbiguous }
+		prepared, lookupErr := runtime.catalog.NodeConfigurationChange(ctx, observed.Transition.EffectID)
+		if lookupErr == nil {
+			if observed.Transition.Confirmed { err = runtime.catalog.FinalizeNodeConfiguration(ctx, prepared, observed.Transition.TargetConfigDigest) } else { err = runtime.catalog.RejectNodeConfiguration(ctx, prepared) }
+			if err != nil { return Installation{}, errors.Join(ErrAmbiguous, err) }
+		} else if !observed.Transition.Restored || !errors.Is(lookupErr, catalog.ErrChangeClosed) { return Installation{}, errors.Join(ErrAmbiguous, lookupErr) }
+	}
 	state, err := runtime.catalog.NodeState(ctx)
 	if err != nil {
 		return Installation{}, err
@@ -140,7 +148,8 @@ func (runtime *Runtime) Inspect(ctx context.Context, edition webengine.Edition) 
 		return Installation{}, ErrNotFound
 	}
 	observed.ID,observed.Edition,observed.State="node-webengine",edition,StateActive
-	observed.Generation,observed.ActiveConfigDigest=state.Configuration.Engine.Tuning.Generation,state.AppliedDigest
+	if observed.ActiveConfigDigest != state.AppliedDigest { return Installation{}, ErrAmbiguous }
+	if observed.Generation == 0 { observed.Generation=state.Configuration.Engine.Tuning.Generation }
 	if observed.InstalledAt.IsZero(){observed.InstalledAt=state.UpdatedAt};observed.UpdatedAt=state.UpdatedAt
 	return observed, nil
 }
@@ -333,7 +342,51 @@ func (runtime *Runtime) RollbackPHP(ctx context.Context, request EffectRequest, 
 }
 
 func(runtime *Runtime)Upgrade(ctx context.Context,request EffectRequest,plan ArtifactPlan)(EffectReceipt,error){if runtime==nil||runtime.lifecycle==nil{return EffectReceipt{},ErrInvalid};return runtime.lifecycle.Upgrade(ctx,request,plan)}
-func(runtime *Runtime)ConvertEdition(ctx context.Context,request EffectRequest,plan ArtifactPlan,generation native.ConfigGeneration,window time.Duration)(SwitchReceipt,error){if runtime==nil||runtime.lifecycle==nil{return SwitchReceipt{},ErrInvalid};return runtime.lifecycle.ConvertEdition(ctx,request,plan,generation,window)}
+func(runtime *Runtime)ConvertEdition(ctx context.Context,request EffectRequest,plan ArtifactPlan,generation native.ConfigGeneration,window time.Duration)(SwitchReceipt,error){
+	if runtime==nil||runtime.lifecycle==nil||runtime.catalog==nil||ctx==nil{return SwitchReceipt{},ErrInvalid}
+	license:=conversionLicense(request)
+	selection:=conversionSelection(request,plan.Edition)
+	if !validConversionLicense(plan.Edition,license)||selection.Version!=plan.Version||!validLifecycleTuple(selection.OS,selection.OSVersion,selection.Architecture)||!validChannel(selection.Channel)||request.PlanDigest!=ConversionPlanDigest(selection,plan,generation.ContentDigest,license,window){return SwitchReceipt{},ErrInvalid}
+	runtime.activation.Lock();defer runtime.activation.Unlock()
+	prepared,err:=runtime.catalog.NodeConfigurationChange(ctx,request.EffectID)
+	if errors.Is(err,catalog.ErrChangeMissing){
+		state,stateErr:=runtime.catalog.NodeState(ctx);if stateErr!=nil{return SwitchReceipt{},stateErr}
+		if state.Configuration.Engine.Edition==plan.Edition{return SwitchReceipt{},ErrConflict}
+		next:=state.Configuration;next.Revision++;next.Engine.Edition=plan.Edition;next.Engine.Tuning.Generation++
+		prepared,err=runtime.catalog.PrepareEditionConfiguration(ctx,request.EffectID,next,state.Configuration.Revision)
+	}
+	if errors.Is(err,catalog.ErrChangeClosed){
+		state,stateErr:=runtime.catalog.NodeState(ctx);if stateErr!=nil{return SwitchReceipt{},errors.Join(ErrAmbiguous,stateErr)}
+		observed,observeErr:=runtime.lifecycle.Inspect(ctx,state.Configuration.Engine.Edition)
+		if observeErr!=nil||observed.Transition==nil||!observed.Transition.Restored||observed.Transition.EffectID!=request.EffectID||observed.Transition.ConversionDigest!=request.PlanDigest{return SwitchReceipt{},errors.Join(ErrAmbiguous,err,observeErr)}
+		return *observed.Transition,ErrInvalid
+	}
+	if err!=nil{return SwitchReceipt{},err}
+	if prepared.Finalized{
+		observed,observeErr:=runtime.lifecycle.Inspect(ctx,plan.Edition)
+		if observeErr!=nil||observed.Transition==nil||observed.Transition.EffectID!=request.EffectID||observed.Transition.ConversionDigest!=request.PlanDigest{return SwitchReceipt{},ErrAmbiguous}
+		return *observed.Transition,nil
+	}
+	target,err:=composer.Compose(prepared.Plan);if err!=nil{return SwitchReceipt{},err}
+	targetRender:=native.RenderRequest{Desired:target.Desired,Snapshot:target.Snapshot}
+	canonical,err:=runtime.renderers[plan.Edition].Render(ctx,targetRender)
+	if err!=nil||canonical.ContentDigest!=generation.ContentDigest{return SwitchReceipt{},ErrConflict}
+	previousPlan,err:=runtime.catalog.CurrentPlan(ctx);if err!=nil{return SwitchReceipt{},err}
+	previous,err:=composer.Compose(previousPlan);if err!=nil{return SwitchReceipt{},err}
+	previousRender:=native.RenderRequest{Desired:previous.Desired,Snapshot:previous.Snapshot}
+	baseline,err:=runtime.renderers[previous.Desired.Engine.Edition].Render(ctx,previousRender);if err!=nil{return SwitchReceipt{},err}
+	state,err:=runtime.catalog.NodeState(ctx);if err!=nil||state.AppliedDigest!=baseline.ContentDigest{return SwitchReceipt{},ErrConflict}
+	input:=lifecycleConvertInput{Request:request,Plan:plan,Generation:generation,RollbackWindow:window,License:license,Target:targetRender,Previous:previousRender,PreviousConfigDigest:baseline.ContentDigest}
+	var receipt SwitchReceipt
+	err=runtime.lifecycle.call(ctx,LinuxManagementConvert,input,&receipt)
+	if receipt.Restored&&validConversionReceipt(receipt)&&receipt.EffectID==request.EffectID&&receipt.ConversionDigest==request.PlanDigest&&receipt.Fence==request.Fence{
+		rejectErr:=runtime.catalog.RejectNodeConfiguration(context.WithoutCancel(ctx),prepared)
+		return receipt,errors.Join(ErrInvalid,err,rejectErr)
+	}
+	if err!=nil||!receipt.Confirmed||!validConversionReceipt(receipt)||receipt.ConversionDigest!=request.PlanDigest{return receipt,errors.Join(ErrAmbiguous,err)}
+	if err=runtime.catalog.FinalizeNodeConfiguration(ctx,prepared,receipt.TargetConfigDigest);err!=nil{return receipt,errors.Join(ErrAmbiguous,err)}
+	return receipt,nil
+}
 
 func validEffectToken(value string) bool {
 	if value == "" || len(value) > 160 {

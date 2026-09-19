@@ -12,11 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation/fsstore"
 )
 
 const LinuxLifecycleWorkerMode = "--private-webengine-candidate"
@@ -26,11 +28,15 @@ type lifecycleWorkerInput struct {
 	Candidate lifecycleGenerationInput `json:"candidate"`
 	Mode string `json:"mode"`
 	Challenges []lifecycleChallenge `json:"challenges,omitempty"`
+	ConversionEffectID string `json:"conversion_effect_id,omitempty"`
+	TargetPlan *ArtifactPlan `json:"target_plan,omitempty"`
+	PackageAction string `json:"package_action,omitempty"`
 }
 
 type lifecycleWorkerResult struct {
 	Validation ValidationReceipt `json:"validation"`
 	Probe ProbeReceipt `json:"probe"`
+	PackageDigest string `json:"package_digest,omitempty"`
 }
 
 type lifecycleBoundedOutput struct { bytes.Buffer; maximum int }
@@ -41,6 +47,11 @@ func (output *lifecycleBoundedOutput) Write(content []byte) (int, error) {
 
 func trustedLifecycleProgram(program string) error {
 	info, err := os.Lstat(program)
+	if err==nil&&info.Mode()&os.ModeSymlink!=0&&(program==lifecycleBinaryPath||program==lifecycleControlPath){
+		resolved,resolveErr:=filepath.EvalSymlinks(program)
+		if resolveErr!=nil||!strings.HasPrefix(resolved,"/usr/local/lsws/bin"+string(os.PathSeparator))||!rootOwnedFile(info){return ErrInvalid}
+		return trustedLifecycleProgram(resolved)
+	}
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 || info.Mode().Perm()&0o022 != 0 || !rootOwnedFile(info) { return ErrUnsupported }
 	canonical, err := filepath.EvalSymlinks(program)
 	if err != nil || canonical != program { return ErrInvalid }
@@ -65,9 +76,16 @@ func runLifecycleCandidate(ctx context.Context, input lifecycleGenerationInput, 
 		if err != nil { return result, err }
 		defer func() { err = errors.Join(err, cleanup()) }()
 	}
+	return runLifecycleWorker(ctx,worker)
+}
+
+func runLifecycleWorker(ctx context.Context,worker lifecycleWorkerInput)(result lifecycleWorkerResult,err error){
+	program,err:=os.Executable();if err!=nil{return result,err}
+	if err=trustedLifecycleProgram(program);err!=nil{return result,err}
 	content, err := json.Marshal(worker)
 	if err != nil || len(content) > linuxManagementMaximumFrame { return result, ErrInvalid }
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	maximum:=2*time.Minute;if worker.Mode=="packages"{maximum=25*time.Minute}
+	ctx, cancel := context.WithTimeout(ctx, maximum)
 	defer cancel()
 	command := exec.CommandContext(ctx, program, LinuxLifecycleWorkerMode)
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}
@@ -78,7 +96,8 @@ func runLifecycleCandidate(ctx context.Context, input lifecycleGenerationInput, 
 	runErr := command.Run()
 	if decodeLifecyclePayload(output.Bytes(), &result) != nil { return lifecycleWorkerResult{}, errors.Join(ErrAmbiguous, runErr) }
 	if runErr != nil { return result, errors.Join(ErrAmbiguous, runErr) }
-	if !result.Validation.Valid || result.Validation.ConfigDigest != input.ConfigDigest || mode == "probe" && (result.Probe.ConfigDigest != input.ConfigDigest || !result.Probe.PHP || !validSHA256(result.Probe.EvidenceDigest)) { return result, ErrAmbiguous }
+	if worker.Mode=="packages"{if !validSHA256(result.PackageDigest){return result,ErrAmbiguous};return result,nil}
+	if !result.Validation.Valid || result.Validation.ConfigDigest != worker.Candidate.ConfigDigest || worker.Mode == "probe" && (result.Probe.ConfigDigest != worker.Candidate.ConfigDigest || !result.Probe.PHP || !validSHA256(result.Probe.EvidenceDigest)) { return result, ErrAmbiguous }
 	return result, nil
 }
 
@@ -94,14 +113,32 @@ func RunLinuxLifecycleWorker() (err error) {
 	content, err := io.ReadAll(io.LimitReader(os.Stdin, linuxManagementMaximumFrame+1))
 	if err != nil || len(content) > linuxManagementMaximumFrame { return ErrInvalid }
 	var input lifecycleWorkerInput
-	if decodeLifecyclePayload(content, &input) != nil || input.Mode != "validate" && input.Mode != "probe" { return ErrInvalid }
-	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Second)
+	if decodeLifecyclePayload(content, &input) != nil || input.Mode != "validate" && input.Mode != "probe" && input.Mode!="packages" { return ErrInvalid }
+	maximum:=110*time.Second;if input.Mode=="packages"{maximum=24*time.Minute}
+	ctx, cancel := context.WithTimeout(context.Background(), maximum)
 	defer cancel()
+	if input.Mode=="packages"{
+		result,packageErr:=executeConversionPackages(ctx,input)
+		encoded,encodeErr:=json.Marshal(result);if encodeErr==nil{_,encodeErr=os.Stdout.Write(encoded)}
+		return errors.Join(packageErr,encodeErr)
+	}
 	generation, err := renderLifecycleGeneration(ctx, input.Candidate)
 	if err != nil { return err }
-	edition, err := readLifecycleEdition()
-	if err != nil || edition != generation.Edition { return ErrUnsupported }
-	store, err := openLifecycleStore(generation.Edition)
+	edition:=generation.Edition
+	var store *fsstore.Store
+	if input.TargetPlan!=nil{
+		record,authorityErr:=conversionAuthority(input.ConversionEffectID)
+		if authorityErr!=nil||record.Phase!=conversionPhasePreflight||digestJSON(*input.TargetPlan)!=digestJSON(record.Input.Plan)||generation.ContentDigest!=record.Input.Generation.ContentDigest{return ErrConflict}
+		imageRoot:=filepath.Join(conversionDirectory(input.ConversionEffectID),"image")
+		digest,digestErr:=conversionImageDigest(ctx,imageRoot);if digestErr!=nil||digest!=record.ImageDigest{return ErrConflict}
+		engineRoot:=filepath.Join(imageRoot,"usr/local/lsws")
+		if err=syscall.Mount("","/","",syscall.MS_REC|syscall.MS_PRIVATE,"");err!=nil{return err}
+		if err=syscall.Mount(engineRoot,"/usr/local/lsws","",syscall.MS_BIND|syscall.MS_REC,"");err!=nil{return err}
+		store,err=fsstore.New(filepath.Join(engineRoot,"conf"),edition)
+	}else{
+		installed,editionErr:=readLifecycleEdition();if editionErr!=nil||installed!=edition{return ErrUnsupported}
+		store,err=openLifecycleStore(edition)
+	}
 	if err != nil { return err }
 	master, err := store.GenerationPath(ctx, activation.Receipt{Edition: generation.Edition, Digest: generation.ContentDigest})
 	closeErr := store.Close()

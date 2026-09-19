@@ -167,7 +167,7 @@ func (host *LinuxLifecycleHost) stageGeneration(ctx context.Context, input lifec
 }
 
 func (host *LinuxLifecycleHost) switchPending() bool {
-	return host.journal.Switch != nil && host.journal.Switch.State != "confirmed" && host.journal.Switch.State != "restored"
+	return host.conversionPending() || host.journal.Switch != nil && host.journal.Switch.State != "confirmed" && host.journal.Switch.State != "restored"
 }
 
 func (host *LinuxLifecycleHost) switchGeneration(ctx context.Context, input SwitchRequest) (SwitchReceipt, error) {

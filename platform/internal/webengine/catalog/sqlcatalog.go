@@ -116,7 +116,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS webengine_one_pending_access_change ON webengi
 `
 
 type NodeConfiguration struct {
-	Revision   uint64             `json:"revision"`
+	Revision   uint64              `json:"revision"`
 	Engine     composer.NodeEngine `json:"engine"`
 	DefaultTLS *composer.TLSInput  `json:"default_tls,omitempty"`
 }
@@ -215,6 +215,15 @@ func (catalog *SQLCatalog) EnsureConfigured(ctx context.Context, configuration N
 		if revision == configuration.Revision && string(currentEncoded) == string(encoded) || compatibleRuntimeNodeConfiguration(current, configuration) {
 			return tx.Commit()
 		}
+		// A privileged edition conversion can durably switch the host before
+		// the control process finalizes its prepared node change. On restart,
+		// the edition marker therefore names the prepared edition while the
+		// current row still names the source edition. Admit only that exact,
+		// already-journaled transition here; Runtime.Inspect will reconcile the
+		// broker receipt and either finalize or reject it before serving work.
+		if compatiblePendingEditionConfiguration(ctx, tx, current, configuration) {
+			return tx.Commit()
+		}
 		if !closedNodeConfigurationUpgrade(current, configuration) {
 			return errors.New("initial node configuration conflicts with stored state")
 		}
@@ -241,6 +250,24 @@ func (catalog *SQLCatalog) EnsureConfigured(ctx context.Context, configuration N
 		return err
 	}
 	return tx.Commit()
+}
+
+func compatiblePendingEditionConfiguration(ctx context.Context, tx *sql.Tx, current, baseline NodeConfiguration) bool {
+	if ctx == nil || tx == nil || current.Revision == 0 || current.Engine.Edition == baseline.Engine.Edition {
+		return false
+	}
+	var expectedRevision uint64
+	var proposal []byte
+	if err := tx.QueryRowContext(ctx, `SELECT expected_revision,proposed_config_json FROM webengine_node_changes WHERE status='pending' LIMIT 1`).Scan(&expectedRevision, &proposal); err != nil || expectedRevision != current.Revision {
+		return false
+	}
+	var prepared NodeConfiguration
+	if json.Unmarshal(proposal, &prepared) != nil || prepared.Revision != current.Revision+1 ||
+		prepared.Engine.Edition == current.Engine.Edition || prepared.Engine.Edition != baseline.Engine.Edition ||
+		prepared.Engine.Tuning.Generation != current.Engine.Tuning.Generation+1 {
+		return false
+	}
+	return compatibleRuntimeNodeConfiguration(prepared, baseline)
 }
 
 func closedNodeConfigurationUpgrade(current, target NodeConfiguration) bool {

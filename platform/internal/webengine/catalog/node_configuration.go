@@ -99,6 +99,7 @@ func (catalog *SQLCatalog) PlanForEdition(ctx context.Context, edition webengine
 	if snapshotGeneration != currentGeneration+1 {
 		return composer.Plan{}, ErrChangeClosed
 	}
+	if configuration.Engine.Edition != edition { configuration.Engine.Tuning.Generation++ }
 	configuration.Engine.Edition = edition
 	plan, err := loadCompletePlan(ctx, tx, configuration, snapshotGeneration)
 	if err != nil {
@@ -111,6 +112,28 @@ func (catalog *SQLCatalog) PlanForEdition(ctx context.Context, edition webengine
 }
 
 func (catalog *SQLCatalog) PrepareNodeConfiguration(ctx context.Context, effectID string, configuration NodeConfiguration, expectedRevision uint64) (PreparedNodeConfiguration, error) {
+	return catalog.prepareNodeConfiguration(ctx, effectID, configuration, expectedRevision, false)
+}
+
+// PrepareEditionConfiguration shares the existing durable node-change journal,
+// but explicitly admits an edition transition. Ordinary tuning cannot do so.
+func (catalog *SQLCatalog) PrepareEditionConfiguration(ctx context.Context, effectID string, configuration NodeConfiguration, expectedRevision uint64) (PreparedNodeConfiguration, error) {
+	return catalog.prepareNodeConfiguration(ctx, effectID, configuration, expectedRevision, true)
+}
+
+func (catalog *SQLCatalog) CurrentPlan(ctx context.Context) (composer.Plan, error) {
+	if catalog == nil || catalog.db == nil { return composer.Plan{}, ErrChangeClosed }
+	tx, err := catalog.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil { return composer.Plan{}, err }
+	defer tx.Rollback()
+	configuration, snapshot, err := loadConfiguration(ctx, tx)
+	if err != nil || snapshot == 0 { return composer.Plan{}, ErrChangeClosed }
+	plan, err := loadCompletePlan(ctx, tx, configuration, snapshot)
+	if err != nil { return composer.Plan{}, err }
+	return plan, tx.Commit()
+}
+
+func (catalog *SQLCatalog) prepareNodeConfiguration(ctx context.Context, effectID string, configuration NodeConfiguration, expectedRevision uint64, editionChange bool) (PreparedNodeConfiguration, error) {
 	if catalog == nil || catalog.db == nil || len(effectID) < 8 || len(effectID) > 255 || expectedRevision == 0 ||
 		configuration.Revision != expectedRevision+1 || configuration.Engine.Tuning.Generation == 0 || len(configuration.Engine.Listeners) == 0 {
 		return PreparedNodeConfiguration{}, errors.New("invalid node configuration change")
@@ -151,7 +174,8 @@ func (catalog *SQLCatalog) PrepareNodeConfiguration(ctx context.Context, effectI
 	if err != nil {
 		return PreparedNodeConfiguration{}, err
 	}
-	if current.Revision != expectedRevision || current.Engine.Edition != configuration.Engine.Edition ||
+	if current.Revision != expectedRevision || (current.Engine.Edition != configuration.Engine.Edition) != editionChange ||
+		configuration.Engine.Edition != webengine.EditionOpenLiteSpeed && configuration.Engine.Edition != webengine.EditionLiteSpeedEnterprise ||
 		configuration.Engine.Tuning.Generation != current.Engine.Tuning.Generation+1 {
 		return PreparedNodeConfiguration{}, ErrChangeClosed
 	}
