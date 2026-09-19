@@ -26,18 +26,19 @@ import (
 
 type liveTLSSecrets struct {
 	LinuxMariaDBSecretSource
-	ca, password []byte
+	ca, password                 []byte
+	clientCertificate, clientKey []byte
 }
 
 func (source *liveTLSSecrets) ExternalAdministrator(context.Context, SecretRef, ResourceID, ResourceID) (MariaDBAdministrator, error) {
 	username, _ := ParseSQLIdentifier("qemu_tls")
-	return MariaDBAdministrator{Username: username, Password: append([]byte(nil), source.password...)}, nil
+	return MariaDBAdministrator{Username: username, Password: append([]byte(nil), source.password...), ClientCertificatePEM: append([]byte(nil), source.clientCertificate...), ClientKeyPEM: append([]byte(nil), source.clientKey...)}, nil
 }
 func (source *liveTLSSecrets) PinnedCertificateAuthority(context.Context, SecretRef, ResourceID) ([]byte, error) {
 	return append([]byte(nil), source.ca...), nil
 }
 
-func liveTLSCertificate(t *testing.T) (ca, certificate, key []byte) {
+func liveTLSCertificate(t *testing.T) (ca, certificate, key, clientCertificate, clientKey []byte) {
 	t.Helper()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -62,7 +63,20 @@ func liveTLSCertificate(t *testing.T) (ca, certificate, key []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverDER}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	clientPrivate, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &x509.Certificate{SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "QEMU disposable client"}, NotBefore: issuer.NotBefore, NotAfter: issuer.NotAfter, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
+	clientDER, err := x509.CreateCertificate(rand.Reader, client, issuer, &clientPrivate.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKeyDER, err := x509.MarshalPKCS8PrivateKey(clientPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverDER}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: clientKeyDER})
 }
 
 func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
@@ -98,8 +112,8 @@ func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
 	if err := os.Chown(root, uid, gid); err != nil {
 		t.Fatal(err)
 	}
-	ca, certificate, key := liveTLSCertificate(t)
-	defer wipeBytes(key)
+	ca, certificate, key, clientCertificate, clientKey := liveTLSCertificate(t)
+	defer wipeBytes(key, clientKey)
 	for name, payload := range map[string][]byte{"ca.pem": ca, "server.pem": certificate, "server.key": key} {
 		path := filepath.Join(root, name)
 		if err := os.WriteFile(path, payload, 0600); err != nil {
@@ -219,8 +233,9 @@ func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
 	if output, err := query(instance); err != nil || !strings.Contains(string(output), "MariaDB") {
 		t.Fatalf("valid TLS connection: %v, output=%q", err, output)
 	}
-	wrongCA, _, wrongKey := liveTLSCertificate(t)
+	wrongCA, _, wrongKey, wrongClientCertificate, wrongClientKey := liveTLSCertificate(t)
 	wipeBytes(wrongKey)
+	defer wipeBytes(wrongClientKey)
 	source.ca = wrongCA
 	rejectTLS(instance)
 	source.ca = ca
@@ -232,5 +247,22 @@ func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
 	if _, err := query(instance); err != nil {
 		t.Fatalf("positive control after rejection: %v", err)
 	}
-	t.Log("actual MariaDB TCP TLS: trusted IP certificate accepted, wrong CA and hostname rejected, positive control restored")
+	if _, err := rootQuery("ALTER USER 'qemu_tls'@'127.0.0.1' REQUIRE X509;"); err != nil {
+		t.Fatalf("require client certificate: %v", err)
+	}
+	if _, err := query(instance); err == nil {
+		t.Fatal("server accepted account without required client certificate")
+	}
+	instance.External.RequiredTLS = TLSMutual
+	source.clientCertificate, source.clientKey = clientCertificate, clientKey
+	if _, err := query(instance); err != nil {
+		t.Fatalf("trusted mutual TLS connection failed: %v", err)
+	}
+	source.clientCertificate, source.clientKey = wrongClientCertificate, wrongClientKey
+	rejectTLS(instance)
+	source.clientCertificate, source.clientKey = clientCertificate, clientKey
+	if _, err := query(instance); err != nil {
+		t.Fatalf("mutual TLS positive control after rejection: %v", err)
+	}
+	t.Log("actual MariaDB TCP TLS and mutual TLS: valid identities accepted; wrong CA, wrong hostname, missing and untrusted client identities rejected")
 }

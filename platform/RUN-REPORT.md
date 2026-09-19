@@ -35,9 +35,13 @@ Evidence: `current-ubuntu-arm64-20260919-smoke/mariadb-tls.log`.
 The fixture process, data directory, keys, and account are removed by cleanup;
 the primary local MariaDB configuration is unchanged. The initial fixture setup
 needed an explicit mysql-writable TMPDIR rather than inheriting root's TMPDIR.
-This qualifies server-authenticated TLS at the database adapter only. It does
-not qualify mutual TLS, secret-broker delivery, external-instance enrollment,
-or the still-incomplete application TLS configuration described below.
+The same live fixture now also switches the account to `REQUIRE X509`, rejects
+the connection without a client certificate, accepts a separate trusted client
+key/certificate via the production mutual-TLS adapter, rejects a client identity
+signed by an unrelated CA with TLS error 2026, and accepts the trusted identity
+again. This qualifies server-authenticated and mutual TLS at the database
+adapter only, not secret-broker delivery, external-instance enrollment, or the
+still-incomplete application TLS configuration described below.
 
 ### Live local MariaDB execution
 
