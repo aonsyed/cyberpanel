@@ -123,27 +123,38 @@ func (service ApplicationService) Install(ctx context.Context, request InstallRe
 }
 
 func (service ApplicationService) compensateInstall(ctx context.Context, operation Operation, databaseID DatabaseBindingID, secrets []SecretRef, cause error) error {
+	// A disconnected caller must not cancel cleanup of already-created resources.
+	// Keep request values, but impose a separate finite recovery budget.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
 	operation.State, operation.Stage, operation.Failure, operation.UpdatedAt = OperationCompensating, "compensating", cause.Error(), service.now()
-	_ = service.Store.UpdateOperation(ctx, operation)
-	var compensationErr error
+	compensationErr := service.Store.UpdateOperation(ctx, operation)
 	for _, secret := range secrets { compensationErr = errors.Join(compensationErr, service.Secrets.RevokeApplicationSecret(ctx, secret)) }
 	compensationErr = errors.Join(compensationErr, service.Databases.RevokeApplicationDatabase(ctx, databaseID))
 	if compensationErr != nil { return service.failRecovery(ctx, operation, "compensation", errors.Join(cause, compensationErr)) }
 	operation.State, operation.Stage, operation.UpdatedAt = OperationCompensated, "compensated", service.now()
-	_ = service.Store.UpdateOperation(ctx, operation)
+	if err := service.Store.UpdateOperation(ctx, operation); err != nil {
+		return service.failRecovery(ctx, operation, "persist_compensation", errors.Join(cause, err))
+	}
 	return cause
 }
 
 func (service ApplicationService) fail(ctx context.Context, operation Operation, stage string, cause error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	operation.State, operation.Stage, operation.Failure, operation.UpdatedAt = OperationFailed, stage, cause.Error(), service.now()
-	_ = service.Store.UpdateOperation(ctx, operation)
+	if err := service.Store.UpdateOperation(ctx, operation); err != nil {
+		return errors.Join(ErrRecoveryRequired, cause, err)
+	}
 	return cause
 }
 
 func (service ApplicationService) failRecovery(ctx context.Context, operation Operation, stage string, cause error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	operation.State, operation.Stage, operation.Failure, operation.UpdatedAt = OperationRecoveryRequired, stage, cause.Error(), service.now()
-	_ = service.Store.UpdateOperation(ctx, operation)
-	return errors.Join(ErrRecoveryRequired, cause)
+	persistenceErr := service.Store.UpdateOperation(ctx, operation)
+	return errors.Join(ErrRecoveryRequired, cause, persistenceErr)
 }
 
 type UpdateRequest struct {
