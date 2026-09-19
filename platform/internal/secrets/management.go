@@ -25,6 +25,7 @@ type ManagementAction string
 const (
 	ManagementEnroll ManagementAction = "enroll"
 	ManagementEnrollExact ManagementAction = "enroll_exact"
+	ManagementProvisionPasswordPair ManagementAction = "provision_password_pair"
 	ManagementRotate ManagementAction = "rotate"
 	ManagementRevoke ManagementAction = "revoke"
 	ManagementProvisionMalwareApproval ManagementAction = "provision_malware_approval"
@@ -42,6 +43,7 @@ type ManagementRequest struct {
 	ExpectedBindingDigest string    `json:"expected_binding_digest,omitempty"`
 	Material        []byte          `json:"material"`
 	Deadline        time.Time       `json:"deadline"`
+	PasswordReplica *PasswordBinding `json:"password_replica,omitempty"`
 }
 
 func (request ManagementRequest) Validate(now time.Time) error {
@@ -49,6 +51,8 @@ func (request ManagementRequest) Validate(now time.Time) error {
 		return ErrInvalid
 	}
 	switch request.Action {
+	case ManagementProvisionPasswordPair:
+		return validatePasswordPair(request)
 	case ManagementProvisionMalwareApproval:
 		if request.ExpectedVersion != 0 || request.ExpectedBindingDigest != "" || validateMalwareApprovalProvision(request) != nil {
 			return ErrInvalid
@@ -68,6 +72,7 @@ func (request ManagementRequest) Validate(now time.Time) error {
 	default:
 		return ErrInvalid
 	}
+	if request.PasswordReplica != nil { return ErrInvalid }
 	return nil
 }
 
@@ -78,6 +83,7 @@ type ManagementResponse struct {
 	Metadata    Metadata `json:"metadata,omitempty"`
 	FailureCode string   `json:"failure_code,omitempty"`
 	PublicKey   []byte   `json:"public_key,omitempty"`
+	ReplicaMetadata *Metadata `json:"replica_metadata,omitempty"`
 }
 
 func (response ManagementResponse) Validate(request ManagementRequest) error {
@@ -85,11 +91,13 @@ func (response ManagementResponse) Validate(request ManagementRequest) error {
 		return ErrInvalid
 	}
 	if response.FailureCode != "" {
-		if response.Metadata.ID != "" || len(response.PublicKey) != 0 || !validMaterialFailure(response.FailureCode) {
+		if response.Metadata.ID != "" || response.ReplicaMetadata != nil || len(response.PublicKey) != 0 || !validMaterialFailure(response.FailureCode) {
 			return ErrInvalid
 		}
 		return nil
 	}
+	if request.Action == ManagementProvisionPasswordPair { return validatePasswordPairResponse(request, response) }
+	if response.ReplicaMetadata != nil { return ErrInvalid }
 	if request.Action == ManagementProvisionMalwareApproval {
 		return validateMalwareApprovalProvisionResponse(request, response)
 	}
@@ -340,6 +348,10 @@ func (server *ManagementServer) serve(connection net.Conn) {
 		} else {
 			metadata, response.PublicKey, err = server.Broker.provisionMalwareApproval(ctx, request)
 		}
+	} else if request.Action == ManagementProvisionPasswordPair {
+		var replica Metadata
+		metadata, replica, err = server.Broker.provisionPasswordPair(ctx, request)
+		if err == nil { response.ReplicaMetadata = &replica }
 	} else if request.Action == ManagementRevoke {
 		metadata, err = server.Broker.store.Head(ctx, request.SecretID)
 		if err == nil && (metadata.OwnerTenantID != request.OwnerTenantID || metadata.Purpose != request.Purpose || metadata.Version != request.ExpectedVersion || metadata.BindingDigest != request.ExpectedBindingDigest || digestJSON(metadata.Audience) != digestJSON(request.Audience)) {
@@ -366,6 +378,7 @@ func (server *ManagementServer) serve(connection net.Conn) {
 	}
 	if err != nil {
 		response.PublicKey = nil
+		response.ReplicaMetadata = nil
 		response.FailureCode = classifyMaterialFailure(err)
 	} else {
 		response.Metadata = metadata

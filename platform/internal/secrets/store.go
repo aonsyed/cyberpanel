@@ -9,6 +9,7 @@ import(
 )
 
 const Schema=`
+CREATE TABLE IF NOT EXISTS secret_password_pairs(primary_id TEXT PRIMARY KEY,replica_id TEXT NOT NULL UNIQUE,intent_digest TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS secret_records(secret_id TEXT NOT NULL,version BIGINT NOT NULL,owner_tenant_id TEXT NOT NULL,state TEXT NOT NULL,key_epoch BIGINT NOT NULL,metadata_json TEXT NOT NULL,nonce BLOB NOT NULL,wrapped_dek BLOB NOT NULL,ciphertext BLOB NOT NULL,aad BLOB NOT NULL,created_at TIMESTAMP NOT NULL,PRIMARY KEY(secret_id,version));
 CREATE TABLE IF NOT EXISTS secret_heads(secret_id TEXT PRIMARY KEY,owner_tenant_id TEXT NOT NULL,current_version BIGINT NOT NULL,key_epoch BIGINT NOT NULL,state TEXT NOT NULL,binding_digest TEXT NOT NULL,updated_at TIMESTAMP NOT NULL);
 CREATE TABLE IF NOT EXISTS secret_delivery_grants(id TEXT PRIMARY KEY,secret_id TEXT NOT NULL,secret_version BIGINT NOT NULL,tenant_id TEXT NOT NULL,operation TEXT NOT NULL,grant_json TEXT NOT NULL,expires_at TIMESTAMP NOT NULL,consumed_at TIMESTAMP);
