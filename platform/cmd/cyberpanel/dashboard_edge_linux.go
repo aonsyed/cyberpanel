@@ -16,6 +16,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/alerts"
@@ -25,6 +26,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 	"github.com/aonsyed/cyberpanel/platform/internal/logworkspace"
+	"github.com/aonsyed/cyberpanel/platform/internal/operations"
 	"github.com/aonsyed/cyberpanel/platform/internal/serviceregistry"
 )
 
@@ -42,11 +44,13 @@ type dashboardEdge struct {
 	logRepository   *logworkspace.SQLiteRepository
 	serviceRegistry *serviceregistry.Registry
 	serviceStore    *serviceregistry.SQLiteRepository
+	serviceObserver *serviceregistry.LinuxObserver
+	serviceHealthMu sync.Mutex
 	signer          *observabilitySigner
 }
 
-func newDashboardEdge(db *sql.DB, now func() time.Time) (*dashboardEdge, error) {
-	if db == nil || now == nil {
+func newDashboardEdge(db *sql.DB, now func() time.Time, serviceCommands apiserver.OperationsCommandService) (*dashboardEdge, error) {
+	if db == nil || now == nil || serviceCommands == nil {
 		return nil, errors.New("dashboard authority is required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -89,7 +93,11 @@ func newDashboardEdge(db *sql.DB, now func() time.Time) (*dashboardEdge, error) 
 	if err != nil {
 		return nil, err
 	}
-	serviceRegistry, serviceStore, err := newCachedServiceRegistry(ctx, db)
+	serviceProber, err := newOperationsServiceHealthProber(serviceCommands, now)
+	if err != nil {
+		return nil, err
+	}
+	serviceRegistry, serviceStore, serviceObserver, err := newObservedServiceRegistry(ctx, db, serviceProber, serviceRegistryClock{now: now})
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +105,7 @@ func newDashboardEdge(db *sql.DB, now func() time.Time) (*dashboardEdge, error) 
 		db: db, now: now, metrics: capacity.Service{Store: metricRepository}, identity: identityStore,
 		alertRepository: alertRepository, inbox: integrations.InboxService{Store: integrations.SQLRepository{DB: db}, Now: now},
 		logRegistry: logRegistry, logReader: logReader, logRepository: logRepository,
-		serviceRegistry: serviceRegistry, serviceStore: serviceStore, signer: signer,
+		serviceRegistry: serviceRegistry, serviceStore: serviceStore, serviceObserver: serviceObserver, signer: signer,
 	}, nil
 }
 
@@ -108,7 +116,7 @@ func (edge *dashboardEdge) ObservabilityCapabilities() apiserver.ObservabilityEd
 		Logs: ready && edge.logRegistry != nil && edge.logReader != nil,
 		LogExport: ready && edge.logReader != nil && edge.logRepository != nil,
 		AlertRules: ready && edge.alertRepository != nil, AlertInbox: ready,
-		ServiceHealth: ready && edge.serviceRegistry != nil && edge.serviceStore != nil,
+		ServiceHealth: ready && edge.serviceRegistry != nil && edge.serviceStore != nil && edge.serviceObserver != nil,
 	}
 }
 
@@ -954,11 +962,175 @@ func aggregateNodeHealth(services []apiserver.ServiceHealthProjection) string {
 	return result
 }
 
+type serviceRegistryClock struct {
+	now func() time.Time
+}
+
+func (clock serviceRegistryClock) Now() time.Time { return clock.now().UTC() }
+
+type operationsServiceHealthProber struct {
+	commands  apiserver.OperationsCommandService
+	node      operations.ResourceID
+	principal operations.ResourceID
+	now       func() time.Time
+}
+
+func newOperationsServiceHealthProber(commands apiserver.OperationsCommandService, now func() time.Time) (*operationsServiceHealthProber, error) {
+	if commands == nil || now == nil {
+		return nil, errors.New("service health prober dependencies are required")
+	}
+	node, nodeErr := operations.NewResourceID("local")
+	principal, principalErr := operations.NewResourceID("service-health-observer")
+	if nodeErr != nil || principalErr != nil {
+		return nil, errors.Join(nodeErr, principalErr)
+	}
+	return &operationsServiceHealthProber{commands: commands, node: node, principal: principal, now: now}, nil
+}
+
+func serviceRegistryOperationName(id serviceregistry.ServiceID) (operations.ServiceName, bool) {
+	switch id {
+	case serviceregistry.ServiceOpenLiteSpeed:
+		return operations.ServiceWebOpenLiteSpeed, true
+	case serviceregistry.ServiceLiteSpeed:
+		return operations.ServiceWebEnterprise, true
+	case serviceregistry.ServiceMariaDB:
+		return operations.ServiceMariaDB, true
+	case serviceregistry.ServicePostfix:
+		return operations.ServicePostfix, true
+	case serviceregistry.ServiceDovecot:
+		return operations.ServiceDovecot, true
+	case serviceregistry.ServicePowerDNS:
+		return operations.ServicePowerDNS, true
+	case serviceregistry.ServiceFTPS:
+		return operations.ServicePureFTPd, true
+	case serviceregistry.ServiceRedis:
+		return operations.ServiceRedis, true
+	case serviceregistry.ServiceSearch:
+		return operations.ServiceElasticsearch, true
+	case serviceregistry.ServicePanelCore:
+		return operations.ServicePanel, true
+	default:
+		return "", false
+	}
+}
+
+func (prober *operationsServiceHealthProber) Probe(ctx context.Context, probe serviceregistry.BoundHealthProbe) (serviceregistry.HealthEvidence, error) {
+	observedAt := prober.now().UTC()
+	service, supported := serviceRegistryOperationName(probe.ServiceID)
+	if !supported {
+		return serviceregistry.SealHealthEvidence(serviceregistry.HealthEvidence{State: serviceregistry.HealthUnsupported, ObservedAt: observedAt})
+	}
+	commandID := accessEdgeID("service-health-", string(probe.ServiceID), probe.Process.BootID, probe.Process.InvocationID, observedAt.Format(time.RFC3339Nano))
+	receipt, err := prober.commands.Handle(ctx, operations.DiagnoseService{
+		Header: operations.CommandHeader{
+			CommandID: commandID,
+			NodeID:    prober.node,
+			Actor: operations.Actor{
+				PrincipalID:  prober.principal,
+				Capabilities: []operations.Capability{operations.CapabilityNodeOperations},
+			},
+			RequestedAt: observedAt,
+			Deadline:    observedAt.Add(15 * time.Second),
+		},
+		Service: service,
+		Depth:   operations.DiagnosticDependency,
+		Since:   observedAt.Add(-5 * time.Minute),
+	})
+	if err != nil {
+		return serviceregistry.HealthEvidence{}, err
+	}
+	diagnostics := receipt.Effect.Result.Diagnostics
+	if receipt.Status != operations.OperationApplied || receipt.Effect.Outcome != operations.EffectConfirmed || diagnostics == nil || diagnostics.Service != service || receipt.Effect.CompletedAt.IsZero() || len(diagnostics.Checks) == 0 {
+		return serviceregistry.HealthEvidence{}, serviceregistry.ErrAmbiguous
+	}
+	state := serviceregistry.HealthDegraded
+	internal := diagnostics.ActiveState == "active"
+	if !internal {
+		state = serviceregistry.HealthFailed
+	}
+	for _, check := range diagnostics.Checks {
+		if check.EvidenceDigest == "" {
+			return serviceregistry.HealthEvidence{}, serviceregistry.ErrAmbiguous
+		}
+		switch check.Outcome {
+		case operations.CheckPass:
+		case operations.CheckWarn:
+			internal = false
+		case operations.CheckFail:
+			internal = false
+			state = serviceregistry.HealthFailed
+		default:
+			return serviceregistry.HealthEvidence{}, serviceregistry.ErrAmbiguous
+		}
+	}
+	return serviceregistry.SealHealthEvidence(serviceregistry.HealthEvidence{
+		State:             state,
+		InternallyHealthy: internal,
+		ObservedAt:        receipt.Effect.CompletedAt,
+	})
+}
+
+func (edge *dashboardEdge) collectServiceHealth(ctx context.Context) {
+	if edge == nil || edge.serviceRegistry == nil || edge.serviceStore == nil || edge.serviceObserver == nil || ctx == nil {
+		return
+	}
+	edge.serviceHealthMu.Lock()
+	defer edge.serviceHealthMu.Unlock()
+	for _, definition := range edge.serviceRegistry.Definitions() {
+		if ctx.Err() != nil {
+			return
+		}
+		expectedGeneration := uint64(0)
+		if current, err := edge.serviceStore.Observed(ctx, "local", definition.ID); err == nil {
+			expectedGeneration = current.Generation
+		} else if !errors.Is(err, serviceregistry.ErrNotFound) {
+			continue
+		}
+		if expectedGeneration >= serviceregistry.MaxGeneration {
+			continue
+		}
+		var desired *serviceregistry.DesiredState
+		configGeneration := uint64(0)
+		if current, err := edge.serviceStore.Desired(ctx, "local", definition.ID); err == nil {
+			desired = &current
+			configGeneration = current.ConfigGeneration
+		} else if !errors.Is(err, serviceregistry.ErrNotFound) {
+			continue
+		}
+		observation, _ := edge.serviceObserver.Observe(ctx, "local", definition.ID, expectedGeneration+1, configGeneration, desired)
+		if validationErr := serviceregistry.ValidateObservation(observation); validationErr != nil {
+			continue
+		}
+		_ = edge.serviceStore.PutObserved(ctx, observation, expectedGeneration)
+	}
+}
+
+func (edge *dashboardEdge) RunServiceHealthCollector(ctx context.Context, interval time.Duration) {
+	if edge == nil || edge.serviceObserver == nil || ctx == nil || interval <= 0 {
+		return
+	}
+	edge.collectServiceHealth(ctx)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			edge.collectServiceHealth(ctx)
+		}
+	}
+}
+
 func newCachedServiceRegistry(ctx context.Context, db *sql.DB) (*serviceregistry.Registry, *serviceregistry.SQLiteRepository, error) {
 	support, ok := localServiceSupport()
 	if !ok {
 		return nil, nil, nil
 	}
+	return newCachedServiceRegistryForSupport(ctx, db, support)
+}
+
+func newCachedServiceRegistryForSupport(ctx context.Context, db *sql.DB, support serviceregistry.SupportContext) (*serviceregistry.Registry, *serviceregistry.SQLiteRepository, error) {
 	registry, err := serviceregistry.NewRegistry(support)
 	if err != nil {
 		return nil, nil, err
@@ -971,6 +1143,27 @@ func newCachedServiceRegistry(ctx context.Context, db *sql.DB) (*serviceregistry
 		return nil, nil, err
 	}
 	return registry, repository, nil
+}
+
+func newObservedServiceRegistry(ctx context.Context, db *sql.DB, prober serviceregistry.HealthProber, clock serviceregistry.Clock) (*serviceregistry.Registry, *serviceregistry.SQLiteRepository, *serviceregistry.LinuxObserver, error) {
+	support, ok := localServiceSupport()
+	if !ok {
+		return nil, nil, nil, nil
+	}
+	registry, repository, err := newCachedServiceRegistryForSupport(ctx, db, support)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	profile := serviceregistry.LinuxProfile(support.OSFamily + "-" + support.OSVersion)
+	runner, err := serviceregistry.NewBoundedExecRunner(profile, registry)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	observer, err := serviceregistry.NewLinuxObserver(profile, registry, runner, prober, clock)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return registry, repository, observer, nil
 }
 
 func localServiceSupport() (serviceregistry.SupportContext, bool) {

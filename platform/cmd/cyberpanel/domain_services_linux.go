@@ -158,10 +158,6 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize identity console edge: %w", err)
 	}
-	dashboardConsoleEdge, err := newDashboardEdge(repositories.ControlDB, runtimeClock{}.Now)
-	if err != nil {
-		return apiserver.DomainServices{}, fmt.Errorf("initialize dashboard console edge: %w", err)
-	}
 	malwareService, err := newMalwareOperationalService(ctx, repositories.ControlDB, identityStore, auditService)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize malware operations: %w", err)
@@ -180,6 +176,10 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		return apiserver.DomainServices{}, fmt.Errorf("connect operations executor: %w", err)
 	}
 	operationsCoordinator := operations.NewCoordinator(repositories.Operations, operationsExecutor, runtimeClock{})
+	dashboardConsoleEdge, err := newDashboardEdge(repositories.ControlDB, runtimeClock{}.Now, operationsCoordinator)
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("initialize dashboard console edge: %w", err)
+	}
 	redisRepository, err := redisservice.NewSQLiteRepository(repositories.ControlDB)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("open managed Redis repository: %w", err)
@@ -769,6 +769,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if mailTelemetryReady {
 		go mailConsoleEdge.RunMailTelemetry(ctx, 15*time.Second)
 	}
+	go dashboardConsoleEdge.RunServiceHealthCollector(ctx, time.Minute)
 	return apiserver.DomainServices{
 		DashboardEdge:               dashboardConsoleEdge,
 		Hosting:                     hostingCoordinator,
