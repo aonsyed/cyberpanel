@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -35,7 +36,22 @@ func(source *LinuxApplicationMaterialSource)ApplicationSecret(ctx context.Contex
 
 type ApplicationSecretIssuer struct{Management *secrets.ManagementClient;Store SQLRepository;ReleaseDigest string}
 func NewApplicationSecretIssuer(management *secrets.ManagementClient,store SQLRepository,releaseDigest string)(*ApplicationSecretIssuer,error){if management==nil||store.DB==nil||len(releaseDigest)!=64{return nil,ErrInvalid};if _,err:=hex.DecodeString(releaseDigest);err!=nil{return nil,ErrInvalid};return &ApplicationSecretIssuer{management,store,strings.ToLower(releaseDigest)},nil}
-func(issuer *ApplicationSecretIssuer)IssueApplicationSecret(ctx context.Context,tenant TenantID,siteID SiteID,installation InstallationID,purpose string)(SecretRef,error){if issuer==nil||issuer.Management==nil||issuer.Store.DB==nil||!validID(string(tenant))||!validID(string(siteID))||!validID(string(installation))||!validID(purpose){return "",ErrInvalid};identifier:=ApplicationManagedSecretID(purpose,installation);if lease,err:=issuer.Store.LoadApplicationSecretLease(ctx,identifier);err==nil&&lease.Metadata.State==secrets.StateActive{return SecretRef(identifier.String()),nil}else if err!=nil&&!errors.Is(err,ErrNotFound){return "",err};material:=make([]byte,32);if _,err:=rand.Read(material);err!=nil{return "",err};encoded:=make([]byte,base64.RawURLEncoding.EncodedLen(len(material)));base64.RawURLEncoding.Encode(encoded,material);wipeLinuxApplicationBytes(material);reference,err:=issuer.putApplicationSecret(ctx,tenant,siteID,installation,purpose,encoded);wipeLinuxApplicationBytes(encoded);return reference,err}
+func (issuer *ApplicationSecretIssuer) IssueApplicationSecret(ctx context.Context, tenant TenantID, siteID SiteID, installation InstallationID, purpose string) (SecretRef, error) {
+	if issuer == nil || issuer.Management == nil || issuer.Store.DB == nil || ctx == nil || !validID(string(tenant)) || !validID(string(siteID)) || !validID(string(installation)) || !validID(purpose) { return "", ErrInvalid }
+	identifier := ApplicationManagedSecretID(purpose, installation)
+	if lease, err := issuer.Store.LoadApplicationSecretLease(ctx, identifier); err == nil && lease.Metadata.State == secrets.StateActive {
+		if lease.InstallationID != installation || lease.Purpose != purpose || lease.Metadata.OwnerTenantID != ApplicationTenantOwnerID(string(tenant)) || lease.Metadata.Purpose != secrets.PurposeAuthentication || !reflect.DeepEqual(lease.Metadata.Audience, issuer.applicationAudience(siteID, installation, purpose)) { return "", ErrPolicyDenied }
+		return SecretRef(identifier.String()), nil
+	} else if err != nil && !errors.Is(err, ErrNotFound) { return "", err }
+	material := make([]byte, 32)
+	if _, err := rand.Read(material); err != nil { return "", err }
+	encoded := make([]byte, base64.RawURLEncoding.EncodedLen(len(material)))
+	base64.RawURLEncoding.Encode(encoded, material)
+	wipeLinuxApplicationBytes(material)
+	reference, err := issuer.putApplicationSecret(ctx, tenant, siteID, installation, purpose, encoded)
+	wipeLinuxApplicationBytes(encoded)
+	return reference, err
+}
 func(issuer *ApplicationSecretIssuer)EnrollAdministratorSecret(ctx context.Context,tenant TenantID,siteID SiteID,installation InstallationID,plaintext []byte)(SecretRef,error){if len(plaintext)<12||len(plaintext)>4096{return "",ErrInvalid};return issuer.putApplicationSecret(ctx,tenant,siteID,installation,"administrator",plaintext)}
 func(issuer *ApplicationSecretIssuer)putApplicationSecret(ctx context.Context,tenant TenantID,siteID SiteID,installation InstallationID,purpose string,plaintext []byte)(SecretRef,error){if issuer==nil||issuer.Management==nil||issuer.Store.DB==nil||ctx==nil||!validID(string(tenant))||!validID(string(siteID))||!validID(string(installation))||!validID(purpose)||len(plaintext)==0{return "",ErrInvalid};identifier:=ApplicationManagedSecretID(purpose,installation);audience:=issuer.applicationAudience(siteID,installation,purpose);request:=secrets.PutRequest{ID:identifier,OwnerTenantID:ApplicationTenantOwnerID(string(tenant)),Purpose:secrets.PurposeAuthentication,Audience:audience,Plaintext:append([]byte(nil),plaintext...)};if lease,err:=issuer.Store.LoadApplicationSecretLease(ctx,identifier);err==nil{if lease.InstallationID!=installation||lease.Purpose!=purpose||lease.Metadata.OwnerTenantID!=request.OwnerTenantID{return "",ErrPolicyDenied};request.ExpectedVersion=lease.Metadata.Version;request.ExpectedBindingDigest=lease.Metadata.BindingDigest}else if !errors.Is(err,ErrNotFound){return "",err};metadata,err:=issuer.Management.Put(ctx,request);if err!=nil{return "",err};lease:=ApplicationSecretLease{InstallationID:installation,Purpose:purpose,Metadata:metadata,UpdatedAt:time.Now().UTC()};if err=issuer.Store.SaveApplicationSecretLease(ctx,lease);err!=nil{_,_=issuer.Management.Revoke(ctx,secrets.RevokeRequest{ID:metadata.ID,OwnerTenantID:metadata.OwnerTenantID,Purpose:metadata.Purpose,Audience:metadata.Audience,ExpectedVersion:metadata.Version,ExpectedBindingDigest:metadata.BindingDigest});return "",err};return SecretRef(metadata.ID.String()),nil}
 func(issuer *ApplicationSecretIssuer)applicationAudience(siteID SiteID,installation InstallationID,purpose string)secrets.AudienceBinding{resourceKind:="application_installation";resource:=ApplicationAudienceID(string(installation));if purpose=="administrator"{resourceKind="hosting_site";resource=ApplicationAudienceID(string(siteID))};return secrets.AudienceBinding{AdapterID:ApplicationSecretAdapterID,AdapterVersion:ApplicationSecretAdapterVersion,Account:"site-application",Origin:"local://panel-execd/applications",ResourceKind:resourceKind,ResourceID:resource,ResourceGeneration:1,Operations:[]secrets.Operation{secrets.OperationAuthenticate},ConsumerReleaseDigest:issuer.ReleaseDigest}}

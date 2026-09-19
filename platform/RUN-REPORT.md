@@ -22,6 +22,22 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Results
 
+### Application secret management through the installed broker
+
+`TestQEMULiveApplicationSecretLease` uses the real installed management socket,
+encrypted broker storage and application SQLite lease repository. It reproduced
+an issuer authorization bug: an active cached lease was returned for another
+tenant without validating its owner. Cached replay now requires the matching
+installation, purpose, tenant, secret purpose and complete consumer audience,
+including release digest. The live QEMU test passes issuance, exact replay
+without rotation, wrong-tenant and changed-release rejection, administrator
+site-binding rejection, revocation and revocation replay. Fixtures are revoked
+on exit. The exact independently staged source also passes the live checks and
+core build, without the unfinished database-placement changes. Evidence:
+`current-ubuntu-arm64-20260919-smoke/application-secret-lifecycle.log`.
+This ran as an authorized root management peer in QEMU; it makes no claim about
+material delivery to consumer processes.
+
 ### Packaged recipe loader and node-release layout
 
 Inspection found a concrete startup mismatch: the container recipe loader
