@@ -524,7 +524,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("initialize certificate peer policy: %v", err)
 	}
-	certificateListener, err := certificates.ListenCertificateBroker(0, controlGID)
+	if uint64(controlGID) > uint64(^uint(0)>>1) {
+		log.Fatalf("certificate broker control GID overflows platform int")
+	}
+	certificateListener, err := certificates.ListenCertificateBroker(0, int(controlGID))
 	if err != nil {
 		log.Fatalf("listen on certificate broker socket: %v", err)
 	}
