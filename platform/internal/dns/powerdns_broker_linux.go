@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 const PowerDNSDaemonSocketPath = "/run/cyberpanel/pdnsd.sock"
@@ -27,73 +29,73 @@ const powerDNSBrokerFrameLimit = 64 << 20
 
 var (
 	ErrPowerDNSDaemonUnauthorized = errors.New("PowerDNS daemon peer is unauthorized")
-	ErrPowerDNSDaemonProtocol = errors.New("PowerDNS daemon protocol failure")
-	ErrPowerDNSDaemonOperation = errors.New("PowerDNS daemon operation failed")
+	ErrPowerDNSDaemonProtocol     = errors.New("PowerDNS daemon protocol failure")
+	ErrPowerDNSDaemonOperation    = errors.New("PowerDNS daemon operation failed")
 )
 
 type PowerDNSBrokerOperation string
 
 const (
 	PowerDNSBrokerApplyConfiguration PowerDNSBrokerOperation = "apply_configuration"
-	PowerDNSBrokerApplyZone PowerDNSBrokerOperation = "apply_zone"
-	PowerDNSBrokerDeleteZone PowerDNSBrokerOperation = "delete_zone"
-	PowerDNSBrokerReload PowerDNSBrokerOperation = "reload"
-	PowerDNSBrokerProbe PowerDNSBrokerOperation = "probe"
-	PowerDNSBrokerRediscover PowerDNSBrokerOperation = "rediscover"
-	PowerDNSBrokerNotifyZone PowerDNSBrokerOperation = "notify_zone"
-	PowerDNSBrokerGetZone PowerDNSBrokerOperation = "get_zone"
-	PowerDNSBrokerObserveZone PowerDNSBrokerOperation = "observe_zone"
-	PowerDNSBrokerConfirmZoneAbsent PowerDNSBrokerOperation = "confirm_zone_absent"
-	PowerDNSBrokerAdoptZone PowerDNSBrokerOperation = "adopt_zone"
-	PowerDNSBrokerListZones PowerDNSBrokerOperation = "list_zones"
-	PowerDNSBrokerListRecordSets PowerDNSBrokerOperation = "list_record_sets"
-	PowerDNSBrokerImportRecordSets PowerDNSBrokerOperation = "import_record_sets"
-	PowerDNSBrokerPresentACMETXT PowerDNSBrokerOperation = "present_acme_txt"
-	PowerDNSBrokerRemoveACMETXT PowerDNSBrokerOperation = "remove_acme_txt"
-	PowerDNSBrokerDNSSECGenerate PowerDNSBrokerOperation = "dnssec_generate"
-	PowerDNSBrokerDNSSECRetire PowerDNSBrokerOperation = "dnssec_retire"
-	PowerDNSBrokerDNSSECRemove PowerDNSBrokerOperation = "dnssec_remove"
-	PowerDNSBrokerDNSSECProve PowerDNSBrokerOperation = "dnssec_prove"
+	PowerDNSBrokerApplyZone          PowerDNSBrokerOperation = "apply_zone"
+	PowerDNSBrokerDeleteZone         PowerDNSBrokerOperation = "delete_zone"
+	PowerDNSBrokerReload             PowerDNSBrokerOperation = "reload"
+	PowerDNSBrokerProbe              PowerDNSBrokerOperation = "probe"
+	PowerDNSBrokerRediscover         PowerDNSBrokerOperation = "rediscover"
+	PowerDNSBrokerNotifyZone         PowerDNSBrokerOperation = "notify_zone"
+	PowerDNSBrokerGetZone            PowerDNSBrokerOperation = "get_zone"
+	PowerDNSBrokerObserveZone        PowerDNSBrokerOperation = "observe_zone"
+	PowerDNSBrokerConfirmZoneAbsent  PowerDNSBrokerOperation = "confirm_zone_absent"
+	PowerDNSBrokerAdoptZone          PowerDNSBrokerOperation = "adopt_zone"
+	PowerDNSBrokerListZones          PowerDNSBrokerOperation = "list_zones"
+	PowerDNSBrokerListRecordSets     PowerDNSBrokerOperation = "list_record_sets"
+	PowerDNSBrokerImportRecordSets   PowerDNSBrokerOperation = "import_record_sets"
+	PowerDNSBrokerPresentACMETXT     PowerDNSBrokerOperation = "present_acme_txt"
+	PowerDNSBrokerRemoveACMETXT      PowerDNSBrokerOperation = "remove_acme_txt"
+	PowerDNSBrokerDNSSECGenerate     PowerDNSBrokerOperation = "dnssec_generate"
+	PowerDNSBrokerDNSSECRetire       PowerDNSBrokerOperation = "dnssec_retire"
+	PowerDNSBrokerDNSSECRemove       PowerDNSBrokerOperation = "dnssec_remove"
+	PowerDNSBrokerDNSSECProve        PowerDNSBrokerOperation = "dnssec_prove"
 )
 
 type PowerDNSBrokerOutcome string
 
 const (
 	PowerDNSBrokerConfirmed PowerDNSBrokerOutcome = "confirmed"
-	PowerDNSBrokerRejected PowerDNSBrokerOutcome = "rejected"
-	PowerDNSBrokerUnknown PowerDNSBrokerOutcome = "unknown"
+	PowerDNSBrokerRejected  PowerDNSBrokerOutcome = "rejected"
+	PowerDNSBrokerUnknown   PowerDNSBrokerOutcome = "unknown"
 )
 
 type PowerDNSBrokerRequest struct {
-	Version uint8 `json:"version"`
-	RequestID string `json:"request_id"`
-	Operation PowerDNSBrokerOperation `json:"operation"`
-	Deadline time.Time `json:"deadline"`
-	EffectID string `json:"effect_id,omitempty"`
+	Version       uint8                   `json:"version"`
+	RequestID     string                  `json:"request_id"`
+	Operation     PowerDNSBrokerOperation `json:"operation"`
+	Deadline      time.Time               `json:"deadline"`
+	EffectID      string                  `json:"effect_id,omitempty"`
 	Configuration *PowerDNSConfigSnapshot `json:"configuration,omitempty"`
-	Zone *ZoneSpec `json:"zone,omitempty"`
-	Delete *PowerDNSDeleteSpec `json:"delete,omitempty"`
-	RecordSets []RecordSet `json:"record_sets,omitempty"`
-	TransferPeers []TransferPeerSpec `json:"transfer_peers,omitempty"`
-	NotifyName *DNSName `json:"notify_name,omitempty"`
-	TenantID string `json:"tenant_id,omitempty"`
-	ZoneID ZoneID `json:"zone_id,omitempty"`
-	ZoneName string `json:"zone_name,omitempty"`
-	BackendDomainID int64 `json:"backend_domain_id,omitempty"`
-	Limit uint32 `json:"limit,omitempty"`
-	Cursor string `json:"cursor,omitempty"`
-	Replace bool `json:"replace,omitempty"`
-	ACMEOwner string `json:"acme_owner,omitempty"`
-	ACMEValue string `json:"acme_value,omitempty"`
-	DNSSECPolicy *DNSSECPolicy `json:"dnssec_policy,omitempty"`
-	DNSSECKeys []DNSSECKeyDescriptor `json:"dnssec_keys,omitempty"`
-	DNSSECDS []DSRecord `json:"dnssec_ds,omitempty"`
+	Zone          *ZoneSpec               `json:"zone,omitempty"`
+	Delete        *PowerDNSDeleteSpec     `json:"delete,omitempty"`
+	RecordSets    []RecordSet             `json:"record_sets,omitempty"`
+	TransferPeers []TransferPeerSpec      `json:"transfer_peers,omitempty"`
+	NotifyName    *DNSName                `json:"notify_name,omitempty"`
+	TenantID      string                  `json:"tenant_id,omitempty"`
+	ZoneID        ZoneID                  `json:"zone_id,omitempty"`
+	ZoneName      string                  `json:"zone_name,omitempty"`
+	BackendDomainID int64                 `json:"backend_domain_id,omitempty"`
+	Limit         uint32                  `json:"limit,omitempty"`
+	Cursor        string                  `json:"cursor,omitempty"`
+	Replace       bool                    `json:"replace,omitempty"`
+	ACMEOwner     string                  `json:"acme_owner,omitempty"`
+	ACMEValue     string                  `json:"acme_value,omitempty"`
+	DNSSECPolicy  *DNSSECPolicy           `json:"dnssec_policy,omitempty"`
+	DNSSECKeys    []DNSSECKeyDescriptor   `json:"dnssec_keys,omitempty"`
+	DNSSECDS      []DSRecord              `json:"dnssec_ds,omitempty"`
 }
 
 type PowerDNSDeleteSpec struct {
-	ID ZoneID `json:"id"`
-	TenantID string `json:"tenant_id"`
-	Name string `json:"name,omitempty"`
+	ID         ZoneID `json:"id"`
+	TenantID   string `json:"tenant_id"`
+	Name       string `json:"name,omitempty"`
 	Generation uint64 `json:"generation"`
 }
 
@@ -101,14 +103,24 @@ func (request PowerDNSBrokerRequest) Validate(now time.Time) error {
 	if request.Version != 1 || !validPowerDNSBrokerID(request.RequestID) || request.Deadline.Before(now.Add(-time.Second)) || request.Deadline.After(now.Add(5*time.Minute)) {
 		return ErrPowerDNSDaemonProtocol
 	}
-	if request.Operation!=PowerDNSBrokerPresentACMETXT&&request.Operation!=PowerDNSBrokerRemoveACMETXT&&(request.ACMEOwner!=""||request.ACMEValue!=""){return ErrPowerDNSDaemonProtocol}
-	if !powerDNSBrokerDNSSECOperation(request.Operation)&&(request.DNSSECPolicy!=nil||len(request.DNSSECKeys)!=0||len(request.DNSSECDS)!=0){return ErrPowerDNSDaemonProtocol}
-	if request.Operation!=PowerDNSBrokerImportRecordSets&&request.Replace{return ErrPowerDNSDaemonProtocol}
-	if request.Operation!=PowerDNSBrokerAdoptZone&&request.BackendDomainID!=0{return ErrPowerDNSDaemonProtocol}
-	if request.Operation!=PowerDNSBrokerConfirmZoneAbsent&&request.ZoneName!=""{return ErrPowerDNSDaemonProtocol}
+	if request.Operation != PowerDNSBrokerPresentACMETXT && request.Operation != PowerDNSBrokerRemoveACMETXT && (request.ACMEOwner != "" || request.ACMEValue != "") {
+		return ErrPowerDNSDaemonProtocol
+	}
+	if !powerDNSBrokerDNSSECOperation(request.Operation) && (request.DNSSECPolicy != nil || len(request.DNSSECKeys) != 0 || len(request.DNSSECDS) != 0) {
+		return ErrPowerDNSDaemonProtocol
+	}
+	if request.Operation != PowerDNSBrokerImportRecordSets && request.Replace {
+		return ErrPowerDNSDaemonProtocol
+	}
+	if request.Operation != PowerDNSBrokerAdoptZone && request.BackendDomainID != 0 {
+		return ErrPowerDNSDaemonProtocol
+	}
+	if request.Operation != PowerDNSBrokerConfirmZoneAbsent && request.ZoneName != "" {
+		return ErrPowerDNSDaemonProtocol
+	}
 	switch request.Operation {
 	case PowerDNSBrokerApplyConfiguration:
-		if request.Configuration == nil || request.Zone != nil || request.Delete != nil || request.NotifyName != nil || request.EffectID != "" || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 || request.Configuration.NodeID == "" || request.Configuration.Generation == 0 || request.Configuration.Database.Fingerprint == "" {
+		if request.Configuration == nil || request.Zone != nil || request.Delete != nil || request.NotifyName != nil || !validPowerDNSEffectID(request.EffectID) || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 || request.Configuration.NodeID == "" || request.Configuration.Generation == 0 || request.Configuration.Database.Fingerprint == "" {
 			return ErrPowerDNSDaemonProtocol
 		}
 	case PowerDNSBrokerApplyZone:
@@ -126,15 +138,21 @@ func (request PowerDNSBrokerRequest) Validate(now time.Time) error {
 			}
 		}
 	case PowerDNSBrokerNotifyZone:
-		if request.NotifyName == nil || request.Configuration != nil || request.Zone != nil || request.Delete != nil || request.EffectID != "" || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 || !validPowerDNSZoneName(*request.NotifyName) {
+		if request.NotifyName == nil || request.Configuration != nil || request.Zone != nil || request.Delete != nil || !validPowerDNSEffectID(request.EffectID) || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 || !validPowerDNSZoneName(*request.NotifyName) {
 			return ErrPowerDNSDaemonProtocol
 		}
-	case PowerDNSBrokerReload, PowerDNSBrokerProbe, PowerDNSBrokerRediscover:
+	case PowerDNSBrokerReload, PowerDNSBrokerRediscover:
+		if request.Configuration != nil || request.Zone != nil || request.Delete != nil || request.NotifyName != nil || !validPowerDNSEffectID(request.EffectID) || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 {
+			return ErrPowerDNSDaemonProtocol
+		}
+	case PowerDNSBrokerProbe:
 		if request.Configuration != nil || request.Zone != nil || request.Delete != nil || request.NotifyName != nil || request.EffectID != "" || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 {
 			return ErrPowerDNSDaemonProtocol
 		}
 	case PowerDNSBrokerGetZone:
-		if !validPowerDNSIdentityValue(request.TenantID,512)||request.ZoneID==""||request.Limit!=0||request.Cursor!=""||request.Configuration!=nil||request.Zone!=nil||request.Delete!=nil||request.NotifyName!=nil||request.EffectID!=""||len(request.RecordSets)!=0||len(request.TransferPeers)!=0{return ErrPowerDNSDaemonProtocol}
+		if !validPowerDNSIdentityValue(request.TenantID, 512) || request.ZoneID == "" || request.Limit != 0 || request.Cursor != "" || request.Configuration != nil || request.Zone != nil || request.Delete != nil || request.NotifyName != nil || request.EffectID != "" || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerObserveZone:
 		if !validPowerDNSIdentityValue(request.TenantID,512)||request.ZoneID==""||!validPowerDNSEffectID(request.EffectID)||request.Limit!=0||request.Cursor!=""||request.Configuration!=nil||request.Zone!=nil||request.Delete!=nil||request.NotifyName!=nil||len(request.RecordSets)!=0||len(request.TransferPeers)!=0{return ErrPowerDNSDaemonProtocol}
 	case PowerDNSBrokerConfirmZoneAbsent:
@@ -142,21 +160,43 @@ func (request PowerDNSBrokerRequest) Validate(now time.Time) error {
 	case PowerDNSBrokerAdoptZone:
 		if request.Zone==nil||request.BackendDomainID<1||request.Zone.Generation!=1||validateZoneSpec(*request.Zone,nil,nil)!=nil||!validPowerDNSEffectID(request.EffectID)||request.TenantID!=""||request.ZoneID!=""||request.Limit!=0||request.Cursor!=""||request.Configuration!=nil||request.Delete!=nil||request.NotifyName!=nil||len(request.RecordSets)!=0||len(request.TransferPeers)!=0{return ErrPowerDNSDaemonProtocol}
 	case PowerDNSBrokerListZones:
-		if !validPowerDNSIdentityValue(request.TenantID,512)||request.ZoneID!=""||request.Limit==0||request.Limit>500||len(request.Cursor)>253||request.Configuration!=nil||request.Zone!=nil||request.Delete!=nil||request.NotifyName!=nil||request.EffectID!=""||len(request.RecordSets)!=0||len(request.TransferPeers)!=0{return ErrPowerDNSDaemonProtocol}
+		if !validPowerDNSIdentityValue(request.TenantID, 512) || request.ZoneID != "" || request.Limit == 0 || request.Limit > 500 || len(request.Cursor) > 253 || request.Configuration != nil || request.Zone != nil || request.Delete != nil || request.NotifyName != nil || request.EffectID != "" || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerListRecordSets:
-		if !validPowerDNSIdentityValue(request.TenantID,512)||request.ZoneID==""||request.Limit==0||request.Limit>1000||len(request.Cursor)>1024||request.Configuration!=nil||request.Zone!=nil||request.Delete!=nil||request.NotifyName!=nil||request.EffectID!=""||len(request.RecordSets)!=0||len(request.TransferPeers)!=0{return ErrPowerDNSDaemonProtocol}
+		if !validPowerDNSIdentityValue(request.TenantID, 512) || request.ZoneID == "" || request.Limit == 0 || request.Limit > 1000 || len(request.Cursor) > 1024 || request.Configuration != nil || request.Zone != nil || request.Delete != nil || request.NotifyName != nil || request.EffectID != "" || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerImportRecordSets:
-		if request.Zone==nil||validatePowerDNSDNSSECZone(*request.Zone)!=nil||!validPowerDNSEffectID(request.EffectID)||len(request.RecordSets)==0||len(request.RecordSets)>10000||request.Configuration!=nil||request.Delete!=nil||request.NotifyName!=nil||request.TenantID!=""||request.ZoneID!=""||request.Limit!=0||request.Cursor!=""||len(request.TransferPeers)!=0{return ErrPowerDNSDaemonProtocol};for _,set:=range request.RecordSets{if set.ZoneID!=request.Zone.ID||set.Validate(request.Zone.Name)!=nil{return ErrPowerDNSDaemonProtocol}}
-	case PowerDNSBrokerPresentACMETXT,PowerDNSBrokerRemoveACMETXT:
-		owner,err:=ParseName(request.ACMEOwner);if err!=nil||!strings.HasPrefix(owner.String(),"_acme-challenge.")||!validPowerDNSIdentityValue(request.TenantID,512)||!validPowerDNSEffectID(request.EffectID)||request.ACMEValue==""||len(request.ACMEValue)>128||request.Configuration!=nil||request.Zone!=nil||request.Delete!=nil||request.NotifyName!=nil||request.ZoneID!=""||request.Limit!=0||request.Cursor!=""||len(request.RecordSets)!=0||len(request.TransferPeers)!=0{return ErrPowerDNSDaemonProtocol}
+		if request.Zone == nil || validatePowerDNSDNSSECZone(*request.Zone) != nil || !validPowerDNSEffectID(request.EffectID) || len(request.RecordSets) == 0 || len(request.RecordSets) > 10000 || request.Configuration != nil || request.Delete != nil || request.NotifyName != nil || request.TenantID != "" || request.ZoneID != "" || request.Limit != 0 || request.Cursor != "" || len(request.TransferPeers) != 0 {
+			return ErrPowerDNSDaemonProtocol
+		}
+		for _, set := range request.RecordSets {
+			if set.ZoneID != request.Zone.ID || set.Validate(request.Zone.Name) != nil {
+				return ErrPowerDNSDaemonProtocol
+			}
+		}
+	case PowerDNSBrokerPresentACMETXT, PowerDNSBrokerRemoveACMETXT:
+		owner, err := ParseName(request.ACMEOwner)
+		if err != nil || !strings.HasPrefix(owner.String(), "_acme-challenge.") || !validPowerDNSIdentityValue(request.TenantID, 512) || !validPowerDNSEffectID(request.EffectID) || request.ACMEValue == "" || len(request.ACMEValue) > 128 || request.Configuration != nil || request.Zone != nil || request.Delete != nil || request.NotifyName != nil || request.ZoneID != "" || request.Limit != 0 || request.Cursor != "" || len(request.RecordSets) != 0 || len(request.TransferPeers) != 0 {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerDNSSECGenerate:
-		if request.Zone==nil||request.DNSSECPolicy==nil||validatePowerDNSDNSSECZone(*request.Zone)!=nil||validateDNSSECPolicy(*request.DNSSECPolicy)!=nil||!validPowerDNSEffectID(request.EffectID)||!emptyPowerDNSBrokerRequestExceptDNSSEC(request)||len(request.DNSSECKeys)!=0||len(request.DNSSECDS)!=0{return ErrPowerDNSDaemonProtocol}
+		if request.Zone == nil || request.DNSSECPolicy == nil || validatePowerDNSDNSSECZone(*request.Zone) != nil || validateDNSSECPolicy(*request.DNSSECPolicy) != nil || !validPowerDNSEffectID(request.EffectID) || !emptyPowerDNSBrokerRequestExceptDNSSEC(request) || len(request.DNSSECKeys) != 0 || len(request.DNSSECDS) != 0 {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerDNSSECRetire:
-		if request.Zone==nil||request.DNSSECPolicy!=nil||validatePowerDNSDNSSECZone(*request.Zone)!=nil||!validPowerDNSEffectID(request.EffectID)||!emptyPowerDNSBrokerRequestExceptDNSSEC(request)||!validPowerDNSDNSSECKeys(request.DNSSECKeys)||len(request.DNSSECDS)!=0{return ErrPowerDNSDaemonProtocol}
+		if request.Zone == nil || request.DNSSECPolicy != nil || validatePowerDNSDNSSECZone(*request.Zone) != nil || !validPowerDNSEffectID(request.EffectID) || !emptyPowerDNSBrokerRequestExceptDNSSEC(request) || !validPowerDNSDNSSECKeys(request.DNSSECKeys) || len(request.DNSSECDS) != 0 {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerDNSSECRemove:
-		if request.Zone==nil||request.DNSSECPolicy!=nil||validatePowerDNSDNSSECZone(*request.Zone)!=nil||!validPowerDNSEffectID(request.EffectID)||!emptyPowerDNSBrokerRequestExceptDNSSEC(request)||len(request.DNSSECKeys)!=0||len(request.DNSSECDS)!=0{return ErrPowerDNSDaemonProtocol}
+		if request.Zone == nil || request.DNSSECPolicy != nil || validatePowerDNSDNSSECZone(*request.Zone) != nil || !validPowerDNSEffectID(request.EffectID) || !emptyPowerDNSBrokerRequestExceptDNSSEC(request) || len(request.DNSSECKeys) != 0 || len(request.DNSSECDS) != 0 {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerDNSSECProve:
-		if request.Zone==nil||request.DNSSECPolicy!=nil||validatePowerDNSDNSSECZone(*request.Zone)!=nil||request.EffectID!=""||!emptyPowerDNSBrokerRequestExceptDNSSEC(request)||!validPowerDNSDNSSECKeys(request.DNSSECKeys)||!validPowerDNSDSRecords(request.DNSSECDS){return ErrPowerDNSDaemonProtocol}
+		if request.Zone == nil || request.DNSSECPolicy != nil || validatePowerDNSDNSSECZone(*request.Zone) != nil || request.EffectID != "" || !emptyPowerDNSBrokerRequestExceptDNSSEC(request) || !validPowerDNSDNSSECKeys(request.DNSSECKeys) || !validPowerDNSDSRecords(request.DNSSECDS) {
+			return ErrPowerDNSDaemonProtocol
+		}
 	default:
 		return ErrPowerDNSDaemonProtocol
 	}
@@ -169,29 +209,29 @@ func validPowerDNSDNSSECKeys(keys []DNSSECKeyDescriptor)bool{if len(keys)==0||le
 func validPowerDNSDSRecords(records []DSRecord)bool{if len(records)==0||len(records)>8{return false};for _,record:=range records{if record.KeyTag==0||record.Algorithm==0||(record.DigestType!=1&&record.DigestType!=2&&record.DigestType!=4)||len(record.Digest)<40||len(record.Digest)>128{ return false };if _,err:=hex.DecodeString(record.Digest);err!=nil{return false}};return true}
 
 type PowerDNSZoneBrokerReceipt struct {
-	Authority AuthorityReceipt `json:"authority"`
-	Rediscover PowerDNSRuntimeReceipt `json:"rediscover"`
-	Notify PowerDNSRuntimeReceipt `json:"notify"`
-	Probe PowerDNSRuntimeReceipt `json:"probe"`
-	DatabaseCommitted bool `json:"database_committed"`
+	Authority         AuthorityReceipt       `json:"authority"`
+	Rediscover        PowerDNSRuntimeReceipt `json:"rediscover"`
+	Notify            PowerDNSRuntimeReceipt `json:"notify"`
+	Probe             PowerDNSRuntimeReceipt `json:"probe"`
+	DatabaseCommitted bool                   `json:"database_committed"`
 }
 
 type PowerDNSBrokerResponse struct {
-	Version uint8 `json:"version"`
-	RequestID string `json:"request_id"`
-	Operation PowerDNSBrokerOperation `json:"operation"`
-	Outcome PowerDNSBrokerOutcome `json:"outcome"`
-	FailureCode string `json:"failure_code,omitempty"`
-	Activation PowerDNSActivationReceipt `json:"activation,omitempty"`
-	Zone PowerDNSZoneBrokerReceipt `json:"zone,omitempty"`
-	Runtime PowerDNSRuntimeReceipt `json:"runtime,omitempty"`
-	ZoneSpec ZoneSpec `json:"zone_spec,omitempty"`
-	Zones []ZoneSpec `json:"zones,omitempty"`
-	RecordSetPage []RecordSet `json:"record_set_page,omitempty"`
-	NextCursor string `json:"next_cursor,omitempty"`
-	DNSSECActivation KeyActivationReceipt `json:"dnssec_activation,omitempty"`
-	DNSSECProof DNSSECProof `json:"dnssec_proof,omitempty"`
-	ObservedAt time.Time `json:"observed_at"`
+	Version          uint8                     `json:"version"`
+	RequestID        string                    `json:"request_id"`
+	Operation        PowerDNSBrokerOperation   `json:"operation"`
+	Outcome          PowerDNSBrokerOutcome     `json:"outcome"`
+	FailureCode      string                    `json:"failure_code,omitempty"`
+	Activation       PowerDNSActivationReceipt `json:"activation,omitempty"`
+	Zone             PowerDNSZoneBrokerReceipt `json:"zone,omitempty"`
+	Runtime          PowerDNSRuntimeReceipt    `json:"runtime,omitempty"`
+	ZoneSpec         ZoneSpec                  `json:"zone_spec,omitempty"`
+	Zones            []ZoneSpec                `json:"zones,omitempty"`
+	RecordSetPage    []RecordSet               `json:"record_set_page,omitempty"`
+	NextCursor       string                    `json:"next_cursor,omitempty"`
+	DNSSECActivation KeyActivationReceipt      `json:"dnssec_activation,omitempty"`
+	DNSSECProof      DNSSECProof               `json:"dnssec_proof,omitempty"`
+	ObservedAt       time.Time                 `json:"observed_at"`
 }
 
 func (response PowerDNSBrokerResponse) Validate(request PowerDNSBrokerRequest, now time.Time) error {
@@ -240,7 +280,16 @@ func (response PowerDNSBrokerResponse) Validate(request PowerDNSBrokerRequest, n
 			return ErrPowerDNSDaemonProtocol
 		}
 	case PowerDNSBrokerImportRecordSets:
-		if response.Zone.DatabaseCommitted{if !validPowerDNSAuthorityReceipt(response.Zone.Authority,request,now)||!validPowerDNSRuntimeReceipt(response.Zone.Rediscover,PowerDNSRediscoverZones,now)||!validPowerDNSRuntimeReceipt(response.Zone.Probe,PowerDNSProbeService,now){return ErrPowerDNSDaemonProtocol};if request.Zone.Mode==ZonePrimary&&!validPowerDNSRuntimeReceipt(response.Zone.Notify,PowerDNSNotifyZone,now){return ErrPowerDNSDaemonProtocol}}else if response.Outcome!=PowerDNSBrokerRejected{return ErrPowerDNSDaemonProtocol}
+		if response.Zone.DatabaseCommitted {
+			if !validPowerDNSAuthorityReceipt(response.Zone.Authority, request, now) || !validPowerDNSRuntimeReceipt(response.Zone.Rediscover, PowerDNSRediscoverZones, now) || !validPowerDNSRuntimeReceipt(response.Zone.Probe, PowerDNSProbeService, now) {
+				return ErrPowerDNSDaemonProtocol
+			}
+			if request.Zone.Mode == ZonePrimary && !validPowerDNSRuntimeReceipt(response.Zone.Notify, PowerDNSNotifyZone, now) {
+				return ErrPowerDNSDaemonProtocol
+			}
+		} else if response.Outcome != PowerDNSBrokerRejected {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerReload:
 		if response.Outcome == PowerDNSBrokerConfirmed && !validSuccessfulPowerDNSRuntime(response.Runtime, PowerDNSReloadService, now) || response.Outcome != PowerDNSBrokerConfirmed && !validOptionalPowerDNSRuntime(response.Runtime, PowerDNSReloadService, now) {
 			return ErrPowerDNSDaemonProtocol
@@ -258,7 +307,9 @@ func (response PowerDNSBrokerResponse) Validate(request PowerDNSBrokerRequest, n
 			return ErrPowerDNSDaemonProtocol
 		}
 	case PowerDNSBrokerGetZone:
-		if response.Outcome==PowerDNSBrokerConfirmed&&(response.ZoneSpec.ID!=request.ZoneID||response.ZoneSpec.TenantID!=request.TenantID||validateZoneSpec(response.ZoneSpec,nil,nil)!=nil){return ErrPowerDNSDaemonProtocol}
+		if response.Outcome == PowerDNSBrokerConfirmed && (response.ZoneSpec.ID != request.ZoneID || response.ZoneSpec.TenantID != request.TenantID || validateZoneSpec(response.ZoneSpec, nil, nil) != nil) {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerObserveZone:
 		if response.Outcome==PowerDNSBrokerConfirmed&&(response.ZoneSpec.ID!=request.ZoneID||response.ZoneSpec.TenantID!=request.TenantID||validateZoneSpec(response.ZoneSpec,nil,nil)!=nil||!validPowerDNSAuthorityReceipt(response.Zone.Authority,request,now)||response.Zone.Authority.Serial==0){return ErrPowerDNSDaemonProtocol}
 	case PowerDNSBrokerConfirmZoneAbsent:
@@ -266,17 +317,45 @@ func (response PowerDNSBrokerResponse) Validate(request PowerDNSBrokerRequest, n
 	case PowerDNSBrokerAdoptZone:
 		if response.Outcome==PowerDNSBrokerConfirmed&&(!response.Zone.DatabaseCommitted||!sameZoneSpec(response.ZoneSpec,*request.Zone)||!validPowerDNSAuthorityReceipt(response.Zone.Authority,request,now)||response.Zone.Authority.Serial==0){return ErrPowerDNSDaemonProtocol}
 	case PowerDNSBrokerListZones:
-		if response.Outcome==PowerDNSBrokerConfirmed{if uint32(len(response.Zones))>request.Limit||len(response.NextCursor)>253{return ErrPowerDNSDaemonProtocol};for _,zone:=range response.Zones{if zone.TenantID!=request.TenantID||validateZoneSpec(zone,nil,nil)!=nil{return ErrPowerDNSDaemonProtocol}}}
+		if response.Outcome == PowerDNSBrokerConfirmed {
+			if uint32(len(response.Zones)) > request.Limit || len(response.NextCursor) > 253 {
+				return ErrPowerDNSDaemonProtocol
+			}
+			for _, zone := range response.Zones {
+				if zone.TenantID != request.TenantID || validateZoneSpec(zone, nil, nil) != nil {
+					return ErrPowerDNSDaemonProtocol
+				}
+			}
+		}
 	case PowerDNSBrokerListRecordSets:
-		if response.Outcome==PowerDNSBrokerConfirmed{if uint32(len(response.RecordSetPage))>request.Limit||len(response.NextCursor)>1024{return ErrPowerDNSDaemonProtocol};for _,set:=range response.RecordSetPage{if set.ZoneID!=request.ZoneID{return ErrPowerDNSDaemonProtocol}}}
-	case PowerDNSBrokerPresentACMETXT,PowerDNSBrokerRemoveACMETXT:
-		if response.Outcome==PowerDNSBrokerConfirmed{if response.Zone.Authority.EffectID!=request.EffectID||response.Zone.Authority.ZoneID==""||response.Zone.Authority.Serial==0||response.Zone.Authority.ObservedAt.IsZero()||!response.Zone.DatabaseCommitted||!validPowerDNSRuntimeReceipt(response.Zone.Notify,PowerDNSNotifyZone,now)||!validPowerDNSRuntimeReceipt(response.Zone.Probe,PowerDNSProbeService,now)||!response.Zone.Notify.Success||!response.Zone.Probe.Success{return ErrPowerDNSDaemonProtocol}}
+		if response.Outcome == PowerDNSBrokerConfirmed {
+			if uint32(len(response.RecordSetPage)) > request.Limit || len(response.NextCursor) > 1024 {
+				return ErrPowerDNSDaemonProtocol
+			}
+			for _, set := range response.RecordSetPage {
+				if set.ZoneID != request.ZoneID {
+					return ErrPowerDNSDaemonProtocol
+				}
+			}
+		}
+	case PowerDNSBrokerPresentACMETXT, PowerDNSBrokerRemoveACMETXT:
+		if response.Outcome == PowerDNSBrokerConfirmed {
+			if response.Zone.Authority.EffectID != request.EffectID || response.Zone.Authority.ZoneID == "" || response.Zone.Authority.Serial == 0 || response.Zone.Authority.ObservedAt.IsZero() || !response.Zone.DatabaseCommitted || !validPowerDNSRuntimeReceipt(response.Zone.Notify, PowerDNSNotifyZone, now) || !validPowerDNSRuntimeReceipt(response.Zone.Probe, PowerDNSProbeService, now) || !response.Zone.Notify.Success || !response.Zone.Probe.Success {
+				return ErrPowerDNSDaemonProtocol
+			}
+		}
 	case PowerDNSBrokerDNSSECGenerate:
-		if response.Outcome==PowerDNSBrokerConfirmed&&!validKeyReceipt(response.DNSSECActivation,request.EffectID){return ErrPowerDNSDaemonProtocol}
-	case PowerDNSBrokerDNSSECRetire,PowerDNSBrokerDNSSECRemove:
-		if response.Outcome==PowerDNSBrokerConfirmed&&response.FailureCode!=""{return ErrPowerDNSDaemonProtocol}
+		if response.Outcome == PowerDNSBrokerConfirmed && !validKeyReceipt(response.DNSSECActivation, request.EffectID) {
+			return ErrPowerDNSDaemonProtocol
+		}
+	case PowerDNSBrokerDNSSECRetire, PowerDNSBrokerDNSSECRemove:
+		if response.Outcome == PowerDNSBrokerConfirmed && response.FailureCode != "" {
+			return ErrPowerDNSDaemonProtocol
+		}
 	case PowerDNSBrokerDNSSECProve:
-		if response.Outcome==PowerDNSBrokerConfirmed&&(!validDNSSECProof(response.DNSSECProof)||response.DNSSECProof.DNSKEYDigest!=digestDNSSECPublicKeys(request.DNSSECKeys)||response.DNSSECProof.DSDigest!=digestPowerDNSDS(request.DNSSECDS)){return ErrPowerDNSDaemonProtocol}
+		if response.Outcome == PowerDNSBrokerConfirmed && (!validDNSSECProof(response.DNSSECProof) || response.DNSSECProof.DNSKEYDigest != digestDNSSECPublicKeys(request.DNSSECKeys) || response.DNSSECProof.DSDigest != digestPowerDNSDS(request.DNSSECDS)) {
+			return ErrPowerDNSDaemonProtocol
+		}
 	}
 	return nil
 }
@@ -287,7 +366,7 @@ type PowerDNSBrokerTransport interface {
 
 type PowerDNSDaemonClient struct {
 	Transport PowerDNSBrokerTransport
-	Now func() time.Time
+	Now       func() time.Time
 }
 
 func NewLocalPowerDNSDaemonClient() *PowerDNSDaemonClient {
@@ -328,8 +407,8 @@ func (client *PowerDNSDaemonClient) request(ctx context.Context, request PowerDN
 	return response, powerDNSBrokerOutcomeError(response)
 }
 
-func (client *PowerDNSDaemonClient) ApplyConfiguration(ctx context.Context, snapshot PowerDNSConfigSnapshot) (PowerDNSActivationReceipt, error) {
-	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerApplyConfiguration, Configuration: &snapshot})
+func (client *PowerDNSDaemonClient) ApplyConfiguration(ctx context.Context, effectID string, snapshot PowerDNSConfigSnapshot) (PowerDNSActivationReceipt, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerApplyConfiguration, EffectID: effectID, Configuration: &snapshot})
 	return response.Activation, err
 }
 
@@ -344,8 +423,8 @@ func (client *PowerDNSDaemonClient) DeleteZone(ctx context.Context, effectID str
 	return response.Zone, err
 }
 
-func (client *PowerDNSDaemonClient) Reload(ctx context.Context) (PowerDNSRuntimeReceipt, error) {
-	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerReload})
+func (client *PowerDNSDaemonClient) Reload(ctx context.Context, effectID string) (PowerDNSRuntimeReceipt, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerReload, EffectID: effectID})
 	return response.Runtime, err
 }
 
@@ -354,47 +433,172 @@ func (client *PowerDNSDaemonClient) Probe(ctx context.Context) (PowerDNSRuntimeR
 	return response.Runtime, err
 }
 
-func (client *PowerDNSDaemonClient) Rediscover(ctx context.Context) (PowerDNSRuntimeReceipt, error) {
-	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerRediscover})
+func (client *PowerDNSDaemonClient) Rediscover(ctx context.Context, effectID string) (PowerDNSRuntimeReceipt, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerRediscover, EffectID: effectID})
 	return response.Runtime, err
 }
 
-func (client *PowerDNSDaemonClient) NotifyZone(ctx context.Context, zone DNSName) (PowerDNSRuntimeReceipt, error) {
-	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerNotifyZone, NotifyName: &zone})
+func (client *PowerDNSDaemonClient) NotifyZone(ctx context.Context, zone DNSName, effectID string) (PowerDNSRuntimeReceipt, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerNotifyZone, EffectID: effectID, NotifyName: &zone})
 	return response.Runtime, err
 }
 
-func (client *PowerDNSDaemonClient) Zone(ctx context.Context,tenant string,id ZoneID)(ZoneSpec,error){response,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerGetZone,TenantID:tenant,ZoneID:id});return response.ZoneSpec,err}
-func(client *PowerDNSDaemonClient)ObserveZone(ctx context.Context,tenant string,id ZoneID,effect string)(ZoneSpec,AuthorityReceipt,error){response,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerObserveZone,TenantID:tenant,ZoneID:id,EffectID:effect});return response.ZoneSpec,response.Zone.Authority,err}
-func(client *PowerDNSDaemonClient)ConfirmZoneAbsent(ctx context.Context,id ZoneID,name DNSName)error{_,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerConfirmZoneAbsent,ZoneID:id,ZoneName:name.String()});return err}
-func(client *PowerDNSDaemonClient)AdoptZone(ctx context.Context,effect string,domainID int64,zone ZoneSpec)(AuthorityReceipt,error){response,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerAdoptZone,EffectID:effect,BackendDomainID:domainID,Zone:&zone});return response.Zone.Authority,err}
-func (client *PowerDNSDaemonClient) ListZones(ctx context.Context,tenant string,limit int,cursor string)([]ZoneSpec,string,error){response,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerListZones,TenantID:tenant,Limit:uint32(limit),Cursor:cursor});return response.Zones,response.NextCursor,err}
-func (client *PowerDNSDaemonClient) ListRecordSets(ctx context.Context,zone ZoneSpec,limit int,cursor string)([]RecordSet,string,error){if zone.ID==""||zone.TenantID==""{return nil,"",ErrInvalidDNS};response,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerListRecordSets,TenantID:zone.TenantID,ZoneID:zone.ID,Limit:uint32(limit),Cursor:cursor});return response.RecordSetPage,response.NextCursor,err}
-func(client *PowerDNSDaemonClient)ImportRecordSets(ctx context.Context,effectID string,zone ZoneSpec,sets []RecordSet,replace bool)(AuthorityReceipt,error){response,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerImportRecordSets,EffectID:effectID,Zone:&zone,RecordSets:sets,Replace:replace});return response.Zone.Authority,err}
-func(client *PowerDNSDaemonClient)MutateACMETXT(ctx context.Context,tenant,owner,value,effectID string,remove bool)(AuthorityReceipt,error){operation:=PowerDNSBrokerPresentACMETXT;if remove{operation=PowerDNSBrokerRemoveACMETXT};response,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:operation,TenantID:tenant,ACMEOwner:owner,ACMEValue:value,EffectID:effectID});return response.Zone.Authority,err}
-func(client *PowerDNSDaemonClient)GenerateAndPublish(ctx context.Context,zone ZoneSpec,policy DNSSECPolicy,effectID string)(KeyActivationReceipt,error){response,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerDNSSECGenerate,Zone:&zone,DNSSECPolicy:&policy,EffectID:effectID});return response.DNSSECActivation,err}
-func(client *PowerDNSDaemonClient)Retire(ctx context.Context,zone ZoneSpec,keys []DNSSECKeyDescriptor,effectID string)error{_,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerDNSSECRetire,Zone:&zone,DNSSECKeys:keys,EffectID:effectID});return err}
-func(client *PowerDNSDaemonClient)Remove(ctx context.Context,zone ZoneSpec,effectID string)error{_,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerDNSSECRemove,Zone:&zone,EffectID:effectID});return err}
-func(client *PowerDNSDaemonClient)Prove(ctx context.Context,zone ZoneSpec,keys []DNSSECKeyDescriptor,records []DSRecord)(DNSSECProof,error){response,err:=client.request(ctx,PowerDNSBrokerRequest{Operation:PowerDNSBrokerDNSSECProve,Zone:&zone,DNSSECKeys:keys,DNSSECDS:records});return response.DNSSECProof,err}
+func (client *PowerDNSDaemonClient) Zone(ctx context.Context, tenant string, id ZoneID) (ZoneSpec, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerGetZone, TenantID: tenant, ZoneID: id})
+	return response.ZoneSpec, err
+}
+func (client *PowerDNSDaemonClient) ObserveZone(ctx context.Context, tenant string, id ZoneID, effect string) (ZoneSpec, AuthorityReceipt, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerObserveZone, TenantID: tenant, ZoneID: id, EffectID: effect})
+	return response.ZoneSpec, response.Zone.Authority, err
+}
+func (client *PowerDNSDaemonClient) ConfirmZoneAbsent(ctx context.Context, id ZoneID, name DNSName) error {
+	_, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerConfirmZoneAbsent, ZoneID: id, ZoneName: name.String()})
+	return err
+}
+func (client *PowerDNSDaemonClient) AdoptZone(ctx context.Context, effect string, domainID int64, zone ZoneSpec) (AuthorityReceipt, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerAdoptZone, EffectID: effect, BackendDomainID: domainID, Zone: &zone})
+	return response.Zone.Authority, err
+}
+func (client *PowerDNSDaemonClient) ListZones(ctx context.Context, tenant string, limit int, cursor string) ([]ZoneSpec, string, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerListZones, TenantID: tenant, Limit: uint32(limit), Cursor: cursor})
+	return response.Zones, response.NextCursor, err
+}
+func (client *PowerDNSDaemonClient) ListRecordSets(ctx context.Context, zone ZoneSpec, limit int, cursor string) ([]RecordSet, string, error) {
+	if zone.ID == "" || zone.TenantID == "" {
+		return nil, "", ErrInvalidDNS
+	}
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerListRecordSets, TenantID: zone.TenantID, ZoneID: zone.ID, Limit: uint32(limit), Cursor: cursor})
+	return response.RecordSetPage, response.NextCursor, err
+}
+func (client *PowerDNSDaemonClient) ImportRecordSets(ctx context.Context, effectID string, zone ZoneSpec, sets []RecordSet, replace bool) (AuthorityReceipt, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerImportRecordSets, EffectID: effectID, Zone: &zone, RecordSets: sets, Replace: replace})
+	return response.Zone.Authority, err
+}
+func (client *PowerDNSDaemonClient) MutateACMETXT(ctx context.Context, tenant, owner, value, effectID string, remove bool) (AuthorityReceipt, error) {
+	operation := PowerDNSBrokerPresentACMETXT
+	if remove {
+		operation = PowerDNSBrokerRemoveACMETXT
+	}
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: operation, TenantID: tenant, ACMEOwner: owner, ACMEValue: value, EffectID: effectID})
+	return response.Zone.Authority, err
+}
+func (client *PowerDNSDaemonClient) GenerateAndPublish(ctx context.Context, zone ZoneSpec, policy DNSSECPolicy, effectID string) (KeyActivationReceipt, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerDNSSECGenerate, Zone: &zone, DNSSECPolicy: &policy, EffectID: effectID})
+	return response.DNSSECActivation, err
+}
+func (client *PowerDNSDaemonClient) Retire(ctx context.Context, zone ZoneSpec, keys []DNSSECKeyDescriptor, effectID string) error {
+	_, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerDNSSECRetire, Zone: &zone, DNSSECKeys: keys, EffectID: effectID})
+	return err
+}
+func (client *PowerDNSDaemonClient) Remove(ctx context.Context, zone ZoneSpec, effectID string) error {
+	_, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerDNSSECRemove, Zone: &zone, EffectID: effectID})
+	return err
+}
+func (client *PowerDNSDaemonClient) Prove(ctx context.Context, zone ZoneSpec, keys []DNSSECKeyDescriptor, records []DSRecord) (DNSSECProof, error) {
+	response, err := client.request(ctx, PowerDNSBrokerRequest{Operation: PowerDNSBrokerDNSSECProve, Zone: &zone, DNSSECKeys: keys, DNSSECDS: records})
+	return response.DNSSECProof, err
+}
 
-type PowerDNSControlClient struct{Daemon *PowerDNSDaemonClient}
-func NewLocalPowerDNSControlClient()*PowerDNSControlClient{return &PowerDNSControlClient{Daemon:NewLocalPowerDNSDaemonClient()}}
-func (client *PowerDNSControlClient)ApplyZone(ctx context.Context,effectID string,spec ZoneSpec,sets []RecordSet,peers []TransferPeerSpec)(AuthorityReceipt,error){if client==nil||client.Daemon==nil{return AuthorityReceipt{},ErrInvalidDNS};receipt,err:=client.Daemon.ApplyZone(ctx,effectID,spec,sets,peers);return receipt.Authority,err}
-func (client *PowerDNSControlClient)DeleteZone(ctx context.Context,effectID string,spec ZoneSpec)(AuthorityReceipt,error){if client==nil||client.Daemon==nil{return AuthorityReceipt{},ErrInvalidDNS};receipt,err:=client.Daemon.DeleteZone(ctx,effectID,spec);return receipt.Authority,err}
-func (client *PowerDNSControlClient)Zone(ctx context.Context,tenant string,id ZoneID)(ZoneSpec,error){if client==nil||client.Daemon==nil{return ZoneSpec{},ErrInvalidDNS};return client.Daemon.Zone(ctx,tenant,id)}
-func(client *PowerDNSControlClient)ObserveZone(ctx context.Context,tenant string,id ZoneID,effect string)(ZoneSpec,AuthorityReceipt,error){if client==nil||client.Daemon==nil{return ZoneSpec{},AuthorityReceipt{},ErrInvalidDNS};return client.Daemon.ObserveZone(ctx,tenant,id,effect)}
-func(client *PowerDNSControlClient)ConfirmZoneAbsent(ctx context.Context,id ZoneID,name DNSName)error{if client==nil||client.Daemon==nil{return ErrInvalidDNS};return client.Daemon.ConfirmZoneAbsent(ctx,id,name)}
-func(client *PowerDNSControlClient)AdoptZone(ctx context.Context,effect string,domainID int64,zone ZoneSpec)(AuthorityReceipt,error){if client==nil||client.Daemon==nil{return AuthorityReceipt{},ErrInvalidDNS};return client.Daemon.AdoptZone(ctx,effect,domainID,zone)}
-func (client *PowerDNSControlClient)ListZones(ctx context.Context,tenant string,limit int,cursor string)([]ZoneSpec,string,error){if client==nil||client.Daemon==nil{return nil,"",ErrInvalidDNS};return client.Daemon.ListZones(ctx,tenant,limit,cursor)}
-func (client *PowerDNSControlClient)ListRecordSets(ctx context.Context,zone ZoneSpec,limit int,cursor string)([]RecordSet,string,error){if client==nil||client.Daemon==nil{return nil,"",ErrInvalidDNS};return client.Daemon.ListRecordSets(ctx,zone,limit,cursor)}
-func(client *PowerDNSControlClient)ImportRecordSets(ctx context.Context,effectID string,zone ZoneSpec,sets []RecordSet,replace bool)(AuthorityReceipt,error){if client==nil||client.Daemon==nil{return AuthorityReceipt{},ErrInvalidDNS};return client.Daemon.ImportRecordSets(ctx,effectID,zone,sets,replace)}
-func(client *PowerDNSControlClient)PresentACMETXT(ctx context.Context,tenant,owner,value,effectID string)error{if client==nil||client.Daemon==nil{return ErrInvalidDNS};_,err:=client.Daemon.MutateACMETXT(ctx,tenant,owner,value,effectID,false);return err}
-func(client *PowerDNSControlClient)RemoveACMETXT(ctx context.Context,tenant,owner,value,effectID string)error{if client==nil||client.Daemon==nil{return ErrInvalidDNS};_,err:=client.Daemon.MutateACMETXT(ctx,tenant,owner,value,effectID,true);return err}
-func(client *PowerDNSControlClient)GenerateAndPublish(ctx context.Context,zone ZoneSpec,policy DNSSECPolicy,effectID string)(KeyActivationReceipt,error){if client==nil||client.Daemon==nil{return KeyActivationReceipt{},ErrInvalidDNS};return client.Daemon.GenerateAndPublish(ctx,zone,policy,effectID)}
-func(client *PowerDNSControlClient)Retire(ctx context.Context,zone ZoneSpec,keys []DNSSECKeyDescriptor,effectID string)error{if client==nil||client.Daemon==nil{return ErrInvalidDNS};return client.Daemon.Retire(ctx,zone,keys,effectID)}
-func(client *PowerDNSControlClient)Remove(ctx context.Context,zone ZoneSpec,effectID string)error{if client==nil||client.Daemon==nil{return ErrInvalidDNS};return client.Daemon.Remove(ctx,zone,effectID)}
-func(client *PowerDNSControlClient)Prove(ctx context.Context,zone ZoneSpec,keys []DNSSECKeyDescriptor,records []DSRecord)(DNSSECProof,error){if client==nil||client.Daemon==nil{return DNSSECProof{},ErrInvalidDNS};return client.Daemon.Prove(ctx,zone,keys,records)}
-var _ TenantZoneBackend=(*PowerDNSControlClient)(nil)
+type PowerDNSControlClient struct{ Daemon *PowerDNSDaemonClient }
+
+func NewLocalPowerDNSControlClient() *PowerDNSControlClient {
+	return &PowerDNSControlClient{Daemon: NewLocalPowerDNSDaemonClient()}
+}
+func (client *PowerDNSControlClient) ApplyZone(ctx context.Context, effectID string, spec ZoneSpec, sets []RecordSet, peers []TransferPeerSpec) (AuthorityReceipt, error) {
+	if client == nil || client.Daemon == nil {
+		return AuthorityReceipt{}, ErrInvalidDNS
+	}
+	receipt, err := client.Daemon.ApplyZone(ctx, effectID, spec, sets, peers)
+	return receipt.Authority, err
+}
+func (client *PowerDNSControlClient) DeleteZone(ctx context.Context, effectID string, spec ZoneSpec) (AuthorityReceipt, error) {
+	if client == nil || client.Daemon == nil {
+		return AuthorityReceipt{}, ErrInvalidDNS
+	}
+	receipt, err := client.Daemon.DeleteZone(ctx, effectID, spec)
+	return receipt.Authority, err
+}
+func (client *PowerDNSControlClient) Zone(ctx context.Context, tenant string, id ZoneID) (ZoneSpec, error) {
+	if client == nil || client.Daemon == nil {
+		return ZoneSpec{}, ErrInvalidDNS
+	}
+	return client.Daemon.Zone(ctx, tenant, id)
+}
+func (client *PowerDNSControlClient) ObserveZone(ctx context.Context, tenant string, id ZoneID, effect string) (ZoneSpec, AuthorityReceipt, error) {
+	if client == nil || client.Daemon == nil {
+		return ZoneSpec{}, AuthorityReceipt{}, ErrInvalidDNS
+	}
+	return client.Daemon.ObserveZone(ctx, tenant, id, effect)
+}
+func (client *PowerDNSControlClient) ConfirmZoneAbsent(ctx context.Context, id ZoneID, name DNSName) error {
+	if client == nil || client.Daemon == nil {
+		return ErrInvalidDNS
+	}
+	return client.Daemon.ConfirmZoneAbsent(ctx, id, name)
+}
+func (client *PowerDNSControlClient) AdoptZone(ctx context.Context, effect string, domainID int64, zone ZoneSpec) (AuthorityReceipt, error) {
+	if client == nil || client.Daemon == nil {
+		return AuthorityReceipt{}, ErrInvalidDNS
+	}
+	return client.Daemon.AdoptZone(ctx, effect, domainID, zone)
+}
+func (client *PowerDNSControlClient) ListZones(ctx context.Context, tenant string, limit int, cursor string) ([]ZoneSpec, string, error) {
+	if client == nil || client.Daemon == nil {
+		return nil, "", ErrInvalidDNS
+	}
+	return client.Daemon.ListZones(ctx, tenant, limit, cursor)
+}
+func (client *PowerDNSControlClient) ListRecordSets(ctx context.Context, zone ZoneSpec, limit int, cursor string) ([]RecordSet, string, error) {
+	if client == nil || client.Daemon == nil {
+		return nil, "", ErrInvalidDNS
+	}
+	return client.Daemon.ListRecordSets(ctx, zone, limit, cursor)
+}
+func (client *PowerDNSControlClient) ImportRecordSets(ctx context.Context, effectID string, zone ZoneSpec, sets []RecordSet, replace bool) (AuthorityReceipt, error) {
+	if client == nil || client.Daemon == nil {
+		return AuthorityReceipt{}, ErrInvalidDNS
+	}
+	return client.Daemon.ImportRecordSets(ctx, effectID, zone, sets, replace)
+}
+func (client *PowerDNSControlClient) PresentACMETXT(ctx context.Context, tenant, owner, value, effectID string) error {
+	if client == nil || client.Daemon == nil {
+		return ErrInvalidDNS
+	}
+	_, err := client.Daemon.MutateACMETXT(ctx, tenant, owner, value, effectID, false)
+	return err
+}
+func (client *PowerDNSControlClient) RemoveACMETXT(ctx context.Context, tenant, owner, value, effectID string) error {
+	if client == nil || client.Daemon == nil {
+		return ErrInvalidDNS
+	}
+	_, err := client.Daemon.MutateACMETXT(ctx, tenant, owner, value, effectID, true)
+	return err
+}
+func (client *PowerDNSControlClient) GenerateAndPublish(ctx context.Context, zone ZoneSpec, policy DNSSECPolicy, effectID string) (KeyActivationReceipt, error) {
+	if client == nil || client.Daemon == nil {
+		return KeyActivationReceipt{}, ErrInvalidDNS
+	}
+	return client.Daemon.GenerateAndPublish(ctx, zone, policy, effectID)
+}
+func (client *PowerDNSControlClient) Retire(ctx context.Context, zone ZoneSpec, keys []DNSSECKeyDescriptor, effectID string) error {
+	if client == nil || client.Daemon == nil {
+		return ErrInvalidDNS
+	}
+	return client.Daemon.Retire(ctx, zone, keys, effectID)
+}
+func (client *PowerDNSControlClient) Remove(ctx context.Context, zone ZoneSpec, effectID string) error {
+	if client == nil || client.Daemon == nil {
+		return ErrInvalidDNS
+	}
+	return client.Daemon.Remove(ctx, zone, effectID)
+}
+func (client *PowerDNSControlClient) Prove(ctx context.Context, zone ZoneSpec, keys []DNSSECKeyDescriptor, records []DSRecord) (DNSSECProof, error) {
+	if client == nil || client.Daemon == nil {
+		return DNSSECProof{}, ErrInvalidDNS
+	}
+	return client.Daemon.Prove(ctx, zone, keys, records)
+}
+var _ TenantZoneBackend = (*PowerDNSControlClient)(nil)
 
 type PowerDNSUnixDialer struct{}
 
@@ -582,14 +786,15 @@ func validatePowerDNSBrokerDirectory(directory string) error {
 }
 
 type PowerDNSDaemonServer struct {
-	Host *LinuxPowerDNSHost
-	Authority *SecuredPowerDNSAuthority
-	Peer *PowerDNSDaemonPeerPolicy
+	Host              *LinuxPowerDNSHost
+	Authority         *SecuredPowerDNSAuthority
+	Peer              *PowerDNSDaemonPeerPolicy
+	Admission         rebootcontrol.ExecutionAdmission
 	MaximumConcurrent uint32
-	Now func() time.Time
-	once sync.Once
-	semaphore chan struct{}
-	operationMu sync.Mutex
+	Now               func() time.Time
+	once              sync.Once
+	semaphore         chan struct{}
+	operationMu       sync.Mutex
 }
 
 func NewPowerDNSDaemonServer(host *LinuxPowerDNSHost, authority *SecuredPowerDNSAuthority, peer *PowerDNSDaemonPeerPolicy) (*PowerDNSDaemonServer, error) {
@@ -600,13 +805,11 @@ func NewPowerDNSDaemonServer(host *LinuxPowerDNSHost, authority *SecuredPowerDNS
 }
 
 func (server *PowerDNSDaemonServer) Serve(listener net.Listener) error {
-	if server == nil || server.Host == nil || server.Authority == nil || server.Peer == nil || listener == nil {
+	if server == nil || server.Host == nil || server.Peer == nil || listener == nil {
 		return ErrInvalidDNS
 	}
-	identity := server.Authority.DatabaseIdentity()
-	if identity.Purpose != PowerDNSAuthoritativePurpose || !powerDNSSHA256(identity.Fingerprint) {
-		return ErrPowerDNSDatabaseIsolation
-	}
+	// The listener may serve host observations while authority bootstrap is
+	// deferred by a closed reboot epoch. Authority publication uses operationMu.
 	server.once.Do(func() {
 		maximum := server.MaximumConcurrent
 		if maximum == 0 {
@@ -653,12 +856,136 @@ func (server *PowerDNSDaemonServer) serve(connection net.Conn) {
 	defer cancel()
 	server.operationMu.Lock()
 	defer server.operationMu.Unlock()
+	mutation := true
+	switch request.Operation {
+	case PowerDNSBrokerProbe, PowerDNSBrokerGetZone, PowerDNSBrokerObserveZone, PowerDNSBrokerConfirmZoneAbsent, PowerDNSBrokerListZones, PowerDNSBrokerListRecordSets, PowerDNSBrokerDNSSECProve:
+		mutation = false
+	}
+	var lease rebootcontrol.ExecutionLease
+	if mutation {
+		if server.Admission == nil {
+			return
+		}
+		canonical := request
+		canonical.RequestID = ""
+		canonical.Deadline = time.Time{}
+		digest := rebootcontrol.ExecutionDigest(canonical)
+		effectID := request.EffectID
+		tenant, zone, node := request.TenantID, request.ZoneID, ""
+		if request.Zone != nil {
+			tenant, zone = request.Zone.TenantID, request.Zone.ID
+		}
+		if request.Delete != nil {
+			tenant, zone = request.Delete.TenantID, request.Delete.ID
+		}
+		if request.Configuration != nil {
+			node = request.Configuration.NodeID
+		}
+		binding := rebootcontrol.ExecutionBinding{Boundary: "powerdns", Method: string(request.Operation), EffectID: effectID, RequestDigest: digest, Caller: "authenticated-panel-core", Resource: rebootcontrol.ExecutionResource(struct {
+			Tenant               string
+			Zone                 ZoneID
+			Node, Owner, Payload string
+		}{tenant, zone, node, request.ACMEOwner, digest})}
+		var err error
+		lease, err = server.Admission.AdmitExecution(ctx, binding)
+		if err != nil {
+			return
+		}
+		if len(lease.Cached) != 0 {
+			var cached PowerDNSBrokerResponse
+			if json.Unmarshal(lease.Cached, &cached) == nil {
+				cached.RequestID = request.RequestID
+				if terminalPowerDNSResponse(server, request, cached, time.Now().UTC()) {
+					_ = writePowerDNSBrokerFrame(connection, powerDNSWireReply{Response: cached})
+				}
+			}
+			return
+		}
+		defer func() { _ = rebootcontrol.SettleExecution(server.Admission, lease, false, nil) }()
+	}
 	response := server.dispatch(ctx, request)
 	if response.Validate(request, time.Now().UTC()) != nil {
 		_ = writePowerDNSBrokerFrame(connection, powerDNSWireReply{ProtocolError: "invalid_response"})
 		return
 	}
+	if mutation && rebootcontrol.SettleExecution(server.Admission, lease, terminalPowerDNSResponse(server, request, response, time.Now().UTC()), response) != nil {
+		return
+	}
 	_ = writePowerDNSBrokerFrame(connection, powerDNSWireReply{Response: response})
+}
+
+func (server *PowerDNSDaemonServer) SetAuthority(authority *SecuredPowerDNSAuthority) error {
+	if authority == nil || authority.DatabaseIdentity().Purpose != PowerDNSAuthoritativePurpose || !powerDNSSHA256(authority.DatabaseIdentity().Fingerprint) {
+		return ErrPowerDNSDatabaseIsolation
+	}
+	server.operationMu.Lock()
+	defer server.operationMu.Unlock()
+	server.Authority = authority
+	return nil
+}
+
+// ReconcileStartup is called only by the local composition, with the raw gate
+// (not its startup-readiness wrapper). The exact snapshot identity is stable
+// across process and host restarts, so a partial activation cannot be retried
+// under a fresh boot identity.
+func (server *PowerDNSDaemonServer) ReconcileStartup(ctx context.Context, admission rebootcontrol.ExecutionAdmission, snapshot PowerDNSConfigSnapshot) error {
+	server.operationMu.Lock()
+	defer server.operationMu.Unlock()
+	if admission == nil || server.Authority == nil || snapshot.Validate(server.Host.ControlDatabaseFingerprint) != nil {
+		return ErrPowerDNSDaemonOperation
+	}
+	digest := rebootcontrol.ExecutionDigest(snapshot)
+	lease, err := admission.AdmitExecution(ctx, rebootcontrol.ExecutionBinding{Boundary: "powerdns", Method: "startup_configuration", EffectID: digest, RequestDigest: digest, Caller: "panel-execd-startup", Resource: rebootcontrol.ExecutionResource(struct {
+		Node     string
+		Database PowerDNSDatabaseBinding
+		Snapshot string
+	}{snapshot.NodeID, snapshot.Database, digest})})
+	if err != nil {
+		return err
+	}
+	if len(lease.Cached) != 0 {
+		var receipt PowerDNSActivationReceipt
+		if json.Unmarshal(lease.Cached, &receipt) != nil || !validStartupPowerDNSActivation(server, receipt, snapshot, time.Now().UTC()) {
+			return ErrPowerDNSDaemonProtocol
+		}
+		probe, probeErr := server.Host.Probe(ctx)
+		if probeErr != nil || !validSuccessfulPowerDNSRuntime(probe, PowerDNSProbeService, time.Now().UTC()) || probe.GenerationID != receipt.GenerationID {
+			return errors.Join(ErrPowerDNSDaemonOperation, probeErr)
+		}
+		return nil
+	}
+	defer func() { _ = rebootcontrol.SettleExecution(admission, lease, false, nil) }()
+	receipt, err := server.Host.ApplyConfiguration(ctx, snapshot)
+	terminal := err == nil && validStartupPowerDNSActivation(server, receipt, snapshot, time.Now().UTC())
+	if settleErr := rebootcontrol.SettleExecution(admission, lease, terminal, receipt); settleErr != nil {
+		return settleErr
+	}
+	if !terminal {
+		return errors.Join(ErrPowerDNSDaemonOperation, err)
+	}
+	return nil
+}
+
+func terminalPowerDNSResponse(server *PowerDNSDaemonServer, request PowerDNSBrokerRequest, response PowerDNSBrokerResponse, now time.Time) bool {
+	if response.Outcome != PowerDNSBrokerConfirmed || response.Validate(request, now) != nil {
+		return false
+	}
+	if request.Operation == PowerDNSBrokerApplyConfiguration {
+		return validStartupPowerDNSActivation(server, response.Activation, *request.Configuration, now)
+	}
+	return true
+}
+
+func validStartupPowerDNSActivation(server *PowerDNSDaemonServer, receipt PowerDNSActivationReceipt, snapshot PowerDNSConfigSnapshot, now time.Time) bool {
+	if server == nil || server.Host == nil || !validPowerDNSActivationReceipt(receipt, snapshot, now) {
+		return false
+	}
+	canonical, err := snapshot.canonical(server.Host.ControlDatabaseFingerprint)
+	if err != nil {
+		return false
+	}
+	expected := rebootcontrol.ExecutionDigest(canonical)
+	return receipt.SnapshotDigest == expected && receipt.GenerationDigest == expected && strings.Contains(receipt.GenerationID, "-"+expected[:12]+"-")
 }
 
 func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerDNSBrokerRequest) PowerDNSBrokerResponse {
@@ -667,6 +994,11 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 		response.ObservedAt = server.Now().UTC()
 	}
 	var err error
+	if server.Authority == nil && request.Operation != PowerDNSBrokerProbe && request.Operation != PowerDNSBrokerDNSSECProve {
+		response.Outcome = PowerDNSBrokerRejected
+		response.FailureCode = "operation_failed"
+		return response
+	}
 	switch request.Operation {
 	case PowerDNSBrokerApplyConfiguration:
 		identity := server.Authority.DatabaseIdentity()
@@ -713,7 +1045,7 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 	case PowerDNSBrokerNotifyZone:
 		response.Runtime, err = server.Host.NotifyZone(ctx, *request.NotifyName)
 	case PowerDNSBrokerGetZone:
-		response.ZoneSpec,err=server.Authority.Zone(ctx,request.TenantID,request.ZoneID)
+		response.ZoneSpec, err = server.Authority.Zone(ctx, request.TenantID, request.ZoneID)
 	case PowerDNSBrokerObserveZone:
 		response.ZoneSpec,response.Zone.Authority,err=server.Authority.ObserveZone(ctx,request.TenantID,request.ZoneID,request.EffectID)
 	case PowerDNSBrokerConfirmZoneAbsent:
@@ -721,22 +1053,51 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 	case PowerDNSBrokerAdoptZone:
 		response.Zone.Authority,err=server.Authority.AdoptZone(ctx,request.EffectID,request.BackendDomainID,*request.Zone);if err==nil{response.Zone.DatabaseCommitted=true;response.ZoneSpec,_,err=server.Authority.ObserveZone(ctx,request.Zone.TenantID,request.Zone.ID,request.EffectID)}
 	case PowerDNSBrokerListZones:
-		response.Zones,response.NextCursor,err=server.Authority.ListZones(ctx,request.TenantID,int(request.Limit),request.Cursor)
+		response.Zones, response.NextCursor, err = server.Authority.ListZones(ctx, request.TenantID, int(request.Limit), request.Cursor)
 	case PowerDNSBrokerListRecordSets:
-		var zone ZoneSpec;zone,err=server.Authority.Zone(ctx,request.TenantID,request.ZoneID);if err==nil{response.RecordSetPage,response.NextCursor,err=server.Authority.ListRecordSets(ctx,zone,int(request.Limit),request.Cursor)}
+		var zone ZoneSpec
+		zone, err = server.Authority.Zone(ctx, request.TenantID, request.ZoneID)
+		if err == nil {
+			response.RecordSetPage, response.NextCursor, err = server.Authority.ListRecordSets(ctx, zone, int(request.Limit), request.Cursor)
+		}
 	case PowerDNSBrokerImportRecordSets:
-		response.Zone.Authority,err=server.Authority.ImportRecordSets(ctx,request.EffectID,*request.Zone,request.RecordSets,request.Replace);if err==nil{response.Zone.DatabaseCommitted=true;response.Zone.Rediscover,err=server.Host.Rediscover(ctx);response.Zone.Rediscover=completePowerDNSRuntimeReceipt(response.Zone.Rediscover,PowerDNSRediscoverZones,err,response.ObservedAt);var notifyErr error;if request.Zone.Mode==ZonePrimary{response.Zone.Notify,notifyErr=server.Host.NotifyZone(ctx,request.Zone.Name);response.Zone.Notify=completePowerDNSRuntimeReceipt(response.Zone.Notify,PowerDNSNotifyZone,notifyErr,response.ObservedAt)};response.Zone.Probe,probeErr:=server.Host.Probe(ctx);response.Zone.Probe=completePowerDNSRuntimeReceipt(response.Zone.Probe,PowerDNSProbeService,probeErr,response.ObservedAt);err=errors.Join(err,notifyErr,probeErr)}
-	case PowerDNSBrokerPresentACMETXT,PowerDNSBrokerRemoveACMETXT:
-		response.Zone.Authority,err=server.Authority.MutateACMETXT(ctx,request.EffectID,request.TenantID,request.ACMEOwner,request.ACMEValue,request.Operation==PowerDNSBrokerRemoveACMETXT)
-		if err==nil{response.Zone.DatabaseCommitted=true;zone,zoneErr:=server.Authority.Zone(ctx,request.TenantID,response.Zone.Authority.ZoneID);if zoneErr!=nil{err=zoneErr}else{response.Zone.Notify,zoneErr=server.Host.NotifyZone(ctx,zone.Name);response.Zone.Notify=completePowerDNSRuntimeReceipt(response.Zone.Notify,PowerDNSNotifyZone,zoneErr,response.ObservedAt);response.Zone.Probe,probeErr:=server.Host.Probe(ctx);response.Zone.Probe=completePowerDNSRuntimeReceipt(response.Zone.Probe,PowerDNSProbeService,probeErr,response.ObservedAt);err=errors.Join(zoneErr,probeErr)}}
+		response.Zone.Authority, err = server.Authority.ImportRecordSets(ctx, request.EffectID, *request.Zone, request.RecordSets, request.Replace)
+		if err == nil {
+			response.Zone.DatabaseCommitted = true
+			response.Zone.Rediscover, err = server.Host.Rediscover(ctx)
+			response.Zone.Rediscover = completePowerDNSRuntimeReceipt(response.Zone.Rediscover, PowerDNSRediscoverZones, err, response.ObservedAt)
+			var notifyErr error
+			if request.Zone.Mode == ZonePrimary {
+				response.Zone.Notify, notifyErr = server.Host.NotifyZone(ctx, request.Zone.Name)
+				response.Zone.Notify = completePowerDNSRuntimeReceipt(response.Zone.Notify, PowerDNSNotifyZone, notifyErr, response.ObservedAt)
+			}
+			response.Zone.Probe, probeErr := server.Host.Probe(ctx)
+			response.Zone.Probe = completePowerDNSRuntimeReceipt(response.Zone.Probe, PowerDNSProbeService, probeErr, response.ObservedAt)
+			err = errors.Join(err, notifyErr, probeErr)
+		}
+	case PowerDNSBrokerPresentACMETXT, PowerDNSBrokerRemoveACMETXT:
+		response.Zone.Authority, err = server.Authority.MutateACMETXT(ctx, request.EffectID, request.TenantID, request.ACMEOwner, request.ACMEValue, request.Operation == PowerDNSBrokerRemoveACMETXT)
+		if err == nil {
+			response.Zone.DatabaseCommitted = true
+			zone, zoneErr := server.Authority.Zone(ctx, request.TenantID, response.Zone.Authority.ZoneID)
+			if zoneErr != nil {
+				err = zoneErr
+			} else {
+				response.Zone.Notify, zoneErr = server.Host.NotifyZone(ctx, zone.Name)
+				response.Zone.Notify = completePowerDNSRuntimeReceipt(response.Zone.Notify, PowerDNSNotifyZone, zoneErr, response.ObservedAt)
+				response.Zone.Probe, probeErr := server.Host.Probe(ctx)
+				response.Zone.Probe = completePowerDNSRuntimeReceipt(response.Zone.Probe, PowerDNSProbeService, probeErr, response.ObservedAt)
+				err = errors.Join(zoneErr, probeErr)
+			}
+		}
 	case PowerDNSBrokerDNSSECGenerate:
-		response.DNSSECActivation,err=server.Host.GenerateAndPublishDNSSEC(ctx,*request.Zone,*request.DNSSECPolicy,request.EffectID)
+		response.DNSSECActivation, err = server.Host.GenerateAndPublishDNSSEC(ctx, *request.Zone, *request.DNSSECPolicy, request.EffectID)
 	case PowerDNSBrokerDNSSECRetire:
-		err=server.Host.RetireDNSSEC(ctx,*request.Zone,request.DNSSECKeys,request.EffectID)
+		err = server.Host.RetireDNSSEC(ctx, *request.Zone, request.DNSSECKeys, request.EffectID)
 	case PowerDNSBrokerDNSSECRemove:
-		err=server.Host.RemoveDNSSEC(ctx,*request.Zone,request.EffectID)
+		err = server.Host.RemoveDNSSEC(ctx, *request.Zone, request.EffectID)
 	case PowerDNSBrokerDNSSECProve:
-		response.DNSSECProof,err=server.Host.ProveDNSSEC(ctx,*request.Zone,request.DNSSECKeys,request.DNSSECDS)
+		response.DNSSECProof, err = server.Host.ProveDNSSEC(ctx, *request.Zone, request.DNSSECKeys, request.DNSSECDS)
 	default:
 		err = ErrPowerDNSDaemonProtocol
 	}
@@ -746,8 +1107,8 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 	}
 	response.FailureCode = powerDNSBrokerFailureCode(err)
 	configurationMayBeActive := request.Operation == PowerDNSBrokerApplyConfiguration && !response.Activation.RolledBack && (response.Activation.Reload.Operation != "" || response.Activation.Probe.Operation != "")
-	dnssecMayHaveChanged:=request.Operation==PowerDNSBrokerDNSSECGenerate||request.Operation==PowerDNSBrokerDNSSECRetire||request.Operation==PowerDNSBrokerDNSSECRemove
-	if configurationMayBeActive || dnssecMayHaveChanged || (request.Operation == PowerDNSBrokerApplyZone || request.Operation == PowerDNSBrokerDeleteZone || request.Operation==PowerDNSBrokerImportRecordSets||request.Operation==PowerDNSBrokerAdoptZone) && response.Zone.DatabaseCommitted {
+	dnssecMayHaveChanged := request.Operation == PowerDNSBrokerDNSSECGenerate || request.Operation == PowerDNSBrokerDNSSECRetire || request.Operation == PowerDNSBrokerDNSSECRemove
+	if configurationMayBeActive || dnssecMayHaveChanged || (request.Operation == PowerDNSBrokerApplyZone || request.Operation == PowerDNSBrokerDeleteZone || request.Operation == PowerDNSBrokerImportRecordSets || request.Operation == PowerDNSBrokerAdoptZone) && response.Zone.DatabaseCommitted {
 		response.Outcome = PowerDNSBrokerUnknown
 	} else {
 		response.Outcome = PowerDNSBrokerRejected
@@ -756,8 +1117,8 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 }
 
 type powerDNSWireReply struct {
-	Response PowerDNSBrokerResponse `json:"response"`
-	ProtocolError string `json:"protocol_error,omitempty"`
+	Response      PowerDNSBrokerResponse `json:"response"`
+	ProtocolError string                 `json:"protocol_error,omitempty"`
 }
 
 func writePowerDNSBrokerFrame(writer io.Writer, value any) error {

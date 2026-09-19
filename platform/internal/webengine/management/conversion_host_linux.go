@@ -676,8 +676,7 @@ func (host *LinuxLifecycleHost) conversionWatchdog(effect string, deadline time.
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	_, _ = host.rollbackEdition(ctx)
-	host.releaseConfiguration()
+	_ = host.recoverEditionConversion(ctx)
 }
 
 func installConversionGeneration(ctx context.Context, input lifecycleGenerationInput) error {

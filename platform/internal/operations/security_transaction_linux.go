@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 const securityRollbackWindow = 6 * time.Minute
@@ -48,9 +50,9 @@ type securityRollbackLease struct {
 	EffectID               string                    `json:"effect_id"`
 	RequestDigest          string                    `json:"request_digest"`
 	Kind                   ResourceKind              `json:"kind"`
-	Candidate              securityActiveGeneration `json:"candidate"`
+	Candidate              securityActiveGeneration  `json:"candidate"`
 	Previous               *securityActiveGeneration `json:"previous,omitempty"`
-	Snapshots              []operationsFileSnapshot `json:"snapshots"`
+	Snapshots              []operationsFileSnapshot  `json:"snapshots"`
 	PreviousRuntimePresent bool                      `json:"previous_runtime_present"`
 	PreviousSSHPorts       []uint16                  `json:"previous_ssh_ports,omitempty"`
 	State                  securityLeaseState        `json:"state"`
@@ -59,6 +61,12 @@ type securityRollbackLease struct {
 	Activation             *ActivationEvidence       `json:"activation,omitempty"`
 	RollbackProofDigest    string                    `json:"rollback_proof_digest,omitempty"`
 	FailureCode            string                    `json:"failure_code,omitempty"`
+}
+
+type securityRecoveryReceipt struct {
+	EffectID    string `json:"effect_id"`
+	LeaseID     string `json:"lease_id"`
+	ProofDigest string `json:"proof_digest"`
 }
 
 func securityDirectoryName(kind ResourceKind) (string, error) {
@@ -400,11 +408,20 @@ func (executor *LinuxOperationsExecutor) scheduleSecurityRollback(effectID strin
 			defer timer.Stop()
 			<-timer.C
 		}
-		executor.mu.Lock()
-		defer executor.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		_ = executor.rollbackSecurityLease(ctx, effectID)
+		for {
+			executor.mu.Lock()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			err := executor.rollbackSecurityLease(ctx, effectID)
+			cancel()
+			executor.mu.Unlock()
+			if err == nil || !errors.Is(err, rebootcontrol.ErrConflict) {
+				return
+			}
+			// Admission denial changes no lease state. Retry the same durable
+			// identity after closure; ambiguous admitted effects never replay.
+			timer := time.NewTimer(30 * time.Second)
+			<-timer.C
+		}
 	}()
 }
 
@@ -412,11 +429,12 @@ func (executor *LinuxOperationsExecutor) scheduleSecurityRollback(effectID strin
 // the privileged broker accepts new work. A restart is conservatively treated
 // as loss of the validating path; wall clock can never extend the lease.
 func (executor *LinuxOperationsExecutor) ResumeSecurityWatchdogs(ctx context.Context) error {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
 	entries, err := os.ReadDir(filepath.Join(executor.stateRoot, "security", "leases"))
 	if err != nil {
 		return err
 	}
-	var joined error
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -424,14 +442,15 @@ func (executor *LinuxOperationsExecutor) ResumeSecurityWatchdogs(ctx context.Con
 		effectID := strings.TrimSuffix(entry.Name(), ".json")
 		lease, found, loadErr := executor.loadSecurityLease(effectID)
 		if loadErr != nil {
-			joined = errors.Join(joined, loadErr)
-			continue
+			return loadErr
 		}
-		if found && (lease.State == securityLeaseArmed || lease.State == securityLeaseRollingBack || lease.State == securityLeaseAmbiguous) {
-			joined = errors.Join(joined, executor.rollbackSecurityLease(ctx, effectID))
+		if found && (lease.State == securityLeaseArmed || lease.State == securityLeaseRollingBack || lease.State == securityLeaseAmbiguous || lease.State == securityLeaseRolledBack) {
+			if err = executor.rollbackSecurityLease(ctx, effectID); err != nil {
+				return err
+			}
 		}
 	}
-	return joined
+	return nil
 }
 
 func (executor *LinuxOperationsExecutor) rollbackSecurityLease(ctx context.Context, effectID string) error {
@@ -439,8 +458,43 @@ func (executor *LinuxOperationsExecutor) rollbackSecurityLease(ctx context.Conte
 	if err != nil || !found {
 		return errors.Join(ErrCompensationFailed, err)
 	}
-	if lease.State == securityLeaseConfirmed || lease.State == securityLeaseRolledBack {
+	if lease.State == securityLeaseConfirmed {
 		return nil
+	}
+	if lease.State != securityLeaseArmed && lease.State != securityLeaseRollingBack && lease.State != securityLeaseAmbiguous && lease.State != securityLeaseRolledBack {
+		return ErrCompensationFailed
+	}
+	if executor.admission == nil {
+		return rebootcontrol.ErrConflict
+	}
+	canonical := lease
+	canonical.State = ""
+	canonical.FailureCode = ""
+	canonical.RollbackProofDigest = ""
+	digest := rebootcontrol.ExecutionDigest(canonical)
+	admitted, err := executor.admission.AdmitExecution(ctx, rebootcontrol.ExecutionBinding{Boundary: "operations-recovery", Method: "security_rollback", EffectID: lease.LeaseID, RequestDigest: digest, Caller: "panel-execd-recovery", Resource: rebootcontrol.ExecutionResource(struct {
+		Kind       ResourceKind
+		Resource   ResourceID
+		Generation uint64
+		Request    string
+	}{lease.Kind, lease.Candidate.ResourceID, lease.Candidate.Generation, lease.RequestDigest})})
+	if err != nil {
+		return err
+	}
+	if len(admitted.Cached) != 0 {
+		var receipt securityRecoveryReceipt
+		if json.Unmarshal(admitted.Cached, &receipt) != nil || !validSecurityRecoveryReceipt(lease, effectID, receipt) {
+			return rebootcontrol.ErrIntegrity
+		}
+		return nil
+	}
+	defer func() { _ = rebootcontrol.SettleExecution(executor.admission, admitted, false, nil) }()
+	if lease.State == securityLeaseRolledBack {
+		receipt := securityRecoveryReceipt{EffectID: effectID, LeaseID: lease.LeaseID, ProofDigest: lease.RollbackProofDigest}
+		if !validSecurityRecoveryReceipt(lease, effectID, receipt) {
+			return ErrCompensationFailed
+		}
+		return rebootcontrol.SettleExecution(executor.admission, admitted, true, receipt)
 	}
 	lease.State = securityLeaseRollingBack
 	if err = executor.storeSecurityLease(lease); err != nil {
@@ -469,7 +523,22 @@ func (executor *LinuxOperationsExecutor) rollbackSecurityLease(ctx context.Conte
 	lease.State = securityLeaseRolledBack
 	lease.FailureCode = ""
 	lease.RollbackProofDigest = digestBytes(append([]byte(snapshotProof(lease.Snapshots)+"\x00"), proof...))
-	return executor.storeSecurityLease(lease)
+	if err = executor.storeSecurityLease(lease); err != nil {
+		return err
+	}
+	stored, storedFound, loadErr := executor.loadSecurityLease(effectID)
+	if loadErr != nil || !storedFound {
+		return errors.Join(ErrCompensationFailed, loadErr)
+	}
+	receipt := securityRecoveryReceipt{EffectID: effectID, LeaseID: stored.LeaseID, ProofDigest: stored.RollbackProofDigest}
+	if !validSecurityRecoveryReceipt(stored, effectID, receipt) {
+		return ErrCompensationFailed
+	}
+	return rebootcontrol.SettleExecution(executor.admission, admitted, true, receipt)
+}
+
+func validSecurityRecoveryReceipt(lease securityRollbackLease, effectID string, receipt securityRecoveryReceipt) bool {
+	return lease.State == securityLeaseRolledBack && lease.EffectID == effectID && receipt.EffectID == effectID && receipt.LeaseID == lease.LeaseID && validSHA256(receipt.ProofDigest) && receipt.ProofDigest == lease.RollbackProofDigest
 }
 
 func (executor *LinuxOperationsExecutor) restoreFirewallRuntime(ctx context.Context, lease securityRollbackLease) ([]byte, error) {

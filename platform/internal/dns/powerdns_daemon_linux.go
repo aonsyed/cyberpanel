@@ -211,6 +211,26 @@ func (host *LinuxPowerDNSHost) currentGeneration(ctx context.Context) (string, e
 	return generation, nil
 }
 
+func (host *LinuxPowerDNSHost) observedCurrentGeneration(ctx context.Context) (string, error) {
+	if host.Store == nil || ctx == nil {
+		return "", ErrInvalidDNS
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := observePowerDNSBinding(host.profile.configuration); err != nil {
+		return "", err
+	}
+	generation, err := host.Store.Current()
+	if err != nil {
+		return "", err
+	}
+	if generation == "" {
+		return "", ErrInvalidDNS
+	}
+	return generation, nil
+}
+
 func (host *LinuxPowerDNSHost) ApplyConfiguration(ctx context.Context, snapshot PowerDNSConfigSnapshot) (PowerDNSActivationReceipt, error) {
 	receipt := PowerDNSActivationReceipt{ObservedAt: time.Now().UTC()}
 	if host == nil || ctx == nil {
@@ -298,7 +318,7 @@ func (host *LinuxPowerDNSHost) Probe(ctx context.Context) (PowerDNSRuntimeReceip
 	}
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	generation, err := host.currentGeneration(ctx)
+	generation, err := host.observedCurrentGeneration(ctx)
 	if err != nil {
 		return PowerDNSRuntimeReceipt{}, err
 	}
@@ -463,6 +483,32 @@ func ensurePowerDNSBinding(binding powerDNSBinding) error {
 		}
 		return syncPowerDNSDirectory(directory)
 	}
+	if err != nil {
+		return err
+	}
+	metadata, ok := existing.Sys().(*syscall.Stat_t)
+	if existing.Mode()&os.ModeSymlink == 0 || !ok || metadata.Uid != 0 {
+		return daemoncfg.ErrConflict
+	}
+	target, err := os.Readlink(binding.link)
+	if err != nil || target != binding.target {
+		return daemoncfg.ErrConflict
+	}
+	return nil
+}
+
+func observePowerDNSBinding(binding powerDNSBinding) error {
+	if !validPowerDNSBinding(binding) {
+		return ErrInvalidDNS
+	}
+	directory := filepath.Dir(binding.link)
+	if err := validateRootOwnedPowerDNSDirectory("/etc"); err != nil {
+		return err
+	}
+	if err := validateRootOwnedPowerDNSDirectory(directory); err != nil {
+		return err
+	}
+	existing, err := os.Lstat(binding.link)
 	if err != nil {
 		return err
 	}

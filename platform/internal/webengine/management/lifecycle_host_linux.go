@@ -22,8 +22,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation/fsstore"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/native"
 )
@@ -81,7 +82,7 @@ type lifecycleJournal struct {
 	Conversion *lifecycleConversionRecord `json:"conversion,omitempty"`
 }
 
-type LinuxLifecycleHost struct { mu sync.Mutex; journal lifecycleJournal; now func()time.Time; configurationRelease func() }
+type LinuxLifecycleHost struct { mu sync.Mutex; journal lifecycleJournal; now func()time.Time; configurationRelease func(); admission rebootcontrol.ExecutionAdmission }
 
 func(host *LinuxLifecycleHost)validateEngineCatalog(catalog localArtifactCatalog)error{
 	if catalog.Sequence==0||!validSHA256(catalog.Digest)||catalog.Sequence<host.journal.EngineCatalogSequence{return ErrConflict}
@@ -97,31 +98,79 @@ func(host *LinuxLifecycleHost)rememberEngineCatalog(catalog localArtifactCatalog
 
 func init(){rootOwnedFile=func(info os.FileInfo)bool{metadata,ok:=info.Sys().(*syscall.Stat_t);return ok&&metadata.Uid==0}}
 
-func NewLinuxLifecycleHost()(*LinuxLifecycleHost,error){
-	if os.Geteuid()!=0{return nil,ErrInvalid}
+func NewLinuxLifecycleHost(admission rebootcontrol.ExecutionAdmission)(*LinuxLifecycleHost,error){
+	if os.Geteuid()!=0||admission==nil{return nil,ErrInvalid}
 	if err:=ensureLifecycleDirectory(lifecycleStateRoot,0o700);err!=nil{return nil,err}
 	if err:=ensureLifecycleDirectory(lifecyclePackageRoot,0o700);err!=nil{return nil,err}
 	if err:=ensurePHPProfileDirectory();err!=nil{return nil,err}
-	host:=&LinuxLifecycleHost{journal:lifecycleJournal{Version:1,Effects:map[string]lifecycleEffectRecord{},PHPProfiles:map[string]PHPProfile{}},now:time.Now}
+	host:=&LinuxLifecycleHost{journal:lifecycleJournal{Version:1,Effects:map[string]lifecycleEffectRecord{},PHPProfiles:map[string]PHPProfile{}},now:time.Now,admission:admission}
 	if err:=host.load();err!=nil{return nil,err}
-	if err := recoverLifecycleChallenges(); err != nil { return nil, err }
 	if host.journal.Generations == nil { host.journal.Generations = map[string]lifecycleGenerationRecord{} }
-	if record:=host.journal.Conversion;record!=nil&&!host.conversionPending()&&(!validConversionRecord(record)||!validConversionReceipt(record.Receipt)||record.Receipt.EvidenceDigest!=conversionEvidence(record)){return nil,ErrInvalid}
-	if host.conversionPending() {
-		ctx,cancel:=context.WithTimeout(context.Background(),30*time.Minute)
-		if err:=host.coordinateConfiguration(ctx);err!=nil{cancel();return nil,err}
-		receipt,err:=host.reconcileEdition(ctx);host.releaseConfiguration();cancel()
-		if err!=nil&&!receipt.Restored{return nil,errors.Join(ErrAmbiguous,err)}
-	}
-	if host.switchPending() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		if err := host.coordinateConfiguration(ctx); err != nil { cancel(); return nil, err }
-		_, err := host.restoreGeneration(ctx, host.journal.Switch.Receipt)
-		host.releaseConfiguration()
-		cancel()
-		if err != nil { return nil, errors.Join(ErrAmbiguous, err) }
-	}
 	return host,nil
+}
+
+type lifecycleChallengeRecoveryReceipt struct {
+	ManifestDigest string `json:"manifest_digest"`
+	MarkerDigest string `json:"marker_digest"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
+type lifecycleConversionRecoveryReceipt struct {
+	RequestDigest string `json:"request_digest"`
+	Phase string `json:"phase"`
+	Switch SwitchReceipt `json:"switch"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
+// ResumeStartup reconciles private recovery effects through the raw durable
+// gate while the public mutation broker remains behind startup readiness.
+func(host *LinuxLifecycleHost)ResumeStartup(ctx context.Context)error{
+	if host==nil||ctx==nil||host.admission==nil{return ErrInvalid}
+	host.mu.Lock();defer host.mu.Unlock()
+	if err:=host.recoverStartupChallenges(ctx);err!=nil{return err}
+	if host.journal.Conversion!=nil{if err:=host.recoverEditionConversion(ctx);err!=nil{return err}}
+	return host.recoverGenerationSwitch(ctx)
+}
+
+func(host *LinuxLifecycleHost)recoverStartupChallenges(ctx context.Context)error{
+	content,manifest,markerDigest,err:=readRecoverableLifecycleChallengeManifest();if err!=nil||manifest==nil{return err}
+	manifestDigest:=linuxManagementDigest(content)
+	requestDigest:=rebootcontrol.ExecutionDigest(struct{Manifest json.RawMessage `json:"manifest"`}{content})
+	lease,err:=host.admission.AdmitExecution(ctx,rebootcontrol.ExecutionBinding{Boundary:"webengine-management-recovery",Method:"candidate_challenge_cleanup",EffectID:"candidate-challenges-"+manifestDigest,RequestDigest:requestDigest,Caller:"panel-execd-startup",Resource:rebootcontrol.ExecutionResource(struct{ManifestPath string `json:"manifest_path"`;MarkerPath string `json:"marker_path"`;Digest string `json:"digest"`}{filepath.Join(lifecycleStateRoot,"candidate-challenges.json"),filepath.Join(lifecycleStateRoot,"candidate-challenges-recovery.json"),manifestDigest})});if err!=nil{return err}
+	if len(lease.Cached)!=0{var receipt lifecycleChallengeRecoveryReceipt;if json.Unmarshal(lease.Cached,&receipt)!=nil||receipt.ManifestDigest!=manifestDigest||receipt.MarkerDigest==""||receipt.MarkerDigest!=markerDigest||receipt.CompletedAt.IsZero()||receipt.CompletedAt.After(host.now().UTC().Add(time.Minute)){return rebootcontrol.ErrIntegrity};return verifyLifecycleChallengeRecoveryState(content,manifestDigest,markerDigest)}
+	defer func(){_ = rebootcontrol.SettleExecution(host.admission,lease,false,nil)}()
+	if err=recoverLifecycleChallengeFiles(content,manifest,manifestDigest,true);err!=nil{return err}
+	markerDigest,err=writeLifecycleChallengeRecoveryMarker(content,manifestDigest);if err!=nil{return err}
+	if err=clearLifecycleChallengeManifest();err!=nil{return err}
+	if err=verifyLifecycleChallengeRecoveryState(content,manifestDigest,markerDigest);err!=nil{return err}
+	return rebootcontrol.SettleExecution(host.admission,lease,true,lifecycleChallengeRecoveryReceipt{manifestDigest,markerDigest,host.now().UTC()})
+}
+
+func(host *LinuxLifecycleHost)recoverEditionConversion(ctx context.Context)error{
+	record:=host.journal.Conversion
+	if record==nil{return nil}
+	if !validConversionRecord(record){return ErrInvalid}
+	base:=record.Receipt;base.Confirmed=false;base.Restored=false;base.ProbeDigest="";base.License=LicenseStatus{};base.LicenseDigest="";base.EvidenceDigest=""
+	requestDigest:=rebootcontrol.ExecutionDigest(struct{Input lifecycleConvertInput `json:"input"`;Previous lifecycleHostState `json:"previous"`;PreviousService conversionServiceState `json:"previous_service"`;PreviousPackages []conversionPackage `json:"previous_packages"`;TargetPackages []conversionPackage `json:"target_packages"`;CatalogDigest string `json:"catalog_digest"`;CatalogSequence uint64 `json:"catalog_sequence"`;HostDigest string `json:"host_digest"`;Receipt SwitchReceipt `json:"receipt"`}{record.Input,record.Previous,record.PreviousService,record.PreviousPackages,record.TargetPackages,record.CatalogDigest,record.CatalogSequence,record.HostDigest,base})
+	lease,err:=host.admission.AdmitExecution(ctx,rebootcontrol.ExecutionBinding{Boundary:"webengine-management-recovery",Method:"edition_conversion_recovery",EffectID:record.Receipt.LeaseID,RequestDigest:requestDigest,Caller:"panel-execd-startup",Resource:rebootcontrol.ExecutionResource(struct{Effect,Previous,Target,PreviousConfig,TargetConfig,Catalog string;CatalogSequence,Fence uint64}{record.Receipt.EffectID,string(record.Receipt.Previous),string(record.Receipt.Target),record.Receipt.PreviousConfigDigest,record.Receipt.TargetConfigDigest,record.CatalogDigest,record.CatalogSequence,record.Receipt.Fence})});if err!=nil{return err}
+	if len(lease.Cached)!=0{var receipt lifecycleConversionRecoveryReceipt;if json.Unmarshal(lease.Cached,&receipt)!=nil||!host.validConversionRecoveryReceipt(receipt,requestDigest){return rebootcontrol.ErrIntegrity};return nil}
+	defer func(){_ = rebootcontrol.SettleExecution(host.admission,lease,false,nil)}()
+	var reconcileErr error
+	if host.conversionPending(){if err=host.coordinateConfiguration(ctx);err!=nil{return err};_,reconcileErr=host.reconcileEdition(ctx);host.releaseConfiguration()}
+	receipt:=lifecycleConversionRecoveryReceipt{RequestDigest:requestDigest,CompletedAt:host.now().UTC()}
+	if current:=host.journal.Conversion;current!=nil{receipt.Phase=current.Phase;receipt.Switch=current.Receipt}
+	if !host.validConversionRecoveryReceipt(receipt,requestDigest){return errors.Join(ErrAmbiguous,reconcileErr)}
+	if err=rebootcontrol.SettleExecution(host.admission,lease,true,receipt);err!=nil{return err}
+	return nil
+}
+
+func(host *LinuxLifecycleHost)validConversionRecoveryReceipt(receipt lifecycleConversionRecoveryReceipt,requestDigest string)bool{
+	record:=host.journal.Conversion
+	if record==nil||(record.Phase!=conversionPhaseConfirmed&&record.Phase!=conversionPhaseRestored)||receipt.RequestDigest!=requestDigest||receipt.Phase!=record.Phase||digestJSON(receipt.Switch)!=digestJSON(record.Receipt)||!validConversionRecord(record)||!validConversionReceipt(record.Receipt)||record.Receipt.EvidenceDigest!=conversionEvidence(record)||receipt.CompletedAt.IsZero()||receipt.CompletedAt.After(host.now().UTC().Add(time.Minute)){return false}
+	plan,channel,config:=record.Receipt.TargetPlan,record.Receipt.TargetChannel,record.Receipt.TargetConfigDigest
+	if record.Receipt.Restored{plan,channel,config=record.Receipt.PreviousPlan,record.Receipt.PreviousChannel,record.Receipt.PreviousConfigDigest}
+	state:=host.journal.Host
+	return state.Active&&state.Generation==record.Input.Request.ExpectedGeneration+1&&state.Fence==record.Receipt.Fence&&state.Channel==channel&&digestJSON(state.Plan)==digestJSON(plan)&&state.ConfigDigest==config&&!state.UpdatedAt.IsZero()&&record.Receipt.LicenseDigest==digestJSON(host.journal.License)
 }
 
 func(host *LinuxLifecycleHost)HandleManagement(ctx context.Context,request LinuxManagementRequest)(any,error){
@@ -221,12 +270,13 @@ func(host *LinuxLifecycleHost)inspect(ctx context.Context,edition webengine.Edit
 	if host.conversionPending(){return Installation{},ErrAmbiguous}
 	if edition!=webengine.EditionOpenLiteSpeed&&edition!=webengine.EditionLiteSpeedEnterprise{return Installation{},ErrInvalid}
 	if host.journal.Host.Generation>0&&!host.journal.Host.Active{return Installation{},ErrNotFound}
-	plan,channel,err:=host.activePlan(ctx,edition);if err!=nil{return Installation{},err}
+	plan,channel,err:=host.activePlan(ctx,edition,false);if err!=nil{return Installation{},err}
 	if err=verifyLifecycleService(ctx,plan);err!=nil{return Installation{},err}
-	if !host.journal.Host.Active{host.journal.Host.Active=true;host.journal.Host.Plan=plan;host.journal.Host.Channel=channel;host.journal.Host.ConfigDigest=currentLifecycleConfig(ctx,edition);host.journal.Host.UpdatedAt=host.now().UTC();if err=host.persist();err!=nil{return Installation{},err}}
-	updated:=host.journal.Host.UpdatedAt;if updated.IsZero(){updated=host.now().UTC()}
+	observed:=host.journal.Host
+	if !observed.Active{observed.Active=true;observed.Plan=plan;observed.Channel=channel;observed.ConfigDigest=currentLifecycleConfig(ctx,edition);observed.UpdatedAt=host.now().UTC()}
+	updated:=observed.UpdatedAt;if updated.IsZero(){updated=host.now().UTC()}
 	actual:=currentLifecycleConfig(ctx,edition);if !validSHA256(actual){return Installation{},ErrAmbiguous}
-	installation:=Installation{ID:"node-webengine",Edition:plan.Edition,Version:plan.Version,ArtifactDigest:plan.ArtifactDigest,RepositorySnapshotDigest:plan.RepositorySnapshotDigest,Channel:channel,State:StateActive,License:host.journal.License,Generation:host.journal.Host.Generation,ActiveConfigDigest:actual,InstalledAt:updated,UpdatedAt:updated}
+	installation:=Installation{ID:"node-webengine",Edition:plan.Edition,Version:plan.Version,ArtifactDigest:plan.ArtifactDigest,RepositorySnapshotDigest:plan.RepositorySnapshotDigest,Channel:channel,State:StateActive,License:host.journal.License,Generation:observed.Generation,ActiveConfigDigest:actual,InstalledAt:updated,UpdatedAt:updated}
 	if record:=host.journal.Conversion;record!=nil&&validConversionRecord(record)&&validConversionReceipt(record.Receipt)&&record.Receipt.EvidenceDigest==conversionEvidence(record)&&record.Receipt.Fence==installation.Generation{
 		bound:=record.Receipt.TargetConfigDigest;if record.Receipt.Restored{bound=record.Receipt.PreviousConfigDigest}
 		if bound==actual{copy:=record.Receipt;installation.Transition=&copy}
@@ -260,8 +310,8 @@ func(host *LinuxLifecycleHost)remove(ctx context.Context,input lifecycleRemoveIn
 	host.journal.Host=lifecycleHostState{Active:false,Generation:request.ExpectedGeneration+1,Fence:request.Fence,Channel:previous.Channel,Plan:previous.Plan,ConfigDigest:"",UpdatedAt:host.now().UTC()};receipt.Outcome="confirmed";receipt.EvidenceDigest=lifecycleEvidence(previous.Plan,"removed");receipt.ObservedAt=host.now().UTC();return receipt,nil
 }
 
-func(host *LinuxLifecycleHost)adoptGeneration(ctx context.Context,expected uint64)error{if host.journal.Host.Generation==0{edition,err:=readLifecycleEdition();if err==nil{plan,channel,discoverErr:=host.activePlan(ctx,edition);if discoverErr==nil{host.journal.Host.Active,host.journal.Host.Plan,host.journal.Host.Channel=true,plan,channel;host.journal.Host.ConfigDigest=currentLifecycleConfig(ctx,edition)}};host.journal.Host.Generation=expected};if host.journal.Host.Generation!=expected{return ErrConflict};return nil}
-func(host *LinuxLifecycleHost)activePlan(ctx context.Context,edition webengine.Edition)(ArtifactPlan,Channel,error){current,err:=readLifecycleEdition();if err!=nil||current!=edition{return ArtifactPlan{},"",ErrNotFound};if host.journal.Host.Active&&host.journal.Host.Plan.Edition==edition&&validateArtifactPlan(host.journal.Host.Plan)==nil{if installedLifecyclePlan(ctx,host.journal.Host.Plan)==nil{return host.journal.Host.Plan,host.journal.Host.Channel,nil}};catalog,err:=readLocalArtifactCatalog(true);if err!=nil{return ArtifactPlan{},"",err};if err=host.validateEngineCatalog(catalog);err!=nil{return ArtifactPlan{},"",err};osName,osVersion,architecture,err:=localPlatformTuple();if err!=nil{return ArtifactPlan{},"",err};var plan ArtifactPlan;var channel Channel;for _,entry:=range catalog.Entries{if entry.OS!=osName||entry.OSVersion!=osVersion||entry.Architecture!=architecture||entry.Plan.Edition!=edition||installedLifecyclePlan(ctx,entry.Plan)!=nil{continue};if plan.Version!=""{return ArtifactPlan{},"",ErrConflict};plan,channel=entry.Plan,entry.Channel};if plan.Version==""{return ArtifactPlan{},"",ErrUnsupported};if err=host.rememberEngineCatalog(catalog);err!=nil{return ArtifactPlan{},"",err};return plan,channel,nil}
+func(host *LinuxLifecycleHost)adoptGeneration(ctx context.Context,expected uint64)error{if host.journal.Host.Generation==0{edition,err:=readLifecycleEdition();if err==nil{plan,channel,discoverErr:=host.activePlan(ctx,edition,true);if discoverErr==nil{host.journal.Host.Active,host.journal.Host.Plan,host.journal.Host.Channel=true,plan,channel;host.journal.Host.ConfigDigest=currentLifecycleConfig(ctx,edition)}};host.journal.Host.Generation=expected};if host.journal.Host.Generation!=expected{return ErrConflict};return nil}
+func(host *LinuxLifecycleHost)activePlan(ctx context.Context,edition webengine.Edition,remember bool)(ArtifactPlan,Channel,error){current,err:=readLifecycleEdition();if err!=nil||current!=edition{return ArtifactPlan{},"",ErrNotFound};if host.journal.Host.Active&&host.journal.Host.Plan.Edition==edition&&validateArtifactPlan(host.journal.Host.Plan)==nil{if installedLifecyclePlan(ctx,host.journal.Host.Plan)==nil{return host.journal.Host.Plan,host.journal.Host.Channel,nil}};catalog,err:=readLocalArtifactCatalog(true);if err!=nil{return ArtifactPlan{},"",err};if err=host.validateEngineCatalog(catalog);err!=nil{return ArtifactPlan{},"",err};osName,osVersion,architecture,err:=localPlatformTuple();if err!=nil{return ArtifactPlan{},"",err};var plan ArtifactPlan;var channel Channel;for _,entry:=range catalog.Entries{if entry.OS!=osName||entry.OSVersion!=osVersion||entry.Architecture!=architecture||entry.Plan.Edition!=edition||installedLifecyclePlan(ctx,entry.Plan)!=nil{continue};if plan.Version!=""{return ArtifactPlan{},"",ErrConflict};plan,channel=entry.Plan,entry.Channel};if plan.Version==""{return ArtifactPlan{},"",ErrUnsupported};if remember{if err=host.rememberEngineCatalog(catalog);err!=nil{return ArtifactPlan{},"",err}};return plan,channel,nil}
 
 func(host *LinuxLifecycleHost)restorePlan(ctx context.Context,state lifecycleHostState)error{if !state.Active{return runLifecycle(ctx,"/usr/bin/systemctl","stop",lifecycleService)};_,paths,err:=authorizeLifecyclePlan(ctx,state.Plan);if err!=nil{return err};if err=installLifecyclePackages(ctx,paths);err==nil{err=writeLifecycleEdition(state.Plan.Edition)};if err==nil{err=runLifecycle(ctx,"/usr/bin/systemctl","restart",lifecycleService)};if err==nil{err=verifyLifecycleService(ctx,state.Plan)};if err==nil{host.journal.Host=state};return err}
 

@@ -21,13 +21,15 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 const DefaultOperationsStateRoot = "/var/lib/cyberpanel/operations"
 
 const (
-	managedRedisServerPath = "/usr/bin/redis-server"
-	managedRedisCLIPath = "/usr/bin/redis-cli"
+	managedRedisServerPath       = "/usr/bin/redis-server"
+	managedRedisCLIPath          = "/usr/bin/redis-cli"
 	managedRedisUnitTemplatePath = "/etc/systemd/system/redis-server@.service"
 )
 
@@ -35,26 +37,54 @@ type FixedCommandRunner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
 }
 
-type BoundedFixedCommandRunner interface { RunBounded(context.Context, string, int, ...string) ([]byte, bool, error) }
+type BoundedFixedCommandRunner interface {
+	RunBounded(context.Context, string, int, ...string) ([]byte, bool, error)
+}
 
-type boundedCommandOutput struct { bytes.Buffer; limit int; truncated bool }
-func (output *boundedCommandOutput) Write(value []byte) (int,error) { count:=len(value);remaining:=output.limit-output.Len();if remaining>0{if remaining>count{remaining=count};_,_=output.Buffer.Write(value[:remaining])};if count>remaining{output.truncated=true};return count,nil }
+type boundedCommandOutput struct {
+	bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (output *boundedCommandOutput) Write(value []byte) (int, error) {
+	count := len(value)
+	remaining := output.limit - output.Len()
+	if remaining > 0 {
+		if remaining > count {
+			remaining = count
+		}
+		_, _ = output.Buffer.Write(value[:remaining])
+	}
+	if count > remaining {
+		output.truncated = true
+	}
+	return count, nil
+}
 
 type LinuxFixedCommandRunner struct{}
 
 func (LinuxFixedCommandRunner) Run(ctx context.Context, binary string, arguments ...string) ([]byte, error) {
-	output, truncated, err := (LinuxFixedCommandRunner{}).RunBounded(ctx,binary,4<<20,arguments...)
-	if truncated && err == nil { err = errors.New("command output limit exceeded") }
+	output, truncated, err := (LinuxFixedCommandRunner{}).RunBounded(ctx, binary, 4<<20, arguments...)
+	if truncated && err == nil {
+		err = errors.New("command output limit exceeded")
+	}
 	return output, err
 }
 
 func (LinuxFixedCommandRunner) RunBounded(ctx context.Context, binary string, maximum int, arguments ...string) ([]byte, bool, error) {
-	if !allowedOperationsBinary(binary) { return nil, false, ErrInvalidEffect }
-	if maximum < 1 || maximum > 4<<20 { return nil, false, ErrInvalidEffect }
+	if !allowedOperationsBinary(binary) {
+		return nil, false, ErrInvalidEffect
+	}
+	if maximum < 1 || maximum > 4<<20 {
+		return nil, false, ErrInvalidEffect
+	}
 	command := exec.CommandContext(ctx, binary, arguments...)
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
-	output:=&boundedCommandOutput{limit:maximum};command.Stdout=output;command.Stderr=output
-	err:=command.Run()
+	output := &boundedCommandOutput{limit: maximum}
+	command.Stdout = output
+	command.Stderr = output
+	err := command.Run()
 	return output.Bytes(), output.truncated, err
 }
 
@@ -71,27 +101,27 @@ func allowedOperationsBinary(binary string) bool {
 }
 
 type managedRedisExecutableIdentity struct {
-	Path string `json:"path"`
-	Device uint64 `json:"device"`
-	Inode uint64 `json:"inode"`
-	Size int64 `json:"size"`
-	Mode uint32 `json:"mode"`
-	ModifiedAt int64 `json:"modified_at"`
+	Path       string `json:"path"`
+	Device     uint64 `json:"device"`
+	Inode      uint64 `json:"inode"`
+	Size       int64  `json:"size"`
+	Mode       uint32 `json:"mode"`
+	ModifiedAt int64  `json:"modified_at"`
 }
 
 type managedRedisRuntime struct {
-	server string
-	cli string
-	version string
-	uid int
-	gid int
+	server         string
+	cli            string
+	version        string
+	uid            int
+	gid            int
 	evidenceDigest string
 }
 
 type managedRedisPackageProfile struct {
-	manager PackageManager
+	manager       PackageManager
 	serverPackage string
-	cliPackage string
+	cliPackage    string
 }
 
 func managedRedisUnavailable(reason string) error {
@@ -305,8 +335,8 @@ func managedRedisUnitDigest(server string) (string, error) {
 	}
 	expected := map[string]string{
 		"ExecStart": server + " /etc/redis/%i.conf --supervised systemd --daemonize no",
-		"User": "redis",
-		"Group": "redis",
+		"User":      "redis",
+		"Group":     "redis",
 	}
 	seen := map[string]bool{}
 	for _, line := range strings.Split(string(content), "\n") {
@@ -378,14 +408,14 @@ func resolveManagedRedisRuntime(ctx context.Context, runner FixedCommandRunner, 
 		return managedRedisRuntime{}, err
 	}
 	evidence, err := json.Marshal(struct {
-		Support RedisRuntimeSupport `json:"support"`
-		Server managedRedisExecutableIdentity `json:"server"`
-		CLI managedRedisExecutableIdentity `json:"cli"`
-		ServerPackage string `json:"server_package"`
-		CLIPackage string `json:"cli_package"`
-		Unit string `json:"unit"`
-		UID int `json:"uid"`
-		GID int `json:"gid"`
+		Support       RedisRuntimeSupport            `json:"support"`
+		Server        managedRedisExecutableIdentity `json:"server"`
+		CLI           managedRedisExecutableIdentity `json:"cli"`
+		ServerPackage string                         `json:"server_package"`
+		CLIPackage    string                         `json:"cli_package"`
+		Unit          string                         `json:"unit"`
+		UID           int                            `json:"uid"`
+		GID           int                            `json:"gid"`
 	}{support, serverIdentity, cliIdentity, serverPackageEvidence, cliPackageEvidence, unitDigest, uid, gid})
 	if err != nil {
 		return managedRedisRuntime{}, managedRedisUnavailable("identity evidence cannot be encoded")
@@ -394,7 +424,7 @@ func resolveManagedRedisRuntime(ctx context.Context, runner FixedCommandRunner, 
 }
 
 type OperationsVolume struct {
-	MountPath string
+	MountPath    string
 	QuotaBackend string
 }
 
@@ -404,39 +434,52 @@ type OperationsPackage struct {
 }
 
 type LinuxOperationsConfig struct {
-	StateRoot string
-	Volumes map[string]OperationsVolume
-	Packages map[string]OperationsPackage
-	WAFPacks map[string]string
-	Secrets LinuxManagedServiceSecretSource
-	Runner FixedCommandRunner
-	Clock Clock
-	Sites LinuxOperationsSiteResolver
+	Admission      rebootcontrol.ExecutionAdmission
+	StateRoot      string
+	Volumes        map[string]OperationsVolume
+	Packages       map[string]OperationsPackage
+	WAFPacks       map[string]string
+	Secrets        LinuxManagedServiceSecretSource
+	Runner         FixedCommandRunner
+	Clock          Clock
+	Sites          LinuxOperationsSiteResolver
 	ProductUpdates ProductUpdateExecutor
 }
 
-type LinuxOperationsSiteBinding struct { TenantID string; SiteID string; SiteKey string; UID uint32; GID uint32; Generation uint64 }
-type LinuxOperationsSiteResolver interface { ResolveOperationsSite(context.Context,string)(LinuxOperationsSiteBinding,error) }
-type LinuxOperationsSiteResolverFunc func(context.Context,string)(LinuxOperationsSiteBinding,error)
-func(function LinuxOperationsSiteResolverFunc)ResolveOperationsSite(ctx context.Context,siteID string)(LinuxOperationsSiteBinding,error){return function(ctx,siteID)}
+type LinuxOperationsSiteBinding struct {
+	TenantID   string
+	SiteID     string
+	SiteKey    string
+	UID        uint32
+	GID        uint32
+	Generation uint64
+}
+type LinuxOperationsSiteResolver interface {
+	ResolveOperationsSite(context.Context, string) (LinuxOperationsSiteBinding, error)
+}
+type LinuxOperationsSiteResolverFunc func(context.Context, string) (LinuxOperationsSiteBinding, error)
+
+func (function LinuxOperationsSiteResolverFunc) ResolveOperationsSite(ctx context.Context, siteID string) (LinuxOperationsSiteBinding, error) {
+	return function(ctx, siteID)
+}
 
 func DefaultLinuxOperationsConfig() LinuxOperationsConfig {
 	return LinuxOperationsConfig{
 		StateRoot: DefaultOperationsStateRoot,
 		Volumes: map[string]OperationsVolume{
-			"hosting": {MountPath: "/home", QuotaBackend: "auto"},
+			"hosting":    {MountPath: "/home", QuotaBackend: "auto"},
 			"cyberpanel": {MountPath: "/var/lib/cyberpanel", QuotaBackend: "auto"},
 		},
 		Packages: map[string]OperationsPackage{
-			"openlitespeed": {APTName: "openlitespeed", DNFName: "openlitespeed"},
-			"litespeed": {APTName: "litespeed", DNFName: "litespeed"},
-			"mariadb-server": {APTName: "mariadb-server", DNFName: "mariadb-server"},
-			"postfix": {APTName: "postfix", DNFName: "postfix"},
-			"dovecot": {APTName: "dovecot-core", DNFName: "dovecot"},
-			"powerdns": {APTName: "pdns-server", DNFName: "pdns"},
-			"pureftpd": {APTName: "pure-ftpd", DNFName: "pure-ftpd"},
-			"redis": {APTName: "redis-server", DNFName: "redis"},
-			"elasticsearch": {APTName: "elasticsearch", DNFName: "elasticsearch"},
+			"openlitespeed":   {APTName: "openlitespeed", DNFName: "openlitespeed"},
+			"litespeed":       {APTName: "litespeed", DNFName: "litespeed"},
+			"mariadb-server":  {APTName: "mariadb-server", DNFName: "mariadb-server"},
+			"postfix":         {APTName: "postfix", DNFName: "postfix"},
+			"dovecot":         {APTName: "dovecot-core", DNFName: "dovecot"},
+			"powerdns":        {APTName: "pdns-server", DNFName: "pdns"},
+			"pureftpd":        {APTName: "pure-ftpd", DNFName: "pure-ftpd"},
+			"redis":           {APTName: "redis-server", DNFName: "redis"},
+			"elasticsearch":   {APTName: "elasticsearch", DNFName: "elasticsearch"},
 			"modsecurity-crs": {APTName: "modsecurity-crs", DNFName: "mod_security_crs"},
 		},
 		WAFPacks: map[string]string{
@@ -447,52 +490,67 @@ func DefaultLinuxOperationsConfig() LinuxOperationsConfig {
 }
 
 type LinuxOperationsExecutor struct {
-	stateRoot string
-	volumes map[string]OperationsVolume
-	packages map[string]OperationsPackage
-	wafPacks map[string]string
-	secrets LinuxManagedServiceSecretSource
-	runner FixedCommandRunner
-	clock Clock
-	sites LinuxOperationsSiteResolver
+	admission      rebootcontrol.ExecutionAdmission
+	stateRoot      string
+	volumes        map[string]OperationsVolume
+	packages       map[string]OperationsPackage
+	wafPacks       map[string]string
+	secrets        LinuxManagedServiceSecretSource
+	runner         FixedCommandRunner
+	clock          Clock
+	sites          LinuxOperationsSiteResolver
 	productUpdates ProductUpdateExecutor
-	mu sync.Mutex
+	mu             sync.Mutex
 }
 
 type operationsJournalRecord struct {
-	Request EffectRequest `json:"request"`
-	Receipt EffectReceipt `json:"receipt"`
-	Snapshots []operationsFileSnapshot `json:"snapshots,omitempty"`
-	CompensationToken SecretRef `json:"compensation_token,omitempty"`
-	Compensation *CompensationReceipt `json:"compensation,omitempty"`
+	Request           EffectRequest            `json:"request"`
+	Receipt           EffectReceipt            `json:"receipt"`
+	Snapshots         []operationsFileSnapshot `json:"snapshots,omitempty"`
+	CompensationToken SecretRef                `json:"compensation_token,omitempty"`
+	Compensation      *CompensationReceipt     `json:"compensation,omitempty"`
 }
 
 type operationsFileSnapshot struct {
-	Path string `json:"path"`
-	Existed bool `json:"existed"`
-	Mode uint32 `json:"mode,omitempty"`
-	UID int `json:"uid,omitempty"`
-	GID int `json:"gid,omitempty"`
+	Path    string `json:"path"`
+	Existed bool   `json:"existed"`
+	Mode    uint32 `json:"mode,omitempty"`
+	UID     int    `json:"uid,omitempty"`
+	GID     int    `json:"gid,omitempty"`
 	Content []byte `json:"content,omitempty"`
 }
 
 type linuxEffectResult struct {
-	Result EffectResult
-	Activation *ActivationEvidence
-	Snapshots []operationsFileSnapshot
-	MutationObserved bool
+	Result                  EffectResult
+	Activation              *ActivationEvidence
+	Snapshots               []operationsFileSnapshot
+	MutationObserved        bool
 	ExecutionEvidenceDigest string
 }
 
 func NewLinuxOperationsExecutor(config LinuxOperationsConfig) (*LinuxOperationsExecutor, error) {
-	if os.Geteuid() != 0 { return nil, ErrUnauthorized }
-	if config.StateRoot == "" { config.StateRoot = DefaultOperationsStateRoot }
-	if config.StateRoot != DefaultOperationsStateRoot { return nil, ErrInvalidResource }
-	if config.Runner == nil { config.Runner = LinuxFixedCommandRunner{} }
-	if config.Clock == nil { config.Clock = SystemClock{} }
-	if len(config.Volumes) == 0 || len(config.Packages) == 0 { return nil, ErrInvalidResource }
-	if err := ensureOperationsStateRoot(config.StateRoot); err != nil { return nil, err }
-	return &LinuxOperationsExecutor{stateRoot: config.StateRoot, volumes: cloneVolumes(config.Volumes), packages: clonePackages(config.Packages), wafPacks: cloneStrings(config.WAFPacks), secrets:config.Secrets, runner: config.Runner, clock: config.Clock, sites:config.Sites, productUpdates:config.ProductUpdates}, nil
+	if os.Geteuid() != 0 {
+		return nil, ErrUnauthorized
+	}
+	if config.StateRoot == "" {
+		config.StateRoot = DefaultOperationsStateRoot
+	}
+	if config.StateRoot != DefaultOperationsStateRoot {
+		return nil, ErrInvalidResource
+	}
+	if config.Runner == nil {
+		config.Runner = LinuxFixedCommandRunner{}
+	}
+	if config.Clock == nil {
+		config.Clock = SystemClock{}
+	}
+	if len(config.Volumes) == 0 || len(config.Packages) == 0 {
+		return nil, ErrInvalidResource
+	}
+	if err := ensureOperationsStateRoot(config.StateRoot); err != nil {
+		return nil, err
+	}
+	return &LinuxOperationsExecutor{admission: config.Admission, stateRoot: config.StateRoot, volumes: cloneVolumes(config.Volumes), packages: clonePackages(config.Packages), wafPacks: cloneStrings(config.WAFPacks), secrets: config.Secrets, runner: config.Runner, clock: config.Clock, sites: config.Sites, productUpdates: config.ProductUpdates}, nil
 }
 
 func ensureOperationsStateRoot(root string) error {
@@ -512,24 +570,60 @@ func ensureOperationsStateRoot(root string) error {
 		filepath.Join(root, "waf", "generations"),
 		filepath.Join(root, "waf", "leases"),
 	} {
-		if err := os.MkdirAll(directory, 0o700); err != nil { return err }
-		info, err := os.Lstat(directory); if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 { return errors.New("unsafe operations state directory") }
-		if err = os.Chown(directory, 0, 0); err != nil { return err }
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return err
+		}
+		info, err := os.Lstat(directory)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+			return errors.New("unsafe operations state directory")
+		}
+		if err = os.Chown(directory, 0, 0); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func cloneVolumes(source map[string]OperationsVolume) map[string]OperationsVolume { result := make(map[string]OperationsVolume, len(source)); for key, value := range source { result[key] = value }; return result }
-func clonePackages(source map[string]OperationsPackage) map[string]OperationsPackage { result := make(map[string]OperationsPackage, len(source)); for key, value := range source { result[key] = value }; return result }
-func cloneStrings(source map[string]string) map[string]string { result := make(map[string]string, len(source)); for key, value := range source { result[key] = value }; return result }
+func cloneVolumes(source map[string]OperationsVolume) map[string]OperationsVolume {
+	result := make(map[string]OperationsVolume, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+func clonePackages(source map[string]OperationsPackage) map[string]OperationsPackage {
+	result := make(map[string]OperationsPackage, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+func cloneStrings(source map[string]string) map[string]string {
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
 
 func (executor *LinuxOperationsExecutor) ObserveOrApply(ctx context.Context, request EffectRequest) (EffectReceipt, error) {
-	if ctx == nil || validateEffectRequest(request) != nil { return EffectReceipt{}, ErrInvalidEffect }
-	executor.mu.Lock(); defer executor.mu.Unlock()
-	if request.Kind == EffectServiceDiagnose && request.ServiceDiagnose.Reboot != nil { return executor.observeRebootServices(ctx, request) }
-	if request.Kind == EffectRebootMarkerArm || request.Kind == EffectRebootMarkerProbe || request.Kind == EffectRebootMarkerClear { return executor.observeRebootMarker(ctx, request) }
-	if record, found, err := executor.loadJournal(request.EffectID); err != nil { return EffectReceipt{}, err } else if found {
-		if record.Request.RequestDigest != request.RequestDigest { return EffectReceipt{}, ErrIdempotency }
+	if ctx == nil || validateEffectRequest(request) != nil {
+		return EffectReceipt{}, ErrInvalidEffect
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if request.Kind == EffectServiceDiagnose && request.ServiceDiagnose.Reboot != nil {
+		return executor.observeRebootServices(ctx, request)
+	}
+	if request.Kind == EffectRebootMarkerArm || request.Kind == EffectRebootMarkerProbe || request.Kind == EffectRebootMarkerClear {
+		return executor.observeRebootMarker(ctx, request)
+	}
+	if record, found, err := executor.loadJournal(request.EffectID); err != nil {
+		return EffectReceipt{}, err
+	} else if found {
+		if record.Request.RequestDigest != request.RequestDigest {
+			return EffectReceipt{}, ErrIdempotency
+		}
 		return record.Receipt, receiptError(record.Receipt)
 	}
 	completedAt := executor.clock.Now().UTC()
@@ -538,17 +632,36 @@ func (executor *LinuxOperationsExecutor) ObserveOrApply(ctx context.Context, req
 	var token SecretRef
 	var retainedSnapshots []operationsFileSnapshot
 	if effectErr == nil {
-		receipt.Outcome = EffectConfirmed; receipt.MutationObserved = effectRequestIsMutation(request); receipt.ProofDigest = effectProof(request, result)
-		if request.Kind == EffectProcessInvestigate && request.ProcessInvestigate != nil { if err := executor.storeProcessProof(receipt.ProofDigest, request.ProcessInvestigate.Process); err != nil { return EffectReceipt{}, err } }
-		if request.Kind == EffectServiceDiagnose && request.ServiceDiagnose != nil { if err := executor.storeDiagnosticProof(receipt.ProofDigest, request.ServiceDiagnose.Service); err != nil { return EffectReceipt{}, err } }
+		receipt.Outcome = EffectConfirmed
+		receipt.MutationObserved = effectRequestIsMutation(request)
+		receipt.ProofDigest = effectProof(request, result)
+		if request.Kind == EffectProcessInvestigate && request.ProcessInvestigate != nil {
+			if err := executor.storeProcessProof(receipt.ProofDigest, request.ProcessInvestigate.Process); err != nil {
+				return EffectReceipt{}, err
+			}
+		}
+		if request.Kind == EffectServiceDiagnose && request.ServiceDiagnose != nil {
+			if err := executor.storeDiagnosticProof(receipt.ProofDigest, request.ServiceDiagnose.Service); err != nil {
+				return EffectReceipt{}, err
+			}
+		}
 	} else {
-		receipt.Outcome = EffectRejected; receipt.FailureCode = stableFailureCode(effectErr)
+		receipt.Outcome = EffectRejected
+		receipt.FailureCode = stableFailureCode(effectErr)
 		if result.MutationObserved {
 			restoreErr := executor.restoreSnapshots(result.Snapshots)
 			externalErr := executor.rollbackExternal(ctx, request, result.Snapshots)
 			if restoreErr != nil || externalErr != nil {
-				var tokenErr error;token,tokenErr = newCompensationToken();if tokenErr!=nil{return EffectReceipt{},tokenErr}; receipt.MutationObserved = true; receipt.CompensationToken = token
-				if restoreErr != nil || request.Kind==EffectResourceProfile || request.Kind==EffectServicePolicy { retainedSnapshots=result.Snapshots }
+				var tokenErr error
+				token, tokenErr = newCompensationToken()
+				if tokenErr != nil {
+					return EffectReceipt{}, tokenErr
+				}
+				receipt.MutationObserved = true
+				receipt.CompensationToken = token
+				if restoreErr != nil || request.Kind == EffectResourceProfile || request.Kind == EffectServicePolicy {
+					retainedSnapshots = result.Snapshots
+				}
 				receipt.Outcome = EffectAmbiguous
 				receipt.FailureCode = "rollback_ambiguous"
 			}
@@ -556,150 +669,308 @@ func (executor *LinuxOperationsExecutor) ObserveOrApply(ctx context.Context, req
 		if errors.Is(effectErr, ErrCompensationFailed) {
 			receipt.Outcome = EffectAmbiguous
 			receipt.MutationObserved = result.MutationObserved
-			if receipt.FailureCode == "" || receipt.FailureCode == "host_operation_failed" { receipt.FailureCode = "security_state_ambiguous" }
+			if receipt.FailureCode == "" || receipt.FailureCode == "host_operation_failed" {
+				receipt.FailureCode = "security_state_ambiguous"
+			}
 		}
 	}
-	if receipt.Outcome == EffectAmbiguous { receipt.ProofDigest = effectProof(request, result) }
+	if receipt.Outcome == EffectAmbiguous {
+		receipt.ProofDigest = effectProof(request, result)
+	}
 	record := operationsJournalRecord{Request: request, Receipt: receipt, Snapshots: retainedSnapshots, CompensationToken: token}
-	if err := executor.storeJournal(record); err != nil { return EffectReceipt{}, err }
+	if err := executor.storeJournal(record); err != nil {
+		return EffectReceipt{}, err
+	}
 	return receipt, effectErr
 }
 
 func receiptError(receipt EffectReceipt) error {
-	switch receipt.Outcome { case EffectConfirmed: return nil; case EffectRejected: return fmt.Errorf("operations effect rejected: %s", receipt.FailureCode); default: return ErrCompensationFailed }
+	switch receipt.Outcome {
+	case EffectConfirmed:
+		return nil
+	case EffectRejected:
+		return fmt.Errorf("operations effect rejected: %s", receipt.FailureCode)
+	default:
+		return ErrCompensationFailed
+	}
 }
 
 func (executor *LinuxOperationsExecutor) Compensate(ctx context.Context, request CompensationRequest) (CompensationReceipt, error) {
-	if ctx == nil || validateCompensationRequest(request) != nil { return CompensationReceipt{}, ErrInvalidEffect }
-	executor.mu.Lock(); defer executor.mu.Unlock()
-	record, found, err := executor.loadJournal(request.EffectID); if err != nil { return CompensationReceipt{}, err }
-	if !found || record.Request.RequestDigest != request.RequestDigest || record.CompensationToken != request.CompensationToken { return CompensationReceipt{}, ErrIdempotency }
-	if record.Compensation != nil { return *record.Compensation, receiptErrorForCompensation(*record.Compensation) }
+	if ctx == nil || validateCompensationRequest(request) != nil {
+		return CompensationReceipt{}, ErrInvalidEffect
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	record, found, err := executor.loadJournal(request.EffectID)
+	if err != nil {
+		return CompensationReceipt{}, err
+	}
+	if !found || record.Request.RequestDigest != request.RequestDigest || record.CompensationToken != request.CompensationToken {
+		return CompensationReceipt{}, ErrIdempotency
+	}
+	if record.Compensation != nil {
+		return *record.Compensation, receiptErrorForCompensation(*record.Compensation)
+	}
 	receipt := CompensationReceipt{EffectID: request.EffectID, RequestDigest: request.RequestDigest, CompensationToken: request.CompensationToken, CompletedAt: executor.clock.Now().UTC()}
-	if err = executor.restoreSnapshots(record.Snapshots); err == nil { err = executor.rollbackExternal(ctx, record.Request, record.Snapshots) }
-	if err != nil { receipt.Outcome = EffectAmbiguous; receipt.FailureCode = "restore_ambiguous" } else { receipt.Outcome = EffectConfirmed; receipt.ProofDigest = snapshotProof(record.Snapshots) }
+	if err = executor.restoreSnapshots(record.Snapshots); err == nil {
+		err = executor.rollbackExternal(ctx, record.Request, record.Snapshots)
+	}
+	if err != nil {
+		receipt.Outcome = EffectAmbiguous
+		receipt.FailureCode = "restore_ambiguous"
+	} else {
+		receipt.Outcome = EffectConfirmed
+		receipt.ProofDigest = snapshotProof(record.Snapshots)
+	}
 	record.Compensation = &receipt
-	if storeErr := executor.storeJournal(record); storeErr != nil { return CompensationReceipt{}, storeErr }
+	if storeErr := executor.storeJournal(record); storeErr != nil {
+		return CompensationReceipt{}, storeErr
+	}
 	return receipt, receiptErrorForCompensation(receipt)
 }
 
-func receiptErrorForCompensation(receipt CompensationReceipt) error { if receipt.Outcome == EffectConfirmed { return nil }; return ErrCompensationFailed }
+func receiptErrorForCompensation(receipt CompensationReceipt) error {
+	if receipt.Outcome == EffectConfirmed {
+		return nil
+	}
+	return ErrCompensationFailed
+}
 
 func (executor *LinuxOperationsExecutor) apply(ctx context.Context, request EffectRequest) (linuxEffectResult, error) {
 	switch request.Kind {
-	case EffectResourceProfile: return executor.applyResourceProfile(ctx, *request.ResourceProfile)
-	case EffectTransferReset: return executor.resetTransfer(*request.TransferReset)
-	case EffectTransferSample: return executor.sampleTransfer(*request.TransferSample)
-	case EffectFirewallPolicy: return executor.applyFirewall(ctx, request, *request.FirewallPolicy)
-	case EffectSSHPolicy: return executor.applySSHPolicy(ctx, request, *request.SSHPolicy)
-	case EffectPutSSHKey: return executor.putSSHKey(*request.PutSSHKey)
-	case EffectDeleteSSHKey: return executor.deleteSSHKey(*request.DeleteSSHKey)
-	case EffectWAFPolicy: return executor.applyWAF(ctx, request, *request.WAFPolicy)
-	case EffectServicePolicy: return executor.applyServicePolicy(ctx, *request.ServicePolicy)
-	case EffectServiceControl: return executor.controlService(ctx, *request.ServiceControl)
-	case EffectServiceDiagnose: return executor.diagnoseService(ctx, *request.ServiceDiagnose)
-	case EffectServiceRepair: return executor.repairService(ctx, *request.ServiceRepair)
-	case EffectMetricsQuery: return executor.queryMetrics(ctx, *request.MetricsQuery)
-	case EffectLogQuery: return executor.queryLogs(ctx, *request.LogQuery)
-	case EffectSSHLoginQuery: return executor.querySSHLogins(ctx, *request.SSHLoginQuery)
-	case EffectSSHSessionQuery: return executor.querySSHSessions(ctx, *request.SSHSessionQuery)
-	case EffectProcessInvestigate: return executor.investigateProcess(ctx, *request.ProcessInvestigate)
-	case EffectProcessTerminate: return executor.terminateProcess(ctx, *request.ProcessTerminate)
-	case EffectPackageTransaction: return executor.applyPackageTransaction(ctx, *request.PackageTransaction)
-	case EffectManagedService: return executor.applyManagedService(ctx, *request.ManagedService)
-	case EffectProductUpdate: return executor.applyProductUpdate(ctx, *request.ProductUpdate)
+	case EffectResourceProfile:
+		return executor.applyResourceProfile(ctx, *request.ResourceProfile)
+	case EffectTransferReset:
+		return executor.resetTransfer(*request.TransferReset)
+	case EffectTransferSample:
+		return executor.sampleTransfer(*request.TransferSample)
+	case EffectFirewallPolicy:
+		return executor.applyFirewall(ctx, request, *request.FirewallPolicy)
+	case EffectSSHPolicy:
+		return executor.applySSHPolicy(ctx, request, *request.SSHPolicy)
+	case EffectPutSSHKey:
+		return executor.putSSHKey(*request.PutSSHKey)
+	case EffectDeleteSSHKey:
+		return executor.deleteSSHKey(*request.DeleteSSHKey)
+	case EffectWAFPolicy:
+		return executor.applyWAF(ctx, request, *request.WAFPolicy)
+	case EffectServicePolicy:
+		return executor.applyServicePolicy(ctx, *request.ServicePolicy)
+	case EffectServiceControl:
+		return executor.controlService(ctx, *request.ServiceControl)
+	case EffectServiceDiagnose:
+		return executor.diagnoseService(ctx, *request.ServiceDiagnose)
+	case EffectServiceRepair:
+		return executor.repairService(ctx, *request.ServiceRepair)
+	case EffectMetricsQuery:
+		return executor.queryMetrics(ctx, *request.MetricsQuery)
+	case EffectLogQuery:
+		return executor.queryLogs(ctx, *request.LogQuery)
+	case EffectSSHLoginQuery:
+		return executor.querySSHLogins(ctx, *request.SSHLoginQuery)
+	case EffectSSHSessionQuery:
+		return executor.querySSHSessions(ctx, *request.SSHSessionQuery)
+	case EffectProcessInvestigate:
+		return executor.investigateProcess(ctx, *request.ProcessInvestigate)
+	case EffectProcessTerminate:
+		return executor.terminateProcess(ctx, *request.ProcessTerminate)
+	case EffectPackageTransaction:
+		return executor.applyPackageTransaction(ctx, *request.PackageTransaction)
+	case EffectManagedService:
+		return executor.applyManagedService(ctx, *request.ManagedService)
+	case EffectProductUpdate:
+		return executor.applyProductUpdate(ctx, *request.ProductUpdate)
 	case EffectControlledReboot:
 		return executor.dispatchMarkedReboot(ctx, request)
-	default: return linuxEffectResult{}, ErrInvalidEffect
+	default:
+		return linuxEffectResult{}, ErrInvalidEffect
 	}
 }
 
 func (executor *LinuxOperationsExecutor) applyProductUpdate(ctx context.Context, effect ProductUpdateEffect) (linuxEffectResult, error) {
 	if executor.productUpdates == nil {
-		if effect.Action != ProductUpdateReadiness { return linuxEffectResult{}, ErrInvalidEffect }
+		if effect.Action != ProductUpdateReadiness {
+			return linuxEffectResult{}, ErrInvalidEffect
+		}
 		evidence := sha256.Sum256([]byte("cyberpanel:product-update-runtime-unavailable:v1\x00" + effect.NodeID + "\x00" + effect.ObservedAt.Format(time.RFC3339Nano)))
 		digest := hex.EncodeToString(evidence[:])
-		result := ProductUpdateResult{Readiness:&ProductUpdateRuntimeReadiness{AdapterID:"unavailable", AdapterVersion:"none", EvidenceDigest:digest},
-			ExecutionReceiptDigest:digest}
-		return linuxEffectResult{Result:EffectResult{ProductUpdate:&result}}, nil
+		result := ProductUpdateResult{Readiness: &ProductUpdateRuntimeReadiness{AdapterID: "unavailable", AdapterVersion: "none", EvidenceDigest: digest},
+			ExecutionReceiptDigest: digest}
+		return linuxEffectResult{Result: EffectResult{ProductUpdate: &result}}, nil
 	}
 	result, err := executor.productUpdates.ObserveOrApply(ctx, effect)
 	if err != nil {
 		mutationObserved := result.MutationObserved
-		if mutationObserved && executor.productUpdates.Recover(ctx, effect) == nil { mutationObserved = false }
-		return linuxEffectResult{MutationObserved:mutationObserved}, err
+		if mutationObserved && executor.productUpdates.Recover(ctx, effect) == nil {
+			mutationObserved = false
+		}
+		return linuxEffectResult{MutationObserved: mutationObserved}, err
 	}
-	if validateProductUpdateResult(effect, result) != nil { return linuxEffectResult{}, ErrInvalidReceipt }
-	return linuxEffectResult{Result:EffectResult{ProductUpdate:&result}, MutationObserved:result.MutationObserved}, nil
+	if validateProductUpdateResult(effect, result) != nil {
+		return linuxEffectResult{}, ErrInvalidReceipt
+	}
+	return linuxEffectResult{Result: EffectResult{ProductUpdate: &result}, MutationObserved: result.MutationObserved}, nil
 }
 
 func (executor *LinuxOperationsExecutor) journalPath(effectID string) (string, error) {
-	if !strings.HasPrefix(effectID, "hostfx-") || len(effectID) != len("hostfx-")+64 || strings.Trim(effectID[len("hostfx-"):], "0123456789abcdef") != "" { return "", ErrInvalidEffect }
+	if !strings.HasPrefix(effectID, "hostfx-") || len(effectID) != len("hostfx-")+64 || strings.Trim(effectID[len("hostfx-"):], "0123456789abcdef") != "" {
+		return "", ErrInvalidEffect
+	}
 	return filepath.Join(executor.stateRoot, "effects", effectID+".json"), nil
 }
 
 func (executor *LinuxOperationsExecutor) loadJournal(effectID string) (operationsJournalRecord, bool, error) {
-	path, err := executor.journalPath(effectID); if err != nil { return operationsJournalRecord{}, false, err }
-	content, err := os.ReadFile(path); if errors.Is(err, os.ErrNotExist) { return operationsJournalRecord{}, false, nil }; if err != nil { return operationsJournalRecord{}, false, err }
+	path, err := executor.journalPath(effectID)
+	if err != nil {
+		return operationsJournalRecord{}, false, err
+	}
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return operationsJournalRecord{}, false, nil
+	}
+	if err != nil {
+		return operationsJournalRecord{}, false, err
+	}
 	var record operationsJournalRecord
-	decoder := json.NewDecoder(strings.NewReader(string(content))); decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&record); err != nil || decoder.Decode(&struct{}{})!=io.EOF || validateEffectRequest(record.Request) != nil || !effectReceiptMatches(record.Request, record.Receipt) { return operationsJournalRecord{}, false, ErrInvalidReceipt }
+	decoder := json.NewDecoder(strings.NewReader(string(content)))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&record); err != nil || decoder.Decode(&struct{}{}) != io.EOF || validateEffectRequest(record.Request) != nil || !effectReceiptMatches(record.Request, record.Receipt) {
+		return operationsJournalRecord{}, false, ErrInvalidReceipt
+	}
 	return record, true, nil
 }
 
 func (executor *LinuxOperationsExecutor) storeJournal(record operationsJournalRecord) error {
-	path, err := executor.journalPath(record.Request.EffectID); if err != nil { return err }
-	content, err := json.Marshal(record); if err != nil { return err }
+	path, err := executor.journalPath(record.Request.EffectID)
+	if err != nil {
+		return err
+	}
+	content, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
 	return atomicOperationsFile(path, content, 0o600)
 }
 
 func atomicOperationsFile(path string, content []byte, mode os.FileMode) error {
-	directory := filepath.Dir(path); temporary, err := os.CreateTemp(directory, ".candidate-"); if err != nil { return err }
-	temporaryPath := temporary.Name(); defer os.Remove(temporaryPath)
-	if err = temporary.Chmod(mode); err == nil { _, err = temporary.Write(content) }
-	if err == nil { err = temporary.Sync() }
-	if closeErr := temporary.Close(); err == nil { err = closeErr }; if err != nil { return err }
-	if err = os.Rename(temporaryPath, path); err != nil { return err }
-	dir, err := os.Open(directory); if err != nil { return err }; defer dir.Close(); return dir.Sync()
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".candidate-")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(mode); err == nil {
+		_, err = temporary.Write(content)
+	}
+	if err == nil {
+		err = temporary.Sync()
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err = os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (executor *LinuxOperationsExecutor) writeCandidate(kind string, content []byte) (string, error) {
-	if kind != "firewall" && kind != "waf" && kind != "ssh" { return "", ErrInvalidEffect }
-	file, err := os.CreateTemp(filepath.Join(executor.stateRoot, "runtime"), "."+kind+"-candidate-"); if err != nil { return "", err }
+	if kind != "firewall" && kind != "waf" && kind != "ssh" {
+		return "", ErrInvalidEffect
+	}
+	file, err := os.CreateTemp(filepath.Join(executor.stateRoot, "runtime"), "."+kind+"-candidate-")
+	if err != nil {
+		return "", err
+	}
 	path := file.Name()
-	if err = file.Chmod(0o600); err == nil { _, err = file.Write(content) }
-	if err == nil { err = file.Sync() }
-	if closeErr := file.Close(); err == nil { err = closeErr }
-	if err != nil { _ = os.Remove(path); return "", err }
+	if err = file.Chmod(0o600); err == nil {
+		_, err = file.Write(content)
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
 	return path, nil
 }
 
 func (executor *LinuxOperationsExecutor) snapshotFile(path string) (operationsFileSnapshot, error) {
-	if !allowedManagedPath(path) { return operationsFileSnapshot{}, ErrInvalidEffect }
-	info, err := os.Lstat(path); if errors.Is(err, os.ErrNotExist) { return operationsFileSnapshot{Path: path}, nil }; if err != nil { return operationsFileSnapshot{}, err }
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 64<<20 { return operationsFileSnapshot{}, ErrInvalidEffect }
-	content, err := os.ReadFile(path); if err != nil { return operationsFileSnapshot{}, err }
+	if !allowedManagedPath(path) {
+		return operationsFileSnapshot{}, ErrInvalidEffect
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return operationsFileSnapshot{Path: path}, nil
+	}
+	if err != nil {
+		return operationsFileSnapshot{}, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 64<<20 {
+		return operationsFileSnapshot{}, ErrInvalidEffect
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return operationsFileSnapshot{}, err
+	}
 	uid, gid := 0, 0
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok { uid, gid = int(stat.Uid), int(stat.Gid) }
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		uid, gid = int(stat.Uid), int(stat.Gid)
+	}
 	return operationsFileSnapshot{Path: path, Existed: true, Mode: uint32(info.Mode().Perm()), UID: uid, GID: gid, Content: content}, nil
 }
 
 func (executor *LinuxOperationsExecutor) replaceManagedFile(path string, content []byte, mode os.FileMode) (operationsFileSnapshot, error) {
-	snapshot, err := executor.snapshotFile(path); if err != nil { return operationsFileSnapshot{}, err }
-	if err = os.MkdirAll(filepath.Dir(path), 0o755); err != nil { return operationsFileSnapshot{}, err }
-	if err = atomicOperationsFile(path, content, mode); err != nil { return operationsFileSnapshot{}, err }
-	if err = os.Chown(path, 0, 0); err != nil { return operationsFileSnapshot{}, err }
+	snapshot, err := executor.snapshotFile(path)
+	if err != nil {
+		return operationsFileSnapshot{}, err
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return operationsFileSnapshot{}, err
+	}
+	if err = atomicOperationsFile(path, content, mode); err != nil {
+		return operationsFileSnapshot{}, err
+	}
+	if err = os.Chown(path, 0, 0); err != nil {
+		return operationsFileSnapshot{}, err
+	}
 	return snapshot, nil
 }
 
 func (executor *LinuxOperationsExecutor) restoreSnapshots(snapshots []operationsFileSnapshot) error {
 	var joined error
-	for index := len(snapshots)-1; index >= 0; index-- {
+	for index := len(snapshots) - 1; index >= 0; index-- {
 		snapshot := snapshots[index]
-		if !allowedManagedPath(snapshot.Path) { joined = errors.Join(joined, ErrInvalidEffect); continue }
-		if !snapshot.Existed { if err := os.Remove(snapshot.Path); err != nil && !errors.Is(err, os.ErrNotExist) { joined = errors.Join(joined, err) }; continue }
-		if err := atomicOperationsFile(snapshot.Path, snapshot.Content, os.FileMode(snapshot.Mode)); err != nil { joined = errors.Join(joined, err); continue }
-		if err := os.Chown(snapshot.Path, snapshot.UID, snapshot.GID); err != nil { joined = errors.Join(joined, err) }
+		if !allowedManagedPath(snapshot.Path) {
+			joined = errors.Join(joined, ErrInvalidEffect)
+			continue
+		}
+		if !snapshot.Existed {
+			if err := os.Remove(snapshot.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				joined = errors.Join(joined, err)
+			}
+			continue
+		}
+		if err := atomicOperationsFile(snapshot.Path, snapshot.Content, os.FileMode(snapshot.Mode)); err != nil {
+			joined = errors.Join(joined, err)
+			continue
+		}
+		if err := os.Chown(snapshot.Path, snapshot.UID, snapshot.GID); err != nil {
+			joined = errors.Join(joined, err)
+		}
 	}
 	return joined
 }
@@ -707,12 +978,44 @@ func (executor *LinuxOperationsExecutor) restoreSnapshots(snapshots []operations
 func allowedManagedPath(path string) bool {
 	clean := filepath.Clean(path)
 	for _, prefix := range []string{"/etc/cyberpanel/", "/etc/firewalld/zones/", "/etc/firewalld/policies/", "/etc/ssh/sshd_config.d/", "/etc/ssh/authorized_keys/", "/etc/redis/", "/etc/elasticsearch/", "/usr/local/lsws/conf/modsec/", DefaultOperationsStateRoot + "/"} {
-		if strings.HasPrefix(clean, prefix) && !strings.Contains(clean, "..") { return true }
+		if strings.HasPrefix(clean, prefix) && !strings.Contains(clean, "..") {
+			return true
+		}
 	}
 	return false
 }
 
-func effectProof(request EffectRequest, result linuxEffectResult) string { encoded, _ := json.Marshal(struct { Request EffectRequest `json:"request"`; Result EffectResult `json:"result"`; Activation *ActivationEvidence `json:"activation,omitempty"`; ExecutionEvidenceDigest string `json:"execution_evidence_digest,omitempty"` }{request, result.Result, result.Activation, result.ExecutionEvidenceDigest}); digest := sha256.Sum256(append([]byte("cyberpanel:operations:proof:v1\x00"), encoded...)); return hex.EncodeToString(digest[:]) }
-func snapshotProof(snapshots []operationsFileSnapshot) string { encoded, _ := json.Marshal(snapshots); digest := sha256.Sum256(append([]byte("cyberpanel:operations:compensation:v1\x00"), encoded...)); return hex.EncodeToString(digest[:]) }
-func newCompensationToken() (SecretRef, error) { var entropy [32]byte; if _, err := io.ReadFull(rand.Reader, entropy[:]); err != nil { return SecretRef{}, err }; return NewSecretRef("comp-"+hex.EncodeToString(entropy[:])) }
-func stableFailureCode(err error) string { switch { case errors.Is(err, context.DeadlineExceeded): return "deadline_exceeded"; case errors.Is(err, ErrInvalidEffect), errors.Is(err, ErrInvalidResource): return "invalid_effect"; case errors.Is(err, os.ErrPermission): return "permission_denied"; default: return "host_operation_failed" } }
+func effectProof(request EffectRequest, result linuxEffectResult) string {
+	encoded, _ := json.Marshal(struct {
+		Request                 EffectRequest       `json:"request"`
+		Result                  EffectResult        `json:"result"`
+		Activation              *ActivationEvidence `json:"activation,omitempty"`
+		ExecutionEvidenceDigest string              `json:"execution_evidence_digest,omitempty"`
+	}{request, result.Result, result.Activation, result.ExecutionEvidenceDigest})
+	digest := sha256.Sum256(append([]byte("cyberpanel:operations:proof:v1\x00"), encoded...))
+	return hex.EncodeToString(digest[:])
+}
+func snapshotProof(snapshots []operationsFileSnapshot) string {
+	encoded, _ := json.Marshal(snapshots)
+	digest := sha256.Sum256(append([]byte("cyberpanel:operations:compensation:v1\x00"), encoded...))
+	return hex.EncodeToString(digest[:])
+}
+func newCompensationToken() (SecretRef, error) {
+	var entropy [32]byte
+	if _, err := io.ReadFull(rand.Reader, entropy[:]); err != nil {
+		return SecretRef{}, err
+	}
+	return NewSecretRef("comp-" + hex.EncodeToString(entropy[:]))
+}
+func stableFailureCode(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, ErrInvalidEffect), errors.Is(err, ErrInvalidResource):
+		return "invalid_effect"
+	case errors.Is(err, os.ErrPermission):
+		return "permission_denied"
+	default:
+		return "host_operation_failed"
+	}
+}

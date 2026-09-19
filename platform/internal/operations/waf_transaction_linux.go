@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 const wafRollbackWindow = 6 * time.Minute
@@ -29,11 +31,11 @@ const (
 )
 
 type wafPolicyPointer struct {
-	ScopeKey    string     `json:"scope_key"`
-	ResourceID  ResourceID `json:"resource_id"`
-	Generation  uint64     `json:"generation"`
-	Digest      string     `json:"digest"`
-	Path        string     `json:"path"`
+	ScopeKey   string     `json:"scope_key"`
+	ResourceID ResourceID `json:"resource_id"`
+	Generation uint64     `json:"generation"`
+	Digest     string     `json:"digest"`
+	Path       string     `json:"path"`
 }
 
 type wafActiveIndex struct {
@@ -50,13 +52,13 @@ type wafSourceEvidence struct {
 }
 
 type wafExclusionEvidence struct {
-	ScopeKey        string     `json:"scope_key"`
-	PolicyID        ResourceID `json:"policy_id"`
-	PolicyGeneration uint64    `json:"policy_generation"`
-	Ordinal         uint32     `json:"ordinal"`
-	ReasonCode      ResourceID `json:"reason_code"`
-	ExpiresAt       time.Time  `json:"expires_at"`
-	Digest          string     `json:"digest"`
+	ScopeKey         string     `json:"scope_key"`
+	PolicyID         ResourceID `json:"policy_id"`
+	PolicyGeneration uint64     `json:"policy_generation"`
+	Ordinal          uint32     `json:"ordinal"`
+	ReasonCode       ResourceID `json:"reason_code"`
+	ExpiresAt        time.Time  `json:"expires_at"`
+	Digest           string     `json:"digest"`
 }
 
 type wafNativeGeneration struct {
@@ -70,24 +72,30 @@ type wafNativeGeneration struct {
 }
 
 type wafRollbackLease struct {
-	Version           uint16                 `json:"version"`
-	LeaseID           string                 `json:"lease_id"`
-	ConfirmationNonce string                 `json:"confirmation_nonce"`
-	EffectID          string                 `json:"effect_id"`
-	RequestDigest     string                 `json:"request_digest"`
-	PolicyDigest      string                 `json:"policy_digest"`
-	PolicyScopeKey    string                 `json:"policy_scope_key"`
-	PreviousIndex     wafActiveIndex         `json:"previous_index"`
-	CandidateIndex    wafActiveIndex         `json:"candidate_index"`
-	PreviousGeneration *wafNativeGeneration `json:"previous_generation,omitempty"`
-	CandidateGeneration wafNativeGeneration `json:"candidate_generation"`
-	Snapshot          operationsFileSnapshot `json:"snapshot"`
-	State             wafTransactionState    `json:"state"`
-	ArmedAt           time.Time              `json:"armed_at"`
-	Deadline          time.Time              `json:"deadline"`
-	Activation        *ActivationEvidence    `json:"activation,omitempty"`
-	RollbackProofDigest string               `json:"rollback_proof_digest,omitempty"`
-	FailureCode       string                 `json:"failure_code,omitempty"`
+	Version             uint16                 `json:"version"`
+	LeaseID             string                 `json:"lease_id"`
+	ConfirmationNonce   string                 `json:"confirmation_nonce"`
+	EffectID            string                 `json:"effect_id"`
+	RequestDigest       string                 `json:"request_digest"`
+	PolicyDigest        string                 `json:"policy_digest"`
+	PolicyScopeKey      string                 `json:"policy_scope_key"`
+	PreviousIndex       wafActiveIndex         `json:"previous_index"`
+	CandidateIndex      wafActiveIndex         `json:"candidate_index"`
+	PreviousGeneration  *wafNativeGeneration   `json:"previous_generation,omitempty"`
+	CandidateGeneration wafNativeGeneration    `json:"candidate_generation"`
+	Snapshot            operationsFileSnapshot `json:"snapshot"`
+	State               wafTransactionState    `json:"state"`
+	ArmedAt             time.Time              `json:"armed_at"`
+	Deadline            time.Time              `json:"deadline"`
+	Activation          *ActivationEvidence    `json:"activation,omitempty"`
+	RollbackProofDigest string                 `json:"rollback_proof_digest,omitempty"`
+	FailureCode         string                 `json:"failure_code,omitempty"`
+}
+
+type wafRecoveryReceipt struct {
+	EffectID    string `json:"effect_id"`
+	LeaseID     string `json:"lease_id"`
+	ProofDigest string `json:"proof_digest"`
 }
 
 func wafPolicyScope(policy WAFPolicy) (string, error) {
@@ -547,20 +555,28 @@ func (executor *LinuxOperationsExecutor) scheduleWAFRollback(effectID string, de
 			defer timer.Stop()
 			<-timer.C
 		}
-		executor.mu.Lock()
-		defer executor.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		_ = executor.rollbackWAFLease(ctx, effectID)
+		for {
+			executor.mu.Lock()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			err := executor.rollbackWAFLease(ctx, effectID)
+			cancel()
+			executor.mu.Unlock()
+			if err == nil || !errors.Is(err, rebootcontrol.ErrConflict) {
+				return
+			}
+			timer := time.NewTimer(30 * time.Second)
+			<-timer.C
+		}
 	}()
 }
 
 func (executor *LinuxOperationsExecutor) ResumeWAFTransactions(ctx context.Context) error {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
 	entries, err := os.ReadDir(filepath.Join(executor.stateRoot, "waf", "leases"))
 	if err != nil {
 		return err
 	}
-	var joined error
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -568,14 +584,15 @@ func (executor *LinuxOperationsExecutor) ResumeWAFTransactions(ctx context.Conte
 		effectID := strings.TrimSuffix(entry.Name(), ".json")
 		lease, found, loadErr := executor.loadWAFLease(effectID)
 		if loadErr != nil {
-			joined = errors.Join(joined, loadErr)
-			continue
+			return loadErr
 		}
-		if found && (lease.State == wafTransactionArmed || lease.State == wafTransactionRollingBack || lease.State == wafTransactionAmbiguous) {
-			joined = errors.Join(joined, executor.rollbackWAFLease(ctx, effectID))
+		if found && (lease.State == wafTransactionArmed || lease.State == wafTransactionRollingBack || lease.State == wafTransactionAmbiguous || lease.State == wafTransactionRolledBack) {
+			if err = executor.rollbackWAFLease(ctx, effectID); err != nil {
+				return err
+			}
 		}
 	}
-	return joined
+	return nil
 }
 
 func (executor *LinuxOperationsExecutor) rollbackWAFLease(ctx context.Context, effectID string) error {
@@ -583,8 +600,38 @@ func (executor *LinuxOperationsExecutor) rollbackWAFLease(ctx context.Context, e
 	if err != nil || !found {
 		return errors.Join(ErrCompensationFailed, err)
 	}
-	if lease.State == wafTransactionConfirmed || lease.State == wafTransactionRolledBack {
+	if lease.State == wafTransactionConfirmed {
 		return nil
+	}
+	if lease.State != wafTransactionArmed && lease.State != wafTransactionRollingBack && lease.State != wafTransactionAmbiguous && lease.State != wafTransactionRolledBack {
+		return ErrCompensationFailed
+	}
+	if executor.admission == nil {
+		return rebootcontrol.ErrConflict
+	}
+	canonical := lease
+	canonical.State = ""
+	canonical.FailureCode = ""
+	canonical.RollbackProofDigest = ""
+	digest := rebootcontrol.ExecutionDigest(canonical)
+	admitted, err := executor.admission.AdmitExecution(ctx, rebootcontrol.ExecutionBinding{Boundary: "operations-recovery", Method: "waf_rollback", EffectID: lease.LeaseID, RequestDigest: digest, Caller: "panel-execd-recovery", Resource: rebootcontrol.ExecutionResource(struct{ Scope, Policy, Request string }{lease.PolicyScopeKey, lease.PolicyDigest, lease.RequestDigest})})
+	if err != nil {
+		return err
+	}
+	if len(admitted.Cached) != 0 {
+		var receipt wafRecoveryReceipt
+		if json.Unmarshal(admitted.Cached, &receipt) != nil || !validWAFRecoveryReceipt(lease, effectID, receipt) {
+			return rebootcontrol.ErrIntegrity
+		}
+		return nil
+	}
+	defer func() { _ = rebootcontrol.SettleExecution(executor.admission, admitted, false, nil) }()
+	if lease.State == wafTransactionRolledBack {
+		receipt := wafRecoveryReceipt{EffectID: effectID, LeaseID: lease.LeaseID, ProofDigest: lease.RollbackProofDigest}
+		if !validWAFRecoveryReceipt(lease, effectID, receipt) {
+			return ErrCompensationFailed
+		}
+		return rebootcontrol.SettleExecution(executor.admission, admitted, true, receipt)
 	}
 	lease.State = wafTransactionRollingBack
 	if err = executor.storeWAFLease(lease); err != nil {
@@ -637,7 +684,22 @@ func (executor *LinuxOperationsExecutor) rollbackWAFLease(ctx context.Context, e
 	lease.State = wafTransactionRolledBack
 	lease.FailureCode = ""
 	lease.RollbackProofDigest = digestBytes(append(append([]byte(snapshotProof([]operationsFileSnapshot{lease.Snapshot})+"\x00"), reloadProof...), runtimeProof...))
-	return executor.storeWAFLease(lease)
+	if err = executor.storeWAFLease(lease); err != nil {
+		return err
+	}
+	stored, storedFound, loadErr := executor.loadWAFLease(effectID)
+	if loadErr != nil || !storedFound {
+		return errors.Join(ErrCompensationFailed, loadErr)
+	}
+	receipt := wafRecoveryReceipt{EffectID: effectID, LeaseID: stored.LeaseID, ProofDigest: stored.RollbackProofDigest}
+	if !validWAFRecoveryReceipt(stored, effectID, receipt) {
+		return ErrCompensationFailed
+	}
+	return rebootcontrol.SettleExecution(executor.admission, admitted, true, receipt)
+}
+
+func validWAFRecoveryReceipt(lease wafRollbackLease, effectID string, receipt wafRecoveryReceipt) bool {
+	return lease.State == wafTransactionRolledBack && lease.EffectID == effectID && receipt.EffectID == effectID && receipt.LeaseID == lease.LeaseID && validSHA256(receipt.ProofDigest) && receipt.ProofDigest == lease.RollbackProofDigest
 }
 
 func wafPointerForScope(index wafActiveIndex, scope string) (wafPolicyPointer, bool) {
