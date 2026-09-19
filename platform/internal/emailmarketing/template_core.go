@@ -20,8 +20,8 @@ const (
 var (
 	templateTokenPattern = regexp.MustCompile(`\{\{([a-z][a-z0-9_]{0,63})\}\}`)
 	htmlTagPattern       = regexp.MustCompile(`(?s)<[^>]*>`)
-	anchorPattern        = regexp.MustCompile(`^<a href="([^"]{1,2048})">$`)
-	canonicalAnchorPattern = regexp.MustCompile(`^<a href="([^"]{1,2048})" rel="noopener noreferrer">$`)
+	anchorPattern        = regexp.MustCompile(`^<a href="([^"]{1,1000}[^"]{0,1000}[^"]{0,48})">$`)
+	canonicalAnchorPattern = regexp.MustCompile(`^<a href="([^"]{1,1000}[^"]{0,1000}[^"]{0,48})" rel="noopener noreferrer">$`)
 	variableNamePattern  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 )
 

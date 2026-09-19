@@ -62,7 +62,7 @@ func classifyError(err error, requestID string) Problem {
 	case errors.Is(err, ErrOperationUnavailable):
 		problem.Type, problem.Title, problem.Status, problem.Code = "https://cyberpanel.dev/problems/operation-unavailable", "Operation unavailable", http.StatusNotImplemented, "operation_unavailable"
 	}
-	var prerequisite *n8nPrerequisiteError
+	var prerequisite *containerApplicationPrerequisiteError
 	if errors.As(err, &prerequisite) { problem.Detail = prerequisite.detail }
 	return problem
 }

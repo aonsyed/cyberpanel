@@ -143,8 +143,8 @@ var addressPattern = regexp.MustCompile(`^[a-z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]
 func validAddress(value string) bool { return len(value) <= 254 && addressPattern.MatchString(value) && !strings.Contains(value, "..") }
 
 var (
-	postfixStatus = regexp.MustCompile(`^postfix/(?:smtp|lmtp|local|virtual)\[[0-9]{1,10}\]: ([A-F0-9]{5,32}): to=<([^>]*)>,(?: orig_to=<[^>]*>,)? relay=[^,]{1,255}, delay=([0-9]+(?:\.[0-9]+)?),[^\r\n]{0,1024} dsn=([245]\.[0-9]{1,3}\.[0-9]{1,3}), status=(sent|deferred|bounced|reject(?:ed)?)\b`)
-	postfixReject = regexp.MustCompile(`^postfix/smtpd\[[0-9]{1,10}\]: (?:NOQUEUE|([A-F0-9]{5,32})): reject: [^\r\n]{0,1536}; from=<([^>]*)> to=<([^>]*)>(?: proto=[A-Za-z0-9]+)?`)
+	postfixStatus = regexp.MustCompile(`^postfix/(?:smtp|lmtp|local|virtual)\[[0-9]{1,10}\]: ([A-F0-9]{5,32}): to=<([^>]*)>,(?: orig_to=<[^>]*>,)? relay=[^,]{1,255}, delay=([0-9]+(?:\.[0-9]+)?),[^\r\n]{0,1000}[^\r\n]{0,24} dsn=([245]\.[0-9]{1,3}\.[0-9]{1,3}), status=(sent|deferred|bounced|reject(?:ed)?)\b`)
+	postfixReject = regexp.MustCompile(`^postfix/smtpd\[[0-9]{1,10}\]: (?:NOQUEUE|([A-F0-9]{5,32})): reject: [^\r\n]{0,1000}[^\r\n]{0,536}; from=<([^>]*)> to=<([^>]*)>(?: proto=[A-Za-z0-9]+)?`)
 	postfixQueue  = regexp.MustCompile(`^postfix/qmgr\[[0-9]{1,10}\]: ([A-F0-9]{5,32}): from=<([^>]*)>, size=([0-9]{1,20}), nrcpt=([0-9]{1,8})`)
 	dovecotLMTP   = regexp.MustCompile(`^dovecot: lmtp\([^)]{0,128}\): (?:msgid=<([^>]*)>: )?(?:save|saved|delivered)[^\r\n]{0,512}(?:to|user)[ =<]([^> ,]+)`)
 	dovecotAuth   = regexp.MustCompile(`^dovecot: auth: .*?(?:user=<([^>]*)>|user=([^ ,]+)).*?(auth failed|authentication failure|passdb: .*? succeeded|login succeeded)\b`)
@@ -153,7 +153,7 @@ var (
 	clamResult    = regexp.MustCompile(`^(?:clamd|clamav)(?:\[[0-9]{1,10}\])?: .*?(?:queue[_ -]?id[=: ]+<?([A-F0-9]{5,32})>?.*?)?(FOUND|OK)$`)
 	dkimResult    = regexp.MustCompile(`^(?:opendkim|rspamd)(?:\[[0-9]{1,10}\])?: .*?(?:queue[_ -]?id[=: ]+<?([A-F0-9]{5,32})>?.*?)?\b(DKIM-Signature field added|signature ok|verification successful|bad signature|verification failed)\b(?:.*?\bkey[=: ]+([A-Za-z0-9._-]{1,128}))?`)
 	policyResult  = regexp.MustCompile(`^policy(?:-server)?(?:\[[0-9]{1,10}\])?: action=(permit|reject|defer|dunno) sender=<([^>]*)> recipient=<([^>]*)>(?: queue_id=([A-F0-9]{5,32}))?`)
-	deliveryResult = regexp.MustCompile(`^delivery(?:\[[0-9]{1,10}\])?: provider=([A-Za-z0-9._-]{1,128}) receipt=([A-Za-z0-9._:@-]{1,256}) queue_id=([A-F0-9]{5,32}) recipient=<([^>]*)> result=(delivered|deferred|bounced|rejected)(?: signature=([A-Za-z0-9+/=_-]{1,1024}) key_id=([A-Za-z0-9._:@-]{1,128}))?$`)
+	deliveryResult = regexp.MustCompile(`^delivery(?:\[[0-9]{1,10}\])?: provider=([A-Za-z0-9._-]{1,128}) receipt=([A-Za-z0-9._:@-]{1,256}) queue_id=([A-F0-9]{5,32}) recipient=<([^>]*)> result=(delivered|deferred|bounced|rejected)(?: signature=([A-Za-z0-9+/=_-]{1,1000}[A-Za-z0-9+/=_-]{0,24}) key_id=([A-Za-z0-9._:@-]{1,128}))?$`)
 	postfixRemote = regexp.MustCompile(`\[([0-9A-Fa-f:.]{2,64})\]`)
 	dovecotRemote = regexp.MustCompile(`\brip=([0-9A-Fa-f:.]{2,64})\b`)
 	rspamdRemote = regexp.MustCompile(`\bip[:= ]+([0-9A-Fa-f:.]{2,64})\b`)
