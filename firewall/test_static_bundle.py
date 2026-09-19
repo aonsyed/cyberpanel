@@ -1,0 +1,52 @@
+import os
+import unittest
+
+
+class FirewallStaticBundleTests(unittest.TestCase):
+
+    def test_collected_bundle_matches_application_source(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        source = os.path.join(root, 'firewall', 'static', 'firewall', 'firewall.js')
+        collected_candidates = (
+            os.path.join(root, 'static', 'firewall', 'firewall.js'),
+            os.path.join(root, 'public', 'static', 'firewall', 'firewall.js'),
+        )
+        collected = next(
+            (path for path in collected_candidates if os.path.isfile(path)),
+            collected_candidates[0],
+        )
+        with open(source, 'rb') as source_file, open(collected, 'rb') as collected_file:
+            self.assertEqual(source_file.read(), collected_file.read())
+
+    def test_templates_use_current_firewall_asset_revision(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        templates = (
+            os.path.join(root, 'baseTemplate', 'templates', 'baseTemplate', 'index.html'),
+            os.path.join(root, 'firewall', 'templates', 'firewall', 'imunify.html'),
+            os.path.join(root, 'firewall', 'templates', 'firewall', 'imunifyAV.html'),
+            os.path.join(root, 'firewall', 'templates', 'firewall', 'notAvailableAV.html'),
+            os.path.join(root, 'firewall', 'templates', 'firewall', 'modSecurityRulesPacks.html'),
+        )
+        expected = "{% static 'firewall/firewall.js' %}?v={{ CP_VERSION }}-2"
+        for template in templates:
+            with self.subTest(template=template), open(template, encoding='utf-8') as template_file:
+                self.assertIn(expected, template_file.read())
+
+    def test_security_page_spinners_follow_legacy_loading_flag_semantics(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        templates = (
+            ('modSecurity.html', 'modsecLoading'),
+            ('modSecurityRules.html', 'modsecLoading'),
+            ('modSecurityRulesPacks.html', 'modsecLoading'),
+            ('secureSSH.html', 'secureSSHLoading'),
+        )
+        for filename, flag in templates:
+            path = os.path.join(root, 'firewall', 'templates', 'firewall', filename)
+            with self.subTest(template=filename), open(path, encoding='utf-8') as template_file:
+                source = template_file.read()
+                self.assertIn('ng-hide="%s"' % flag, source)
+                self.assertNotIn('ng-show="%s"' % flag, source)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1252,10 +1252,18 @@ function findFileExtension(fileName) {
     
     // Download
     $scope.downloadFile = function () {
+        // The path and domain must be percent-encoded. Without encoding, a
+        // name containing '#' is cut off as a URL fragment, '&' starts a new
+        // query parameter, and '+' arrives as a space. Each produces a
+        // different path than the one clicked, so the download is refused.
+        // Issue #1902.
         if (domainName === "") {
-            $window.location.href = "/filemanager/RootDownloadFile?fileToDownload=" + $scope.currentRPath + "/" + allFilesAndFolders[0];
+            $window.location.href = "/filemanager/RootDownloadFile?fileToDownload=" +
+                encodeURIComponent($scope.currentRPath + "/" + allFilesAndFolders[0]);
         } else {
-            $window.location.href = "/filemanager/downloadFile?fileToDownload=" + $scope.completeStartingPath + "/" + allFilesAndFolders[0] + "&domainName=" + domainName;
+            $window.location.href = "/filemanager/downloadFile?fileToDownload=" +
+                encodeURIComponent($scope.completeStartingPath + "/" + allFilesAndFolders[0]) +
+                "&domainName=" + encodeURIComponent(domainName);
         }
     };
     

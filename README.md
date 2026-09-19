@@ -11,12 +11,13 @@ Web Hosting Control Panel powered by OpenLiteSpeed, designed to simplify hosting
 - 💻 **FTP Server** for file transfers.
 - 🕒 **Light-weight DNS Server** (PowerDNS).
 - 🔐 **phpMyAdmin** to manage databases (MariaDB).
-- 📧 **Email Support** (SnappyMail).
+- 📧 **Email Support** with integrated webmail.
 - 🕌 **File Manager** for quick file access.
 - 🌐 **PHP Management** made easy.
 - 🔒 **Firewall** (FirewallD & ConfigServer Firewall Integration).
 - 📀 **One-click Backups and Restores**.
 - 🐳 **Docker Management** with command execution capabilities.
+- 🤖 **One-click applications** — n8n and [Hermes Agent](guides/HERMES_AGENT_GUIDE.md) on their own domain with SSL.
 - 🤖 **AI-Powered Security Scanner** for enhanced protection.
 - 📊 **Monthly Bandwidth Reset** - Automatic bandwidth usage reset (Fixed in latest version).
 

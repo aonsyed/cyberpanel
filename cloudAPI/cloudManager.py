@@ -18,6 +18,9 @@ from packages.packagesManager import PackagesManager
 from plogical.mysqlUtilities import mysqlUtilities
 from plogical.virtualHostUtilities import virtualHostUtilities
 from websiteFunctions.website import WebsiteManager
+from websiteFunctions.wordpressEntitlements import wordpress_entitlement_required
+from websiteFunctions.apacheEntitlements import apache_backend_entitlement_error
+from plogical.premiumEntitlements import premium_entitlement_required
 from s3Backups.s3Backups import S3Backups
 from serverLogs.views import getLogsFromFile
 from serverStatus.views import topProcessesStatus, killProcess, switchTOLSWSStatus
@@ -27,6 +30,7 @@ from plogical.CyberCPLogFileWriter import CyberCPLogFileWriter as logging
 from plogical.securityUtils import (
     EMAIL_REPORT_DIRECTORY,
     api_token_matches,
+    api_two_factor_matches,
     create_private_token_file,
     read_private_token_file,
     remove_stale_private_token_files,
@@ -51,7 +55,8 @@ class CloudManager:
 
     def verifyLogin(self, request):
         try:
-            if api_token_matches(request.META.get('HTTP_AUTHORIZATION'), self.admin.token):
+            if (api_token_matches(request.META.get('HTTP_AUTHORIZATION'), self.admin.token)
+                    and api_two_factor_matches(self.admin, request, self.data)):
                 return 1, self.ajaxPre(1, None)
             else:
                 return 0, self.ajaxPre(0, 'Invalid login information.')
@@ -76,6 +81,9 @@ class CloudManager:
 
     def submitWebsiteCreation(self):
         try:
+            denial = apache_backend_entitlement_error(self.data)
+            if denial is not None:
+                return denial
 
             try:
 
@@ -1091,6 +1099,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @premium_entitlement_required('Filemanager', label='MySQL Manager')
     def fetchRam(self, request):
         try:
             # request.session['userID'] = self.admin.pk
@@ -1122,6 +1131,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @premium_entitlement_required('Filemanager', label='MySQL Manager')
     def applyMySQLChanges(self, request):
         try:
             request.session['userID'] = self.admin.pk
@@ -1474,6 +1484,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @premium_entitlement_required('email-debugger', label='Email Debugger')
     def RunServerLevelEmailChecks(self):
         try:
 
@@ -1493,6 +1504,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @premium_entitlement_required('email-debugger', label='Email Debugger')
     def ReadReport(self):
         try:
             reportToken = self.data['reportFile']
@@ -1513,6 +1525,7 @@ class CloudManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @premium_entitlement_required('email-debugger', label='Email Debugger')
     def ResetEmailConfigurations(self):
         try:
 
@@ -1546,6 +1559,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @premium_entitlement_required('email-debugger', label='Email Debugger')
     def debugEmailForSite(self):
         try:
 
@@ -1563,6 +1577,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @premium_entitlement_required('email-debugger', label='Email Debugger')
     def fixMailSSL(self, request):
         try:
 
@@ -1949,6 +1964,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @wordpress_entitlement_required()
     def DeployWordPress(self):
         try:
 
@@ -1982,6 +1998,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @wordpress_entitlement_required()
     def FetchWordPressDetails(self):
         try:
 
@@ -2073,6 +2090,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @wordpress_entitlement_required()
     def AutoLogin(self):
         try:
 
@@ -2109,6 +2127,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @wordpress_entitlement_required()
     def UpdateWPSettings(self):
         try:
 
@@ -2208,6 +2227,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @wordpress_entitlement_required()
     def GetCurrentPlugins(self):
         try:
             website = Websites.objects.get(domain=self.data['domain'])
@@ -2231,6 +2251,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def UpdatePlugins(self):
         try:
             website = Websites.objects.get(domain=self.data['domain'])
@@ -2280,6 +2301,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def ChangeState(self):
         try:
             website = Websites.objects.get(domain=self.data['domain'])
@@ -2315,6 +2337,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def DeletePlugins(self):
         try:
             website = Websites.objects.get(domain=self.data['domain'])
@@ -2351,6 +2374,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def GetCurrentThemes(self):
         try:
 
@@ -2374,6 +2398,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def UpdateThemes(self):
         try:
             website = Websites.objects.get(domain=self.data['domain'])
@@ -2423,6 +2448,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def ChangeStateThemes(self):
         try:
             website = Websites.objects.get(domain=self.data['domain'])
@@ -2460,6 +2486,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def DeleteThemes(self):
         try:
             website = Websites.objects.get(domain=self.data['domain'])
@@ -2557,6 +2584,7 @@ class CloudManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @wordpress_entitlement_required()
     def SaveAutoUpdateSettings(self):
         try:
             website = Websites.objects.get(domain=self.data['domainName'])
@@ -2605,6 +2633,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def fetchWPSettings(self):
         try:
 
@@ -2636,6 +2665,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def updateWPCLI(self):
         try:
 
@@ -2649,6 +2679,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def saveWPSettings(self):
         try:
 
@@ -2662,6 +2693,7 @@ class CloudManager:
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @wordpress_entitlement_required()
     def WPScan(self):
         try:
 
@@ -2686,6 +2718,10 @@ class CloudManager:
 
     def SubmitCyberPanelUpgrade(self):
         try:
+            if os.path.lexists('/etc/csf'):
+                from cyberpanel_firewall_migration import CSF_UPGRADE_MESSAGE
+                return self.ajaxPre(0, CSF_UPGRADE_MESSAGE)
+
             try:
                 mail = str(int(self.data['mail']))
             except:
@@ -4663,8 +4699,9 @@ To manage n8n:
             website_manager = WebsiteManager()
             delete_result = website_manager.submitWebsiteDeletion(self.admin.pk, {'websiteName': domain_name})
 
-            if delete_result['status'] == 0:
-                return self.ajaxPre(0, delete_result['error_message'])
+            deletion = json.loads(delete_result.content)
+            if deletion.get('websiteDeleteStatus') != 1 or deletion.get('state') != 'completed':
+                return self.ajaxPre(0, deletion.get('error_message', 'Website deletion has not completed.'))
 
             # Clean up status files
             status_file_path = f'/home/cyberpanel/n8n_install_{domain_name.replace(".", "_")}_status'

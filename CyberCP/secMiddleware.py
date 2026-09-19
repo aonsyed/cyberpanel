@@ -8,9 +8,39 @@ import re
 from loginSystem.models import Administrator
 
 
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+    "https://www.jsdelivr.com https://cdn.jsdelivr.net https://code.jquery.com "
+    "https://code.angularjs.org https://cdnjs.cloudflare.com "
+    "https://maxcdn.bootstrapcdn.com https://ajax.googleapis.com https://js.stripe.com; "
+    "connect-src *; "
+    "font-src 'self' data: https:; "
+    "style-src 'self' 'unsafe-inline' https:; "
+    "img-src 'self' data: blob: https:; "
+    "frame-src 'self' blob: https://www.youtube.com https://www.youtube-nocookie.com "
+    "https://stripe.com https://*.stripe.com; "
+    "object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self' https:"
+)
+
+
 class secMiddleware:
     HIGH = 0
     LOW = 1
+
+    WEBMAIL_PUBLIC_PATHS = (
+        '/webmail/login',
+        '/webmail/api/login',
+        '/webmail/api/logout',
+    )
+
+    @staticmethod
+    def _has_standalone_webmail_session(request):
+        return bool(
+            request.session.get('webmail_standalone')
+            and request.session.get('webmail_email')
+            and request.session.get('webmail_password')
+        )
 
     def get_client_ip(request):
         ip = request.META.get('HTTP_CF_CONNECTING_IP')
@@ -37,7 +67,14 @@ class secMiddleware:
         import re
         webhook_pattern = re.compile(r'^/websites/[^/]+/(webhook|gitNotify)/?$')
         
+        publicWebmailRequest = pathActual in self.WEBMAIL_PUBLIC_PATHS
+        standaloneWebmailRequest = (
+            pathActual.startswith('/webmail/')
+            and self._has_standalone_webmail_session(request)
+        )
+
         if pathActual == "/backup/localInitiate" or  pathActual == '/' or pathActual == '/verifyLogin' or pathActual == '/logout' or pathActual.startswith('/api')\
+                or publicWebmailRequest or standaloneWebmailRequest\
                 or webhook_pattern.match(pathActual) or pathActual.startswith('/cloudAPI'):
             pass
         else:
@@ -150,6 +187,18 @@ class secMiddleware:
                     elif key == 'ports':
                         # For other endpoints, ports key continues to skip validation
                         continue
+
+                    # Database passwords are opaque credentials.  The database
+                    # layer binds these values as SQL parameters, so rejecting
+                    # characters such as $, &, quotes, or semicolons only makes
+                    # strong generated passwords unusable.  Keep the exemption
+                    # limited to the password field on the two endpoints that
+                    # create or update a database account.
+                    if key == 'dbPassword' and pathActual in (
+                        '/dataBases/submitDBCreation',
+                        '/dataBases/changePassword',
+                    ):
+                        continue
                     
                     # Allow protocol parameter for CSF modifyPorts endpoint
                     if key == 'protocol' and pathActual == '/firewall/modifyPorts':
@@ -208,6 +257,13 @@ class secMiddleware:
                         if key == 'content' or key == 'fileContent' or key == 'configData' or key == 'rewriteRules' or key == 'modSecRules' or key == 'contentNow' or key == 'emailMessage':
                             continue
 
+                        # Passwords are opaque credentials and may legitimately
+                        # contain shell metacharacters.  Only exempt the password
+                        # value on the exact login endpoint; usernames and every
+                        # other login field keep the normal validation below.
+                        if pathActual == '/verifyLogin' and key == 'password':
+                            continue
+
                         # For API endpoints, still check for the most dangerous command injection characters
                         if isinstance(value, (str, bytes)) and (value.find('- -') > -1 or value.find('\n') > -1 or value.find(';') > -1 or
                             value.find('&&') > -1 or value.find('||') > -1 or value.find('|') > -1 or
@@ -228,7 +284,8 @@ class secMiddleware:
                             or key == 'emailMessage' or key == 'configData' or key == 'rewriteRules' \
                             or key == 'modSecRules' or key == 'recordContentTXT' or key == 'SecAuditLogRelevantStatus' \
                             or key == 'fileContent' or key == 'commands' or key == 'gitHost' or key == 'ipv6' or key == 'contentNow' \
-                            or key == 'time_of_day' or key == 'notification_emails' or key == 'domains' or key == 'content':
+                            or key == 'time_of_day' or key == 'notification_emails' or key == 'domains' or key == 'content' \
+                            or (key == 'password' and pathActual == '/websites/saveSSHAccessChanges'):
                         continue
 
                     # Skip validation for API endpoints that need JSON structure characters
@@ -281,12 +338,7 @@ class secMiddleware:
 
         response['X-XSS-Protection'] = "1; mode=block"
         response['X-Frame-Options'] = "sameorigin"
-        response['Content-Security-Policy'] = "script-src 'self' https://www.jsdelivr.com"
-        response['Content-Security-Policy'] = "connect-src *;"
-        response['Content-Security-Policy'] = "font-src 'self' 'unsafe-inline' https://www.jsdelivr.com https://fonts.googleapis.com"
-        response[
-            'Content-Security-Policy'] = "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://www.jsdelivr.com https://cdnjs.cloudflare.com https://maxcdn.bootstrapcdn.com https://cdn.jsdelivr.net"
-        # response['Content-Security-Policy'] = "default-src 'self' cyberpanel.cloud *.cyberpanel.cloud"
+        response['Content-Security-Policy'] = CONTENT_SECURITY_POLICY
         response['X-Content-Type-Options'] = "nosniff"
         response['Referrer-Policy'] = "same-origin"
 

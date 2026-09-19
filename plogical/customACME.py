@@ -16,6 +16,29 @@ import OpenSSL
 from plogical import CyberCPLogFileWriter as logging
 from plogical.processUtilities import ProcessUtilities
 import socket
+import tempfile
+
+
+def _atomic_write(path, content, mode):
+    """Replace a certificate file atomically with an explicit final mode."""
+    directory = os.path.dirname(path)
+    descriptor, temporary_path = tempfile.mkstemp(
+        dir=directory, prefix='.%s-' % os.path.basename(path))
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, 'wb') as output:
+            descriptor = None
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+        os.chmod(path, mode)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
 
 class CustomACME:
@@ -61,7 +84,8 @@ class CustomACME:
             f'Certificate path: {self.cert_path}, Challenge path: {self.challenge_path}')
 
         # Create accounts directory if it doesn't exist
-        os.makedirs('/etc/letsencrypt/accounts', exist_ok=True)
+        os.makedirs('/etc/letsencrypt/accounts', mode=0o700, exist_ok=True)
+        os.chmod('/etc/letsencrypt/accounts', 0o700)
 
     def _generate_account_key(self):
         """Generate RSA account key"""
@@ -86,7 +110,7 @@ class CustomACME:
             response = requests.get(self.acme_directory)
             self.directory = response.json()
             logging.CyberCPLogFileWriter.writeToFile(
-                f'Successfully fetched ACME directory: {json.dumps(self.directory)}')
+                'Successfully fetched ACME directory')
             return True
         except Exception as e:
             logging.CyberCPLogFileWriter.writeToFile(f'Error getting directory: {str(e)}')
@@ -111,7 +135,7 @@ class CustomACME:
                 raise KeyError('Replay-Nonce header not found in response')
 
             self.nonce = response.headers[nonce_header]
-            logging.CyberCPLogFileWriter.writeToFile(f'Successfully got nonce: {self.nonce}')
+            logging.CyberCPLogFileWriter.writeToFile('Successfully got nonce')
             return True
         except Exception as e:
             logging.CyberCPLogFileWriter.writeToFile(f'Error getting nonce: {str(e)}')
@@ -120,9 +144,9 @@ class CustomACME:
     def _create_jws(self, payload, url):
         """Create JWS (JSON Web Signature)"""
         try:
-            logging.CyberCPLogFileWriter.writeToFile(f'Creating JWS for URL: {url}')
+            logging.CyberCPLogFileWriter.writeToFile('Creating ACME JWS request')
             if payload is not None:
-                logging.CyberCPLogFileWriter.writeToFile(f'Payload: {json.dumps(payload)}')
+                logging.CyberCPLogFileWriter.writeToFile('ACME request payload prepared')
 
             # Get a fresh nonce for this request
             if not self._get_nonce():
@@ -147,7 +171,7 @@ class CustomACME:
                 "e": base64.urlsafe_b64encode(e_bytes).decode('utf-8').rstrip('='),
                 "alg": "RS256"
             }
-            logging.CyberCPLogFileWriter.writeToFile(f'Created JWK: {json.dumps(jwk_key)}')
+            logging.CyberCPLogFileWriter.writeToFile('Created JWK for ACME request')
 
             # Create protected header
             protected = {
@@ -159,7 +183,7 @@ class CustomACME:
             # Add either JWK or Key ID based on whether we have an account URL
             if self.account_url and url != self.directory['newAccount']:
                 protected["kid"] = self.account_url
-                logging.CyberCPLogFileWriter.writeToFile(f'Using Key ID: {self.account_url}')
+                logging.CyberCPLogFileWriter.writeToFile('Using existing ACME account')
             else:
                 protected["jwk"] = jwk_key
                 logging.CyberCPLogFileWriter.writeToFile('Using JWK for new account')
@@ -207,7 +231,7 @@ class CustomACME:
 
             # Ensure the JWS is properly formatted
             jws_str = json.dumps(jws, separators=(',', ':'))
-            logging.CyberCPLogFileWriter.writeToFile(f'Final JWS: {jws_str}')
+            logging.CyberCPLogFileWriter.writeToFile('ACME JWS request created')
 
             return jws_str
         except Exception as e:
@@ -218,6 +242,9 @@ class CustomACME:
         """Load existing account key if available"""
         try:
             if os.path.exists(self.account_key_path):
+                if os.path.islink(self.account_key_path):
+                    raise ValueError('ACME account key must not be a symbolic link')
+                os.chmod(self.account_key_path, 0o600)
                 logging.CyberCPLogFileWriter.writeToFile('Loading existing account key...')
                 with open(self.account_key_path, 'rb') as f:
                     key_data = f.read()
@@ -242,8 +269,7 @@ class CustomACME:
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption()
             )
-            with open(self.account_key_path, 'wb') as f:
-                f.write(key_data)
+            _atomic_write(self.account_key_path, key_data, 0o600)
             logging.CyberCPLogFileWriter.writeToFile('Successfully saved account key')
             return True
         except Exception as e:
@@ -294,27 +320,18 @@ class CustomACME:
             }
             response = requests.post(self.directory['newAccount'], data=jws, headers=headers)
             logging.CyberCPLogFileWriter.writeToFile(f'Account creation response status: {response.status_code}')
-            logging.CyberCPLogFileWriter.writeToFile(f'Account creation response: {response.text}')
+            logging.CyberCPLogFileWriter.writeToFile('Account creation response received')
 
-            if response.status_code == 201:
+            if response.status_code in (200, 201):
                 self.account_url = response.headers['Location']
-                logging.CyberCPLogFileWriter.writeToFile(
-                    f'Successfully created account. Account URL: {self.account_url}')
+                logging.CyberCPLogFileWriter.writeToFile('Successfully registered ACME account')
                 # Save the account key for future use
                 self._save_account_key()
                 return True
             elif response.status_code == 429:
                 logging.CyberCPLogFileWriter.writeToFile(
-                    'Rate limit hit for account creation. Using staging environment...')
-                self.staging = True
-                self.acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
-                # Get new directory and nonce for staging
-                if not self._get_directory():
-                    return False
-                if not self._get_nonce():
-                    return False
-                # Try one more time with staging
-                return self._create_account()
+                    'Rate limit hit for account creation. Keeping the requested ACME environment.')
+                return False
             elif response.status_code == 400 and "badNonce" in response.text:
                 logging.CyberCPLogFileWriter.writeToFile('Bad nonce, getting new nonce and retrying...')
                 if not self._get_nonce():
@@ -341,7 +358,7 @@ class CustomACME:
 
             response = requests.post(eab_url, headers=headers, data=data)
             logging.CyberCPLogFileWriter.writeToFile(f'ZeroSSL EAB response status: {response.status_code}')
-            logging.CyberCPLogFileWriter.writeToFile(f'ZeroSSL EAB response: {response.text}')
+            logging.CyberCPLogFileWriter.writeToFile('ZeroSSL EAB credentials response received')
 
             if response.status_code == 200:
                 eab_data = response.json()
@@ -429,15 +446,14 @@ class CustomACME:
             }
             response = requests.post(self.directory['newOrder'], data=jws, headers=headers)
             logging.CyberCPLogFileWriter.writeToFile(f'Order creation response status: {response.status_code}')
-            logging.CyberCPLogFileWriter.writeToFile(f'Order creation response: {response.text}')
+            logging.CyberCPLogFileWriter.writeToFile('Order creation response received')
 
             if response.status_code == 201:
                 self.order_url = response.headers['Location']
                 self.authorizations = response.json()['authorizations']
                 self.finalize_url = response.json()['finalize']
-                logging.CyberCPLogFileWriter.writeToFile(f'Successfully created order. Order URL: {self.order_url}')
-                logging.CyberCPLogFileWriter.writeToFile(f'Authorizations: {self.authorizations}')
-                logging.CyberCPLogFileWriter.writeToFile(f'Finalize URL: {self.finalize_url}')
+                logging.CyberCPLogFileWriter.writeToFile('Successfully created order')
+                logging.CyberCPLogFileWriter.writeToFile('ACME authorizations received')
                 return True
             return False
         except Exception as e:
@@ -447,7 +463,7 @@ class CustomACME:
     def _handle_http_challenge(self, challenge):
         """Handle HTTP-01 challenge"""
         try:
-            logging.CyberCPLogFileWriter.writeToFile(f'Handling HTTP challenge: {json.dumps(challenge)}')
+            logging.CyberCPLogFileWriter.writeToFile('Handling ACME HTTP challenge')
 
             # Get key authorization
             key_auth = self._get_key_authorization(challenge)
@@ -462,7 +478,7 @@ class CustomACME:
 
             # Write challenge file
             challenge_file = os.path.join(self.challenge_path, challenge['token'])
-            logging.CyberCPLogFileWriter.writeToFile(f'Writing challenge file: {challenge_file}')
+            logging.CyberCPLogFileWriter.writeToFile('Writing ACME challenge file')
 
             # Write only the key authorization to the file
             with open(challenge_file, 'w') as f:
@@ -477,7 +493,7 @@ class CustomACME:
     def _handle_dns_challenge(self, challenge):
         """Handle DNS-01 challenge (Cloudflare)"""
         try:
-            logging.CyberCPLogFileWriter.writeToFile(f'Handling DNS challenge: {json.dumps(challenge)}')
+            logging.CyberCPLogFileWriter.writeToFile('Handling ACME DNS challenge')
             # This is a placeholder - implement Cloudflare API integration
             # You'll need to add your Cloudflare API credentials and implementation
             pass
@@ -532,7 +548,7 @@ class CustomACME:
 
             # Combine token and key authorization
             key_auth = f"{challenge['token']}.{thumbprint}"
-            logging.CyberCPLogFileWriter.writeToFile(f'Key authorization: {key_auth}')
+            logging.CyberCPLogFileWriter.writeToFile('ACME key authorization created')
             return key_auth
         except Exception as e:
             logging.CyberCPLogFileWriter.writeToFile(f'Error getting key authorization: {str(e)}')
@@ -558,7 +574,7 @@ class CustomACME:
             bool: True if challenge is verified successfully, False otherwise
         """
         try:
-            logging.CyberCPLogFileWriter.writeToFile(f'Verifying challenge at URL: {challenge_url}')
+            logging.CyberCPLogFileWriter.writeToFile('Verifying ACME challenge')
 
             # Create empty payload for POST-as-GET request
             # This is a special type of request where we want to GET a resource
@@ -595,7 +611,7 @@ class CustomACME:
             # }
             response = requests.post(challenge_url, data=jws, headers=headers)
             logging.CyberCPLogFileWriter.writeToFile(f'Challenge verification response status: {response.status_code}')
-            logging.CyberCPLogFileWriter.writeToFile(f'Challenge verification response: {response.text}')
+            logging.CyberCPLogFileWriter.writeToFile('Challenge verification response received')
 
             # Check if the challenge was verified successfully
             # Status code 200 indicates success
@@ -627,7 +643,7 @@ class CustomACME:
             }
             response = requests.post(self.finalize_url, data=jws, headers=headers)
             logging.CyberCPLogFileWriter.writeToFile(f'Order finalization response status: {response.status_code}')
-            logging.CyberCPLogFileWriter.writeToFile(f'Order finalization response: {response.text}')
+            logging.CyberCPLogFileWriter.writeToFile('Order finalization response received')
 
             if response.status_code == 200:
                 # Wait for order to be processed
@@ -645,14 +661,14 @@ class CustomACME:
                         return False
 
                     response = requests.post(self.order_url, data=jws, headers=headers)
-                    logging.CyberCPLogFileWriter.writeToFile(f'Order status check response: {response.text}')
+                    logging.CyberCPLogFileWriter.writeToFile('Order status response received')
 
                     if response.status_code == 200:
                         order_status = response.json().get('status')
                         if order_status == 'valid':
                             self.certificate_url = response.json().get('certificate')
                             logging.CyberCPLogFileWriter.writeToFile(
-                                f'Successfully finalized order. Certificate URL: {self.certificate_url}')
+                                'Successfully finalized order')
                             return True
                         elif order_status == 'invalid':
                             logging.CyberCPLogFileWriter.writeToFile('Order validation failed')
@@ -678,7 +694,6 @@ class CustomACME:
         """Download certificate from ACME server"""
         try:
             logging.CyberCPLogFileWriter.writeToFile('Downloading certificate...')
-            logging.CyberCPLogFileWriter.writeToFile(f'Certificate URL: {self.certificate_url}')
 
             # Get a fresh nonce for the request
             if not self._get_nonce():
@@ -696,7 +711,6 @@ class CustomACME:
             }
             response = requests.post(self.certificate_url, data=jws, headers=headers)
             logging.CyberCPLogFileWriter.writeToFile(f'Certificate download response status: {response.status_code}')
-            logging.CyberCPLogFileWriter.writeToFile(f'Certificate download response headers: {response.headers}')
 
             if response.status_code == 200:
                 logging.CyberCPLogFileWriter.writeToFile('Successfully downloaded certificate')
@@ -710,7 +724,7 @@ class CustomACME:
                 certificate = certificate[:certificate.rindex(end_marker) + len(end_marker)] + b'\n'
                 return certificate
             else:
-                logging.CyberCPLogFileWriter.writeToFile(f'Certificate download failed: {response.text}')
+                logging.CyberCPLogFileWriter.writeToFile('Certificate download failed')
             return None
         except Exception as e:
             logging.CyberCPLogFileWriter.writeToFile(f'Error downloading certificate: {str(e)}')
@@ -719,7 +733,7 @@ class CustomACME:
     def _wait_for_challenge_validation(self, challenge_url, max_attempts=10, delay=2):
         """Wait for challenge to be validated by the ACME server"""
         try:
-            logging.CyberCPLogFileWriter.writeToFile(f'Waiting for challenge validation at URL: {challenge_url}')
+            logging.CyberCPLogFileWriter.writeToFile('Waiting for ACME challenge validation')
             for attempt in range(max_attempts):
                 if not self._get_nonce():
                     logging.CyberCPLogFileWriter.writeToFile('Failed to get nonce for challenge status check')
@@ -735,7 +749,7 @@ class CustomACME:
                     'Content-Type': 'application/jose+json'
                 }
                 response = requests.post(challenge_url, data=jws, headers=headers)
-                logging.CyberCPLogFileWriter.writeToFile(f'Challenge status check response: {response.text}')
+                logging.CyberCPLogFileWriter.writeToFile('Challenge status response received')
 
                 if response.status_code == 200:
                     challenge_status = response.json().get('status')
@@ -938,7 +952,7 @@ class CustomACME:
                     'Content-Type': 'application/jose+json'
                 }
                 response = requests.post(self.order_url, data=jws, headers=headers)
-                logging.CyberCPLogFileWriter.writeToFile(f'Order status check response: {response.text}')
+                logging.CyberCPLogFileWriter.writeToFile('Order status response received')
 
                 if response.status_code == 200:
                     order_status = response.json().get('status')
@@ -972,7 +986,8 @@ class CustomACME:
                 f'Starting certificate issuance for domains: {domains}, use_dns: {use_dns}')
 
             # Try to load existing account key first
-            if self._load_account_key():
+            account_key_loaded = self._load_account_key()
+            if account_key_loaded:
                 logging.CyberCPLogFileWriter.writeToFile('Using existing account key')
             else:
                 logging.CyberCPLogFileWriter.writeToFile('No existing account key found, will create new one')
@@ -990,10 +1005,11 @@ class CustomACME:
                 return False
 
             # Initialize ACME
-            logging.CyberCPLogFileWriter.writeToFile('Step 1: Generating account key')
-            if not self._generate_account_key():
-                logging.CyberCPLogFileWriter.writeToFile('Failed to generate account key')
-                return False
+            logging.CyberCPLogFileWriter.writeToFile('Step 1: Preparing account key')
+            if not account_key_loaded:
+                if not self._generate_account_key():
+                    logging.CyberCPLogFileWriter.writeToFile('Failed to generate account key')
+                    return False
 
             logging.CyberCPLogFileWriter.writeToFile('Step 2: Getting ACME directory')
             if not self._get_directory():
@@ -1008,19 +1024,9 @@ class CustomACME:
             logging.CyberCPLogFileWriter.writeToFile('Step 4: Creating account')
             if not self._create_account():
                 logging.CyberCPLogFileWriter.writeToFile('Failed to create account')
-                # If we failed to create account and we're not in staging, try staging
-                if not self.staging:
-                    logging.CyberCPLogFileWriter.writeToFile('Switching to staging environment...')
-                    self.staging = True
-                    self.acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
-                    if not self._get_directory():
-                        return False
-                    if not self._get_nonce():
-                        return False
-                    if not self._create_account():
-                        return False
-                else:
-                    return False
+                # A production failure must not install an untrusted staging certificate.
+                # Test issuance remains available through the explicit staging argument.
+                return False
 
             # Create order with only valid domains
             logging.CyberCPLogFileWriter.writeToFile('Step 5: Creating order')
@@ -1031,14 +1037,14 @@ class CustomACME:
             # Handle challenges
             logging.CyberCPLogFileWriter.writeToFile('Step 6: Handling challenges')
             for auth_url in self.authorizations:
-                logging.CyberCPLogFileWriter.writeToFile(f'Processing authorization URL: {auth_url}')
+                logging.CyberCPLogFileWriter.writeToFile('Processing ACME authorization')
                 if not self._get_nonce():
                     logging.CyberCPLogFileWriter.writeToFile('Failed to get nonce for authorization')
                     return False
 
                 # Get authorization details with POST-as-GET request
                 # ACME protocol requires POST with empty payload for fetching resources
-                logging.CyberCPLogFileWriter.writeToFile(f'Fetching authorization details for: {auth_url}')
+                logging.CyberCPLogFileWriter.writeToFile('Fetching ACME authorization details')
                 jws = self._create_jws(None, auth_url)  # None payload for POST-as-GET
                 if not jws:
                     logging.CyberCPLogFileWriter.writeToFile('Failed to create JWS for authorization request')
@@ -1049,7 +1055,7 @@ class CustomACME:
                 }
                 response = requests.post(auth_url, data=jws, headers=headers)
                 logging.CyberCPLogFileWriter.writeToFile(f'Authorization response status: {response.status_code}')
-                logging.CyberCPLogFileWriter.writeToFile(f'Authorization response: {response.text}')
+                logging.CyberCPLogFileWriter.writeToFile('Authorization response received')
 
                 if response.status_code != 200:
                     logging.CyberCPLogFileWriter.writeToFile('Failed to get authorization')
@@ -1057,7 +1063,7 @@ class CustomACME:
 
                 challenges = response.json()['challenges']
                 for challenge in challenges:
-                    logging.CyberCPLogFileWriter.writeToFile(f'Processing challenge: {json.dumps(challenge)}')
+                    logging.CyberCPLogFileWriter.writeToFile('Processing ACME challenge')
 
                     # Only handle the challenge type we're using
                     if use_dns and challenge['type'] == 'dns-01':
@@ -1141,28 +1147,24 @@ class CustomACME:
             cert_file = os.path.join(self.cert_path, 'fullchain.pem')
             key_file = os.path.join(self.cert_path, 'privkey.pem')
 
-            # Write to a temp file and rename so an interrupted write can never leave a
-            # half-written or trailing-garbage fullchain.pem behind.
+            # Atomic replacement prevents a partial certificate while explicit
+            # modes keep the private key readable only by its service account.
             logging.CyberCPLogFileWriter.writeToFile(f'Saving certificate to: {cert_file}')
-            with open(cert_file + '.tmp', 'wb') as f:
-                f.write(certificate)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(cert_file + '.tmp', cert_file)
+            _atomic_write(cert_file, certificate, 0o644)
 
             logging.CyberCPLogFileWriter.writeToFile(f'Saving private key to: {key_file}')
-            with open(key_file + '.tmp', 'wb') as f:
-                f.write(key.private_bytes(
+            _atomic_write(
+                key_file,
+                key.private_bytes(
                     encoding=serialization.Encoding.PEM,
                     format=serialization.PrivateFormat.PKCS8,
-                    encryption_algorithm=serialization.NoEncryption()
-                ))
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(key_file + '.tmp', key_file)
+                    encryption_algorithm=serialization.NoEncryption(),
+                ),
+                0o600,
+            )
 
             logging.CyberCPLogFileWriter.writeToFile('Successfully completed certificate issuance')
             return True
         except Exception as e:
             logging.CyberCPLogFileWriter.writeToFile(f'Error issuing certificate: {str(e)}')
-            return False 
+            return False

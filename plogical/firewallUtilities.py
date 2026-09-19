@@ -16,6 +16,8 @@ import argparse
 import re
 import ipaddress
 from plogical.processUtilities import ProcessUtilities
+from plogical.sshKeyUtilities import delete_authorized_key
+from plogical.sshConfigUtilities import update_ssh_config, ssh_service_is_listening
 
 # firewalld rich-rule values are embedded inside a single-quoted shell argument,
 # so they cannot be passed through shlex.quote. Validate them against strict
@@ -132,44 +134,21 @@ class FirewallUtilities:
     @staticmethod
     def saveSSHConfigs(type, sshPort, rootLogin):
         try:
-            if type == "1":
+            if type != "1":
+                raise ValueError('Unsupported SSH configuration action.')
 
-                command = 'semanage port -a -t ssh_port_t -p tcp ' + sshPort
-                ProcessUtilities.normalExecutioner(command)
+            def prepare():
+                ProcessUtilities.normalExecutioner('semanage port -a -t ssh_port_t -p tcp ' + str(int(sshPort)))
+                FirewallUtilities.addRule('tcp', str(int(sshPort)), "0.0.0.0/0")
 
-                FirewallUtilities.addRule('tcp', sshPort, "0.0.0.0/0")
-
-
-                if rootLogin == "1":
-                    rootLogin = "PermitRootLogin yes\n"
-                else:
-                    rootLogin = "PermitRootLogin no\n"
-
-                sshPort = "Port " + sshPort + "\n"
-
-                pathToSSH = "/etc/ssh/sshd_config"
-
-                data = open(pathToSSH, 'r').readlines()
-
-                writeToFile = open(pathToSSH, "w")
-
-                for items in data:
-                    if items.find("PermitRootLogin") > -1:
-                        if items.find("Yes") > -1 or items.find("yes"):
-                            writeToFile.writelines(rootLogin)
-                            continue
-                    elif items.find("Port") > -1:
-                        writeToFile.writelines(sshPort)
-                    else:
-                        writeToFile.writelines(items)
-                writeToFile.close()
-
-                command = 'systemctl restart sshd'
-                ProcessUtilities.normalExecutioner(command)
-
-                print("1,None")
-
-        except BaseException as msg:
+            update_ssh_config(
+                '/etc/ssh/sshd_config', sshPort, 'yes' if rootLogin == '1' else 'no',
+                prepare=prepare,
+                restart=lambda: ProcessUtilities.normalExecutioner('systemctl restart sshd') == 1,
+                is_active=lambda: ProcessUtilities.normalExecutioner('systemctl is-active --quiet sshd') == 1,
+                is_listening=lambda: ssh_service_is_listening(sshPort))
+            print("1,None")
+        except Exception as msg:
             print("0," + str(msg))
 
     @staticmethod
@@ -223,26 +202,15 @@ class FirewallUtilities:
     @staticmethod
     def deleteSSHKey(key, path=None):
         try:
-            keyPart = key.split(" ")[1]
-
             if path == None:
                 pathToSSH = "/root/.ssh/authorized_keys"
             else:
                 pathToSSH = path
 
-            data = open(pathToSSH, 'r').readlines()
-
-            writeToFile = open(pathToSSH, "w")
-
-            for items in data:
-                if items.find("ssh-rsa") > -1 and items.find(keyPart) > -1:
-                    continue
-                else:
-                    writeToFile.writelines(items)
-
-            writeToFile.close()
-
-            print("1,None")
+            if delete_authorized_key(pathToSSH, key):
+                print("1,None")
+            else:
+                print("0,SSH key not found.")
 
         except BaseException as msg:
             print("0," + str(msg))

@@ -10,7 +10,7 @@ import os
 from plogical.mailUtilities import mailUtilities
 from plogical.processUtilities import ProcessUtilities
 from ApachController.ApacheVhosts import ApacheVhost
-from managePHP.phpConfig import matches_directive
+from managePHP.phpConfig import fpm_service_for_ini, matches_directive
 
 import json
 from django.urls import reverse
@@ -223,13 +223,12 @@ class phpUtilities:
 
             installUtilities.installUtilities.reStartLiteSpeed()
 
-            if ProcessUtilities.decideDistro() == ProcessUtilities.centos or ProcessUtilities.decideDistro() == ProcessUtilities.cent8:
-                phpService = f'php{phpVers}-php-fpm'
-            else:
-                phpService = f"php{phpVers.split('/')[3]}-fpm"
-
-            command = f"systemctl restart {phpService}"
-            ProcessUtilities.normalExecutioner(command)
+            phpService = fpm_service_for_ini(phpVers)
+            if phpService is not None:
+                command = f"systemctl restart {phpService}"
+                if ProcessUtilities.normalExecutioner(command) != 1:
+                    raise RuntimeError(
+                        f"PHP configuration saved, but restarting {phpService} failed.")
 
             print("1,None")
         except BaseException as msg:
@@ -430,6 +429,8 @@ class phpUtilities:
 
     @staticmethod
     def FindIfSaidPHPIsAvaiableOtherwiseMaketheNextOneAvailableToUse(vhFile, phpVersion):
+        # Preserve the requested version. Callers must surface an unavailable
+        # runtime instead of silently changing the website to another PHP.
         if vhFile != None:
             virtualHostName = vhFile.split('/')[6]
             result = phpUtilities.GetPHPVersionFromFile(vhFile, virtualHostName)
@@ -437,8 +438,7 @@ class phpUtilities:
             if os.path.exists(result):
                 return phpVersion
             else:
-                from managePHP.phpManager import PHPManager
-                return PHPManager.findPHPVersions()[-2]
+                return phpVersion
         else:
             from managePHP.phpManager import PHPManager
             php = PHPManager.getPHPString(phpVersion)
@@ -446,8 +446,7 @@ class phpUtilities:
             if os.path.exists(finalPath):
                 return phpVersion
             else:
-                from managePHP.phpManager import PHPManager
-                return PHPManager.findPHPVersions()[-2]
+                return phpVersion
 
 
     @staticmethod

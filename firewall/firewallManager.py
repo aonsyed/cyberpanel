@@ -21,6 +21,7 @@ from django.shortcuts import HttpResponse, render, redirect
 from random import randint
 import time
 from plogical.firewallUtilities import FirewallUtilities
+from plogical.sshKeyUtilities import authorized_key_records
 from firewall.models import FirewallRules
 from plogical.modSec import modSec
 from plogical.csf import CSF
@@ -306,36 +307,7 @@ class FirewallManager:
                 cat = "sudo cat " + pathToKeyFile
                 data = ProcessUtilities.outputExecutioner(cat).split('\n')
 
-                json_data = "["
-                checker = 0
-
-                for items in data:
-                    if items.find("ssh-rsa") > -1:
-                        keydata = items.split(" ")
-
-                        try:
-                            key = "ssh-rsa " + keydata[1][:50] + "  ..  " + keydata[2]
-                            try:
-                                userName = keydata[2][:keydata[2].index("@")]
-                            except:
-                                userName = keydata[2]
-                        except:
-                            key = "ssh-rsa " + keydata[1][:50]
-                            userName = ''
-
-
-
-                        dic = {'userName': userName,
-                               'key': key,
-                               }
-
-                        if checker == 0:
-                            json_data = json_data + json.dumps(dic)
-                            checker = 1
-                        else:
-                            json_data = json_data + ',' + json.dumps(dic)
-
-                json_data = json_data + ']'
+                json_data = json.dumps(authorized_key_records(data))
 
                 final_json = json.dumps({'status': 1, 'error_message': "None", "data": json_data})
                 return HttpResponse(final_json)
@@ -431,7 +403,11 @@ class FirewallManager:
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
             else:
-                final_dic = {'status': 1, 'delete_status': 1, "error_mssage": output}
+                final_dic = {
+                    'status': 0,
+                    'delete_status': 0,
+                    'error_message': output,
+                }
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
 
@@ -1455,13 +1431,10 @@ class FirewallManager:
             else:
                 return ACLManager.loadErrorJson('installStatus', 0)
 
-            execPath = "sudo /usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/csf.py"
-            execPath = execPath + " removeCSF"
-            ProcessUtilities.popenExecutioner(execPath)
-
-            time.sleep(2)
-
-            data_ret = {"installStatus": 1}
+            data_ret = {
+                "installStatus": 0,
+                "error_message": CSF.migrationRequiredMessage,
+            }
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
@@ -1651,9 +1624,18 @@ class FirewallManager:
                 return 0
 
             data = json.loads(self.request.body)
+            key = str(data.get('key', '')).strip()
+            if not key:
+                data_ret = {'status': 0, 'error_message': 'An Imunify360 license key is required.'}
+                return HttpResponse(json.dumps(data_ret))
 
-            execPath = "/usr/local/CyberCP/bin/python /usr/local/CyberCP/CLManager/CageFS.py"
-            execPath = execPath + " --function submitinstallImunify --key %s" % (data['key'])
+            from plogical.imunify_integration import (
+                build_install_worker_command,
+                ensure_install_status_file,
+            )
+            ensure_install_status_file(reset=True)
+
+            execPath = build_install_worker_command('360', key=key)
             ProcessUtilities.popenExecutioner(execPath)
 
             data_ret = {'status': 1, 'error_message': 'None'}
@@ -1701,8 +1683,13 @@ class FirewallManager:
                                                           1)
                 return 0
 
-            execPath = "/usr/local/CyberCP/bin/python /usr/local/CyberCP/CLManager/CageFS.py"
-            execPath = execPath + " --function submitinstallImunifyAV"
+            from plogical.imunify_integration import (
+                build_install_worker_command,
+                ensure_install_status_file,
+            )
+            ensure_install_status_file(reset=True)
+
+            execPath = build_install_worker_command('av')
             ProcessUtilities.popenExecutioner(execPath)
 
             data_ret = {'status': 1, 'error_message': 'None'}
@@ -1800,11 +1787,5 @@ class FirewallManager:
             final_dic = {'status': 0, 'error_message': str(msg)}
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
-
-
-
-
-
-
 
 

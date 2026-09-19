@@ -28,6 +28,14 @@ def cyberpanel_account_available():
         return False
 
 
+def lscpd_account_available():
+    try:
+        pwd.getpwnam("lscpd")
+        return os.geteuid() == 0 and os.path.exists("/usr/bin/sudo")
+    except KeyError:
+        return False
+
+
 class SafeFileReadTests(unittest.TestCase):
     def test_file_manager_reads_as_the_website_account(self):
         website = SimpleNamespace(externalApp="exampleuser")
@@ -76,6 +84,61 @@ class SafeFileReadTests(unittest.TestCase):
 
             with self.assertRaises(OSError):
                 stage_file_for_download(root, source, staging, owner_user=None)
+
+    @unittest.skipUnless(lscpd_account_available(), "requires the lscpd service account")
+    def test_staged_download_is_private_and_readable_by_lscpd(self):
+        account = pwd.getpwnam("lscpd")
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(root, "download.txt")
+            staging = os.path.join(parent, "downloads")
+            with open(source, "w", encoding="utf-8") as handle:
+                handle.write("download-content")
+            os.chmod(parent, 0o755)
+
+            staged = stage_file_for_download(
+                root,
+                source,
+                staging,
+                owner_user="lscpd",
+            )
+            read_result = subprocess.run(
+                ["/usr/bin/sudo", "-u", "lscpd", "/bin/cat", staged],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual("download-content", read_result.stdout)
+            self.assertEqual(account.pw_uid, os.stat(staging).st_uid)
+            self.assertEqual(account.pw_uid, os.stat(staged).st_uid)
+            self.assertEqual(0o700, stat.S_IMODE(os.stat(staging).st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(os.stat(staged).st_mode))
+
+    @unittest.skipUnless(cyberpanel_account_available(), "requires the CyberPanel service account")
+    def test_default_staged_download_is_readable_by_wsgi_worker(self):
+        account = pwd.getpwnam("cyberpanel")
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(root, "download.txt")
+            staging = os.path.join(parent, "downloads")
+            with open(source, "w", encoding="utf-8") as handle:
+                handle.write("download-content")
+            os.chmod(parent, 0o755)
+
+            staged = stage_file_for_download(root, source, staging)
+            read_result = subprocess.run(
+                ["/usr/bin/sudo", "-u", "cyberpanel", "/bin/cat", staged],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual("download-content", read_result.stdout)
+            self.assertEqual(account.pw_uid, os.stat(staging).st_uid)
+            self.assertEqual(account.pw_uid, os.stat(staged).st_uid)
+            self.assertEqual(0o700, stat.S_IMODE(os.stat(staging).st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(os.stat(staged).st_mode))
 
     def test_read_command_runs_outside_project_directory(self):
         with tempfile.TemporaryDirectory() as root:
@@ -126,6 +189,40 @@ class SafeFileReadTests(unittest.TestCase):
 
 
 class SafeArchiveTests(unittest.TestCase):
+    def test_file_manager_queues_extraction_without_waiting_for_worker(self):
+        manager = FileManager(
+            SimpleNamespace(session={"userID": 17}),
+            {
+                "domainName": "example.com",
+                "fileToExtract": "/home/example.com/site.tar",
+                "extractionLocation": "/home/example.com/public_html",
+                "extractionType": "tar",
+            },
+        )
+        website = SimpleNamespace(externalApp="example_user")
+
+        with mock.patch(
+            "filemanager.filemanager.Websites.objects.get",
+            return_value=website,
+        ), mock.patch(
+            "filemanager.filemanager.create_archive_extraction_job",
+            return_value=("a" * 43, "/home/cyberpanel/.file-extractions/" + ("a" * 43)),
+        ), mock.patch(
+            "filemanager.filemanager.build_archive_extraction_command",
+            return_value="/usr/bin/systemd-run safe-command",
+        ) as command_builder, mock.patch(
+            "filemanager.filemanager.ProcessUtilities.executioner",
+            return_value=1,
+        ) as executioner:
+            response = manager.extract()
+
+        payload = json.loads(response.content)
+        self.assertEqual(1, payload["status"])
+        self.assertEqual("queued", payload["state"])
+        self.assertEqual("a" * 43, payload["job"])
+        self.assertEqual("example_user", command_builder.call_args.kwargs["run_as"])
+        executioner.assert_called_once_with("/usr/bin/systemd-run safe-command")
+
     @unittest.skipUnless(cyberpanel_account_available(), "requires the CyberPanel service account")
     def test_read_and_extract_run_as_cyberpanel_service_account(self):
         account = pwd.getpwnam("cyberpanel")

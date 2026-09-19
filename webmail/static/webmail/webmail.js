@@ -104,13 +104,15 @@ app.directive('wmAutocomplete', ['$http', function($http) {
     };
 }]);
 
-app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($scope, $http, $sce, $timeout) {
+app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', '$interval', function($scope, $http, $sce, $timeout, $interval) {
 
     // ── State ────────────────────────────────────────────────
     $scope.currentEmail = '';
     $scope.managedAccounts = [];
     $scope.folders = [];
     $scope.currentFolder = 'INBOX';
+    $scope.deletingMessages = false;
+    $scope.movingMessages = false;
     $scope.messages = [];
     $scope.currentPage = 1;
     $scope.totalPages = 1;
@@ -142,9 +144,30 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
 
     // Settings
     $scope.wmSettings = {};
+    $scope.safeSignatureHtml = '';
 
     // Draft auto-save
     var draftTimer = null;
+    var inboxRefreshTimer = null;
+    var messageRequest = 0;
+    var openRequest = 0;
+
+    function messageContext() {
+        return {folder: $scope.currentFolder, account: $scope.currentEmail};
+    }
+
+    function currentMessageContext(context) {
+        return context && context.folder === $scope.currentFolder && context.account === $scope.currentEmail;
+    }
+
+    function bindMessageContext(messages, context) {
+        messages.forEach(function(msg) { msg._webmailContext = context; });
+        return messages;
+    }
+
+    function selectedMessageContext(msg) {
+        return msg && currentMessageContext(msg._webmailContext);
+    }
 
     // ── Helper ───────────────────────────────────────────────
     function apiCall(url, data, callback, errback) {
@@ -175,9 +198,33 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
                 $scope.managedAccounts = data.accounts || [];
                 $scope.loadFolders();
                 $scope.loadSettings();
+                startInboxRefresh();
             } else {
                 notify(data.error_message || 'No email accounts found. Create an email account first or use the standalone login.', 'error');
             }
+        });
+    };
+
+    function startInboxRefresh() {
+        if (inboxRefreshTimer) return;
+        inboxRefreshTimer = $interval(function() {
+            var tabVisible = !document.hidden;
+            var hasSelection = $scope.messages.some(function(msg) { return msg.selected; });
+            if (tabVisible && $scope.viewMode === 'list' && $scope.currentFolder === 'INBOX' &&
+                    $scope.currentPage === 1 && !$scope.loading && !hasSelection) {
+                $scope.loadMessages();
+                $scope.loadFolders(false);
+            }
+        }, 30000);
+    }
+
+    $scope.$on('$destroy', function() {
+        if (inboxRefreshTimer) $interval.cancel(inboxRefreshTimer);
+    });
+
+    $scope.logoutStandalone = function() {
+        apiCall('/webmail/api/logout', {}, function() {
+            window.location.href = '/webmail/login';
         });
     };
 
@@ -192,6 +239,8 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
         $scope.openMsg = null;
         $scope.viewMode = 'list';
         $scope.messages = [];
+        messageRequest++;
+        openRequest++;
         $scope.contacts = [];
         $scope.filteredContacts = [];
         $scope.sieveRules = [];
@@ -211,11 +260,11 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
     };
 
     // ── Folders ──────────────────────────────────────────────
-    $scope.loadFolders = function() {
+    $scope.loadFolders = function(refreshMessages) {
         apiCall('/webmail/api/listFolders', {}, function(data) {
             if (data.status === 1) {
                 $scope.folders = data.folders;
-                $scope.loadMessages();
+                if (refreshMessages !== false) $scope.loadMessages();
             } else {
                 notify(data.error_message || 'Failed to load folders.', 'error');
             }
@@ -270,15 +319,18 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
 
     // ── Messages ─────────────────────────────────────────────
     $scope.loadMessages = function() {
+        var context = messageContext();
+        var request = ++messageRequest;
         $scope.loading = true;
         apiCall('/webmail/api/listMessages', {
-            folder: $scope.currentFolder,
+            folder: context.folder,
             page: $scope.currentPage,
             perPage: $scope.perPage
         }, function(data) {
+            if (request !== messageRequest || !currentMessageContext(context)) return;
             $scope.loading = false;
             if (data.status === 1) {
-                $scope.messages = data.messages;
+                $scope.messages = bindMessageContext(data.messages, context);
                 $scope.totalMessages = data.total;
                 $scope.totalPages = data.pages;
                 $scope.selectAll = false;
@@ -286,6 +338,7 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
                 notify(data.error_message || 'Failed to load messages.', 'error');
             }
         }, function() {
+            if (request !== messageRequest || !currentMessageContext(context)) return;
             $scope.loading = false;
         });
     };
@@ -309,45 +362,66 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
             $scope.loadMessages();
             return;
         }
+        var context = messageContext();
+        var request = ++messageRequest;
         $scope.loading = true;
         apiCall('/webmail/api/searchMessages', {
-            folder: $scope.currentFolder,
+            folder: context.folder,
             query: $scope.searchQuery
         }, function(data) {
-            $scope.loading = false;
+            if (request !== messageRequest || !currentMessageContext(context)) return;
             if (data.status === 1 && data.uids && data.uids.length > 0) {
-                // Fetch the found messages by their UIDs
+                // Keep the original folder/account while fetching search results.
                 apiCall('/webmail/api/listMessages', {
-                    folder: $scope.currentFolder,
+                    folder: context.folder,
+                    fromAccount: context.account,
                     page: 1,
                     perPage: data.uids.length,
                     uids: data.uids
                 }, function(msgData) {
+                    if (request !== messageRequest || !currentMessageContext(context)) return;
+                    $scope.loading = false;
                     if (msgData.status === 1) {
-                        $scope.messages = msgData.messages;
+                        $scope.messages = bindMessageContext(msgData.messages, context);
                         $scope.totalMessages = msgData.total;
                         $scope.totalPages = msgData.pages;
+                    } else {
+                        notify(msgData.error_message || 'Failed to load messages.', 'error');
                     }
+                }, function() {
+                    if (request === messageRequest && currentMessageContext(context)) $scope.loading = false;
                 });
-            } else if (data.status === 1) {
-                $scope.messages = [];
-                $scope.totalMessages = 0;
-                $scope.totalPages = 1;
-                notify('No messages found.', 'info');
+            } else {
+                $scope.loading = false;
+                if (data.status === 1) {
+                    $scope.messages = [];
+                    $scope.totalMessages = 0;
+                    $scope.totalPages = 1;
+                    notify('No messages found.', 'info');
+                } else {
+                    notify(data.error_message || 'Failed to search messages.', 'error');
+                }
             }
         }, function() {
-            $scope.loading = false;
+            if (request === messageRequest && currentMessageContext(context)) $scope.loading = false;
         });
     };
 
     // ── Open/Read Message ────────────────────────────────────
     $scope.openMessage = function(msg) {
+        if ($scope.loading || !selectedMessageContext(msg)) return;
+        var context = msg._webmailContext;
+        var request = ++openRequest;
+        var listRequest = messageRequest;
         apiCall('/webmail/api/getMessage', {
-            folder: $scope.currentFolder,
+            folder: context.folder,
+            fromAccount: context.account,
             uid: msg.uid
         }, function(data) {
+            if (request !== openRequest || listRequest !== messageRequest || !currentMessageContext(context)) return;
             if (data.status === 1) {
                 $scope.openMsg = data.message;
+                $scope.openMsg._webmailContext = context;
                 var html = data.message.body_html || '';
                 var text = data.message.body_text || '';
                 // Use sanitized HTML from backend, or escape plain text
@@ -372,6 +446,15 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
         });
     };
 
+    function escapeHtml(value) {
+        return String(value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     // ── Compose ──────────────────────────────────────────────
     $scope.composeNew = function() {
         $scope.compose = {to: '', cc: '', bcc: '', subject: '', body: '', files: [], inReplyTo: '', references: ''};
@@ -382,8 +465,8 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
             if (editor) {
                 editor.innerHTML = '';
                 // Add signature if available
-                if ($scope.wmSettings.signatureHtml) {
-                    editor.innerHTML = '<br><br><div class="wm-signature">-- <br>' + $scope.wmSettings.signatureHtml + '</div>';
+                if ($scope.safeSignatureHtml) {
+                    editor.innerHTML = '<br><br><div class="wm-signature">-- <br>' + $scope.safeSignatureHtml + '</div>';
                 }
             }
         }, 100);
@@ -407,8 +490,8 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
         $timeout(function() {
             var editor = document.getElementById('wm-compose-body');
             if (editor) {
-                var sig = $scope.wmSettings.signatureHtml ? '<br><br><div class="wm-signature">-- <br>' + $scope.wmSettings.signatureHtml + '</div>' : '';
-                editor.innerHTML = '<br>' + sig + '<br><div class="wm-quoted">On ' + $scope.openMsg.date + ', ' + $scope.openMsg.from + ' wrote:<br><blockquote>' + ($scope.openMsg.body_html || $scope.openMsg.body_text || '') + '</blockquote></div>';
+                var sig = $scope.safeSignatureHtml ? '<br><br><div class="wm-signature">-- <br>' + $scope.safeSignatureHtml + '</div>' : '';
+                editor.innerHTML = '<br>' + sig + '<br><div class="wm-quoted">On ' + escapeHtml($scope.openMsg.date) + ', ' + escapeHtml($scope.openMsg.from) + ' wrote:<br><blockquote>' + ($scope.openMsg.body_html || escapeHtml($scope.openMsg.body_text)) + '</blockquote></div>';
             }
         }, 100);
         startDraftAutoSave();
@@ -433,7 +516,7 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
         $timeout(function() {
             var editor = document.getElementById('wm-compose-body');
             if (editor) {
-                editor.innerHTML = '<br><br><div class="wm-quoted">On ' + ($scope.openMsg.date || '') + ', ' + ($scope.openMsg.from || '') + ' wrote:<br><blockquote>' + ($scope.openMsg.body_html || $scope.openMsg.body_text || '') + '</blockquote></div>';
+                editor.innerHTML = '<br><br><div class="wm-quoted">On ' + escapeHtml($scope.openMsg.date) + ', ' + escapeHtml($scope.openMsg.from) + ' wrote:<br><blockquote>' + ($scope.openMsg.body_html || escapeHtml($scope.openMsg.body_text)) + '</blockquote></div>';
             }
         }, 100);
         startDraftAutoSave();
@@ -456,7 +539,7 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
         $timeout(function() {
             var editor = document.getElementById('wm-compose-body');
             if (editor) {
-                editor.innerHTML = '<br><br><div class="wm-forwarded">---------- Forwarded message ----------<br>From: ' + $scope.openMsg.from + '<br>Date: ' + $scope.openMsg.date + '<br>Subject: ' + $scope.openMsg.subject + '<br>To: ' + $scope.openMsg.to + '<br><br>' + ($scope.openMsg.body_html || $scope.openMsg.body_text || '') + '</div>';
+                editor.innerHTML = '<br><br><div class="wm-forwarded">---------- Forwarded message ----------<br>From: ' + escapeHtml($scope.openMsg.from) + '<br>Date: ' + escapeHtml($scope.openMsg.date) + '<br>Subject: ' + escapeHtml($scope.openMsg.subject) + '<br>To: ' + escapeHtml($scope.openMsg.to) + '<br><br>' + ($scope.openMsg.body_html || escapeHtml($scope.openMsg.body_text)) + '</div>';
             }
         }, 100);
         startDraftAutoSave();
@@ -581,13 +664,28 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
     }
 
     $scope.bulkDelete = function() {
-        var uids = getSelectedUids();
-        if (uids.length === 0) return;
+        if ($scope.deletingMessages || $scope.movingMessages || $scope.loading) return;
+        var selected = $scope.messages.filter(function(msg) { return msg.selected; });
+        if (selected.length === 0) return;
+        if (!selected.every(selectedMessageContext)) {
+            notify('The selected folder or account changed. Refresh before deleting.', 'error');
+            return;
+        }
+        var uids = selected.map(function(msg) { return msg.uid; });
+        var context = messageContext();
+        $scope.deletingMessages = true;
         apiCall('/webmail/api/deleteMessages', {folder: $scope.currentFolder, uids: uids}, function(data) {
+            $scope.deletingMessages = false;
             if (data.status === 1) {
+                if (!currentMessageContext(context)) return;
                 $scope.loadMessages();
-                $scope.loadFolders();
+                $scope.loadFolders(false);
+            } else {
+                notify(data.error_message || 'Unable to delete messages. Refresh before retrying.', 'error');
             }
+        }, function() {
+            $scope.deletingMessages = false;
+            notify('Deletion could not be confirmed. Refresh the source folder and Trash before retrying.', 'error');
         });
     };
 
@@ -609,20 +707,40 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
         });
     };
 
-    $scope.bulkMove = function() {
-        var uids = getSelectedUids();
-        if (uids.length === 0 || !$scope.moveTarget) return;
+    $scope.bulkMove = function(target) {
+        if ($scope.deletingMessages || $scope.movingMessages || $scope.loading) return;
+        var selected = $scope.messages.filter(function(msg) { return msg.selected; });
+        if (selected.length === 0 || !target) return;
+        if (!selected.every(selectedMessageContext)) {
+            notify('The selected folder or account changed. Refresh before moving.', 'error');
+            return;
+        }
+        var context = messageContext();
+        var uids = selected.map(function(msg) { return msg.uid; });
+        var destination = target.name || target;
+        if (destination === context.folder) {
+            notify('Select a different destination folder before moving messages.', 'error');
+            return;
+        }
+        $scope.movingMessages = true;
         apiCall('/webmail/api/moveMessages', {
-            folder: $scope.currentFolder,
+            folder: context.folder,
             uids: uids,
-            targetFolder: $scope.moveTarget.name || $scope.moveTarget
+            targetFolder: destination
         }, function(data) {
+            $scope.movingMessages = false;
             if (data.status === 1) {
+                if (!currentMessageContext(context)) return;
                 $scope.showMoveDropdown = false;
                 $scope.moveTarget = '';
                 $scope.loadMessages();
-                $scope.loadFolders();
+                $scope.loadFolders(false);
+            } else {
+                notify(data.error_message || 'Unable to move messages. Refresh before retrying.', 'error');
             }
+        }, function() {
+            $scope.movingMessages = false;
+            notify('Move could not be confirmed. Refresh the source and destination folders before retrying.', 'error');
         });
     };
 
@@ -633,13 +751,29 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
     };
 
     $scope.deleteMsg = function(msg) {
+        if ($scope.deletingMessages || $scope.movingMessages || $scope.loading) return;
+        if (!selectedMessageContext(msg)) {
+            notify('The selected folder or account changed. Refresh before deleting.', 'error');
+            return;
+        }
+        var context = msg._webmailContext;
+        $scope.deletingMessages = true;
         apiCall('/webmail/api/deleteMessages', {folder: $scope.currentFolder, uids: [msg.uid]}, function(data) {
+            $scope.deletingMessages = false;
             if (data.status === 1) {
-                $scope.openMsg = null;
-                $scope.viewMode = 'list';
+                if (!currentMessageContext(context)) return;
+                if ($scope.openMsg === msg) {
+                    $scope.openMsg = null;
+                    $scope.viewMode = 'list';
+                }
                 $scope.loadMessages();
-                $scope.loadFolders();
+                $scope.loadFolders(false);
+            } else {
+                notify(data.error_message || 'Unable to delete messages. Refresh before retrying.', 'error');
             }
+        }, function() {
+            $scope.deletingMessages = false;
+            notify('Deletion could not be confirmed. Refresh the source folder and Trash before retrying.', 'error');
         });
     };
 
@@ -737,8 +871,8 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
             var editor = document.getElementById('wm-compose-body');
             if (editor) {
                 editor.innerHTML = '';
-                if ($scope.wmSettings.signatureHtml) {
-                    editor.innerHTML = '<br><br><div class="wm-signature">-- <br>' + $scope.wmSettings.signatureHtml + '</div>';
+                if ($scope.safeSignatureHtml) {
+                    editor.innerHTML = '<br><br><div class="wm-signature">-- <br>' + $scope.safeSignatureHtml + '</div>';
                 }
             }
         }, 100);
@@ -803,6 +937,7 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
         apiCall('/webmail/api/getSettings', {}, function(data) {
             if (data.status === 1) {
                 $scope.wmSettings = data.settings;
+                $scope.safeSignatureHtml = data.settings.signatureHtml || '';
                 if ($scope.wmSettings.messagesPerPage) {
                     $scope.perPage = parseInt($scope.wmSettings.messagesPerPage);
                 }
@@ -813,6 +948,8 @@ app.controller('webmailCtrl', ['$scope', '$http', '$sce', '$timeout', function($
     $scope.saveSettings = function() {
         apiCall('/webmail/api/saveSettings', $scope.wmSettings, function(data) {
             if (data.status === 1) {
+                $scope.wmSettings.signatureHtml = data.signatureHtml || '';
+                $scope.safeSignatureHtml = data.signatureHtml || '';
                 notify('Settings saved.');
                 if ($scope.wmSettings.messagesPerPage) {
                     $scope.perPage = parseInt($scope.wmSettings.messagesPerPage);

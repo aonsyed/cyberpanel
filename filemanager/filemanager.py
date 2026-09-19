@@ -1,4 +1,3 @@
-import getpass
 import os
 import shlex
 import sys
@@ -11,6 +10,12 @@ from websiteFunctions.models import Websites
 from random import randint
 from django.core.files.storage import FileSystemStorage
 from plogical.acl import ACLManager
+from filemanager.rootEntitlements import require_root_entitlement, root_entitlement_required
+from plogical.archiveExtractionJobs import (
+    build_archive_extraction_command,
+    create_archive_extraction_job,
+    get_archive_extraction_status,
+)
 from filemanager.models import Trash
 
 
@@ -201,6 +206,7 @@ class FileManager:
             print("Permisson not changed")
     
     
+    @root_entitlement_required
     def listForTable(self):
         try:
             finalData = {}
@@ -221,6 +227,7 @@ class FileManager:
                 output = ProcessUtilities.outputExecutioner(command, website.externalApp).splitlines()
 
             except:
+                require_root_entitlement(self.data)
                 pathCheck = '/'
 
                 if self.notInside(self.data['completeStartingPath'], pathCheck):
@@ -261,6 +268,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def list(self):
         try:
             finalData = {}
@@ -296,6 +304,7 @@ class FileManager:
                     except:
                         continue
             except:
+                require_root_entitlement(self.data)
                 command = "ls -la --group-directories-first " + self.returnPathEnclosed(
                     self.data['completeStartingPath'])
                 output = ProcessUtilities.outputExecutioner(command).splitlines()
@@ -329,6 +338,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def createNewFile(self):
         try:
             finalData = {}
@@ -346,6 +356,7 @@ class FileManager:
                 ProcessUtilities.executioner(command, website.externalApp)
                 self.changeOwner(self.data['fileName'])
             except:
+                require_root_entitlement(self.data)
                 homePath = '/'
 
                 if self.notInside(self.data['fileName'], homePath):
@@ -360,6 +371,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def createNewFolder(self):
         try:
             finalData = {}
@@ -378,6 +390,7 @@ class FileManager:
 
                 self.changeOwner(self.data['folderName'])
             except:
+                require_root_entitlement(self.data)
                 homePath = '/'
 
                 if self.notInside(self.data['folderName'], homePath):
@@ -395,6 +408,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def deleteFolderOrFile(self):
         try:
             finalData = {}
@@ -451,6 +465,7 @@ class FileManager:
                     command = 'chattr -R +i %s' % (self.returnPathEnclosed(self.homePath))
                     ProcessUtilities.executioner(command)
             except:
+                require_root_entitlement(self.data)
                 try:
                     skipTrash = self.data['skipTrash']
                 except:
@@ -494,6 +509,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def restore(self):
         try:
             finalData = {}
@@ -529,6 +545,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def copy(self):
         try:
 
@@ -572,6 +589,7 @@ class FileManager:
             except:
 
 
+                require_root_entitlement(self.data)
                 homePath = '/'
 
                 if self.notInside(self.data['newPath'], homePath):
@@ -609,6 +627,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def move(self):
         try:
 
@@ -642,6 +661,7 @@ class FileManager:
             except:
 
 
+                require_root_entitlement(self.data)
                 homePath = '/'
 
                 command = 'mkdir ' + self.returnPathEnclosed(self.data['newPath'])
@@ -669,6 +689,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def rename(self):
         try:
 
@@ -693,6 +714,7 @@ class FileManager:
 
                 self.changeOwner(self.data['basePath'] + '/' + self.data['newFileName'])
             except:
+                require_root_entitlement(self.data)
                 homePath = '/'
 
                 if self.notInside(self.data['basePath'] + '/' + self.data['existingName'], homePath):
@@ -714,6 +736,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def readFileContents(self):
         try:
 
@@ -762,6 +785,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def writeFileContents(self):
         try:
 
@@ -791,6 +815,7 @@ class FileManager:
 
                 os.remove(tempPath)
             except:
+                require_root_entitlement(self.data)
                 if self.data.get('domainName', '') != '':
                     return self.ajaxPre(0, 'Not allowed.')
 
@@ -817,6 +842,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def upload(self):
         try:
 
@@ -870,6 +896,7 @@ class FileManager:
                 except:
                     pass
             except:
+                require_root_entitlement(self.data)
                 pathCheck = '/'
                 command = 'ls -la %s' % (self.returnPathEnclosed(self.data['completePath']))
                 result = ProcessUtilities.outputExecutioner(command)
@@ -903,6 +930,7 @@ class FileManager:
                 pass
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def extract(self):
         try:
 
@@ -933,33 +961,49 @@ class FileManager:
             pythonPath = '/usr/local/CyberCP/bin/python'
             if not os.path.exists(pythonPath):
                 pythonPath = sys.executable
-            extractionScript = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'plogical',
-                'safeArchiveExtraction.py',
+            jobToken, statusPath = create_archive_extraction_job(
+                self.request.session['userID'],
+                domainName,
             )
-            command = '%s %s --allowed-root %s --archive %s --destination %s --type %s' % (
-                shlex.quote(pythonPath),
-                shlex.quote(extractionScript),
-                shlex.quote(homePath),
-                shlex.quote(self.data['fileToExtract']),
-                shlex.quote(self.data['extractionLocation']),
-                shlex.quote(extractionType),
+            command = build_archive_extraction_command(
+                token=jobToken,
+                status_path=statusPath,
+                allowed_root=homePath,
+                archive_path=self.data['fileToExtract'],
+                destination=self.data['extractionLocation'],
+                archive_type=extractionType,
+                run_as=websiteUser,
+                python_path=pythonPath,
             )
-            if getpass.getuser() == 'root':
-                result = ProcessUtilities.normalExecutioner(command, User=websiteUser)
-            else:
-                result = ProcessUtilities.executioner(command, websiteUser)
+            result = ProcessUtilities.executioner(command)
             if result != 1:
-                return self.ajaxPre(0, 'Archive extraction was rejected or failed.')
+                return self.ajaxPre(0, 'Archive extraction could not be started.')
 
-
+            finalData['job'] = jobToken
+            finalData['state'] = 'queued'
             json_data = json.dumps(finalData)
             return HttpResponse(json_data)
 
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    def extractionStatus(self):
+        try:
+            domainName = self.data.get('domainName', '')
+            status = get_archive_extraction_status(
+                self.data.get('job', ''),
+                self.request.session['userID'],
+                domainName,
+            )
+            status['status'] = 1
+            return HttpResponse(json.dumps(status))
+        except PermissionError:
+            return self.ajaxPre(0, 'Archive extraction job is not available.')
+        except BaseException as msg:
+            logging.writeToFile(str(msg) + ' [FileManager.extractionStatus]')
+            return self.ajaxPre(0, 'Archive extraction status is not available.')
+
+    @root_entitlement_required
     def compress(self):
         try:
 
@@ -993,6 +1037,7 @@ class FileManager:
 
                 self.changeOwner(self.data['compressedFileName'])
             except:
+                require_root_entitlement(self.data)
                 if self.data['compressionType'] == 'zip':
                     compressedFileName = self.returnPathEnclosed(
                         self.data['basePath'] + '/' + self.data['compressedFileName'] + '.zip')
@@ -1023,6 +1068,7 @@ class FileManager:
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
 
+    @root_entitlement_required
     def changePermissions(self):
         try:
 

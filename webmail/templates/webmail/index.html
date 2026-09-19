@@ -6,7 +6,7 @@
 
 <link rel="stylesheet" href="{% static 'webmail/webmail.css' %}">
 
-<div class="webmail-container" ng-controller="webmailCtrl" ng-init="init()">
+<div class="webmail-container" ng-class="{'wm-reading': viewMode === 'read'}" ng-controller="webmailCtrl" ng-init="init()">
 
     <div id="cybermailBanner" style="display:none;flex-shrink:0;">
       <div style="padding:10px 20px;display:flex;align-items:center;gap:14px;background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 50%,#9333ea 100%);">
@@ -74,6 +74,11 @@
                 <a ng-click="createFolder()" class="wm-nav-link">
                     <i class="fa fa-folder-plus"></i> {% trans "New Folder" %}
                 </a>
+                {% if standalone_webmail %}
+                <a ng-click="logoutStandalone()" class="wm-nav-link">
+                    <i class="fa fa-arrow-right-from-bracket"></i> {% trans "Sign Out" %}
+                </a>
+                {% endif %}
             </div>
         </div>
 
@@ -93,7 +98,7 @@
                 <label class="wm-checkbox-label">
                     <input type="checkbox" ng-model="selectAll" ng-change="toggleSelectAll()">
                 </label>
-                <button class="wm-action-btn" ng-click="bulkDelete()" title="{% trans 'Delete' %}">
+                <button class="wm-action-btn" ng-click="bulkDelete()" ng-disabled="deletingMessages || movingMessages || loading" title="{% trans 'Delete' %}">
                     <i class="fa fa-trash"></i>
                 </button>
                 <button class="wm-action-btn" ng-click="bulkMarkRead()" title="{% trans 'Mark read' %}">
@@ -103,12 +108,12 @@
                     <i class="fa fa-envelope"></i>
                 </button>
                 <div class="wm-move-dropdown" ng-if="showMoveDropdown">
-                    <select ng-model="moveTarget" ng-change="bulkMove()"
+                    <select ng-model="moveTarget" ng-change="bulkMove(moveTarget)" ng-disabled="deletingMessages || movingMessages || loading"
                             ng-options="f.name for f in folders">
                         <option value="">{% trans "Move to..." %}</option>
                     </select>
                 </div>
-                <button class="wm-action-btn" ng-click="showMoveDropdown = !showMoveDropdown" title="{% trans 'Move' %}">
+                <button class="wm-action-btn" ng-click="showMoveDropdown = !showMoveDropdown" ng-disabled="deletingMessages || movingMessages || loading" title="{% trans 'Move' %}">
                     <i class="fa fa-folder-open"></i>
                 </button>
                 <span class="wm-page-info">{$ currentPage $} / {$ totalPages $}</span>
@@ -132,7 +137,10 @@
                         <i class="fa" ng-class="msg.is_flagged ? 'fa-star wm-starred' : 'fa-star wm-unstarred'"></i>
                     </button>
                     <div class="wm-msg-from">{$ msg.from | limitTo:30 $}</div>
-                    <div class="wm-msg-subject">{$ msg.subject | limitTo:60 $}</div>
+                    <div class="wm-msg-subject">
+                        <i ng-if="msg.is_answered" class="fa fa-reply wm-answered-icon" title="{% trans 'Replied' %}"></i>
+                        {$ msg.subject | limitTo:60 $}
+                    </div>
                     <div class="wm-msg-date">{$ msg.date | wmDate $}</div>
                 </div>
                 <div class="wm-empty" ng-if="messages.length === 0 && !loading">
@@ -151,6 +159,9 @@
             <!-- Message Read View -->
             <div ng-if="viewMode === 'read' && openMsg" class="wm-read-view">
                 <div class="wm-read-toolbar">
+                    <button class="btn btn-sm btn-default wm-mobile-back" ng-click="setView('list')">
+                        <i class="fa fa-arrow-left"></i> {% trans "Back" %}
+                    </button>
                     <button class="btn btn-sm btn-default" ng-click="replyTo()">
                         <i class="fa fa-reply"></i> {% trans "Reply" %}
                     </button>
@@ -160,7 +171,7 @@
                     <button class="btn btn-sm btn-default" ng-click="forwardMsg()">
                         <i class="fa fa-share"></i> {% trans "Forward" %}
                     </button>
-                    <button class="btn btn-sm btn-danger" ng-click="deleteMsg(openMsg)">
+                    <button class="btn btn-sm btn-danger" ng-click="deleteMsg(openMsg)" ng-disabled="deletingMessages || movingMessages || loading">
                         <i class="fa fa-trash"></i> {% trans "Delete" %}
                     </button>
                 </div>
@@ -466,6 +477,6 @@
     </div>
 </div>
 
-<script src="{% static 'webmail/webmail.js' %}?v=6"></script>
+<script src="{% static 'webmail/webmail.js' %}?v=9"></script>
 
 {% endblock %}

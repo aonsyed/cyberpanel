@@ -4,6 +4,170 @@ All notable changes to CyberPanel are documented here. The canonical,
 continuously updated changelog also lives at
 https://cyberpanel.net/KnowledgeBase/home/change-logs/
 
+## v3.0.6 (build 6) — 2026-09-07
+
+Maintenance and security hardening for standalone webmail authentication.
+
+### Webmail authentication
+- The dedicated `/webmail/login` page and its login/logout APIs are reachable
+  without a CyberPanel administrator session, allowing ordinary mailbox users
+  to authenticate directly against IMAP.
+- Standalone mailbox sessions are isolated from CyberPanel administrator
+  sessions and are accepted only when all required mailbox-session fields are
+  present.
+- Standalone login rotates the session identifier, expires after 12 hours,
+  rate-limits repeated failures, and returns a generic authentication error.
+- Login and logout are POST-only and CSRF-protected. The login page now always
+  issues the CSRF cookie needed by the browser client.
+- Standalone users can access only their authenticated mailbox and now have a
+  dedicated sign-out action.
+
+## v3.0.5 (build 5) — 2026-08-26
+
+Security update for API authentication and two-factor enforcement.
+
+### Security
+- Standard API, cloud API, connection verification, and panel-session handoff
+  now require a current TOTP code whenever two-factor authentication is
+  enabled for the account.
+- API keys are versioned, cryptographically random credentials independent of
+  the account password. Enabled accounts using legacy keys receive a new key
+  during upgrade.
+- API Access can display a newly enabled key, regenerate it on demand, and
+  revoke it completely when access is disabled.
+- Repeated invalid API TOTP attempts are rate-limited per account and source.
+- Password-authenticated connection verification returns the account's current
+  API key only after all required factors succeed and marks the response as
+  non-cacheable.
+
+### Integration guidance
+- Send the current TOTP code in the `X-CyberPanel-OTP` header or the JSON
+  `otp` field. TOTP values are not accepted from query strings.
+- After upgrading, replace legacy password-derived keys in external tools with
+  the key shown under **Users > API Access**.
+- Provisioning systems can set a pre-generated `cp_api_v1_` credential with
+  `adminPass.py --api 1 --api-token '<key>'`.
+
+## v3.0.4 (build 4) — 2026-08-23
+
+Reliability release for installation, upgrades, remote databases, SSL,
+WordPress, file management, and native webmail.
+
+### Platform support
+- AlmaLinux 10 fresh installations and upgrades now use native EL10
+  repositories and a matched OpenLiteSpeed ABI set: OpenLiteSpeed 2.5.2,
+  `cyberpanel_ols.so` 2.7.6, and `mod_security.so` 2.5.2.
+- The installer provisions the EL10 `udns`, Postfix, MariaDB, Remi, EPEL, and
+  LiteSpeed dependencies without relying on EL9 packages or removed DNF
+  modularity commands.
+- Existing Ubuntu, EL8, EL9, and openEuler artifact selections are unchanged.
+
+### Installation and upgrades
+- Remote MySQL installations now configure every database consumer for the
+  selected host and port, validate the endpoint before package setup, fail
+  early when the CyberPanel database cannot be prepared, and keep database
+  passwords out of installation logs and process arguments.
+- Remote database settings, the Django secret, and other private configuration
+  survive upgrades. Upgrade helpers load only after the new source is staged,
+  preserving compatibility with older installed launchers.
+- Interrupted upgrades report partial state safely, deployed firewall assets
+  are validated, and unavailable legacy PHP development packages are skipped.
+
+### Mail and webmail
+- CyberPanel's integrated webmail is now the supported mail interface. Fresh
+  installations no longer provision the retired RainLoop or SnappyMail clients;
+  upgrades preserve and protect existing legacy data without exposing it.
+- Postfix domain lookups work with MariaDB 11.8, and Dovecot 2.4 local delivery
+  can read its protected SQL configuration without weakening file permissions.
+- Generated Sieve redirect rules are valid and mailbox delivery was verified
+  end to end through the integrated client.
+
+### Websites and files
+- WordPress can be installed on an existing website, uses an available PHP CLI,
+  avoids an unnecessary PHP restart, and is registered correctly in WordPress
+  Manager.
+- phpMyAdmin auto-login now validates a short-lived, one-time handoff from the
+  authenticated panel session instead of relying on an unrelated PHP session.
+- File Manager downloads preserve filenames containing spaces, `#`, `&`, `+`,
+  or `%` while retaining path traversal protection (#1902).
+- Plugin routes and OpenSSH authorized-key deletion now match only the intended
+  entry.
+
+### SSL and security
+- SSL renewal is reported as successful only after the renewed certificate is
+  deployed. ACME account state is preserved, private keys retain owner-only
+  permissions, and sensitive ACME response metadata is not logged.
+- Strong database-account passwords containing shell, SQL, whitespace, and
+  environment-file metacharacters are handled without interpolation.
+
+## v3.0.3 (build 3) — 2026-08-20
+
+Security hotfix for API authentication and account authorization.
+
+### Security
+- Placeholder and empty API tokens are rejected across all token-authenticated
+  endpoints. API-created accounts now receive cryptographically random tokens,
+  and upgrade rotates invalid tokens on enabled accounts.
+- Cloud session access now uses uniform authentication failures, rejects
+  suspended accounts, rate-limits failed attempts, rotates the session key, and
+  prevents credentials from being forwarded in referrer headers.
+- API-created site owners and user-management flows now evaluate the effective
+  ACL configuration, preventing non-administrators from assigning an
+  administrator-level custom ACL. Existing custom ACL records are synchronized
+  during upgrade.
+- Debug logging for website-creation API calls no longer records request
+  payloads containing account credentials.
+
+## v3.0.2 (build 2) — 2026-08-18
+
+Adds Hermes Agent as a one-click Docker application and consolidates the fixes
+that landed on the `v3.0.1` branch after its initial build, which were never
+given their own changelog entry.
+
+### Applications
+- Hermes Agent can now be deployed from Docker Sites the same way as n8n: pick
+  the domain, the resources and the dashboard login, and the panel builds the
+  container, the reverse proxy and the SSL-terminated dashboard. The agent keeps
+  its state in its own data volume and needs no database container, and its
+  dashboard is reachable only through the domain, never on a public port. The
+  model provider API key is added from inside the dashboard, so no credential
+  for it is stored by the panel.
+- The application list, the resources shown for each application, and the
+  application recorded against a Docker site are now driven by one definition,
+  so every site is recorded as the application it actually runs. Previously
+  every Docker site was recorded as WordPress.
+
+### Fixes
+- Git repositories whose name contains a dot, such as `repo.ltd`, can be
+  attached again instead of being rejected as invalid input (#1716).
+- The Email Marketing page loads its application script, so the page renders
+  its lists instead of staying empty (#1707).
+- Logging out of phpMyAdmin now ends the session and returns to the panel
+  instead of leaving a blank page with the session still open (#1680).
+- Corrected a "Pleas wait" typo on the manage git page (#1752).
+- The Docker site form starts with valid owner, application and resource
+  values, and the selected entry in each dropdown is no longer clipped.
+
+### Consolidated from the v3.0.1 branch
+- Ubuntu 26 installer detection completed, and login sessions persist correctly
+  with tightened secret access.
+- Scheduled local backups validate their destination and apply retention;
+  backups of sites without DNS or mail records complete.
+- Downloads staged for the file manager use a private directory owned by the
+  service account instead of loosening permissions on the panel home (#1894).
+- Local database credentials are repaired during upgrade, and a failed upgrade
+  reports partial state instead of claiming the old build is still running
+  (#1891).
+- Webmail handles unknown MIME charsets, and webmail content and SSH password
+  changes are hardened.
+- WordPress installation fails safely, remote transfer error responses are
+  handled, self-hosted git deployment is restored, and Imunify installation and
+  panel integration are fixed.
+- Web Terminal keeps working after upgrades and runtime rebuilds, honours a
+  custom SSH port, and requires a one-time authorization.
+- Docker environment variable rows are indexed correctly, ACME logging exposure
+  is reduced, and the dashboard no longer renders a raw uptime placeholder.
+
 ## v3.0.0 (build 0) — 2026-08-09
 
 ### Platform support
@@ -138,8 +302,8 @@ below were already shipped to the `v2.4.8` branch and are consolidated here.
   (never a graceful restart) and removes the target before copying.
 - Ubuntu < 22.04 (e.g. 20.04, glibc 2.31) now skips the custom overlay
   entirely — the `ubuntu` artifact needs GLIBC ≥ 2.34 (ticket #OXHTOK7AH).
-- AlmaLinux/Rocky/RHEL 10 now install the `rhel9` artifact (el9 binary covers
-  el10).
+- At the time of this release, AlmaLinux/Rocky/RHEL 10 selected the `rhel9`
+  artifact. CyberPanel 3.0.4 supersedes this with a native EL10 ABI set.
 
 **Support notes:**
 - Servers where support removed the `module cyberpanel_ols { }` block from

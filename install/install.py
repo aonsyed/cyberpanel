@@ -8,18 +8,23 @@ import re
 import shlex
 from firewallUtilities import FirewallUtilities
 import time
-import string
 import random
 import socket
 from os.path import *
 from stat import *
 import stat
-import secrets
 import install_utils
 import json
+import hashlib
 
 sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cyberpanel_version import BUILD, VERSION
+from database_consumers import (
+    configure_phpmyadmin_signon,
+    dovecot_connect_line,
+)
+from env_generator import DatabaseConfigError, build_database_config
+from plogical.legacyWebmail import legacy_data_permission_commands
 
 # Using shared char_set from install_utils
 char_set = install_utils.char_set
@@ -39,6 +44,37 @@ openeuler = install_utils.openeuler
 cent9 = 4  # Not in install_utils yet
 CloudLinux8 = 0  # Not in install_utils yet
 
+LITESPEED_EL10_KEY_SHA256 = 'cd0578a8febe98cb7d7d437a73419b8407ddd98cd848f2c9c7fdd288d768af01'
+
+
+def is_el10_release(os_release_path='/etc/os-release'):
+    """Return True only for supported Enterprise Linux 10 distributions."""
+    values = {}
+    try:
+        with open(os_release_path, 'r') as release_file:
+            for raw_line in release_file:
+                key, separator, value = raw_line.partition('=')
+                if separator:
+                    values[key.strip()] = value.strip().strip('"\'').lower()
+    except OSError:
+        return False
+
+    supported_ids = {'almalinux', 'rocky', 'rhel', 'centos', 'cloudlinux', 'ol'}
+    return (values.get('ID') in supported_ids
+            and values.get('VERSION_ID', '').split('.', 1)[0] == '10')
+
+
+def verify_litespeed_el10_key(key_path):
+    """Verify the replacement LiteSpeed RPM signing key before importing it."""
+    try:
+        digest = hashlib.sha256()
+        with open(key_path, 'rb') as key_file:
+            for chunk in iter(lambda: key_file.read(65536), b''):
+                digest.update(chunk)
+        return digest.hexdigest() == LITESPEED_EL10_KEY_SHA256
+    except OSError:
+        return False
+
 # Using shared function from install_utils
 FetchCloudLinuxAlmaVersionVersion = install_utils.FetchCloudLinuxAlmaVersionVersion
 
@@ -55,11 +91,29 @@ def get_Ubuntu_release():
     return release
 
 
+def normalize_opendkim_socket_lines(lines):
+    """Return an OpenDKIM config with one inet socket directive."""
+    normalized = []
+    socket_written = False
+
+    for line in lines:
+        if re.match(r'^\s*Socket(?:\s|$)', line):
+            if not socket_written:
+                normalized.append('Socket  inet:8891@localhost\n')
+                socket_written = True
+            continue
+        normalized.append(line)
+
+    if not socket_written:
+        normalized.append('Socket  inet:8891@localhost\n')
+
+    return normalized
+
+
 class preFlightsChecks:
     debug = 1
     cyberPanelMirror = "mirror.cyberpanel.net/pip"
     cdn = 'cyberpanel.sh'
-    SnappyVersion = '2.38.2'
     apt_updated = False  # Track if apt update has been run
     
     def install_package(self, package_name, options="", silent=False):
@@ -107,22 +161,6 @@ class preFlightsChecks:
         ).returncode == 0
         if not user_exists:
             command = 'useradd -g lscpd -M -d /usr/local/lscp lscpd'
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-    def addWebServerUserToLSCPDGroup(self):
-        """Allow the web-server account to access panel-owned webmail data."""
-        user_exists = subprocess.run(
-            ['id', '-u', 'nobody'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        ).returncode == 0
-        group_exists = subprocess.run(
-            ['getent', 'group', 'lscpd'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        ).returncode == 0
-        if user_exists and group_exists:
-            command = 'usermod -a -G lscpd nobody'
             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
 
     def __init__(self, rootPath, ip, path, cwd, cyberPanelPath, distro, remotemysql=None, mysqlhost=None, mysqldb=None,
@@ -473,6 +511,40 @@ class preFlightsChecks:
         except BaseException as msg:
             logging.InstallLog.writeToFile("[ERROR] setup_account_cyberpanel. " + str(msg))
 
+    def configureLiteSpeedEL10Key(self):
+        """Install LiteSpeed's EL10-compatible RPM key after pin verification."""
+        if not is_el10_release():
+            return
+
+        download_path = '/tmp/RPM-GPG-KEY-litespeed2025'
+        key_path = '/etc/pki/rpm-gpg/RPM-GPG-KEY-litespeed'
+        key_url = 'https://rpms.litespeedtech.com/centos/RPM-GPG-KEY-litespeed2025'
+        command = f'wget --https-only -q -O {download_path} {key_url}'
+        preFlightsChecks.call(
+            command, self.distro, command,
+            'Download LiteSpeed EL10 signing key', 1, 1, os.EX_OSERR,
+        )
+
+        if not verify_litespeed_el10_key(download_path):
+            try:
+                os.remove(download_path)
+            except OSError:
+                pass
+            preFlightsChecks.stdOut(
+                'LiteSpeed EL10 signing key failed SHA256 verification.',
+                1, 1, os.EX_DATAERR,
+            )
+
+        os.makedirs(os.path.dirname(key_path), exist_ok=True)
+        os.replace(download_path, key_path)
+        os.chmod(key_path, 0o644)
+        result = subprocess.call(['rpmkeys', '--import', key_path])
+        if result != 0:
+            preFlightsChecks.stdOut(
+                'Unable to import the LiteSpeed EL10 signing key.',
+                1, 1, os.EX_OSERR,
+            )
+
     def installCyberPanelRepo(self):
         self.stdOut("Install Cyberpanel repo")
 
@@ -533,6 +605,7 @@ class preFlightsChecks:
         elif self.distro == cent8:
             command = 'rpm -Uvh http://rpms.litespeedtech.com/centos/litespeed-repo-1.1-1.el8.noarch.rpm'
             preFlightsChecks.call(command, self.distro, command, command, 1, 1, os.EX_OSERR)
+            self.configureLiteSpeedEL10Key()
 
     def fix_selinux_issue(self):
         try:
@@ -566,13 +639,27 @@ class preFlightsChecks:
             
             # Import the environment generator
             sys.path.append(os.path.join(self.cyberPanelPath, 'install'))
-            from env_generator import create_env_file, create_env_backup
-            
+            from env_generator import (create_env_file, create_env_backup,
+                                       build_database_config)
+
+            # A remote installation moves both the application connection and
+            # the administrative connection to --mysqlhost:--mysqlport. This
+            # validates the endpoint and raises before anything is written if
+            # a required value is missing.
+            database_config = build_database_config(
+                remote=(self.remotemysql == 'ON'),
+                host=getattr(self, 'mysqlhost', None),
+                port=getattr(self, 'mysqlport', None),
+                root_db=getattr(self, 'mysqldb', None),
+                root_user=getattr(self, 'mysqluser', None),
+            )
+
             # Generate secure credentials
             credentials = create_env_file(
-                self.cyberPanelPath, 
-                mysql_root_password, 
-                cyberpanel_db_password
+                self.cyberPanelPath,
+                mysql_root_password,
+                cyberpanel_db_password,
+                database_config=database_config
             )
             
             # Create backup for recovery
@@ -588,33 +675,88 @@ class preFlightsChecks:
             # Fallback to original method if environment generation fails
             self.fallback_settings_update(mysql_root_password, cyberpanel_db_password)
 
-    def fallback_settings_update(self, mysqlPassword, password):
+    def fallback_settings_update(self, mysql_root_password, cyberpanel_db_password):
         """
         Fallback method to update settings.py directly if environment generation fails
+
+        DATABASES declares 'default' (the cyberpanel application user) before
+        'rootdb' (the administrative user), so the first 'PASSWORD:' line
+        encountered belongs to the application connection. The previous
+        ordering wrote the administrative password there and the application
+        password into rootdb, leaving both connections wrong.
         """
         logging.InstallLog.writeToFile("Using fallback method for settings.py update")
-        
+
+        remote = (self.remotemysql == 'ON')
+
+        # This runs because environment generation already failed, so it must
+        # not depend on env_generator being importable. The local values are
+        # inlined; the helper is only consulted to validate a remote endpoint.
+        db = {
+            'db_name': 'cyberpanel',
+            'db_user': 'cyberpanel',
+            'db_host': 'localhost',
+            'db_port': '3306',
+            'root_db_name': 'mysql',
+            'root_db_user': 'root',
+            'root_db_host': 'localhost',
+            'root_db_port': '3306',
+        }
+
+        if remote:
+            try:
+                sys.path.append(os.path.join(self.cyberPanelPath, 'install'))
+                from env_generator import build_database_config
+                db = build_database_config(
+                    remote=True,
+                    host=getattr(self, 'mysqlhost', None),
+                    port=getattr(self, 'mysqlport', None),
+                    root_db=getattr(self, 'mysqldb', None),
+                    root_user=getattr(self, 'mysqluser', None),
+                )
+            except Exception as endpoint_error:
+                # Writing the local defaults for a remote installation would
+                # point every connection at a database that is not there, and
+                # the installation would fail later with a confusing error.
+                logging.InstallLog.writeToFile(
+                    "[ERROR] Could not resolve the remote database endpoint "
+                    "for the fallback settings update: %s"
+                    % str(endpoint_error))
+                raise
+
         path = self.cyberPanelPath + "/CyberCP/settings.py"
         data = open(path, "r").readlines()
         writeDataToFile = open(path, "w")
-        counter = 0
+        # 0 = still inside 'default', 1 = inside 'rootdb'.
+        block = 0
 
         for items in data:
             if items.find('SECRET_KEY') > -1:
-                SK = "SECRET_KEY = '%s'\n" % (generate_pass(50))
+                SK = "SECRET_KEY = %r\n" % generate_pass(50)
                 writeDataToFile.writelines(SK)
                 continue
 
             if items.find("'PASSWORD':") > -1:
-                if counter == 0:
-                    writeDataToFile.writelines("        'PASSWORD': '" + mysqlPassword + "'," + "\n")
-                    counter = counter + 1
+                if block == 0:
+                    writeDataToFile.writelines(
+                        "        'PASSWORD': %r,\n" % cyberpanel_db_password)
                 else:
-                    writeDataToFile.writelines("        'PASSWORD': '" + password + "'," + "\n")
-            elif items.find('127.0.0.1') > -1:
-                writeDataToFile.writelines("        'HOST': 'localhost',\n")
-            elif items.find("'PORT':'3307'") > -1:
-                writeDataToFile.writelines("        'PORT': '',\n")
+                    writeDataToFile.writelines(
+                        "        'PASSWORD': %r,\n" % mysql_root_password)
+            elif items.find("'HOST':") > -1:
+                host = db['db_host'] if block == 0 else db['root_db_host']
+                writeDataToFile.writelines("        'HOST': %r,\n" % host)
+            elif items.find("'PORT':") > -1:
+                port = db['db_port'] if block == 0 else db['root_db_port']
+                writeDataToFile.writelines("        'PORT': %r,\n" % port)
+                # PORT is the last entry of each database block.
+                block = block + 1
+            elif items.find("'USER':") > -1 and block == 1:
+                writeDataToFile.writelines(
+                    "        'USER': %r,\n" % db['root_db_user'])
+            elif items.find("'NAME':") > -1 and block == 1:
+                writeDataToFile.writelines(
+                    "        'NAME': %r,\n" % db['root_db_name'])
             else:
                 writeDataToFile.writelines(items)
 
@@ -653,12 +795,17 @@ class preFlightsChecks:
         # This allows root/sudo users to be able to work with MySQL/MariaDB without hunting down the password like
         # all the other control panels allow
         # reference: https://oracle-base.com/articles/mysql/mysql-password-less-logins-using-option-files
+        sys.path.append(os.path.join(self.cyberPanelPath, 'install'))
+        from env_generator import build_mysql_client_config
+
         mysql_my_root_cnf = '/root/.my.cnf'
-        mysql_root_cnf_content = """
-[client]
-user=root
-password="%s"
-""" % password
+        mysql_root_cnf_content = build_mysql_client_config(
+            password,
+            remote=(self.remotemysql == 'ON'),
+            host=getattr(self, 'mysqlhost', None),
+            port=getattr(self, 'mysqlport', None),
+            user=getattr(self, 'mysqluser', None),
+        )
 
         with open(mysql_my_root_cnf, 'w') as f:
             f.write(mysql_root_cnf_content)
@@ -672,24 +819,15 @@ password="%s"
 
         # Generate secure environment file instead of hardcoding passwords
         # Note: password = MySQL root password, mysqlPassword = CyberPanel DB password
+        # The remote endpoint is now part of the generated environment rather
+        # than something patched into settings.py afterwards. Three text
+        # substitutions used to run here against an undefined `path`, which
+        # raised before migrations on every remote installation; even with the
+        # name defined they edited settings.py, whose database values are only
+        # fallbacks — .env is what Django actually reads.
         self.generate_secure_env_file(password, mysqlPassword)
 
         logging.InstallLog.writeToFile("Environment configuration generated successfully!")
-
-        if self.remotemysql == 'ON':
-            command = "sed -i 's|localhost|%s|g' %s" % (self.mysqlhost, path)
-            preFlightsChecks.call(command, self.distro, command, command, 1, 1, os.EX_OSERR)
-
-            # command = "sed -i 's|'mysql'|'%s'|g' %s" % (self.mysqldb, path)
-            # preFlightsChecks.call(command, self.distro, command, command, 1, 1, os.EX_OSERR)
-
-            command = "sed -i 's|root|%s|g' %s" % (self.mysqluser, path)
-            preFlightsChecks.call(command, self.distro, command, command, 1, 1, os.EX_OSERR)
-
-            command = "sed -i \"s|'PORT': ''|'PORT':'%s'|g\" %s" % (self.mysqlport, path)
-            preFlightsChecks.call(command, self.distro, command, command, 1, 1, os.EX_OSERR)
-
-        logging.InstallLog.writeToFile("settings.py updated!")
 
         # self.setupVirtualEnv(self.distro)
 
@@ -766,8 +904,8 @@ password="%s"
         command = "chown -R root:root /usr/local/lscp"
         preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
 
-        command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/rainloop"
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+        for command in legacy_data_permission_commands():
+            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
 
         command = "chmod 700 /usr/local/CyberCP/cli/cyberPanel.py"
         preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
@@ -783,6 +921,22 @@ password="%s"
 
         command = "chown root:cyberpanel /usr/local/CyberCP/CyberCP/settings.py"
         preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+
+        # The panel worker must read one shared environment and Django signing
+        # key, but no unrelated account should be able to read either file.
+        for path in ('/usr/local/CyberCP/.env', '/usr/local/CyberCP/secret_key'):
+            if os.path.exists(path):
+                command = "chown root:cyberpanel %s" % path
+                preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+                command = "chmod 640 %s" % path
+                preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+
+        backup_env = '/usr/local/CyberCP/.env.backup'
+        if os.path.exists(backup_env):
+            command = "chown root:root %s" % backup_env
+            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+            command = "chmod 600 %s" % backup_env
+            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
 
         files = ['/etc/yum.repos.d/MariaDB.repo', '/etc/pdns/pdns.conf', '/etc/systemd/system/lscpd.service',
                  '/etc/pure-ftpd/pure-ftpd.conf', '/etc/pure-ftpd/pureftpd-pgsql.conf',
@@ -880,45 +1034,6 @@ password="%s"
             command = 'chmod 640 /usr/local/lscp/cyberpanel/logs/access.log'
             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
 
-        # Create complete SnappyMail directory structure early in installation
-        command = 'mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/configs/'
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-        command = 'mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/domains/'
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-        command = 'mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/storage/'
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-        command = 'mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/temp/'
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-        command = 'mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/cache/'
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-        # Set proper ownership early
-        command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/snappymail/"
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-        # Set proper permissions - make all data directories group writable
-        command = "chmod -R 775 /usr/local/lscp/cyberpanel/snappymail/data/"
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-        # Ensure the web server user (nobody) can access the directories
-        # Note: lscpd is already added to nobody group earlier in the installation
-        self.addWebServerUserToLSCPDGroup()
-
-        # Fix SnappyMail public directory ownership early
-        command = "chown -R lscpd:lscpd /usr/local/CyberCP/public/snappymail/data"
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-        snappymailinipath = '/usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/configs/application.ini'
-
-        command = 'chmod 600 /usr/local/CyberCP/public/snappymail.php'
-        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-        ###
-
         WriteToFile = open('/etc/fstab', 'a')
         WriteToFile.write('proc    /proc        proc        defaults,hidepid=2    0 0\n')
         WriteToFile.close()
@@ -996,6 +1111,7 @@ password="%s"
 $cfg['Servers'][$i]['AllowNoPassword'] = false;
 $cfg['Servers'][$i]['auth_type'] = 'signon';
 $cfg['Servers'][$i]['SignonSession'] = 'SignonSession';
+$cfg['Servers'][$i]['SignonScript'] = __DIR__ . '/phpmyadminsession.php';
 $cfg['Servers'][$i]['SignonURL'] = 'phpmyadminsignin.php';
 $cfg['Servers'][$i]['LogoutURL'] = 'phpmyadminsignin.php?logout';
 """
@@ -1024,18 +1140,17 @@ $cfg['Servers'][$i]['LogoutURL'] = 'phpmyadminsignin.php?logout';
             preFlightsChecks.call(command, self.distro, '[chown -R lscpd:lscpd /usr/local/CyberCP/public/phpmyadmin]',
                                   'chown -R lscpd:lscpd /usr/local/CyberCP/public/phpmyadmin', 1, 0, os.EX_OSERR)
 
-            if self.remotemysql == 'ON':
-                command = "sed -i 's|'localhost'|'%s'|g' %s" % (
-                    self.mysqlhost, '/usr/local/CyberCP/public/phpmyadmin/config.inc.php')
-                preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
             command = 'cp /usr/local/CyberCP/plogical/phpmyadminsignin.php /usr/local/CyberCP/public/phpmyadmin/phpmyadminsignin.php'
+            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+            command = 'cp /usr/local/CyberCP/plogical/phpmyadminsession.php /usr/local/CyberCP/public/phpmyadmin/phpmyadminsession.php'
             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
 
             if self.remotemysql == 'ON':
-                command = "sed -i 's|localhost|%s|g' /usr/local/CyberCP/public/phpmyadmin/phpmyadminsignin.php" % (
-                    self.mysqlhost)
-                preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+                configure_phpmyadmin_signon(
+                    '/usr/local/CyberCP/public/phpmyadmin/phpmyadminsignin.php',
+                    self.mysqlhost,
+                    self.mysqlport,
+                )
 
 
         except BaseException as msg:
@@ -1059,19 +1174,21 @@ $cfg['Servers'][$i]['LogoutURL'] = 'phpmyadminsignin.php?logout';
                 command = 'yum install --enablerepo=gf-plus -y postfix3 postfix3-ldap postfix3-mysql postfix3-pcre'
                 preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
             elif self.distro == cent8:
-
-                clAPVersion = FetchCloudLinuxAlmaVersionVersion()
-                type = clAPVersion.split('-')[0]
-                version = int(clAPVersion.split('-')[1])
-
-                if type == 'al' and version >= 90:
-                    command = 'dnf --nogpg install -y https://mirror.ghettoforge.net/distributions/gf/gf-release-latest.gf.el9.noarch.rpm'
-                    preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+                if is_el10_release():
+                    command = 'dnf install -y postfix postfix-mysql cyrus-sasl-plain'
                 else:
-                    command = 'dnf --nogpg install -y https://mirror.ghettoforge.net/distributions/gf/gf-release-latest.gf.el8.noarch.rpm'
-                    preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+                    clAPVersion = FetchCloudLinuxAlmaVersionVersion()
+                    type = clAPVersion.split('-')[0]
+                    version = int(clAPVersion.split('-')[1])
 
-                command = 'dnf install --enablerepo=gf-plus postfix3 postfix3-mysql cyrus-sasl-plain -y'
+                    if type == 'al' and version >= 90:
+                        command = 'dnf --nogpg install -y https://mirror.ghettoforge.net/distributions/gf/gf-release-latest.gf.el9.noarch.rpm'
+                        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+                    else:
+                        command = 'dnf --nogpg install -y https://mirror.ghettoforge.net/distributions/gf/gf-release-latest.gf.el8.noarch.rpm'
+                        preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
+
+                    command = 'dnf install --enablerepo=gf-plus postfix3 postfix3-mysql cyrus-sasl-plain -y'
                 preFlightsChecks.call(command, self.distro, command, command, 1, 1, os.EX_OSERR)
             elif self.distro == openeuler:
                 command = 'dnf install postfix cyrus-sasl-plain -y'
@@ -1157,10 +1274,13 @@ $cfg['Servers'][$i]['LogoutURL'] = 'phpmyadminsignin.php?logout';
                     else:
                         writeDataToFile.write(items)
             else:
-                if mysql == 'Two':
-                    dataWritten = "connect = host=127.0.0.1 dbname=cyberpanel user=cyberpanel password=" + mysqlPassword + " port=3307\n"
-                else:
-                    dataWritten = "connect = host=localhost dbname=cyberpanel user=cyberpanel password=" + mysqlPassword + " port=3306\n"
+                dataWritten = dovecot_connect_line(
+                    mysqlPassword,
+                    mysql=mysql,
+                    remote=(self.remotemysql == 'ON'),
+                    host=self.mysqlhost,
+                    port=self.mysqlport,
+                )
 
                 for items in data:
                     if items.find("connect") > -1:
@@ -1560,198 +1680,6 @@ $cfg['Servers'][$i]['LogoutURL'] = 'phpmyadminsignin.php?logout';
 
         return 1
 
-    def downoad_and_install_raindloop(self):
-        try:
-            #######
-
-            if not os.path.exists("/usr/local/CyberCP/public"):
-                os.mkdir("/usr/local/CyberCP/public")
-
-            if os.path.exists("/usr/local/CyberCP/public/snappymail"):
-                return 0
-
-            os.chdir("/usr/local/CyberCP/public")
-
-            command = 'wget https://github.com/the-djmaze/snappymail/releases/download/v%s/snappymail-%s.zip' % (preFlightsChecks.SnappyVersion, preFlightsChecks.SnappyVersion)
-
-            preFlightsChecks.call(command, self.distro, command, command, 1, 1, os.EX_OSERR)
-
-            #############
-
-            command = 'unzip snappymail-%s.zip -d /usr/local/CyberCP/public/snappymail' % (preFlightsChecks.SnappyVersion)
-            preFlightsChecks.call(command, self.distro, command, command, 1, 1, os.EX_OSERR)
-
-            try:
-                os.remove("snappymail-%s.zip" % (preFlightsChecks.SnappyVersion))
-            except:
-                pass
-
-            #######
-
-            os.chdir("/usr/local/CyberCP/public/snappymail")
-
-            command = 'find . -type d -exec chmod 755 {} \;'
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            #############
-
-            command = 'find . -type f -exec chmod 644 {} \;'
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            ######
-
-            # Create SnappyMail data directories with proper structure
-            command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/configs/"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/domains/"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/storage/"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/temp/"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/cache/"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            # Set proper ownership for SnappyMail data directories
-            command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/snappymail/"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            # Set proper permissions for SnappyMail data directories (group writable)
-            command = "chmod -R 775 /usr/local/lscp/cyberpanel/snappymail/data/"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            # Ensure web server users are in the lscpd group for access
-            self.addWebServerUserToLSCPDGroup()
-
-            # Fix SnappyMail public directory ownership immediately after creation
-            command = "chown -R lscpd:lscpd /usr/local/CyberCP/public/snappymail/data"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            command = "mkdir -p /usr/local/lscp/cyberpanel/rainloop/data"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            ### Enable sub-folders
-
-            command = "mkdir -p /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/configs/"
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-#             labsPath = '/usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/configs/application.ini'
-#
-#             labsData = """[labs]
-# imap_folder_list_limit = 0
-# autocreate_system_folders = On
-# """
-#
-#             # writeToFile = open(labsPath, 'a')
-#             # writeToFile.write(labsData)
-#             # writeToFile.close()
-#
-#             iPath = os.listdir('/usr/local/CyberCP/public/snappymail/snappymail/v/')
-#
-#             path = "/usr/local/CyberCP/public/snappymail/snappymail/v/%s/include.php" % (iPath[0])
-#
-#             data = open(path, 'r').readlines()
-#             writeToFile = open(path, 'w')
-#
-#             for items in data:
-#                 if items.find("$sCustomDataPath = '';") > -1:
-#                     writeToFile.writelines(
-#                         "			$sCustomDataPath = '/usr/local/lscp/cyberpanel/rainloop/data';\n")
-#                 else:
-#                     writeToFile.writelines(items)
-#
-#             writeToFile.close()
-#
-#             includeFileOldPath = '/usr/local/CyberCP/public/snappymail/_include.php'
-#             includeFileNewPath = '/usr/local/CyberCP/public/snappymail/include.php'
-#
-#             if os.path.exists(includeFileOldPath):
-#                 writeToFile = open(includeFileOldPath, 'a')
-#                 writeToFile.write("\ndefine('APP_DATA_FOLDER_PATH', '/usr/local/lscp/cyberpanel/rainloop/data/');\n")
-#                 writeToFile.close()
-#
-#             command = 'mv %s %s' % (includeFileOldPath, includeFileNewPath)
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-#
-#             #command = "sed -i 's|autocreate_system_folders = Off|autocreate_system_folders = On|g' %s" % (labsPath)
-#             command = "sed -i 's|verify_certificate = On|verify_certificate = Off|g' %s" % (labsPath)
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-#
-#             ### now download and install actual plugin
-#
-#             command = f'mkdir /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect'
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-#
-#             command = f'chmod 700 /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect'
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-#
-#             command = f'chmod 700 /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect'
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-#
-#             command = f'wget -O /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect/index.php https://raw.githubusercontent.com/the-djmaze/snappymail/master/plugins/mailbox-detect/index.php'
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-#
-#             command = f'chmod 644 /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect/index.php'
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-#
-#             command = f'chown lscpd:lscpd /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect/index.php'
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-#
-#             ### Enable plugins and enable mailbox creation plugin
-#
-#             labsDataLines = open(labsPath, 'r').readlines()
-#             PluginsActivator = 0
-#             WriteToFile = open(labsPath, 'w')
-#             for lines in labsDataLines:
-#                 if lines.find('[plugins]') > -1:
-#                     PluginsActivator = 1
-#                     WriteToFile.write(lines)
-#                 elif PluginsActivator and lines.find('enable = ') > -1:
-#                     WriteToFile.write(f'enable = On\n')
-#                 elif PluginsActivator and lines.find('enabled_list = ') > -1:
-#                     WriteToFile.write(f'enabled_list = "mailbox-detect"\n')
-#                 elif PluginsActivator == 1 and lines.find('[defaults]') > -1:
-#                     PluginsActivator = 0
-#                     WriteToFile.write(lines)
-#                 else:
-#                     WriteToFile.write(lines)
-#             WriteToFile.close()
-#
-#             ## enable auto create in the enabled plugin
-#             PluginsFilePath = '/usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/configs/plugin-mailbox-detect.json'
-#
-#             WriteToFile = open(PluginsFilePath, 'w')
-#             WriteToFile.write("""{
-#     "plugin": {
-#         "autocreate_system_folders": true
-#     }
-# }
-# """)
-#             WriteToFile.close()
-#
-#             command = f'chown lscpd:lscpd {PluginsFilePath}'
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-#
-#             command = f'chmod 600 {PluginsFilePath}'
-#             preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            command = f'wget -O /usr/local/CyberCP/snappymail_cyberpanel.php  https://raw.githubusercontent.com/the-djmaze/snappymail/master/integrations/cyberpanel/install.php'
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-            command = f'/usr/local/lsws/lsphp80/bin/php /usr/local/CyberCP/snappymail_cyberpanel.php'
-            preFlightsChecks.call(command, self.distro, command, command, 1, 0, os.EX_OSERR)
-
-
-        except BaseException as msg:
-            logging.InstallLog.writeToFile('[ERROR] ' + str(msg) + " [downoad_and_install_snappymail]")
-            return 0
-
-        return 1
-
     ###################################################### Email setup ends!
 
     def reStartLiteSpeed(self):
@@ -1803,15 +1731,16 @@ $cfg['Servers'][$i]['LogoutURL'] = 'phpmyadminsignin.php?logout';
                 # Not available in ubuntu
                 self.manage_service('dbus', 'restart')
 
-            # Ubuntu 26 terminates the installer's SSH session scope after
-            # systemd-logind is restarted, which kills the installation midway.
-            # Earlier Ubuntu releases and non-Ubuntu distributions retain the
-            # existing behavior.
-            if self.distro != ubuntu or get_Ubuntu_release() < 26.04:
+            # Newer systemd releases terminate the installer's SSH session scope
+            # when logind restarts. Keep earlier distributions unchanged.
+            skip_logind_restart = is_el10_release() or (
+                self.distro == ubuntu and get_Ubuntu_release() >= 26.04
+            )
+            if not skip_logind_restart:
                 self.manage_service('systemd-logind', 'restart')
             else:
                 logging.InstallLog.writeToFile(
-                    "Ubuntu 26.04: keeping systemd-logind running during installation."
+                    "Keeping systemd-logind running during installation."
                 )
 
             self.manage_service('firewalld', 'start')
@@ -2324,6 +2253,9 @@ $cfg['Servers'][$i]['LogoutURL'] = 'phpmyadminsignin.php?logout';
         print("###################################################################")
 
     def modSecPreReqs(self):
+        if is_el10_release():
+            return 1
+
         try:
 
             pathToRemoveGarbageFile = os.path.join(self.server_root_path, "modules/mod_security.so")
@@ -2337,6 +2269,33 @@ $cfg['Servers'][$i]['LogoutURL'] = 'phpmyadminsignin.php?logout';
         try:
             if self.distro == cent8 or self.distro == openeuler or self.distro == ubuntu:
                 self.install_package('opendkim opendkim-tools')
+
+                if self.distro == ubuntu and get_Ubuntu_release() >= 26.0:
+                    os.makedirs('/etc/opendkim/keys', exist_ok=True)
+                    for table_path in (
+                        '/etc/opendkim/KeyTable',
+                        '/etc/opendkim/SigningTable',
+                        '/etc/opendkim/TrustedHosts',
+                    ):
+                        if not os.path.exists(table_path):
+                            with open(table_path, 'a'):
+                                pass
+                        os.chmod(table_path, 0o644)
+                elif is_el10_release():
+                    keys_path = '/etc/opendkim/keys'
+                    os.makedirs(keys_path, exist_ok=True)
+                    shutil.chown(keys_path, user='root', group='opendkim')
+                    os.chmod(keys_path, 0o750)
+                    for table_path in (
+                        '/etc/opendkim/KeyTable',
+                        '/etc/opendkim/SigningTable',
+                        '/etc/opendkim/TrustedHosts',
+                    ):
+                        if not os.path.exists(table_path):
+                            with open(table_path, 'a'):
+                                pass
+                        shutil.chown(table_path, user='root', group='opendkim')
+                        os.chmod(table_path, 0o640)
             else:
                 self.install_package('opendkim')
 
@@ -2383,7 +2342,11 @@ milter_default_action = accept
             writeToFile.write(configData)
             writeToFile.close()
 
-            if self.distro == ubuntu or self.distro == cent8:
+            if self.distro == ubuntu and get_Ubuntu_release() >= 26.0:
+                data = open(openDKIMConfigurePath, 'r').readlines()
+                with open(openDKIMConfigurePath, 'w') as writeToFile:
+                    writeToFile.writelines(normalize_opendkim_socket_lines(data))
+            elif self.distro == ubuntu or self.distro == cent8:
                 data = open(openDKIMConfigurePath, 'r').readlines()
                 writeToFile = open(openDKIMConfigurePath, 'w')
                 for items in data:
@@ -2960,6 +2923,18 @@ def main():
 
     args = parser.parse_args()
 
+    if args.remotemysql == 'ON':
+        try:
+            build_database_config(
+                remote=True,
+                host=args.mysqlhost,
+                port=args.mysqlport,
+                root_db=args.mysqldb,
+                root_user=args.mysqluser,
+            )
+        except DatabaseConfigError as error:
+            parser.error(str(error))
+
     logging.InstallLog.ServerIP = args.publicip
     logging.InstallLog.writeToFile("Starting CyberPanel installation..,10")
     preFlightsChecks.stdOut("Starting CyberPanel installation..")
@@ -3000,13 +2975,25 @@ def main():
         remotemysql = args.remotemysql
         mysqlhost = args.mysqlhost
         mysqluser = args.mysqluser
-        mysqlpassword = args.mysqlpassword
+        mysqlpassword = os.environ.pop(
+            'CP_INSTALL_MYSQL_PASSWORD', None
+        )
+        if mysqlpassword is None:
+            # Retained for callers that invoke install.py directly. The shell
+            # installer uses the process environment so the secret is not
+            # exposed in the command line shown by process tools.
+            mysqlpassword = args.mysqlpassword
         mysqlport = args.mysqlport
         mysqldb = args.mysqldb
 
         if preFlightsChecks.debug:
+            # debug is on for every installation and this output lands in
+            # /root/install.log, which is what people paste into support
+            # threads. Print what is needed to diagnose a connection problem
+            # and never the password itself.
             print('mysqlhost: %s, mysqldb: %s,  mysqluser: %s, mysqlpassword: %s, mysqlport: %s' % (
-                mysqlhost, mysqldb, mysqluser, mysqlpassword, mysqlport))
+                mysqlhost, mysqldb, mysqluser,
+                '<set>' if mysqlpassword else '<empty>', mysqlport))
             time.sleep(10)
 
     else:
@@ -3076,7 +3063,6 @@ def main():
     checks.install_default_keys()
 
     checks.download_install_CyberPanel(installCyberPanel.InstallCyberPanel.mysqlPassword, mysql)
-    checks.downoad_and_install_raindloop()
     checks.download_install_phpmyadmin()
     checks.setupCLI()
     checks.setup_cron()
@@ -3123,60 +3109,6 @@ def main():
 
     checks.installCLScripts()
     # checks.disablePackegeUpdates()
-
-    try:
-        # command = 'mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/data/default/configs/'
-        # subprocess.call(shlex.split(command))
-
-        # Generate a strong, unique SnappyMail admin password instead of a
-        # well-known default. The same value is applied via SetPassword() below,
-        # so the password recovery in cyberpanel.sh continues to work while no
-        # install ever ships with predictable webmail admin credentials.
-        snappymailAdminPassword = generate_pass()
-
-        writeToFile = open('/usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/configs/application.ini', 'a')
-
-        writeToFile.write("""
-[security]
-admin_login = "admin"
-admin_password = "%s"
-""" % (snappymailAdminPassword))
-        writeToFile.close()
-
-        content = """<?php
-
-$_ENV['snappymail_INCLUDE_AS_API'] = true;
-include '/usr/local/CyberCP/public/snappymail/index.php';
-
-$oConfig = \snappymail\Api::Config();
-$oConfig->SetPassword('%s');
-echo $oConfig->Save() ? 'Done' : 'Error';
-
-?>""" % (snappymailAdminPassword)
-
-        writeToFile = open('/usr/local/CyberCP/public/snappymail.php', 'w')
-        writeToFile.write(content)
-        writeToFile.close()
-
-        command = '/usr/local/lsws/lsphp83/bin/php /usr/local/CyberCP/public/snappymail.php'
-        subprocess.call(shlex.split(command))
-
-        command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/snappymail/data"
-        subprocess.call(shlex.split(command))
-
-        # Ensure all data directories have group write permissions
-        command = "chmod -R 775 /usr/local/lscp/cyberpanel/snappymail/data"
-        subprocess.call(shlex.split(command))
-
-        # Ensure web server users are in the lscpd group
-        checks.addWebServerUserToLSCPDGroup()
-
-        # Fix SnappyMail public directory ownership (critical fix)
-        command = "chown -R lscpd:lscpd /usr/local/CyberCP/public/snappymail/data"
-        subprocess.call(shlex.split(command))
-    except:
-        pass
-
     checks.fixCyberPanelPermissions()
     configure_jwt_secret()
 

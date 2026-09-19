@@ -1,19 +1,117 @@
 <?php
 
-// Check if user is logged into CyberPanel
-session_start();
-if (!isset($_SESSION['userID'])) {
-    // Redirect to CyberPanel login page
+define("PMA_SIGNON_INDEX", 1);
+define('PMA_SIGNON_SESSIONNAME', 'SignonSession');
+define('PMA_DISABLE_SSL_PEER_VALIDATION', TRUE);
+
+function getPMAHandoffValidationURL($bindPath = '/usr/local/lscp/conf/bind.conf') {
+    $port = 8090;
+    if (file_exists($bindPath)) {
+        $binding = @file_get_contents($bindPath);
+        if ($binding === false) {
+            return false;
+        }
+        $binding = trim($binding, " \t\r\n");
+        if ($binding !== '') {
+            if (!preg_match('/\A\*:([0-9]{1,5})\z/', $binding, $matches)) {
+                return false;
+            }
+            $port = (int) $matches[1];
+            if ($port < 1 || $port > 65535) {
+                return false;
+            }
+        }
+    }
+
+    // Only the port comes from local LSCPD configuration, never request headers.
+    return 'https://127.0.0.1:' . $port . '/dataBases/consumePHPMYAdminHandoff';
+}
+
+function getPMASessionValidationURL($bindPath = '/usr/local/lscp/conf/bind.conf') {
+    $url = getPMAHandoffValidationURL($bindPath);
+    return $url === false ? false : str_replace(
+        '/dataBases/consumePHPMYAdminHandoff', '/dataBases/validatePHPMYAdminSession', $url);
+}
+
+function rejectSignon() {
     header('Location: /base/');
     exit();
 }
 
-define("PMA_SIGNON_INDEX", 1);
+function requestPMAPanel($validationURL, $fields) {
+    if (!isset($_COOKIE['cyberpanel_sessionid']) || !is_string($_COOKIE['cyberpanel_sessionid'])) {
+        return false;
+    }
+    $sessionID = (string) $_COOKIE['cyberpanel_sessionid'];
+    if (!preg_match('/^[A-Za-z0-9]{16,128}$/D', $sessionID)) {
+        return false;
+    }
+    $clientIP = isset($_SERVER['HTTP_CF_CONNECTING_IP'])
+        ? (string) $_SERVER['HTTP_CF_CONNECTING_IP']
+        : (isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '');
+    if (filter_var($clientIP, FILTER_VALIDATE_IP) === false) {
+        return false;
+    }
+
+    if ($validationURL === false || !function_exists('curl_init')) {
+        return false;
+    }
+
+    $request = @curl_init($validationURL);
+    if ($request === false) {
+        return false;
+    }
+
+    @curl_setopt_array($request, array(
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query(
+            $fields,
+            '',
+            '&',
+            PHP_QUERY_RFC3986
+        ),
+        CURLOPT_COOKIE => 'cyberpanel_sessionid=' . $sessionID,
+        CURLOPT_HTTPHEADER => array('CF-Connecting-IP: ' . $clientIP),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 2,
+        CURLOPT_TIMEOUT => 5,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0,
+    ));
+    $response = @curl_exec($request);
+    $statusCode = (int) @curl_getinfo($request, CURLINFO_RESPONSE_CODE);
+
+    if (!is_string($response) || $statusCode !== 200) {
+        return false;
+    }
+    $payload = @json_decode($response, true);
+    return is_array($payload) && isset($payload['status']) && $payload['status'] === 1
+        ? $payload : false;
+}
+
+
+function consumeHandoff($username, $token) {
+    if (!is_string($username) || $username === '' || strlen($username) > 255 ||
+        !is_string($token) || $token === '' || strlen($token) > 512) {
+        return false;
+    }
+    $url = defined('PMA_HANDOFF_VALIDATION_URL')
+        ? PMA_HANDOFF_VALIDATION_URL : getPMAHandoffValidationURL();
+    $payload = requestPMAPanel($url, array('username' => $username, 'token' => $token));
+    if ($payload === false || !isset($payload['grant']) || !is_string($payload['grant']) ||
+        !preg_match('/^[a-f0-9]{64}$/D', $payload['grant'])) {
+        return false;
+    }
+    return $payload['grant'];
+}
+
+// SignonScript imports these functions without running the browser handoff.
+if (defined('PMA_SIGNON_LIBRARY_ONLY')) {
+    return;
+}
 
 try {
-    define('PMA_SIGNON_SESSIONNAME', 'SignonSession');
-    define('PMA_DISABLE_SSL_PEER_VALIDATION', TRUE);
-
     if (isset($_POST['token'])) {
 
         ### Get credentials using the token
@@ -34,33 +132,51 @@ try {
         echo '</form>';
         echo '<script>document.getElementById("redirectForm").submit();</script>';
 
-    } else if (isset($_POST['logout'])) {
+    } else if (isset($_POST['logout']) || isset($_GET['logout'])) {
+        // phpMyAdmin is configured with LogoutURL = 'phpmyadminsignin.php?logout',
+        // which arrives as a GET. Checking only $_POST left the session alive and
+        // rendered a blank page.
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            session_name(PMA_SIGNON_SESSIONNAME);
+            @session_start();
+        }
         $params = session_get_cookie_params();
         setcookie(session_name(), '', time() - 86400, $params["path"], $params["domain"], $params["secure"], $params["httponly"]);
-        session_destroy();
+        @session_destroy();
         header('Location: /base/');
         return;
     } else if (isset($_POST['password'])) {
+        $username = isset($_POST['username']) ? (string) $_POST['username'] : '';
+        $password = $_POST['password'];
+        $handoffToken = isset($_POST['handoff_token']) ? (string) $_POST['handoff_token'] : '';
+
+        $grant = consumeHandoff($username, $handoffToken);
+        if ($grant === false || !is_string($password)) {
+            rejectSignon();
+        }
 
         session_name(PMA_SIGNON_SESSIONNAME);
-        @session_start();
+        if (!@session_start()) {
+            rejectSignon();
+        }
 
-        $username = htmlspecialchars($_POST['username'], ENT_QUOTES, 'UTF-8');
-        $password = $_POST['password'];
-
+        if (!@session_regenerate_id(true)) {
+            rejectSignon();
+        }
+        $_SESSION = array();
+        $_SESSION['PMA_panel_grant'] = $grant;
+        $_SESSION['PMA_panel_session'] = $_COOKIE['cyberpanel_sessionid'];
         $_SESSION['PMA_single_signon_user'] = $username;
         $_SESSION['PMA_single_signon_password'] = $password;
         $_SESSION['PMA_single_signon_host'] = 'localhost';
+        $_SESSION['PMA_single_signon_port'] = 3306;
 
         @session_write_close();
 
         header('Location: /phpmyadmin/index.php?server=' . PMA_SIGNON_INDEX);
+    } else {
+        rejectSignon();
     }
 } catch (Exception $e) {
-    echo 'Caught exception: ', $e->getMessage(), "\n";
-    $params = session_get_cookie_params();
-    setcookie(session_name(), '', time() - 86400, $params["path"], $params["domain"], $params["secure"], $params["httponly"]);
-    session_destroy();
-    header('Location: /dataBases/phpMyAdmin');
-    return;
+    rejectSignon();
 }

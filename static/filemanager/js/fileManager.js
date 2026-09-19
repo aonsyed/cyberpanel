@@ -22,7 +22,7 @@ fileManager.config(['$interpolateProvider', function ($interpolateProvider) {
 }]);
 
 
-fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader, $window) {
+fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader, $window, $timeout) {
 
     $('form').submit(function (e) {
         e.preventDefault();
@@ -308,14 +308,14 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
     $scope.selectAll = function () {
 
         var tableBody = document.getElementById("tableBodyFiles");
-        var getFileName = tableBody.firstChild.firstChild.innerHTML;
+        var getFileName = tableBody.firstChild.firstChild.textContent;
         allFilesAndFolders = [];
 
         var collectionOfA = tableBody.getElementsByTagName("tr");
 
         for (var i = 0; i < collectionOfA.length; i++) {
             collectionOfA[i].style.background = "#ccdbe8";
-            var getFileName = collectionOfA[i].getElementsByTagName('td')[0].innerHTML;
+            var getFileName = collectionOfA[i].getElementsByTagName('td')[0].textContent;
             allFilesAndFolders.push(getFileName);
         }
 
@@ -325,7 +325,7 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
     $scope.unSelectAll = function () {
 
         var tableBody = document.getElementById("tableBodyFiles");
-        var getFileName = tableBody.firstChild.firstChild.innerHTML;
+        var getFileName = tableBody.firstChild.firstChild.textContent;
         allFilesAndFolders = [];
 
         var collectionOfA = tableBody.getElementsByTagName("tr");
@@ -342,7 +342,7 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
         var rightClickNode = document.getElementById("rightClick")
 
         var check = 1;
-        var getFileName = nodeName.getElementsByTagName('td')[0].innerHTML;
+        var getFileName = nodeName.getElementsByTagName('td')[0].textContent;
 
         if (nodeName.style.backgroundColor === "rgb(204, 219, 232)") {
 
@@ -537,19 +537,11 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
 
             var extractNodeRight = document.getElementById("extractOnRight");
 
-            var result = findFileExtension(allFilesAndFolders[0]);
+            var extractionType = archiveExtractionType(allFilesAndFolders[0]);
 
-            if (result !== undefined) {
-                if (result[0] === "gz") {
-                    extractFileNode.style.pointerEvents = "auto";
-                    extractNodeRight.style.display = "Block";
-                } else if (result[0] === "zip") {
-                    extractFileNode.style.pointerEvents = "auto";
-                    extractNodeRight.style.display = "Block";
-                } else {
-                    extractFileNode.style.pointerEvents = "none";
-                    extractNodeRight.style.display = "None";
-                }
+            if (extractionType !== "") {
+                extractFileNode.style.pointerEvents = "auto";
+                extractNodeRight.style.display = "Block";
             } else {
                 extractFileNode.style.pointerEvents = "none";
                 extractNodeRight.style.display = "None";
@@ -637,7 +629,7 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
                 completePathToFile = $scope.currentRPath;
             } else if (functionName === "doubleClick") {
 
-                completePathToFile = $scope.currentRPath + "/" + node.innerHTML;
+                completePathToFile = $scope.currentRPath + "/" + node.textContent;
             } else if (functionName === "homeFetch") {
                 completePathToFile = homeRPathBack;
             } else if (functionName === "goBackOnPath") {
@@ -655,7 +647,7 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
             if (functionName === "startPoint") {
                 completePathToFile = $scope.currentPath;
             } else if (functionName === "doubleClick") {
-                completePathToFile = $scope.currentPath + "/" + node.innerHTML;
+                completePathToFile = $scope.currentPath + "/" + node.textContent;
             } else if (functionName === "homeFetch") {
                 completePathToFile = homePathBack;
             } else if (functionName === "goBackOnPath") {
@@ -740,6 +732,23 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
 
     function findFileExtension(fileName) {
         return (/[.]/.exec(fileName)) ? /[^.]+$/.exec(fileName) : undefined;
+    }
+
+    function archiveExtractionType(fileName) {
+        var lowerName = String(fileName).toLowerCase();
+        if (/\.tar\.gz$/.test(lowerName)) {
+            return 'tar.gz';
+        }
+        if (/\.tgz$/.test(lowerName)) {
+            return 'tgz';
+        }
+        if (/\.tar$/.test(lowerName)) {
+            return 'tar';
+        }
+        if (/\.zip$/.test(lowerName)) {
+            return 'zip';
+        }
+        return '';
     }
 
     $scope.fetchForTableSecondary(null, "startPoint");
@@ -1206,12 +1215,11 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
         $scope.extractionLoading = false;
 
         var completeFileToExtract = pathbase + "/" + allFilesAndFolders[0];
-        var extractionType = "";
-
-        if (findFileExtension(completeFileToExtract) == "gz") {
-            extractionType = "tar.gz";
-        } else {
-            extractionType = "zip";
+        var extractionType = archiveExtractionType(completeFileToExtract);
+        if (extractionType === "") {
+            $scope.extractionLoading = true;
+            alertify.notify('Unsupported archive type.', 'error', 10);
+            return;
         }
 
         var data = {
@@ -1236,16 +1244,16 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
         $http.post(url, data, config).then(ListInitialDatas, cantLoadInitialDatas);
 
         function ListInitialDatas(response) {
-
-            $scope.extractionLoading = true;
-            $('#showExtraction').modal('hide');
-
             if (response.data.status === 1) {
-                var notification = alertify.notify('Successfully Extracted!', 'success', 5, function () {
-                    console.log('dismissed');
-                });
-                $scope.fetchForTableSecondary(null, 'refresh');
+                $('#showExtraction').modal('hide');
+                var progressNotification = alertify.notify(
+                    'Archive extraction started. You can keep using the panel.',
+                    'message',
+                    0
+                );
+                pollExtractionStatus(response.data.job, progressNotification);
             } else {
+                $scope.extractionLoading = true;
                 var notification = alertify.notify(response.data.error_message, 'error', 10, function () {
                     console.log('dismissed');
                 });
@@ -1254,9 +1262,71 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
         }
 
         function cantLoadInitialDatas(response) {
+            $scope.extractionLoading = true;
+            alertify.notify('Could not start archive extraction.', 'error', 10);
         }
 
     };
+
+    function pollExtractionStatus(job, progressNotification) {
+        var failedPolls = 0;
+
+        function finishProgress() {
+            if (progressNotification && progressNotification.dismiss) {
+                progressNotification.dismiss();
+            }
+            $scope.extractionLoading = true;
+        }
+
+        function poll() {
+            var data = {
+                job: job,
+                method: 'extractStatus',
+                domainRandomSeed: domainRandomSeed,
+                domainName: domainName
+            };
+            var config = {
+                headers: {
+                    'X-CSRFToken': getCookie('csrftoken')
+                }
+            };
+
+            $http.post(url, data, config).then(function (response) {
+                if (response.data.status !== 1) {
+                    finishProgress();
+                    alertify.notify(response.data.error_message, 'error', 10);
+                    return;
+                }
+                if (response.data.state === 'completed') {
+                    finishProgress();
+                    alertify.notify(response.data.message, 'success', 5);
+                    $scope.fetchForTableSecondary(null, 'refresh');
+                    return;
+                }
+                if (response.data.state === 'failed') {
+                    finishProgress();
+                    alertify.notify(response.data.message, 'error', 10);
+                    return;
+                }
+                failedPolls = 0;
+                $timeout(poll, 2000);
+            }, function () {
+                failedPolls += 1;
+                if (failedPolls < 4) {
+                    $timeout(poll, 2000);
+                    return;
+                }
+                finishProgress();
+                alertify.notify(
+                    'Extraction is still running, but its status could not be refreshed.',
+                    'warning',
+                    10
+                );
+            });
+        }
+
+        poll();
+    }
 
     /// move
 
@@ -1416,7 +1486,7 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
 
         var downloadOnRight = document.getElementById("downloadOnRight");
 
-        if (trNode.lastChild.innerHTML === "File") {
+        if (trNode.lastChild.textContent === "File") {
             downloadOnRight.style.display = "Block";
         } else {
             downloadOnRight.style.display = "none";
@@ -1429,7 +1499,7 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
     $scope.addFileOrFolderToListForRightClick = function (nodeName) {
 
         var check = 1;
-        var getFileName = nodeName.getElementsByTagName('td')[0].innerHTML;
+        var getFileName = nodeName.getElementsByTagName('td')[0].textContent;
 
         if (nodeName.style.backgroundColor === "#ccdbe8") {
 
@@ -1584,16 +1654,21 @@ fileManager.controller('fileManagerCtrl', function ($scope, $http, FileUploader,
 
     // Download files
 
+    // The path and domain must be percent-encoded. Without encoding, a name
+    // containing '#' is cut off as a URL fragment, '&' starts a new query
+    // parameter, and '+' arrives as a space. Each produces a different path
+    // than the one clicked, so the download is refused. Issue #1902.
     $scope.downloadFile = function () {
         url = "/filemanager/downloadFile";
         var downloadURL = $scope.currentPath + "/" + allFilesAndFolders[0];
-        window.location.href = url + '?domainName=' + domainName + '&fileToDownload=' + downloadURL;
+        window.location.href = url + '?domainName=' + encodeURIComponent(domainName) +
+            '&fileToDownload=' + encodeURIComponent(downloadURL);
     };
 
     $scope.RootDownloadFile = function () {
         url = "/filemanager/RootDownloadFile";
         var downloadURL = $scope.currentPath + "/" + allFilesAndFolders[0];
-        window.location.href = url + '?fileToDownload=' + downloadURL;
+        window.location.href = url + '?fileToDownload=' + encodeURIComponent(downloadURL);
     };
 
 

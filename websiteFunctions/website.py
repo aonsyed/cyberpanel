@@ -6,7 +6,7 @@ import sys
 import django
 
 from databases.models import Databases
-from plogical.DockerSites import Docker_Sites
+from plogical.DockerSites import Docker_Sites, DOCKER_APPS
 from plogical.httpProc import httpProc
 
 sys.path.append('/usr/local/CyberCP')
@@ -14,6 +14,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "CyberCP.settings")
 django.setup()
 import json
 from plogical.acl import ACLManager
+from plogical.premiumEntitlements import premium_entitlement_required
 import plogical.CyberCPLogFileWriter as logging
 from plogical.CyberCPLogFileWriter import CyberCPLogFileWriter
 from websiteFunctions.models import Websites, ChildDomains, GitLogs, wpplugins, WPSites, WPStaging, WPSitesBackup, \
@@ -37,6 +38,12 @@ from plogical.applicationInstaller import ApplicationInstaller
 from plogical import hashPassword, randomPassword
 from emailMarketing.emACL import emACL
 from plogical.processUtilities import ProcessUtilities
+from plogical.sshKeyUtilities import authorized_key_records
+from plogical.systemPassword import (
+    consume_system_password_request,
+    create_system_password_request,
+)
+from plogical.securityUtils import generate_api_token
 from managePHP.phpManager import PHPManager
 from ApachController.ApacheVhosts import ApacheVhost
 from plogical.vhostConfs import vhostConfs
@@ -45,6 +52,116 @@ from .StagingSetup import StagingSetup
 import validators
 from django.http import JsonResponse
 import ipaddress
+import requests
+from plogical.wordpressInstallerUtilities import (
+    change_php_succeeded,
+    php_binary_for_selection,
+    select_wordpress_version,
+)
+from plogical.cyberedge import (
+    download_verified_plugin,
+    public_edge_status,
+    wordpress_admin_redirect,
+)
+from websiteFunctions.wordpressEntitlements import wordpress_entitlement_required
+from websiteFunctions.apacheEntitlements import (
+    apache_manager_available, apache_entitlement_required,
+    apache_backend_entitlement_error, normalize_apache_backend,
+)
+
+
+def storage_card_context(website, now=None):
+    """Present only recent, verified website/mail statistics and quota status."""
+    from datetime import datetime, timezone
+    now = now or datetime.now(timezone.utc)
+    try:
+        cached = json.loads(website.config)
+        if not isinstance(cached, dict):
+            cached = {}
+    except (TypeError, ValueError):
+        cached = {}
+
+    def recent(value):
+        try:
+            timestamp = datetime.fromisoformat(value)
+            if timestamp.tzinfo is None:
+                return None
+            # The installed statistics schedule runs daily. Allow a delayed run
+            # without indefinitely presenting a stopped scheduler as current.
+            if not 0 <= (now - timestamp).total_seconds() <= 36 * 60 * 60:
+                return None
+            return timestamp.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    allowance = max(0, int(website.package.diskSpace))
+    measured_at = recent(cached.get('storageUsageCheckedAt'))
+    usage = cached.get('DiskUsage')
+    available = (cached.get('storageUsageStatus') == 'available' and measured_at is not None
+                 and type(usage) is int and usage >= 0)
+    quota = cached.get('storageQuotaStatus')
+    quota_state = 'unavailable'
+    if isinstance(quota, dict) and recent(quota.get('checked_at')):
+        state = quota.get('state')
+        if state in ('unconfigured', 'pending', 'unsupported', 'unavailable'):
+            quota_state = state
+        elif state == 'active':
+            expected = {
+                'disk_space': allowance,
+                'inode_limit': int(website.package.inodeLimit),
+                'enforce': bool(website.package.enforceDiskLimits),
+            }
+            if (quota.get('enforced') is True and quota.get('policy') == expected
+                    and quota.get('scope') == 'website_and_owned_mail'
+                    and expected['enforce'] and (allowance or expected['inode_limit'])):
+                quota_state = 'active'
+            else:
+                quota_state = 'pending'
+    return {
+        'storageUsageAvailable': available,
+        'storageUsageState': 'available' if available else 'unavailable',
+        'storageUsageCheckedAt': measured_at if available else '',
+        'storageQuotaState': quota_state,
+        'diskInMB': usage if available else None,
+        'diskUsage': min(100, usage * 100 // allowance) if available and allowance else 0,
+        'diskInMBTotal': allowance,
+    }
+
+
+def get_wordpress_version(output):
+    value = str(output or '').strip()
+    if re.fullmatch(r'\d+(?:\.\d+){1,3}(?:[-+._a-zA-Z0-9]+)?', value):
+        return value
+    return 'Unavailable'
+
+
+def get_wordpress_flag(output, default=0):
+    for line in reversed(str(output or '').splitlines()):
+        value = line.strip()
+        if value in ('0', '1'):
+            return int(value)
+    return default
+
+
+def get_wordpress_maintenance_mode(output):
+    value = str(output or '').strip().lower()
+    if 'not active' in value:
+        return 0
+    return int('active' in value)
+
+
+def get_wordpress_json_list(output):
+    value = str(output or '').strip()
+    candidates = [value] + list(reversed(value.splitlines()))
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, list):
+                return parsed
+        except (TypeError, ValueError):
+            continue
+    return []
 
 
 class WebsiteManager:
@@ -73,20 +190,7 @@ class WebsiteManager:
 
     def createWebsite(self, request=None, userID=None, data=None):
 
-        url = "https://platform.cyberpersons.com/CyberpanelAdOns/Adonpermission"
-        data = {
-            "name": "all",
-            "IP": ACLManager.GetServerIP()
-        }
-
-        import requests
-        response = requests.post(url, data=json.dumps(data))
-        Status = response.json()['status']
-
-        test_domain_status = 0
-
-        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
-            test_domain_status = 1
+        test_domain_status = int(apache_manager_available())
 
         currentACL = ACLManager.loadedACL(userID)
         adminNames = ACLManager.loadAllUsers(userID)
@@ -101,69 +205,47 @@ class WebsiteManager:
                         Data, 'createWebsite')
         return proc.render()
 
+    @wordpress_entitlement_required(page=True)
     def WPCreate(self, request=None, userID=None, data=None):
-        url = "https://platform.cyberpersons.com/CyberpanelAdOns/Adonpermission"
-        data = {
-            "name": "wp-manager",
-            "IP": ACLManager.GetServerIP()
-        }
+        currentACL = ACLManager.loadedACL(userID)
+        adminNames = ACLManager.loadAllUsers(userID)
+        packagesName = ACLManager.loadPackages(userID, currentACL)
 
-        import requests
+        if len(packagesName) == 0:
+            packagesName = ['Default']
+
+        FinalVersions = []
+        userobj = Administrator.objects.get(pk=userID)
+        counter = 0
         try:
-            response = requests.post(url, data=json.dumps(data), timeout=10)
-            Status = response.json()['status']
-        except (requests.RequestException, ValueError, KeyError):
-            Status = 0
+            import requests
+            WPVersions = json.loads(requests.get('https://api.wordpress.org/core/version-check/1.7/').text)[
+                'offers']
 
+            for versions in WPVersions:
+                if counter == 7:
+                    break
+                if versions['current'] not in FinalVersions:
+                    FinalVersions.append(versions['current'])
+                    counter = counter + 1
+        except:
+            FinalVersions = ['5.6', '5.5.3', '5.5.2']
 
-        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
-            currentACL = ACLManager.loadedACL(userID)
-            adminNames = ACLManager.loadAllUsers(userID)
-            packagesName = ACLManager.loadPackages(userID, currentACL)
+        Plugins = wpplugins.objects.filter(owner=userobj)
+        rnpss = randomPassword.generate_pass(10)
 
-            if len(packagesName) == 0:
-                packagesName = ['Default']
+        ##
 
-            FinalVersions = []
-            userobj = Administrator.objects.get(pk=userID)
-            counter = 0
-            try:
-                import requests
-                WPVersions = json.loads(requests.get('https://api.wordpress.org/core/version-check/1.7/').text)[
-                    'offers']
+        test_domain_status = 1
 
-                for versions in WPVersions:
-                    if counter == 7:
-                        break
-                    if versions['current'] not in FinalVersions:
-                        FinalVersions.append(versions['current'])
-                        counter = counter + 1
-            except:
-                FinalVersions = ['5.6', '5.5.3', '5.5.2']
+        Data = {'packageList': packagesName, "owernList": adminNames, 'WPVersions': FinalVersions,
+                'Plugins': Plugins, 'Randam_String': rnpss.lower(), 'test_domain_data': test_domain_status,
+                'apache_backend_available': apache_manager_available()}
+        proc = httpProc(request, 'websiteFunctions/WPCreate.html',
+                        Data, 'createDatabase')
+        return proc.render()
 
-            Plugins = wpplugins.objects.filter(owner=userobj)
-            rnpss = randomPassword.generate_pass(10)
-
-            ##
-
-            test_domain_status = 1
-
-            Data = {'packageList': packagesName, "owernList": adminNames, 'WPVersions': FinalVersions,
-                    'Plugins': Plugins, 'Randam_String': rnpss.lower(), 'test_domain_data': test_domain_status}
-            proc = httpProc(request, 'websiteFunctions/WPCreate.html',
-                            Data, 'createDatabase')
-            return proc.render()
-        else:
-            currentACL = ACLManager.loadedACL(userID)
-            websites = ACLManager.findAllSites(currentACL, userID)
-            proc = httpProc(
-                request,
-                'websiteFunctions/freeWordpressInstall.html',
-                {'websiteList': websites},
-                'createDatabase',
-            )
-            return proc.render()
-
+    @wordpress_entitlement_required(page=True)
     def ListWPSites(self, request=None, userID=None, DeleteID=None):
         import json
         currentACL = ACLManager.loadedACL(userID)
@@ -231,6 +313,7 @@ class WebsiteManager:
         proc = httpProc(request, 'websiteFunctions/WPsitesList.html', context)
         return proc.render()
 
+    @wordpress_entitlement_required(page=True)
     def WPHome(self, request=None, userID=None, WPid=None, DeleteID=None):
         Data = {}
         currentACL = ACLManager.loadedACL(userID)
@@ -242,100 +325,76 @@ class WebsiteManager:
         else:
             return ACLManager.loadError()
 
+        rnpss = randomPassword.generate_pass(10)
+
+        Data['Randam_String'] = rnpss.lower()
+        Data['wpsite'] = WPobj
+        Data['test_domain_data'] = 1
+
         try:
+            DeleteID = request.GET.get('DeleteID', None)
 
-            url = "https://platform.cyberpersons.com/CyberpanelAdOns/Adonpermission"
-            data = {
-                "name": "wp-manager",
-                "IP": ACLManager.GetServerIP()
-            }
+            if DeleteID != None:
+                wstagingDelete = WPStaging.objects.get(pk=DeleteID, owner=WPobj)
 
-            import requests
-            response = requests.post(url, data=json.dumps(data))
-            Status = response.json()['status']
+                # Get the associated staging WPSites and Websites records
+                staging_wpsite = wstagingDelete.wpsite
+                staging_website = staging_wpsite.owner
 
-            rnpss = randomPassword.generate_pass(10)
+                # Delete the staging Websites record and all associated data BEFORE deleting DB records
+                # Use the same robust deletion method as regular websites
+                execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
+                execPath = execPath + " deleteVirtualHostConfigurations --virtualHostName " + staging_website.domain
+                ProcessUtilities.popenExecutioner(execPath)
 
-            Data['Randam_String'] = rnpss.lower()
+                # Delete the WPStaging record
+                wstagingDelete.delete()
 
-            if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
-                Data['wpsite'] = WPobj
-                Data['test_domain_data'] = 1
+                # Delete the staging WPSites record
+                staging_wpsite.delete()
 
-                try:
-                    DeleteID = request.GET.get('DeleteID', None)
+                # Delete the staging Websites record
+                staging_website.delete()
 
-                    if DeleteID != None:
-                        wstagingDelete = WPStaging.objects.get(pk=DeleteID, owner=WPobj)
+        except BaseException as msg:
+            logging.CyberCPLogFileWriter.writeToFile(f"Error cleaning up WP/Staging sites: {str(msg)}")
 
-                        # Get the associated staging WPSites and Websites records
-                        staging_wpsite = wstagingDelete.wpsite
-                        staging_website = staging_wpsite.owner
+        proc = httpProc(request, 'websiteFunctions/WPsiteHome.html',
+                        Data, 'createDatabase')
+        return proc.render()
 
-                        # Delete the staging Websites record and all associated data BEFORE deleting DB records
-                        # Use the same robust deletion method as regular websites
-                        execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
-                        execPath = execPath + " deleteVirtualHostConfigurations --virtualHostName " + staging_website.domain
-                        ProcessUtilities.popenExecutioner(execPath)
-
-                        # Delete the WPStaging record
-                        wstagingDelete.delete()
-
-                        # Delete the staging WPSites record
-                        staging_wpsite.delete()
-
-                        # Delete the staging Websites record
-                        staging_website.delete()
-
-                except BaseException as msg:
-                    logging.CyberCPLogFileWriter.writeToFile(f"Error cleaning up WP/Staging sites: {str(msg)}")
-
-                proc = httpProc(request, 'websiteFunctions/WPsiteHome.html',
-                                Data, 'createDatabase')
-                return proc.render()
-            else:
-                from django.shortcuts import reverse
-                return redirect(reverse('pricing'))
-        except:
-            proc = httpProc(request, 'websiteFunctions/WPsiteHome.html',
-                            Data, 'createDatabase')
-            return proc.render()
-
+    @wordpress_entitlement_required(page=True)
     def RestoreHome(self, request=None, userID=None, BackupID=None):
         Data = {}
         currentACL = ACLManager.loadedACL(userID)
         admin = Administrator.objects.get(pk=userID)
 
-        if ACLManager.CheckForPremFeature('wp-manager'):
+        Data['backupobj'] = WPSitesBackup.objects.get(pk=BackupID)
 
-            Data['backupobj'] = WPSitesBackup.objects.get(pk=BackupID)
+        if ACLManager.CheckIPBackupObjectOwner(currentACL, Data['backupobj'], admin) == 1:
+            pass
+        else:
+            return ACLManager.loadError()
 
-            if ACLManager.CheckIPBackupObjectOwner(currentACL, Data['backupobj'], admin) == 1:
-                pass
+        config = json.loads(Data['backupobj'].config)
+        Data['FileName'] = config['name']
+        try:
+            Data['Backuptype'] = config['Backuptype']
+
+            if Data['Backuptype'] == 'DataBase Backup' or Data['Backuptype'] == 'Website Backup':
+                Data['WPsites'] = [WPSites.objects.get(pk=Data['backupobj'].WPSiteID)]
             else:
-                return ACLManager.loadError()
-
-            config = json.loads(Data['backupobj'].config)
-            Data['FileName'] = config['name']
-            try:
-                Data['Backuptype'] = config['Backuptype']
-
-                if Data['Backuptype'] == 'DataBase Backup' or Data['Backuptype'] == 'Website Backup':
-                    Data['WPsites'] = [WPSites.objects.get(pk=Data['backupobj'].WPSiteID)]
-                else:
-                    Data['WPsites'] = ACLManager.GetALLWPObjects(currentACL, userID)
-
-            except:
-                Data['Backuptype'] = None
                 Data['WPsites'] = ACLManager.GetALLWPObjects(currentACL, userID)
 
-            proc = httpProc(request, 'websiteFunctions/WPRestoreHome.html',
-                            Data, 'createDatabase')
-            return proc.render()
-        else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
+        except:
+            Data['Backuptype'] = None
+            Data['WPsites'] = ACLManager.GetALLWPObjects(currentACL, userID)
 
+        proc = httpProc(request, 'websiteFunctions/WPRestoreHome.html',
+                        Data, 'createDatabase')
+        return proc.render()
+
+    @wordpress_entitlement_required(page=True)
     def RemoteBackupConfig(self, request=None, userID=None, DeleteID=None):
         Data = {}
         currentACL = ACLManager.loadedACL(userID)
@@ -347,44 +406,40 @@ class WebsiteManager:
         except:
             pass
 
-        if ACLManager.CheckForPremFeature('wp-manager'):
-
-            Data['WPsites'] = ACLManager.GetALLWPObjects(currentACL, userID)
-            allcon = RemoteBackupConfig.objects.all()
-            Data['backupconfigs'] = []
-            for i in allcon:
-                configr = json.loads(i.config)
-                if i.configtype == "SFTP":
+        Data['WPsites'] = ACLManager.GetALLWPObjects(currentACL, userID)
+        allcon = RemoteBackupConfig.objects.all()
+        Data['backupconfigs'] = []
+        for i in allcon:
+            configr = json.loads(i.config)
+            if i.configtype == "SFTP":
+                Data['backupconfigs'].append({
+                    'id': i.pk,
+                    'Type': i.configtype,
+                    'HostName': configr['Hostname'],
+                    'Path': configr['Path']
+                })
+            elif i.configtype == "S3":
+                Provider = configr['Provider']
+                if Provider == "Backblaze":
                     Data['backupconfigs'].append({
                         'id': i.pk,
                         'Type': i.configtype,
-                        'HostName': configr['Hostname'],
-                        'Path': configr['Path']
+                        'HostName': Provider,
+                        'Path': configr['S3keyname']
                     })
-                elif i.configtype == "S3":
-                    Provider = configr['Provider']
-                    if Provider == "Backblaze":
-                        Data['backupconfigs'].append({
-                            'id': i.pk,
-                            'Type': i.configtype,
-                            'HostName': Provider,
-                            'Path': configr['S3keyname']
-                        })
-                    else:
-                        Data['backupconfigs'].append({
-                            'id': i.pk,
-                            'Type': i.configtype,
-                            'HostName': Provider,
-                            'Path': configr['S3keyname']
-                        })
+                else:
+                    Data['backupconfigs'].append({
+                        'id': i.pk,
+                        'Type': i.configtype,
+                        'HostName': Provider,
+                        'Path': configr['S3keyname']
+                    })
 
-            proc = httpProc(request, 'websiteFunctions/RemoteBackupConfig.html',
-                            Data, 'createDatabase')
-            return proc.render()
-        else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
+        proc = httpProc(request, 'websiteFunctions/RemoteBackupConfig.html',
+                        Data, 'createDatabase')
+        return proc.render()
 
+    @wordpress_entitlement_required(page=True)
     def BackupfileConfig(self, request=None, userID=None, RemoteConfigID=None, DeleteID=None):
         Data = {}
         currentACL = ACLManager.loadedACL(userID)
@@ -399,28 +454,25 @@ class WebsiteManager:
         except:
             pass
 
-        if ACLManager.CheckForPremFeature('wp-manager'):
-            Data['WPsites'] = ACLManager.GetALLWPObjects(currentACL, userID)
-            allsechedule = RemoteBackupSchedule.objects.filter(RemoteBackupConfig=RemoteConfigobj)
-            Data['Backupschedule'] = []
-            for i in allsechedule:
-                lastrun = i.lastrun
-                LastRun = time.strftime('%Y-%m-%d', time.localtime(float(lastrun)))
-                Data['Backupschedule'].append({
-                    'id': i.pk,
-                    'Name': i.Name,
-                    'RemoteConfiguration': i.RemoteBackupConfig.configtype,
-                    'Retention': i.fileretention,
-                    'Frequency': i.timeintervel,
-                    'LastRun': LastRun
-                })
-            proc = httpProc(request, 'websiteFunctions/BackupfileConfig.html',
-                            Data, 'createDatabase')
-            return proc.render()
-        else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
+        Data['WPsites'] = ACLManager.GetALLWPObjects(currentACL, userID)
+        allsechedule = RemoteBackupSchedule.objects.filter(RemoteBackupConfig=RemoteConfigobj)
+        Data['Backupschedule'] = []
+        for i in allsechedule:
+            lastrun = i.lastrun
+            LastRun = time.strftime('%Y-%m-%d', time.localtime(float(lastrun)))
+            Data['Backupschedule'].append({
+                'id': i.pk,
+                'Name': i.Name,
+                'RemoteConfiguration': i.RemoteBackupConfig.configtype,
+                'Retention': i.fileretention,
+                'Frequency': i.timeintervel,
+                'LastRun': LastRun
+            })
+        proc = httpProc(request, 'websiteFunctions/BackupfileConfig.html',
+                        Data, 'createDatabase')
+        return proc.render()
 
+    @wordpress_entitlement_required(page=True)
     def AddRemoteBackupsite(self, request=None, userID=None, RemoteScheduleID=None, DeleteSiteID=None):
         Data = {}
         currentACL = ACLManager.loadedACL(userID)
@@ -436,100 +488,83 @@ class WebsiteManager:
         except:
             pass
 
-        if ACLManager.CheckForPremFeature('wp-manager'):
-            Data['WPsites'] = ACLManager.GetALLWPObjects(currentACL, userID)
-            allRemoteBackupsites = RemoteBackupsites.objects.filter(owner=RemoteBackupScheduleobj)
-            Data['RemoteBackupsites'] = []
-            for i in allRemoteBackupsites:
-                try:
-                    wpsite = WPSites.objects.get(pk=i.WPsites)
-                    Data['RemoteBackupsites'].append({
-                        'id': i.pk,
-                        'Title': wpsite.title,
-                    })
-                except:
-                    pass
-            proc = httpProc(request, 'websiteFunctions/AddRemoteBackupSite.html',
-                            Data, 'createDatabase')
-            return proc.render()
-        else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
+        Data['WPsites'] = ACLManager.GetALLWPObjects(currentACL, userID)
+        allRemoteBackupsites = RemoteBackupsites.objects.filter(owner=RemoteBackupScheduleobj)
+        Data['RemoteBackupsites'] = []
+        for i in allRemoteBackupsites:
+            try:
+                wpsite = WPSites.objects.get(pk=i.WPsites)
+                Data['RemoteBackupsites'].append({
+                    'id': i.pk,
+                    'Title': wpsite.title,
+                })
+            except:
+                pass
+        proc = httpProc(request, 'websiteFunctions/AddRemoteBackupSite.html',
+                        Data, 'createDatabase')
+        return proc.render()
 
     def WordpressPricing(self, request=None, userID=None, ):
         Data = {}
         proc = httpProc(request, 'websiteFunctions/CyberpanelPricing.html', Data, 'createWebsite')
         return proc.render()
 
+    @wordpress_entitlement_required(page=True)
     def RestoreBackups(self, request=None, userID=None, DeleteID=None):
         Data = {}
         currentACL = ACLManager.loadedACL(userID)
         admin = Administrator.objects.get(pk=userID)
 
-        url = "https://platform.cyberpersons.com/CyberpanelAdOns/Adonpermission"
-        data = {
-            "name": "wp-manager",
-            "IP": ACLManager.GetServerIP()
-        }
+        backobj = WPSitesBackup.objects.filter(owner=admin).order_by('-id')
 
-        import requests
-        response = requests.post(url, data=json.dumps(data))
-        Status = response.json()['status']
+        # if ACLManager.CheckIPBackupObjectOwner(currentACL, backobj, admin) == 1:
+        #     pass
+        # else:
+        #     return ACLManager.loadError()
 
-        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
+        try:
+            if DeleteID != None:
+                DeleteIDobj = WPSitesBackup.objects.get(pk=DeleteID)
 
-            backobj = WPSitesBackup.objects.filter(owner=admin).order_by('-id')
+                if ACLManager.CheckIPBackupObjectOwner(currentACL, DeleteIDobj, admin) == 1:
+                    config = DeleteIDobj.config
+                    conf = json.loads(config)
+                    FileName = conf['name']
+                    command = "rm -r /home/backup/%s.tar.gz" % FileName
+                    ProcessUtilities.executioner(command)
+                    DeleteIDobj.delete()
 
-            # if ACLManager.CheckIPBackupObjectOwner(currentACL, backobj, admin) == 1:
-            #     pass
-            # else:
-            #     return ACLManager.loadError()
+        except BaseException as msg:
+            pass
+        Data['job'] = []
+
+        for sub in backobj:
+            try:
+                wpsite = WPSites.objects.get(pk=sub.WPSiteID)
+                web = wpsite.title
+            except:
+                web = "Website Not Found"
 
             try:
-                if DeleteID != None:
-                    DeleteIDobj = WPSitesBackup.objects.get(pk=DeleteID)
+                config = sub.config
+                conf = json.loads(config)
+                Backuptype = conf['Backuptype']
+                BackupDestination = conf['BackupDestination']
+            except:
+                Backuptype = "Backup type not exists"
 
-                    if ACLManager.CheckIPBackupObjectOwner(currentACL, DeleteIDobj, admin) == 1:
-                        config = DeleteIDobj.config
-                        conf = json.loads(config)
-                        FileName = conf['name']
-                        command = "rm -r /home/backup/%s.tar.gz" % FileName
-                        ProcessUtilities.executioner(command)
-                        DeleteIDobj.delete()
+            Data['job'].append({
+                'id': sub.id,
+                'title': web,
+                'Backuptype': Backuptype,
+                'BackupDestination': BackupDestination
+            })
 
-            except BaseException as msg:
-                pass
-            Data['job'] = []
+        proc = httpProc(request, 'websiteFunctions/RestoreBackups.html',
+                        Data, 'createDatabase')
+        return proc.render()
 
-            for sub in backobj:
-                try:
-                    wpsite = WPSites.objects.get(pk=sub.WPSiteID)
-                    web = wpsite.title
-                except:
-                    web = "Website Not Found"
-
-                try:
-                    config = sub.config
-                    conf = json.loads(config)
-                    Backuptype = conf['Backuptype']
-                    BackupDestination = conf['BackupDestination']
-                except:
-                    Backuptype = "Backup type not exists"
-
-                Data['job'].append({
-                    'id': sub.id,
-                    'title': web,
-                    'Backuptype': Backuptype,
-                    'BackupDestination': BackupDestination
-                })
-
-            proc = httpProc(request, 'websiteFunctions/RestoreBackups.html',
-                            Data, 'createDatabase')
-            return proc.render()
-        else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
-
+    @wordpress_entitlement_required(page=True)
     def AutoLogin(self, request=None, userID=None):
 
         WPid = request.GET.get('id')
@@ -547,111 +582,87 @@ class WebsiteManager:
         php = PHPManager.getPHPString(WPobj.owner.phpSelection)
         FinalPHPPath = '/usr/local/lsws/lsphp%s/bin/php' % (php)
 
-        url = "https://platform.cyberpersons.com/CyberpanelAdOns/Adonpermission"
-        data = {
-            "name": "wp-manager",
-            "IP": ACLManager.GetServerIP()
-        }
+        password = randomPassword.generate_pass(10)
 
-        import requests
-        response = requests.post(url, data=json.dumps(data))
-        Status = response.json()['status']
+        command = f'sudo -u %s {FinalPHPPath} /usr/bin/wp user create autologin %s --role=administrator --user_pass="%s" --path=%s --skip-plugins --skip-themes' % (
+            WPobj.owner.externalApp, 'autologin@cloudpages.cloud', password, WPobj.path)
+        ProcessUtilities.executioner(command)
 
-        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
+        command = f'sudo -u %s {FinalPHPPath} /usr/bin/wp user update autologin --user_pass="%s" --path=%s --skip-plugins --skip-themes' % (
+            WPobj.owner.externalApp, password, WPobj.path)
+        ProcessUtilities.executioner(command)
 
-            ## Get title
+        data = {}
 
-            password = randomPassword.generate_pass(10)
-
-            command = f'sudo -u %s {FinalPHPPath} /usr/bin/wp user create autologin %s --role=administrator --user_pass="%s" --path=%s --skip-plugins --skip-themes' % (
-                WPobj.owner.externalApp, 'autologin@cloudpages.cloud', password, WPobj.path)
-            ProcessUtilities.executioner(command)
-
-            command = f'sudo -u %s {FinalPHPPath} /usr/bin/wp user update autologin --user_pass="%s" --path=%s --skip-plugins --skip-themes' % (
-                WPobj.owner.externalApp, password, WPobj.path)
-            ProcessUtilities.executioner(command)
-
-            data = {}
-
-            if WPobj.FinalURL.endswith('/'):
-                FinalURL = WPobj.FinalURL[:-1]
-            else:
-                FinalURL = WPobj.FinalURL
-
-            data['url'] = 'https://%s' % (FinalURL)
-            data['userName'] = 'autologin'
-            data['password'] = password
-
-            proc = httpProc(request, 'websiteFunctions/AutoLogin.html',
-                            data, 'createDatabase')
-            return proc.render()
+        if WPobj.FinalURL.endswith('/'):
+            FinalURL = WPobj.FinalURL[:-1]
         else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
+            FinalURL = WPobj.FinalURL
 
+        data['url'] = 'https://%s' % (FinalURL)
+        data['userName'] = 'autologin'
+        data['password'] = password
+        data['redirectPath'] = wordpress_admin_redirect(request.GET.get('next'))
+
+        proc = httpProc(request, 'websiteFunctions/AutoLogin.html',
+                        data, 'createDatabase')
+        return proc.render()
+
+    @wordpress_entitlement_required(page=True)
     def ConfigurePlugins(self, request=None, userID=None, data=None):
 
-        if ACLManager.CheckForPremFeature('wp-manager'):
-            currentACL = ACLManager.loadedACL(userID)
-            userobj = Administrator.objects.get(pk=userID)
+        currentACL = ACLManager.loadedACL(userID)
+        userobj = Administrator.objects.get(pk=userID)
 
-            Selectedplugins = wpplugins.objects.filter(owner=userobj)
-            # data['Selectedplugins'] = wpplugins.objects.filter(ProjectOwner=HostingCompany)
+        Selectedplugins = wpplugins.objects.filter(owner=userobj)
+        # data['Selectedplugins'] = wpplugins.objects.filter(ProjectOwner=HostingCompany)
 
-            Data = {'Selectedplugins': Selectedplugins, }
-            proc = httpProc(request, 'websiteFunctions/WPConfigurePlugins.html',
-                            Data, 'createDatabase')
-            return proc.render()
-        else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
+        Data = {'Selectedplugins': Selectedplugins, }
+        proc = httpProc(request, 'websiteFunctions/WPConfigurePlugins.html',
+                        Data, 'createDatabase')
+        return proc.render()
 
+    @wordpress_entitlement_required(page=True)
     def Addnewplugin(self, request=None, userID=None, data=None):
         from django.shortcuts import reverse
-        if ACLManager.CheckForPremFeature('wp-manager'):
-            currentACL = ACLManager.loadedACL(userID)
-            adminNames = ACLManager.loadAllUsers(userID)
-            packagesName = ACLManager.loadPackages(userID, currentACL)
-            phps = PHPManager.findPHPVersions()
+        currentACL = ACLManager.loadedACL(userID)
+        adminNames = ACLManager.loadAllUsers(userID)
+        packagesName = ACLManager.loadPackages(userID, currentACL)
+        phps = PHPManager.findPHPVersions()
 
-            Data = {'packageList': packagesName, "owernList": adminNames, 'phps': phps}
-            proc = httpProc(request, 'websiteFunctions/WPAddNewPlugin.html',
-                            Data, 'createDatabase')
-            return proc.render()
+        Data = {'packageList': packagesName, "owernList": adminNames, 'phps': phps}
+        proc = httpProc(request, 'websiteFunctions/WPAddNewPlugin.html',
+                        Data, 'createDatabase')
+        return proc.render()
 
-        return redirect(reverse('pricing'))
-
+    @wordpress_entitlement_required()
     def SearchOnkeyupPlugin(self, userID=None, data=None):
         try:
-            if ACLManager.CheckForPremFeature('wp-manager'):
-                currentACL = ACLManager.loadedACL(userID)
+            currentACL = ACLManager.loadedACL(userID)
 
-                pluginname = data['pluginname']
-                # logging.CyberCPLogFileWriter.writeToFile("Plugin Name ....... %s"%pluginname)
+            pluginname = data['pluginname']
+            # logging.CyberCPLogFileWriter.writeToFile("Plugin Name ....... %s"%pluginname)
 
-                url = "http://api.wordpress.org/plugins/info/1.1/?action=query_plugins&request[search]=%s" % str(
-                    pluginname)
-                import requests
+            url = "http://api.wordpress.org/plugins/info/1.1/?action=query_plugins&request[search]=%s" % str(
+                pluginname)
+            import requests
 
-                res = requests.get(url)
-                r = res.json()
+            res = requests.get(url)
+            r = res.json()
 
-                # return proc.ajax(1, 'Done', {'plugins': r})
+            # return proc.ajax(1, 'Done', {'plugins': r})
 
-                data_ret = {'status': 1, 'plugns': r, }
+            data_ret = {'status': 1, 'plugns': r, }
 
-                json_data = json.dumps(data_ret)
-                return HttpResponse(json_data)
-            else:
-                data_ret = {'status': 0, 'createWebSiteStatus': 0, 'error_message': 'Premium feature not available.'}
-                json_data = json.dumps(data_ret)
-                return HttpResponse(json_data)
+            json_data = json.dumps(data_ret)
+            return HttpResponse(json_data)
 
         except BaseException as msg:
             data_ret = {'status': 0, 'createWebSiteStatus': 0, 'error_message': str(msg)}
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def AddNewpluginAjax(self, userID=None, data=None):
         try:
             currentACL = ACLManager.loadedACL(userID)
@@ -677,6 +688,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required(page=True)
     def EidtPlugin(self, request=None, userID=None, pluginbID=None):
         Data = {}
         currentACL = ACLManager.loadedACL(userID)
@@ -697,6 +709,7 @@ class WebsiteManager:
                         Data, 'createDatabase')
         return proc.render()
 
+    @wordpress_entitlement_required()
     def deletesPlgin(self, userID=None, data=None, ):
         try:
             currentACL = ACLManager.loadedACL(userID)
@@ -729,6 +742,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def Addplugineidt(self, userID=None, data=None, ):
         try:
             currentACL = ACLManager.loadedACL(userID)
@@ -815,20 +829,7 @@ class WebsiteManager:
                 defaultDomain='NONE'
 
 
-        url = "https://platform.cyberpersons.com/CyberpanelAdOns/Adonpermission"
-        data = {
-            "name": "all",
-            "IP": ACLManager.GetServerIP()
-        }
-
-        import requests
-        response = requests.post(url, data=json.dumps(data))
-        Status = response.json()['status']
-
-        test_domain_status = 0
-
-        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
-            test_domain_status = 1
+        test_domain_status = int(apache_manager_available())
 
         rnpss = randomPassword.generate_pass(10)
         proc = httpProc(request, 'websiteFunctions/createDomain.html',
@@ -898,6 +899,7 @@ class WebsiteManager:
         })
         return proc.render()
 
+    @wordpress_entitlement_required()
     def FetchWPdata(self, userID=None, data=None):
         try:
             currentACL = ACLManager.loadedACL(userID)
@@ -924,33 +926,47 @@ class WebsiteManager:
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp core version --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
                 Vhuser, FinalPHPPath, path)
             version = ProcessUtilities.outputExecutioner(command, None, True)
-            version = html.escape(version)
+            version = get_wordpress_version(version)
 
-            command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin status litespeed-cache --skip-plugins --skip-themes --path=%s' % (
-                Vhuser, FinalPHPPath, path)
-            lscachee = ProcessUtilities.outputExecutioner(command)
+            command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin get cyberedge-cache --format=json --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
+                shlex.quote(Vhuser), shlex.quote(FinalPHPPath), shlex.quote(path))
+            cyberedge_plugin_raw = str(ProcessUtilities.outputExecutioner(command, None, True) or '').strip()
+            cyberedge_installed = 0
+            cyberedge_active = 0
+            try:
+                cyberedge_plugin = json.loads(cyberedge_plugin_raw)
+                cyberedge_installed = 1
+                cyberedge_active = 1 if cyberedge_plugin.get('status') == 'active' else 0
+            except (TypeError, ValueError):
+                pass
+
+            cyberedge_connected = 0
+            edge_status = {'state': 'inactive', 'cache': '', 'node': '', 'reason': ''}
+            if cyberedge_active:
+                command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp option get cyberedge_connection_history_v1 --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
+                    shlex.quote(Vhuser), shlex.quote(FinalPHPPath), shlex.quote(path))
+                connection_history = str(ProcessUtilities.outputExecutioner(command, None, True) or '').strip()
+                cyberedge_connected = 1 if connection_history == 'v1' else 0
+                if cyberedge_connected:
+                    edge_status = public_edge_status(wpsite.FinalURL)
 
             # Get current theme
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp theme list --status=active --field=name --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
                 Vhuser, FinalPHPPath, path)
-            currentTheme = ProcessUtilities.outputExecutioner(command, None, True)
-            currentTheme = currentTheme.strip()
+            currentTheme = str(ProcessUtilities.outputExecutioner(command, None, True) or '').strip()
+            if not currentTheme:
+                currentTheme = 'Unavailable'
 
             # Get number of plugins
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin list --field=name --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
                 Vhuser, FinalPHPPath, path)
-            plugins = ProcessUtilities.outputExecutioner(command, None, True)
+            plugins = str(ProcessUtilities.outputExecutioner(command, None, True) or '')
             pluginCount = len([p for p in plugins.split('\n') if p.strip()])
 
 
-            if lscachee.find('Status: Active') > -1:
-                lscache = 1
-            else:
-                lscache = 0
-
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp config list --skip-plugins --skip-themes --path=%s' % (
                 Vhuser, FinalPHPPath, path)
-            stdout = ProcessUtilities.outputExecutioner(command)
+            stdout = str(ProcessUtilities.outputExecutioner(command) or '')
             debugging = 0
             for items in stdout.split('\n'):
                 if items.find('WP_DEBUG	true	constant') > -1:
@@ -960,19 +976,12 @@ class WebsiteManager:
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp option get blog_public --skip-plugins --skip-themes --path=%s' % (
                 Vhuser, FinalPHPPath, path)
             stdoutput = ProcessUtilities.outputExecutioner(command)
-            searchindex = int(stdoutput.splitlines()[-1])
+            searchindex = get_wordpress_flag(stdoutput)
 
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp maintenance-mode status --skip-plugins --skip-themes --path=%s' % (
                 Vhuser, FinalPHPPath, path)
             maintenanceMod = ProcessUtilities.outputExecutioner(command)
-
-            
-
-            result = maintenanceMod.splitlines()[-1]
-            if result.find('not active') > -1:
-                maintenanceMode = 0
-            else:
-                maintenanceMode = 1
+            maintenanceMode = get_wordpress_maintenance_mode(maintenanceMod)
 
             ##### Check passwd protection
             vhostName = wpsite.owner.domain
@@ -985,15 +994,21 @@ class WebsiteManager:
 
             #### Check WP cron
             command = "sudo -u %s cat %s/wp-config.php" % (Vhuser, wpsite.path)
-            stdout = ProcessUtilities.outputExecutioner(command)
+            stdout = str(ProcessUtilities.outputExecutioner(command) or '')
             if stdout.find("'DISABLE_WP_CRON', 'true'") > -1:
                 wpcron = 1
             else:
                 wpcron = 0
 
             fb = {
-                'version': version.rstrip('\n'),
-                'lscache': lscache,
+                'version': version,
+                'cyberedge_installed': cyberedge_installed,
+                'cyberedge_active': cyberedge_active,
+                'cyberedge_connected': cyberedge_connected,
+                'cyberedge_route_state': edge_status.get('state', 'unavailable'),
+                'cyberedge_cache': edge_status.get('cache', ''),
+                'cyberedge_node': edge_status.get('node', ''),
+                'cyberedge_reason': edge_status.get('reason', ''),
                 'debugging': debugging,
                 'searchIndex': searchindex,
                 'maintenanceMode': maintenanceMode,
@@ -1015,6 +1030,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def GetCurrentPlugins(self, userID=None, data=None):
         try:
 
@@ -1041,9 +1057,9 @@ class WebsiteManager:
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin list --skip-plugins --skip-themes --format=json --path=%s' % (
                 Vhuser, FinalPHPPath, path)
             stdoutput = ProcessUtilities.outputExecutioner(command)
-            json_data = stdoutput.splitlines()[-1]
+            plugin_data = json.dumps(get_wordpress_json_list(stdoutput))
 
-            data_ret = {'status': 1, 'error_message': 'None', 'plugins': json_data}
+            data_ret = {'status': 1, 'error_message': 'None', 'plugins': plugin_data}
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
@@ -1053,6 +1069,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def GetCurrentThemes(self, userID=None, data=None):
         try:
 
@@ -1079,9 +1096,9 @@ class WebsiteManager:
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp theme list --skip-plugins --skip-themes --format=json --path=%s' % (
                 Vhuser, FinalPHPPath, path)
             stdoutput = ProcessUtilities.outputExecutioner(command)
-            json_data = stdoutput.splitlines()[-1]
+            theme_data = json.dumps(get_wordpress_json_list(stdoutput))
 
-            data_ret = {'status': 1, 'error_message': 'None', 'themes': json_data}
+            data_ret = {'status': 1, 'error_message': 'None', 'themes': theme_data}
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
@@ -1091,6 +1108,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def fetchstaging(self, userID=None, data=None):
         try:
 
@@ -1119,6 +1137,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def fetchDatabase(self, userID=None, data=None):
         try:
 
@@ -1179,6 +1198,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def SaveUpdateConfig(self, userID=None, data=None):
         try:
 
@@ -1235,6 +1255,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def DeploytoProduction(self, userID=None, data=None):
         try:
 
@@ -1280,6 +1301,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def WPCreateBackup(self, userID=None, data=None):
         try:
 
@@ -1317,6 +1339,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def RestoreWPbackupNow(self, userID=None, data=None):
         try:
 
@@ -1370,6 +1393,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def SaveBackupConfig(self, userID=None, data=None):
         try:
 
@@ -1428,6 +1452,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def SaveBackupSchedule(self, userID=None, data=None):
         try:
 
@@ -1499,6 +1524,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def AddWPsiteforRemoteBackup(self, userID=None, data=None):
         try:
 
@@ -1544,6 +1570,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def UpdateRemoteschedules(self, userID=None, data=None):
         try:
 
@@ -1567,6 +1594,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def ScanWordpressSite(self, userID=None, data=None):
         try:
 
@@ -1623,6 +1651,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def installwpcore(self, userID=None, data=None):
         try:
 
@@ -1667,6 +1696,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def dataintegrity(self, userID=None, data=None):
         try:
 
@@ -1706,6 +1736,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def UpdatePlugins(self, userID=None, data=None):
         try:
 
@@ -1754,6 +1785,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def UpdateThemes(self, userID=None, data=None):
         try:
 
@@ -1802,6 +1834,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def DeletePlugins(self, userID=None, data=None):
         try:
 
@@ -1850,6 +1883,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def DeleteThemes(self, userID=None, data=None):
         try:
 
@@ -1895,6 +1929,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def ChangeStatus(self, userID=None, data=None):
         try:
 
@@ -1946,6 +1981,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def ChangeStatusThemes(self, userID=None, data=None):
         try:
             # logging.CyberCPLogFileWriter.writeToFile("Error WP ChangeStatusThemes ....... %s")
@@ -1990,6 +2026,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def CreateStagingNow(self, userID=None, data=None):
         try:
             currentACL = ACLManager.loadedACL(userID)
@@ -2025,6 +2062,7 @@ class WebsiteManager:
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
         
+    @wordpress_entitlement_required()
     def UpdateWPSettings(self, userID=None, data=None):
         # Map old setting names to new ones
         setting_map = {
@@ -2033,6 +2071,7 @@ class WebsiteManager:
             'debugging': 'debugging',
             'maintenanceMode': 'maintenance-mode',
             'lscache': 'lscache',
+            'cyberedge': 'cyberedge',
             'Wpcron': 'wpcron',
             # Add more mappings as needed
         }
@@ -2130,6 +2169,20 @@ Require valid-user
                     command = f'sudo -u {Vhuser} {FinalPHPPath} -d error_reporting=0 /usr/bin/wp plugin activate litespeed-cache --skip-plugins --skip-themes --path={wpsite.path}'
                 else:
                     command = f'sudo -u {Vhuser} {FinalPHPPath} -d error_reporting=0 /usr/bin/wp plugin deactivate litespeed-cache --skip-plugins --skip-themes --path={wpsite.path}'
+            elif setting == 'cyberedge':
+                plugin_archive = download_verified_plugin()
+                try:
+                    install_command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin install %s --force --skip-plugins --skip-themes --path=%s' % (
+                        shlex.quote(Vhuser), shlex.quote(FinalPHPPath),
+                        shlex.quote(plugin_archive), shlex.quote(wpsite.path))
+                    install_result = str(ProcessUtilities.outputExecutioner(install_command) or '')
+                    if 'Error:' in install_result:
+                        raise BaseException(install_result)
+                finally:
+                    if os.path.exists(plugin_archive):
+                        os.unlink(plugin_archive)
+                command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin activate cyberedge-cache --skip-plugins --skip-themes --path=%s' % (
+                    shlex.quote(Vhuser), shlex.quote(FinalPHPPath), shlex.quote(wpsite.path))
             else:
                 resp = {'status': 0, 'error_message': 'Invalid setting type'}
                 if data.get('legacy_response'):
@@ -2162,8 +2215,12 @@ Require valid-user
             else:
                 return JsonResponse(resp)
 
+    @wordpress_entitlement_required()
     def submitWorpressCreation(self, userID=None, data=None):
         try:
+            entitlement_error = apache_backend_entitlement_error(data)
+            if entitlement_error is not None:
+                return entitlement_error
             currentACL = ACLManager.loadedACL(userID)
             admin = Administrator.objects.get(pk=userID)
 
@@ -2187,7 +2244,7 @@ Require valid-user
             extraArgs['websiteOwner'] = data['websiteOwner']
             extraArgs['package'] = data['package']
             extraArgs['home'] = data['home']
-            extraArgs['apacheBackend'] = data['apacheBackend']
+            extraArgs['apacheBackend'] = normalize_apache_backend(data.get('apacheBackend', 0))
             try:
                 extraArgs['path'] = data['path']
                 if extraArgs['path'] == '':
@@ -2214,6 +2271,9 @@ Require valid-user
 
     def submitWebsiteCreation(self, userID=None, data=None):
         try:
+            entitlement_error = apache_backend_entitlement_error(data)
+            if entitlement_error is not None:
+                return entitlement_error
             currentACL = ACLManager.loadedACL(userID)
 
             domain = data['domainName']
@@ -2282,10 +2342,7 @@ Require valid-user
 
             tempStatusPath = "/home/cyberpanel/" + str(randint(1000, 9999))
 
-            try:
-                apacheBackend = str(data['apacheBackend'])
-            except:
-                apacheBackend = "0"
+            apacheBackend = str(normalize_apache_backend(data.get('apacheBackend', 0)))
 
             try:
                 mailDomain = str(data['mailDomain'])
@@ -2321,6 +2378,9 @@ Require valid-user
 
     def submitDomainCreation(self, userID=None, data=None):
         try:
+            entitlement_error = apache_backend_entitlement_error(data)
+            if entitlement_error is not None:
+                return entitlement_error
 
             currentACL = ACLManager.loadedACL(userID)
             admin = Administrator.objects.get(pk=userID)
@@ -2344,6 +2404,10 @@ Require valid-user
                 apachePath = ApacheVhost.configBasePath + masterDomain + '.conf'
 
                 if os.path.exists(apachePath):
+                    if not normalize_apache_backend(data.get('apacheBackend', 0)):
+                        entitlement_error = apache_backend_entitlement_error({'apacheBackend': 1})
+                        if entitlement_error is not None:
+                            return entitlement_error
                     data['apacheBackend'] = 1
 
                 phpSelection = Websites.objects.get(domain=masterDomain).phpSelection
@@ -2394,10 +2458,7 @@ Require valid-user
             else:
                 path = f'/home/{masterDomain}/public_html'
 
-            try:
-                apacheBackend = str(data['apacheBackend'])
-            except:
-                apacheBackend = "0"
+            apacheBackend = str(normalize_apache_backend(data.get('apacheBackend', 0)))
 
             execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
 
@@ -2878,7 +2939,23 @@ Require valid-user
 
             execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
             execPath = execPath + " deleteVirtualHostConfigurations --virtualHostName " + websiteName
-            ProcessUtilities.popenExecutioner(execPath)
+            from plogical.websiteDeletion import wait_for_deletion
+            state = wait_for_deletion(execPath, ProcessUtilities.outputExecutioner,
+                                      lambda message: logging.CyberCPLogFileWriter.writeToFile(
+                                          '%s: %s' % (websiteName, message)))
+            if state == 'pending':
+                return HttpResponse(json.dumps({
+                    'status': 1, 'websiteDeleteStatus': 2, 'state': 'pending',
+                    'error_message': 'Deletion is still running. Wait and refresh the website list before taking another action.'}))
+            if (state == 'completed' and Websites.objects.filter(domain=websiteName).exists()
+                    and ACLManager.FindIfChild() == 1):
+                return HttpResponse(json.dumps({
+                    'status': 1, 'websiteDeleteStatus': 2, 'state': 'awaiting_primary',
+                    'error_message': 'Local website removal completed on the failover server. The shared website record is retained; complete or verify deletion on the primary server.'}))
+            if state != 'completed' or Websites.objects.filter(domain=websiteName).exists():
+                return HttpResponse(json.dumps({
+                    'status': 0, 'websiteDeleteStatus': 0, 'state': 'failed',
+                    'error_message': 'Website deletion did not complete. Some resources may already have been removed. Check the panel log before retrying.'}))
 
             ### delete site from dgdrive backups
 
@@ -2889,7 +2966,7 @@ Require valid-user
             except:
                 pass
 
-            data_ret = {'status': 1, 'websiteDeleteStatus': 1, 'error_message': "None"}
+            data_ret = {'status': 1, 'websiteDeleteStatus': 1, 'state': 'completed', 'error_message': "None"}
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
@@ -3450,6 +3527,7 @@ context /cyberpanel_suspension_page.html {
 
     def saveWebsiteChanges(self, userID=None, data=None):
         try:
+            from plogical import filesystemQuota, storageQuota
             domain = data['domain']
             package = data['packForWeb']
             email = data['email']
@@ -3472,6 +3550,24 @@ context /cyberpanel_suspension_page.html {
             else:
                 return ACLManager.loadErrorJson('websiteDeleteStatus', 0)
 
+            modifyWeb = Websites.objects.get(domain=domain)
+            webpack = Package.objects.get(packageName=package)
+            quota_plan = None
+            if webpack.enforceDiskLimits:
+                try:
+                    quota_plan = filesystemQuota.prepare_package_quota(webpack, [modifyWeb])
+                except Exception as error:
+                    return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                        'error_message': 'No website settings were changed. ' + str(error)}))
+
+            try:
+                storage_plan = storageQuota.prepare_policy(
+                    modifyWeb, webpack.diskSpace, webpack.inodeLimit,
+                    enforce=bool(webpack.enforceDiskLimits))
+            except Exception as error:
+                return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                    'error_message': 'No website settings were changed. ' + str(error)}))
+
             confPath = virtualHostUtilities.Server_root + "/conf/vhosts/" + domain
             completePathToConfigFile = confPath + "/vhost.conf"
 
@@ -3483,9 +3579,6 @@ context /cyberpanel_suspension_page.html {
 
             newOwner = Administrator.objects.get(userName=newUser)
 
-            modifyWeb = Websites.objects.get(domain=domain)
-            webpack = Package.objects.get(packageName=package)
-
             modifyWeb.package = webpack
             modifyWeb.adminEmail = email
             modifyWeb.phpSelection = phpVersion
@@ -3493,11 +3586,19 @@ context /cyberpanel_suspension_page.html {
 
             modifyWeb.save()
 
-            ## Update disk quota when package changes - Fix for GitHub issue #1442
-            if webpack.enforceDiskLimits:
-                spaceString = f'{webpack.diskSpace}M {webpack.diskSpace}M'
-                command = f'setquota -u {modifyWeb.externalApp} {spaceString} 0 0 /'
-                ProcessUtilities.executioner(command)
+            if quota_plan is not None:
+                try:
+                    filesystemQuota.apply_quota_plan(quota_plan)
+                except Exception as error:
+                    return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                        'error_message': 'Website settings were saved, but disk/inode quotas were not fully applied. ' + str(error)}))
+
+            if storage_plan is not None:
+                try:
+                    storageQuota.apply_policy(storage_plan)
+                except Exception as error:
+                    return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                        'error_message': 'Website settings were saved, but the combined website/mail quota was not applied. ' + str(error)}))
 
             ## Fix https://github.com/usmannasir/cyberpanel/issues/998
 
@@ -3561,6 +3662,7 @@ context /cyberpanel_suspension_page.html {
             Data['diskUsage'] = DiskUsagePercentage
             Data['diskInMB'] = DiskUsage
             Data['diskInMBTotal'] = website.package.diskSpace
+            Data.update(storage_card_context(website))
 
             Data['phps'] = PHPManager.findPHPVersions()
             import os
@@ -3806,6 +3908,7 @@ context /cyberpanel_suspension_page.html {
             Data['diskUsage'] = DiskUsagePercentage
             Data['diskInMB'] = DiskUsage
             Data['diskInMBTotal'] = website.package.diskSpace
+            Data.update(storage_card_context(website))
 
             Data['phps'] = PHPManager.findPHPVersions()
 
@@ -4209,9 +4312,31 @@ context /cyberpanel_suspension_page.html {
         confPath = virtualHostUtilities.Server_root + "/conf/vhosts/" + self.domain
         completePathToConfigFile = confPath + "/vhost.conf"
 
+        try:
+            php_binary = php_binary_for_selection(phpVersion)
+        except ValueError as msg:
+            return HttpResponse(json.dumps({
+                'status': 0, 'changePHP': 0, 'error_message': str(msg),
+            }))
+        if not os.path.isfile(php_binary):
+            return HttpResponse(json.dumps({
+                'status': 0,
+                'changePHP': 0,
+                'error_message': '%s is not installed on this server.' % phpVersion,
+            }))
+
         execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
         execPath = execPath + " changePHP --phpVersion " + shlex.quote(phpVersion) + " --path " + completePathToConfigFile
-        ProcessUtilities.popenExecutioner(execPath)
+        output = ProcessUtilities.outputExecutioner(execPath)
+        if not change_php_succeeded(output):
+            logging.CyberCPLogFileWriter.writeToFile(
+                'PHP change failed for %s: %s' % (self.domain, output)
+            )
+            return HttpResponse(json.dumps({
+                'status': 0,
+                'changePHP': 0,
+                'error_message': output or 'PHP change command failed.',
+            }))
 
         try:
             website = Websites.objects.get(domain=self.domain)
@@ -4228,9 +4353,17 @@ context /cyberpanel_suspension_page.html {
                     completePathToConfigFile = confPath + "/vhost.conf"
                     execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
                     execPath = execPath + " changePHP --phpVersion " + shlex.quote(phpVersion) + " --path " + completePathToConfigFile
-                    ProcessUtilities.popenExecutioner(execPath)
+                    alias_output = ProcessUtilities.outputExecutioner(execPath)
+                    if not change_php_succeeded(alias_output):
+                        raise RuntimeError(alias_output or 'PHP change command failed.')
                 except BaseException as msg:
                     logging.CyberCPLogFileWriter.writeToFile(f'Error changing PHP for alias: {str(msg)}')
+                    return HttpResponse(json.dumps({
+                        'status': 0,
+                        'changePHP': 0,
+                        'error_message': 'PHP changed for the website, but failed for alias %s: %s'
+                                         % (alias.domain, msg),
+                    }))
 
 
         except:
@@ -4728,6 +4861,7 @@ context /cyberpanel_suspension_page.html {
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required(page=True)
     def wordpressInstall(self, request=None, userID=None, data=None):
         currentACL = ACLManager.loadedACL(userID)
         admin = Administrator.objects.get(pk=userID)
@@ -4740,6 +4874,7 @@ context /cyberpanel_suspension_page.html {
         proc = httpProc(request, 'websiteFunctions/installWordPress.html', {'domainName': self.domain})
         return proc.render()
 
+    @wordpress_entitlement_required()
     def installWordpress(self, userID=None, data=None):
         try:
 
@@ -4764,6 +4899,24 @@ context /cyberpanel_suspension_page.html {
             extraArgs['adminPassword'] = data['passwordByPass']
             extraArgs['adminEmail'] = data['adminEmail']
             extraArgs['tempStatusPath'] = "/home/cyberpanel/" + str(randint(1000, 9999))
+
+            try:
+                version_response = requests.get(
+                    'https://api.wordpress.org/core/version-check/1.7/',
+                    timeout=15,
+                )
+                version_response.raise_for_status()
+                version_data = version_response.json()
+                if not isinstance(version_data, dict):
+                    raise ValueError('Invalid WordPress API response.')
+                extraArgs['WPVersion'] = select_wordpress_version(
+                    version_data.get('offers', [])
+                )
+            except (requests.RequestException, TypeError, ValueError):
+                raise BaseException(
+                    'Could not determine the current WordPress version. '
+                    'Please try the installation again.'
+                )
 
             if data['home'] == '0':
                 extraArgs['path'] = data['path']
@@ -5353,12 +5506,29 @@ StrictHostKeyChecking no
                 if adminEmail is None:
                     data['adminEmail'] = "example@example.org"
 
+                acl = ACL.objects.get(name=apiACL)
+                currentACL = ACLManager.loadedACL(admin.pk)
+
+                if ACLManager.currentContextPermission(currentACL, 'createWebsite') != 1:
+                    return ACLManager.loadErrorJson('createWebSiteStatus', 0)
+
+                if currentACL['admin'] != 1:
+                    if ACLManager.isAdminACL(acl):
+                        return ACLManager.loadErrorJson('createWebSiteStatus', 0)
+                    if currentACL.get('changeUserACL', 0) != 1 and acl.name != 'user':
+                        return ACLManager.loadErrorJson('createWebSiteStatus', 0)
+
+                if ACLManager.websitesLimitCheck(admin, int(websitesLimit)) == 0:
+                    data_ret = {'status': 0, 'createWebSiteStatus': 0,
+                                'error_message': "You've reached maximum websites limit as a reseller."}
+                    return HttpResponse(json.dumps(data_ret))
+
                 try:
-                    acl = ACL.objects.get(name=apiACL)
                     websiteOwn = Administrator(userName=websiteOwner,
                                                password=hashPassword.hash_password(ownerPassword),
                                                email=adminEmail, type=3, owner=admin.pk,
-                                               initWebsitesLimit=websitesLimit, acl=acl, api=1)
+                                               initWebsitesLimit=websitesLimit, acl=acl,
+                                               token=generate_api_token(), api=1)
                     websiteOwn.save()
                 except BaseException:
                     pass
@@ -5517,6 +5687,7 @@ StrictHostKeyChecking no
 
         return pagination
 
+    @apache_entitlement_required()
     def getSwitchStatus(self, userID=None, data=None):
         try:
 
@@ -5587,6 +5758,7 @@ StrictHostKeyChecking no
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @apache_entitlement_required()
     def switchServer(self, userID=None, data=None):
 
         currentACL = ACLManager.loadedACL(userID)
@@ -5612,6 +5784,7 @@ StrictHostKeyChecking no
         json_data = json.dumps(data_ret)
         return HttpResponse(json_data)
 
+    @apache_entitlement_required()
     def tuneSettings(self, userID=None, data=None):
         try:
 
@@ -5867,10 +6040,17 @@ StrictHostKeyChecking no
     def saveSSHAccessChanges(self, userID=None, data=None):
         try:
 
+            if not isinstance(data, dict):
+                raise ValueError('Invalid request.')
+            domain = data.get('domain')
+            password = data.get('password')
+            if not isinstance(domain, str) or not isinstance(password, str):
+                raise ValueError('Invalid request.')
+
             currentACL = ACLManager.loadedACL(userID)
             admin = Administrator.objects.get(pk=userID)
 
-            self.domain = data['domain']
+            self.domain = domain
 
             if ACLManager.checkOwnership(self.domain, admin, currentACL) == 1:
                 pass
@@ -5884,14 +6064,29 @@ StrictHostKeyChecking no
             #     json_data = json.dumps(data_ret)
             #     return HttpResponse(json_data)
 
-            uBuntuPath = '/etc/lsb-release'
-
-            if os.path.exists(uBuntuPath):
-                command = "echo '%s:%s' | chpasswd" % (website.externalApp, data['password'])
-            else:
-                command = 'echo "%s" | passwd --stdin %s' % (data['password'], website.externalApp)
-
-            ProcessUtilities.executioner(command)
+            requestToken = create_system_password_request(
+                website.externalApp,
+                password,
+            )
+            pythonPath = '/usr/local/CyberCP/bin/python'
+            if not os.path.exists(pythonPath):
+                pythonPath = sys.executable
+            passwordScript = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'plogical',
+                'changeSystemPassword.py',
+            )
+            command = '%s %s --token %s' % (
+                shlex.quote(pythonPath),
+                shlex.quote(passwordScript),
+                shlex.quote(requestToken),
+            )
+            if ProcessUtilities.executioner(command) != 1:
+                try:
+                    consume_system_password_request(requestToken)
+                except Exception:
+                    pass
+                raise RuntimeError('Unable to change system password.')
 
             data_ret = {'status': 1, 'error_message': 'None', 'LinuxUser': website.externalApp}
             json_data = json.dumps(data_ret)
@@ -6428,7 +6623,8 @@ StrictHostKeyChecking no
                 if not validators.domain(self.gitHost):
                     return ACLManager.loadErrorJson('status', 'Invalid characters in your input.')
 
-            if ACLManager.validateInput(self.gitUsername) and ACLManager.validateInput(self.gitReponame):
+            if ACLManager.validateInput(self.gitUsername) and ACLManager.validateInput(self.gitReponame,
+                                                                              ACLManager.RepoNameRegex):
                 pass
             else:
                 return ACLManager.loadErrorJson('status', 'Invalid characters in your input.')
@@ -6844,7 +7040,8 @@ StrictHostKeyChecking no
 
             ## Security check
 
-            if ACLManager.validateInput(self.gitUsername) and ACLManager.validateInput(self.gitReponame):
+            if ACLManager.validateInput(self.gitUsername) and ACLManager.validateInput(self.gitReponame,
+                                                                              ACLManager.RepoNameRegex):
                 pass
             else:
                 return ACLManager.loadErrorJson('status', 'Invalid characters in your input.')
@@ -7507,34 +7704,7 @@ StrictHostKeyChecking no
             cat = "cat " + pathToKeyFile
             data = ProcessUtilities.outputExecutioner(cat, website.externalApp).split('\n')
 
-            json_data = "["
-            checker = 0
-
-            for items in data:
-                if items.find("ssh-rsa") > -1:
-                    keydata = items.split(" ")
-
-                    try:
-                        key = "ssh-rsa " + keydata[1][:50] + "  ..  " + keydata[2]
-                        try:
-                            userName = keydata[2][:keydata[2].index("@")]
-                        except:
-                            userName = keydata[2]
-                    except:
-                        key = "ssh-rsa " + keydata[1][:50]
-                        userName = ''
-
-                    dic = {'userName': userName,
-                           'key': key,
-                           }
-
-                    if checker == 0:
-                        json_data = json_data + json.dumps(dic)
-                        checker = 1
-                    else:
-                        json_data = json_data + ',' + json.dumps(dic)
-
-            json_data = json_data + ']'
+            json_data = json.dumps(authorized_key_records(data))
 
             final_json = json.dumps({'status': 1, 'error_message': "None", "data": json_data})
             return HttpResponse(final_json)
@@ -7565,7 +7735,10 @@ StrictHostKeyChecking no
             ProcessUtilities.outputExecutioner(command)
 
             execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/firewallUtilities.py"
-            execPath = execPath + " deleteSSHKey --key '%s' --path %s" % (key, pathToKeyFile)
+            execPath = execPath + " deleteSSHKey --key %s --path %s" % (
+                shlex.quote(key),
+                shlex.quote(pathToKeyFile),
+            )
 
             output = ProcessUtilities.outputExecutioner(execPath, website.externalApp)
 
@@ -7574,12 +7747,16 @@ StrictHostKeyChecking no
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
             else:
-                final_dic = {'status': 1, 'delete_status': 1, "error_mssage": output}
+                final_dic = {
+                    'status': 0,
+                    'delete_status': 0,
+                    'error_message': output,
+                }
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
 
         except BaseException as msg:
-            final_dic = {'status': 0, 'delete_status': 0, 'error_mssage': str(msg)}
+            final_dic = {'status': 0, 'delete_status': 0, 'error_message': str(msg)}
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
@@ -7630,6 +7807,7 @@ StrictHostKeyChecking no
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @apache_entitlement_required(page=True)
     def ApacheManager(self, request=None, userID=None, data=None):
         currentACL = ACLManager.loadedACL(userID)
         admin = Administrator.objects.get(pk=userID)
@@ -7642,15 +7820,13 @@ StrictHostKeyChecking no
         phps = PHPManager.findPHPVersions()
         apachePHPs = PHPManager.findApachePHPVersions()
 
-        if ACLManager.CheckForPremFeature('all'):
-            apachemanager = 1
-        else:
-            apachemanager = 0
+        apachemanager = 1
 
         proc = httpProc(request, 'websiteFunctions/ApacheManager.html',
                         {'domainName': self.domain, 'phps': phps, 'apachemanager': apachemanager, 'apachePHPs': apachePHPs})
         return proc.render()
 
+    @apache_entitlement_required()
     def saveApacheConfigsToFile(self, userID=None, data=None):
 
         currentACL = ACLManager.loadedACL(userID)
@@ -7691,6 +7867,7 @@ StrictHostKeyChecking no
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @premium_entitlement_required('docker-manager', label='Docker Manager', page_redirect='pricing')
     def CreateDockerPackage(self, request=None, userID=None, data=None, DeleteID=None):
         Data = {}
 
@@ -7714,6 +7891,7 @@ StrictHostKeyChecking no
                         Data, 'createWebsite')
         return proc.render()
 
+    @premium_entitlement_required('docker-manager', label='Docker Manager', page_redirect='pricing')
     def AssignPackage(self, request=None, userID=None, data=None, DeleteID=None):
 
         currentACL = ACLManager.loadedACL(userID)
@@ -7738,43 +7916,31 @@ StrictHostKeyChecking no
                         Data, 'createWebsite')
         return proc.render()
 
+    @premium_entitlement_required('docker-manager', label='Docker Manager', page_redirect='pricing')
     def CreateDockersite(self, request=None, userID=None, data=None):
-        url = "https://platform.cyberpersons.com/CyberpanelAdOns/Adonpermission"
-        data = {
-            "name": "docker-manager",
-            "IP": ACLManager.GetServerIP()
-        }
+        adminNames = ACLManager.loadAllUsers(userID)
+        Data = {'adminNames': adminNames}
 
-        import requests
-        response = requests.post(url, data=json.dumps(data))
-        Status = response.json()['status']
+        if PackageAssignment.objects.all().count() == 0:
+            name = 'Default'
+            cpu = 2
+            Memory = 1024
+            Bandwidth = '100'
+            disk = '100'
 
-        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
-            adminNames = ACLManager.loadAllUsers(userID)
-            Data = {'adminNames': adminNames}
+            saveobj = DockerPackages(Name=name, CPUs=cpu, Ram=Memory, Bandwidth=Bandwidth, DiskSpace=disk, config='')
+            saveobj.save()
 
-            if PackageAssignment.objects.all().count() == 0:
-                name = 'Default'
-                cpu = 2
-                Memory = 1024
-                Bandwidth = '100'
-                disk = '100'
+            userobj = Administrator.objects.get(pk=1)
 
-                saveobj = DockerPackages(Name=name, CPUs=cpu, Ram=Memory, Bandwidth=Bandwidth, DiskSpace=disk, config='')
-                saveobj.save()
+            sv = PackageAssignment(user=userobj, package=saveobj)
+            sv.save()
 
-                userobj = Administrator.objects.get(pk=1)
+        proc = httpProc(request, 'websiteFunctions/CreateDockerSite.html',
+                        Data, 'createWebsite')
+        return proc.render()
 
-                sv = PackageAssignment(user=userobj, package=saveobj)
-                sv.save()
-
-            proc = httpProc(request, 'websiteFunctions/CreateDockerSite.html',
-                            Data, 'createWebsite')
-            return proc.render()
-        else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
-
+    @premium_entitlement_required('docker-manager', label='Docker Manager', flags=('installStatus', 'createWebSiteStatus'))
     def AddDockerpackage(self, userID=None, data=None):
         try:
 
@@ -7804,6 +7970,7 @@ StrictHostKeyChecking no
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @premium_entitlement_required('docker-manager', label='Docker Manager', flags=('installStatus', 'createWebSiteStatus'))
     def Getpackage(self, userID=None, data=None):
         try:
             currentACL = ACLManager.loadedACL(userID)
@@ -7837,6 +8004,7 @@ StrictHostKeyChecking no
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @premium_entitlement_required('docker-manager', label='Docker Manager', flags=('installStatus', 'createWebSiteStatus'))
     def Updatepackage(self, userID=None, data=None):
         try:
 
@@ -7871,6 +8039,7 @@ StrictHostKeyChecking no
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @premium_entitlement_required('docker-manager', label='Docker Manager', flags=('installStatus', 'createWebSiteStatus'))
     def AddAssignment(self, userID=None, data=None):
         try:
 
@@ -7909,6 +8078,7 @@ StrictHostKeyChecking no
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @premium_entitlement_required('docker-manager', label='Docker Manager', flags=('installStatus', 'createWebSiteStatus'))
     def submitDockerSiteCreation(self, userID=None, data=None):
         try:
             admin = Administrator.objects.get(pk=userID)
@@ -7926,13 +8096,27 @@ StrictHostKeyChecking no
             WPemal = data['WPemal']
             WPpasswd = data['WPpasswd']
 
-            if int(MYsqlRam) < 256:
+            if App not in DOCKER_APPS:
+                final_dic = {'status': 0, 'error_message': f'Unknown application: {App}.'}
+                final_json = json.dumps(final_dic)
+                return HttpResponse(final_json)
+
+            AppMeta = DOCKER_APPS[App]
+
+            ## Apps without their own database container ignore the MySQL resources entirely.
+
+            if AppMeta['requiresDB'] and int(MYsqlRam) < 256:
                 final_dic = {'status': 0, 'error_message': 'Minimum MySQL ram should be 256MB.'}
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
 
-            if int(SiteRam) < 256:
-                final_dic = {'status': 0, 'error_message': 'Minimum site ram should be 256MB.'}
+            if not AppMeta['requiresDB']:
+                MysqlCPU = 0
+                MYsqlRam = 0
+
+            if int(SiteRam) < AppMeta['minSiteRam']:
+                final_dic = {'status': 0,
+                             'error_message': f"Minimum site ram for {App} should be {AppMeta['minSiteRam']}MB."}
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
 
@@ -8078,35 +8262,23 @@ StrictHostKeyChecking no
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
+    @premium_entitlement_required('docker-manager', label='Docker Manager', page_redirect='pricing')
     def Dockersitehome(self, request=None, userID=None, data=None, DeleteID=None):
-        url = "https://platform.cyberpersons.com/CyberpanelAdOns/Adonpermission"
-        data = {
-            "name": "docker-manager",
-            "IP": ACLManager.GetServerIP()
-        }
+        currentACL = ACLManager.loadedACL(userID)
+        admin = Administrator.objects.get(pk=userID)
 
-        import requests
-        response = requests.post(url, data=json.dumps(data))
-        Status = response.json()['status']
+        ds = DockerSites.objects.get(pk=self.domain)
 
-        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
-            currentACL = ACLManager.loadedACL(userID)
-            admin = Administrator.objects.get(pk=userID)
-
-            ds = DockerSites.objects.get(pk=self.domain)
-
-            if ACLManager.checkOwnership(ds.admin.domain, admin, currentACL) == 1:
-                pass
-            else:
-                return ACLManager.loadError()
-
-            proc = httpProc(request, 'websiteFunctions/DockerSiteHome.html',
-                            {'dockerSite': ds})
-            return proc.render()
+        if ACLManager.checkOwnership(ds.admin.domain, admin, currentACL) == 1:
+            pass
         else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
+            return ACLManager.loadError()
+
+        proc = httpProc(request, 'websiteFunctions/DockerSiteHome.html',
+                        {'dockerSite': ds})
+        return proc.render()
         
+    @wordpress_entitlement_required()
     def fetchWPSitesForDomain(self, userID=None, data=None):
         try:
             currentACL = ACLManager.loadedACL(userID)
@@ -8200,6 +8372,7 @@ StrictHostKeyChecking no
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
+    @wordpress_entitlement_required()
     def fetchWPBackups(self, userID=None, data=None):
         try:
             currentACL = ACLManager.loadedACL(userID)

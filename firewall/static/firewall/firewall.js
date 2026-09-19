@@ -680,14 +680,14 @@ app.controller('secureSSHCTRL', function ($scope, $http) {
 
     }
 
-    $scope.deleteKey = function (key) {
+    $scope.deleteKey = function (keyId) {
 
         $scope.secureSSHLoading = false;
 
         url = "/firewall/deleteSSHKey";
 
         var data = {
-            key: key,
+            key: keyId,
         };
 
         var config = {
@@ -1738,16 +1738,16 @@ app.controller('csf', function ($scope, $http, $timeout, $window) {
     $scope.activateTab = function (newMain, newChild) {
         // Remove active class from all tabs
         $('.tab-button').removeClass('active');
-        
+
         // Add active class to clicked tab
         $('#' + newMain).addClass('active');
-        
+
         // Hide all tab contents
         $('.tab-content').removeClass('active');
-        
+
         // Show selected tab content
         $('#' + newChild).addClass('active');
-        
+
         currentMain = newMain;
         currentChild = newChild;
     };

@@ -16,6 +16,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "CyberCP.settings")
 django.setup()
 import json
 from plogical.acl import ACLManager
+from plogical.premiumEntitlements import premium_entitlement_required
 import plogical.CyberCPLogFileWriter as logging
 from websiteFunctions.models import Websites, Backups, dest, backupSchedules, BackupJob, GDrive, GDriveSites
 from plogical.virtualHostUtilities import virtualHostUtilities
@@ -35,6 +36,11 @@ import googleapiclient.discovery
 from googleapiclient.discovery import build
 from websiteFunctions.models import NormalBackupDests, NormalBackupJobs, NormalBackupSites
 from plogical.IncScheduler import IncScheduler
+from plogical.remoteTransferResponse import parse_remote_transfer_response
+from plogical.normalBackupUtilities import (
+    normalize_backup_retention_days,
+    normalize_local_backup_path,
+)
 from django.http import JsonResponse
 from cyberpanel_version import version_at_least
 
@@ -73,6 +79,7 @@ class BackupManager:
         proc = httpProc(request, 'IncBackups/RestoreV2Backup.html', {'websiteList': websitesName, 'BackupStat': BackupStat}, 'createBackup')
         return proc.render()
 
+    @premium_entitlement_required('all', label='Backup V2', page_redirect='ConfigureV2Backup')
     def CreateV2backupSite(self, request=None, userID=None, data=None):
         currentACL = ACLManager.loadedACL(userID)
         websitesName = ACLManager.findAllSites(currentACL, userID)
@@ -855,7 +862,13 @@ class BackupManager:
                     final_json = json.dumps(final_dic)
                     return HttpResponse(final_json)
             else:
-                config = {'type': data['type'], 'path': data['path']}
+                try:
+                    localPath = normalize_local_backup_path(data.get('path', ''))
+                except ValueError as msg:
+                    final_dic = {'status': 0, 'destStatus': 0, 'error_message': str(msg)}
+                    return HttpResponse(json.dumps(final_dic))
+
+                config = {'type': data['type'], 'path': localPath}
                 nd = NormalBackupDests(name=data['name'], config=json.dumps(config))
                 nd.save()
 
@@ -1027,7 +1040,7 @@ class BackupManager:
             selectedAccount = data['selectedAccount']
             name = data['name']
             backupFrequency = data['backupFrequency']
-            backupRetention = data['backupRetention']
+            backupRetention = normalize_backup_retention_days(data['backupRetention'])
 
             currentACL = ACLManager.loadedACL(userID)
 
@@ -1283,23 +1296,23 @@ class BackupManager:
 
 
                 ipFile = os.path.join("/etc", "cyberpanel", "machineIP")
-                f = open(ipFile)
-                ownIP = f.read()
+                with open(ipFile) as ip_file:
+                    ownIP = ip_file.read().strip()
 
                 finalData = json.dumps({'username': "admin", "password": password, "ipAddress": ownIP,
                                         "accountsToTransfer": accountsToTransfer, 'port': port})
 
                 url = "https://" + ipAddress + ":8090/api/remoteTransfer"
 
-                r = requests.post(url, data=finalData, verify=False)
+                r = requests.post(url, data=finalData, verify=False, timeout=30)
 
                 if os.path.exists('/usr/local/CyberCP/debug'):
                     message = 'Remote transfer initiation status: %s' % (r.text)
                     logging.CyberCPLogFileWriter.writeToFile(message)
 
-                data = json.loads(r.text)
+                transfer_status, transfer_dir, remote_error = parse_remote_transfer_response(r)
 
-                if data['transferStatus'] == 1:
+                if transfer_status == 1:
 
                     ## Create local backup dir
 
@@ -1311,7 +1324,7 @@ class BackupManager:
 
                     ## create local directory that will host backups
 
-                    localStoragePath = "/home/backup/transfer-" + str(data['dir'])
+                    localStoragePath = "/home/backup/transfer-" + transfer_dir
 
                     ## making local storage directory for backups
 
@@ -1322,12 +1335,12 @@ class BackupManager:
                     ProcessUtilities.executioner(command)
 
                     final_json = json.dumps(
-                        {'remoteTransferStatus': 1, 'error_message': "None", "dir": data['dir']})
+                        {'remoteTransferStatus': 1, 'error_message': "None", "dir": transfer_dir})
                     return HttpResponse(final_json)
                 else:
                     final_json = json.dumps({'remoteTransferStatus': 0,
                                              'error_message': "Can not initiate remote transfer. Error message: " +
-                                                              data['error_message']})
+                                                              remote_error})
                     return HttpResponse(final_json)
 
             except BaseException as msg:
@@ -1359,15 +1372,15 @@ class BackupManager:
             data = json.loads(r.text)
 
             if data['fetchStatus'] == 1:
-                if data['status'].find("Backups are successfully generated and received on") > -1:
+                if data['status'].find("[5010]") > -1:
+                    data = {'remoteTransferStatus': 0, 'error_message': data['status'],
+                            'backupsSent': 0}
+                    json_data = json.dumps(data)
+                    return HttpResponse(json_data)
+                elif data['status'].find("Backups are successfully generated and received on") > -1:
 
                     data = {'remoteTransferStatus': 1, 'error_message': "None", "status": data['status'],
                             'backupsSent': 1}
-                    json_data = json.dumps(data)
-                    return HttpResponse(json_data)
-                elif data['status'].find("[5010]") > -1:
-                    data = {'remoteTransferStatus': 0, 'error_message': data['status'],
-                            'backupsSent': 0}
                     json_data = json.dumps(data)
                     return HttpResponse(json_data)
                 else:
@@ -1467,34 +1480,16 @@ class BackupManager:
             time.sleep(3)
 
             command = "sudo cat " + shlex.quote(backupLogPath)
-            status = ProcessUtilities.outputExecutioner(command)
+            result = ProcessUtilities.outputExecutioner(command, retRequired=True)
+            if not result or len(result) != 2 or result[0] != 1 or not result[1]:
+                return HttpResponse(json.dumps({
+                    'remoteTransferStatus': 0, 'complete': 0, 'status': 'None',
+                    'error_message': 'Restore progress could not be read. Check the retained transfer directory and panel log.'}))
+            status = result[1]
 
 
-            if status.find("Error") > -1:
-                Error_find = "There was an error during the backup process. Please review the log for more information."
-                status = status + Error_find
-
-
-
-            if status.find("completed[success]") > -1:
-                command = "rm -rf " + shlex.quote(removalPath)
-                ProcessUtilities.executioner(command)
-                data_ret = {'remoteTransferStatus': 1, 'error_message': "None", "status": status, "complete": 1}
-                json_data = json.dumps(data_ret)
-                return HttpResponse(json_data)
-
-            elif status.find("[5010]") > -1:
-                command = "sudo rm -rf " + shlex.quote(removalPath)
-                ProcessUtilities.executioner(command)
-                data = {'remoteTransferStatus': 0, 'error_message': status,
-                        "status": "None", "complete": 0}
-                json_data = json.dumps(data)
-                return HttpResponse(json_data)
-
-            else:
-                data_ret = {'remoteTransferStatus': 1, 'error_message': "None", "status": status, "complete": 0}
-                json_data = json.dumps(data_ret)
-                return HttpResponse(json_data)
+            from plogical.remoteRestoreBatch import batch_status
+            return HttpResponse(json.dumps(batch_status(status)))
 
         except BaseException as msg:
             data = {'remoteTransferStatus': 0, 'error_message': str(msg), "status": "None", "complete": 0}
@@ -1711,6 +1706,7 @@ class BackupManager:
                 'lastRun': lastRun,
                 'allSites': allSites,
                 'currently': frequency,
+                'retention': retention,
                 'currentStatus': currentStatus
             }
             json_data = json.dumps(data_ret)
@@ -1871,9 +1867,9 @@ class BackupManager:
             config = json.loads(nbj.config)
             config[IncScheduler.frequency] = backupFrequency
             try:
-                backupRetention = data['backupRetention']
+                backupRetention = normalize_backup_retention_days(data['backupRetention'])
                 config[IncScheduler.retention] = backupRetention
-            except:
+            except KeyError:
                 pass
 
 
@@ -2786,4 +2782,3 @@ class BackupManager:
 
         except Exception as e:
             return JsonResponse({'status': 0, 'error_message': str(e)})
-

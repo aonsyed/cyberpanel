@@ -1,11 +1,11 @@
 #!/usr/local/CyberCP/bin/python
 import os,sys
 import random
-import string
 
 from ApachController.ApacheVhosts import ApacheVhost
 from manageServices.models import PDNSStatus
 from .processUtilities import ProcessUtilities
+from .legacyWebmail import legacy_data_permission_commands
 
 sys.path.append('/usr/local/CyberCP')
 import django
@@ -51,6 +51,15 @@ class ACLManager:
               '"dkimManager": 1, "createFTPAccount": 1, "deleteFTPAccount": 1, "listFTPAccounts": 1, "createBackup": 1,' \
               ' "restoreBackup": 0, "addDeleteDestinations": 0, "scheduleBackups": 0, "remoteBackups": 0, "googleDriveBackups": 1, "manageSSL": 1, ' \
               '"hostnameSSL": 0, "mailServerSSL": 0 }'
+
+    @staticmethod
+    def isAdminACL(acl):
+        if int(getattr(acl, 'adminStatus', 0) or 0) == 1:
+            return True
+        try:
+            return int(json.loads(acl.config).get('adminStatus', 0) or 0) == 1
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            return False
 
     @staticmethod
     def VerifySMTPHost(currentACL, owner, user):
@@ -150,6 +159,12 @@ class ACLManager:
             return ipData.split('\n', 1)[0]
         except BaseException:
             return "192.168.100.1"
+
+    ## GitHub and GitLab allow dots in a repository name (repo.ltd), the default
+    ## validateInput pattern does not, so attaching such a repo failed the security
+    ## check. Dots are allowed between segments only, never leading and never doubled,
+    ## so the name can still not walk a path.
+    RepoNameRegex = compile(r'[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*')
 
     @staticmethod
     def validateInput(value, regex = None):
@@ -484,7 +499,7 @@ class ACLManager:
 
     @staticmethod
     def websitesLimitCheck(currentAdmin, websitesLimit, userToBeModified = None):
-        if currentAdmin.acl.adminStatus != 1:
+        if not ACLManager.isAdminACL(currentAdmin.acl):
 
             if currentAdmin.initWebsitesLimit != 0:
                 webLimits = 0
@@ -1094,10 +1109,21 @@ class ACLManager:
             }
 
             import requests
-            response = requests.post(url, data=json.dumps(data))
-            return response.json()['status']
-        except:
-            return 1
+            response = requests.post(
+                url, data=json.dumps(data), timeout=(3.05, 10),
+                allow_redirects=False,
+            )
+            if response.status_code != 200:
+                return 0
+            payload = response.json()
+            # The addon service returns integer 0/1. A failed lookup or a
+            # truthy malformed value must never enable paid functionality.
+            if not isinstance(payload, dict):
+                return 0
+            status = payload.get('status')
+            return int(type(status) is int and status == 1)
+        except Exception:
+            return 0
 
     @staticmethod
     def CheckIPBackupObjectOwner(currentACL, backupobj, user):
@@ -1218,34 +1244,6 @@ class ACLManager:
     def fixPermissions():
         try:
 
-            try:
-                def generate_pass(length=14):
-                    import secrets
-                    chars = string.ascii_uppercase + string.ascii_lowercase + string.digits
-                    size = length
-                    return ''.join(secrets.choice(chars) for x in range(size))
-
-                content = """<?php
-$_ENV['snappymail_INCLUDE_AS_API'] = true;
-include '/usr/local/CyberCP/public/snappymail/index.php';
-
-$oConfig = \snappymail\Api::Config();
-$oConfig->SetPassword('%s');
-echo $oConfig->Save() ? 'Done' : 'Error';
-
-?>""" % (generate_pass())
-
-                writeToFile = open('/usr/local/CyberCP/public/snappymail.php', 'w')
-                writeToFile.write(content)
-                writeToFile.close()
-
-                command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/snappymail/data"
-                ProcessUtilities.executioner(command, 'root', True)
-
-            except:
-                pass
-
-
             command = "usermod -G lscpd,lsadm,nobody lscpd"
             ProcessUtilities.executioner(command, 'root', True)
 
@@ -1297,8 +1295,8 @@ echo $oConfig->Save() ? 'Done' : 'Error';
             command = "chown -R root:root /usr/local/lscp"
             ProcessUtilities.executioner(command, 'root', True)
 
-            command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/rainloop"
-            ProcessUtilities.executioner(command, 'root', True)
+            for command in legacy_data_permission_commands():
+                ProcessUtilities.executioner(command, 'root', True)
 
             command = "chmod 700 /usr/local/CyberCP/cli/cyberPanel.py"
             ProcessUtilities.executioner(command, 'root', True)
@@ -1412,12 +1410,6 @@ echo $oConfig->Save() ? 'Done' : 'Error';
             command = 'chmod 640 /usr/local/lscp/cyberpanel/logs/access.log'
             ProcessUtilities.executioner(command, 'root', True)
 
-            command = '/usr/local/lsws/lsphp83/bin/php /usr/local/CyberCP/public/snappymail.php'
-            ProcessUtilities.executioner(command, 'root', True)
-
-            command = 'chmod 600 /usr/local/CyberCP/public/snappymail.php'
-            ProcessUtilities.executioner(command, 'root', True)
-
             ###
 
             WriteToFile = open('/etc/fstab', 'a')
@@ -1465,4 +1457,3 @@ echo $oConfig->Save() ? 'Done' : 'Error';
 
         except BaseException as msg:
             logging.writeToFile(str(msg) + " [fixPermissions]")
-
