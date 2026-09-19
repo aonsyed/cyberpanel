@@ -774,7 +774,8 @@ func validHostnames(values []string) bool {
 
 func validHostname(value string) bool {
 	value = strings.ToLower(strings.TrimSuffix(value, "."))
-	if value == "" || len(value) > 253 || netip.ParseAddr(value).IsValid() {
+	parsedAddress, _ := netip.ParseAddr(value)
+	if value == "" || len(value) > 253 || parsedAddress.IsValid() {
 		return false
 	}
 	labels := strings.Split(value, ".")
@@ -799,7 +800,8 @@ func validDNSName(value string) bool {
 	if value == "@" || value == "*" {
 		return true
 	}
-	if len(value) == 0 || len(value) > 253 || netip.ParseAddr(value).IsValid() {
+	parsedAddress, _ := netip.ParseAddr(value)
+	if len(value) == 0 || len(value) > 253 || parsedAddress.IsValid() {
 		return false
 	}
 	labels := strings.Split(value, ".")
