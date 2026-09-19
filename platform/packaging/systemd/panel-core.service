@@ -12,6 +12,7 @@ Group=cyberpanel
 ExecStart=/usr/lib/cyberpanel/bin/cyberpanel serve -config /etc/cyberpanel/panel-core.json
 LoadCredential=audit-signing.key:/etc/cyberpanel/secrets/audit-signing.key
 LoadCredential=webmail-session.key:/etc/cyberpanel/secrets/webmail-session.key
+LoadCredential=mail-webmail-master:/etc/cyberpanel/secrets/mail-webmail-master
 LoadCredential=marketing-unsubscribe.key:/etc/cyberpanel/secrets/marketing-unsubscribe.key
 RuntimeDirectory=cyberpanel-core
 RuntimeDirectoryMode=0750
