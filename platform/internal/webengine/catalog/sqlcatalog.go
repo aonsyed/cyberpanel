@@ -90,6 +90,34 @@ CREATE TABLE IF NOT EXISTS webengine_proxy_changes (
  completed_at TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS webengine_one_pending_proxy_change ON webengine_proxy_changes(status) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS webengine_tenant_workload_routes_v1 (
+ reservation_id TEXT PRIMARY KEY,
+ tenant_id TEXT NOT NULL,
+ site_id TEXT NOT NULL,
+ domain_id TEXT NOT NULL,
+ hostname TEXT NOT NULL,
+ listener_ref TEXT NOT NULL,
+ workload_id TEXT NOT NULL,
+ recipe_digest TEXT NOT NULL,
+ image_digest TEXT NOT NULL,
+ generation BIGINT NOT NULL,
+ target_endpoint TEXT NOT NULL,
+ activation_authority_digest TEXT NOT NULL,
+ reservation_digest TEXT NOT NULL UNIQUE,
+ route_ref TEXT NOT NULL UNIQUE,
+ activation_effect_id TEXT NOT NULL UNIQUE,
+ state TEXT NOT NULL,
+ activation_generation BIGINT NOT NULL,
+ candidate_digest TEXT NOT NULL,
+ observation_digest TEXT NOT NULL,
+ receipt_json TEXT NOT NULL,
+ activated_at TIMESTAMP,
+ created_at TIMESTAMP NOT NULL,
+ updated_at TIMESTAMP NOT NULL,
+ discarded_at TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS webengine_one_live_tenant_workload_route_v1
+ ON webengine_tenant_workload_routes_v1(hostname,listener_ref) WHERE state<>'discarded';
 CREATE TABLE IF NOT EXISTS webengine_access_policies (
  policy_ref TEXT PRIMARY KEY,
  tenant_id TEXT NOT NULL,
@@ -354,6 +382,9 @@ func (catalog *SQLCatalog) Prepare(ctx context.Context, request service.SiteEffe
 		return controller.PreparedPlan{}, err
 	}
 
+	if err := guardTenantWorkloadSiteTx(ctx, tx, input); err != nil {
+		return controller.PreparedPlan{}, err
+	}
 	if err := preserveOwnedSiteTLS(ctx, tx, &input); err != nil {
 		return controller.PreparedPlan{}, err
 	}
