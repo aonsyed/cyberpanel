@@ -584,7 +584,7 @@ func loadFailbackEvidence(ctx context.Context,tx *sql.Tx,authority LocalWriterAu
 	var evidence LocalReplicationEvidence
 	if err=decode(raw,&evidence);err!=nil{return err}
 	if err=evidence.Validate();err!=nil{return err}
-	if !evidence.Usable(now)||evidence.TenantID!=operation.TenantID||evidence.GroupID!=operation.GroupID||evidence.ResourceID!=operation.ResourceID||evidence.SourceNodeID!=operation.PreviousWriterNodeID||evidence.TargetNodeID!=operation.WriterNodeID||evidence.EvidenceID!=operation.EvidenceID||fence.AppliedAt.Before(evidence.ObservedAt){return ErrCheckpointStale}
+	if !evidence.Usable(now)||evidence.TenantID!=operation.TenantID||evidence.GroupID!=operation.GroupID||evidence.ResourceID!=operation.ResourceID||evidence.SourceNodeID!=operation.PreviousWriterNodeID||evidence.TargetNodeID!=operation.WriterNodeID||evidence.EvidenceID!=ID(operation.EvidenceID)||fence.AppliedAt.Before(evidence.ObservedAt){return ErrCheckpointStale}
 	var bindingRaw []byte
 	err=tx.QueryRowContext(ctx,`SELECT binding_json FROM ha_local_channel_bindings WHERE channel_id=?`,evidence.ChannelID).Scan(&bindingRaw)
 	if errors.Is(err,sql.ErrNoRows){return ErrCheckpointStale}
