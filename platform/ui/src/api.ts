@@ -27,7 +27,7 @@ export class APIClient {
   constructor(baseURL = "") { this.baseURL = baseURL.replace(/\/$/, ""); }
 
   async loadCatalog(signal?: AbortSignal): Promise<OperationDescription[]> {
-    const response = await fetch(`${this.baseURL}/api/v1/catalog`, { credentials: "same-origin", headers: { Accept: "application/json" }, signal });
+    const response = await fetch(`${this.baseURL}/api/v1/catalog`, { credentials: "same-origin", headers: { Accept: "application/json" }, signal: signal ?? null });
     if (!response.ok) throw await this.problem(response);
     const body = await response.json() as CatalogResponse;
     if (body.api_version !== "panel.cyberpanel.io/v1" || !Array.isArray(body.operations)) throw new Error("The API catalog is incompatible with this console.");
@@ -39,7 +39,7 @@ export class APIClient {
   operation(name: string): OperationDescription | undefined { return this.catalog.get(name); }
   available(name: string): boolean { return this.catalog.has(name); }
 
-  async invoke<T>(operation: string, options: { tenantId?: string; resourceId?: string; expectedGeneration?: number; payload?: unknown; idempotencyKey?: string; signal?: AbortSignal } = {}): Promise<ResponseEnvelope<T>> {
+  async invoke<T>(operation: string, options: { tenantId?: string | undefined; resourceId?: string | undefined; expectedGeneration?: number | undefined; payload?: unknown; idempotencyKey?: string; signal?: AbortSignal | undefined } = {}): Promise<ResponseEnvelope<T>> {
     const requestID = opaqueID("req");
     const description = this.catalog.get(operation);
     if (!description) throw new Error(`Operation ${operation} is not available on this node.`);
@@ -49,7 +49,7 @@ export class APIClient {
       if (this.csrfToken) headers.set("X-CSRF-Token", this.csrfToken);
     }
     const response = await fetch(`${this.baseURL}/api/v1/operations`, {
-      method: "POST", credentials: "same-origin", headers, signal: options.signal,
+      method: "POST", credentials: "same-origin", headers, signal: options.signal ?? null,
       body: JSON.stringify({ api_version: "panel.cyberpanel.io/v1", request_id: requestID, operation, tenant_id: options.tenantId || undefined, resource_id: options.resourceId || undefined, expected_generation: options.expectedGeneration || undefined, payload: options.payload ?? {} })
     });
     const deliveredCSRF = response.headers.get("X-CSRF-Token");
@@ -65,7 +65,7 @@ export class APIClient {
     const headers = new Headers({ "Content-Type": "application/json", Accept: "application/json", "X-Request-ID": requestID });
     if (description.mutating) headers.set("Idempotency-Key", opaqueID("idem"));
     const response = await fetch(`${this.baseURL}/api/v1/operations`, {
-      method: "POST", credentials: "omit", headers, signal,
+      method: "POST", credentials: "omit", headers, signal: signal ?? null,
       body: JSON.stringify({ api_version:"panel.cyberpanel.io/v1", request_id:requestID, operation, payload })
     });
     if (!response.ok) throw await this.problem(response);
@@ -76,7 +76,7 @@ export class APIClient {
     if (!this.catalog.has("container.exec.exchange")) throw new Error("Container exec exchange is not available on this node.");
     const requestID = opaqueID("req");
     const response = await fetch(`${this.baseURL}/api/v1/containers/exec/exchange`, {
-      method: "POST", credentials: "omit", signal,
+      method: "POST", credentials: "omit", signal: signal ?? null,
       headers: { "Content-Type": "application/json", Accept: "application/json", "X-Request-ID": requestID },
       body: JSON.stringify({ grant_id: grantID, token })
     });

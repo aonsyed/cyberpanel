@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, ref } from "vue";
-import { Bell, CaretDown, Command, List, MagnifyingGlass, Moon, Sun } from "@phosphor-icons/vue";
+import { PhBell as Bell, PhCaretDown as CaretDown, PhCommand as Command, PhList as List, PhMagnifyingGlass as MagnifyingGlass, PhMoon as Moon, PhSun as Sun } from "@phosphor-icons/vue";
 import type { APIClient } from "../api";
 import { sessionStore } from "../store";
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, ref } from "vue";
-import { ArrowRight, Fingerprint, Key, ShieldCheck } from "@phosphor-icons/vue";
+import { PhArrowRight as ArrowRight, PhFingerprint as Fingerprint, PhKey as Key, PhShieldCheck as ShieldCheck } from "@phosphor-icons/vue";
 import type { APIClient } from "../api";
 import { APIProblem } from "../api";
 import { sessionStore, type ViewerProjection } from "../store";
