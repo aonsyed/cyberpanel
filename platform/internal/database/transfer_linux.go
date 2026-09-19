@@ -155,16 +155,16 @@ func (backend *LinuxTransferBackend) Import(ctx context.Context, job TransferJob
 	var gzipReader *gzip.Reader
 	if job.Compression == TransferCompressionGzip {
 		magic, peekErr := bufferedInput.Peek(2)
-		if peekErr != nil || len(magic) != 2 || magic[0] != 0x1f || magic[1] != 0x8b { return transferInputFailure(job, backend.now(), verifiedInput, nil), ErrTransferInvalid }
+		if peekErr != nil || len(magic) != 2 || magic[0] != 0x1f || magic[1] != 0x8b { return transferInputFailure(job, backend.now, verifiedInput, nil), ErrTransferInvalid }
 		gzipReader, err = gzip.NewReader(bufferedInput)
-		if err != nil { return transferInputFailure(job, backend.now(), verifiedInput, nil), ErrTransferInvalid }
+		if err != nil { return transferInputFailure(job, backend.now, verifiedInput, nil), ErrTransferInvalid }
 		defer gzipReader.Close()
 		sqlStream = gzipReader
 	}
 	decompressed := newTransferBoundedReader(sqlStream, job.Limits.MaximumBytes)
 	sqlBuffered := bufio.NewReaderSize(decompressed, 64<<10)
 	header, headerErr := sqlBuffered.ReadSlice('\n')
-	if headerErr != nil || string(header) != transferSQLMagic { return transferInputFailure(job, backend.now(), verifiedInput, nil), ErrTransferInvalid }
+	if headerErr != nil || string(header) != transferSQLMagic { return transferInputFailure(job, backend.now, verifiedInput, nil), ErrTransferInvalid }
 	lastSafeBytes := uint64(0)
 	constrained := newConstrainedTransferSQLReader(sqlBuffered, func() error {
 		if verifiedInput.count-lastSafeBytes < transferCheckpointBytes { return nil }
