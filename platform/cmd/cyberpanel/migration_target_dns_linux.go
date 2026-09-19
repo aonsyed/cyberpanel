@@ -145,7 +145,7 @@ func (target *migrationHostTarget) observeDNS(ctx context.Context, scope migrati
 	observed := []dns.RecordSet{}
 	cursor := ""
 	for {
-		page, next, listErr := target.dns.ListRecordSets(ctx, zone, 500, cursor)
+		page, next, listErr := target.dns.ListRecordSetsForTenant(ctx, scope.TenantID, zone, 500, cursor)
 		if listErr != nil {
 			return "", listErr
 		}
@@ -340,7 +340,7 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 		if parseErr != nil {
 			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, parseErr)
 		}
-		receipt, applyErr := target.dns.ApplyZone(ctx, "migration-dns-"+intent.EffectID, zone, sets, nil)
+		receipt, applyErr := target.dns.ApplyZoneForTenant(ctx, scope.TenantID, "migration-dns-"+intent.EffectID, zone, sets, nil)
 		if applyErr != nil || receipt.EffectID != "migration-dns-"+intent.EffectID || receipt.ZoneID != zone.ID || receipt.Serial == 0 || receipt.ObservedAt.IsZero() {
 			return migration.ActivationReceipt{}, errors.Join(migration.ErrAmbiguous, applyErr)
 		}

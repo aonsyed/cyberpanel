@@ -20,12 +20,12 @@ import (
 type dnsEdge struct {
 	authority interface {
 		Zone(context.Context,string,dns.ZoneID)(dns.ZoneSpec,error)
-		ImportRecordSets(context.Context,string,dns.ZoneSpec,[]dns.RecordSet,bool)(dns.AuthorityReceipt,error)
+		ImportRecordSetsForTenant(context.Context,string,string,dns.ZoneSpec,[]dns.RecordSet,bool)(dns.AuthorityReceipt,error)
 	}
 	dnssec *dns.DNSSECCoordinator
 }
 
-func newDNSEdge(authority *dns.PowerDNSControlClient, dnssec *dns.DNSSECCoordinator) (apiserver.DNSEdgeService,error) {
+func newDNSEdge(authority *dns.TenantZoneAuthority, dnssec *dns.DNSSECCoordinator) (apiserver.DNSEdgeService,error) {
 	if authority==nil||dnssec==nil{return nil,errors.New("DNS edge dependencies required")}
 	return &dnsEdge{authority:authority,dnssec:dnssec},nil
 }
@@ -37,7 +37,7 @@ func (edge *dnsEdge) ImportZone(ctx context.Context,call apiserver.EdgeCall,payl
 	sets:=make([]dns.RecordSet,0,len(payload.RecordSets));byKey:=make(map[string]dns.RecordSet,len(payload.RecordSets))
 	for _,input:=range payload.RecordSets{owner,parseErr:=dns.ParseName(input.Name);if parseErr!=nil{return apiserver.EdgeMutation[apiserver.DNSZoneMutationProjection]{},parseErr};set:=dns.RecordSet{ZoneID:zone.ID,Owner:owner,Kind:dns.RRKind(strings.ToUpper(input.Type)),TTL:input.TTL,Records:append([]string(nil),input.Values...)};canonical,canonicalErr:=set.Canonical(zone.Name);if canonicalErr!=nil{return apiserver.EdgeMutation[apiserver.DNSZoneMutationProjection]{},canonicalErr};byKey[canonical.Owner.String()+"|"+string(canonical.Kind)]=canonical}
 	sets=sets[:0];keys:=make([]string,0,len(byKey));for key:=range byKey{keys=append(keys,key)};sort.Strings(keys);for _,key:=range keys{sets=append(sets,byKey[key])}
-	zone.Generation++;receipt,err:=edge.authority.ImportRecordSets(ctx,dnsEdgeEffect(call,"import"),zone,sets,payload.Replace);if err!=nil{return apiserver.EdgeMutation[apiserver.DNSZoneMutationProjection]{},err}
+	zone.Generation++;receipt,err:=edge.authority.ImportRecordSetsForTenant(ctx,call.TenantID,dnsEdgeEffect(call,"import"),zone,sets,payload.Replace);if err!=nil{return apiserver.EdgeMutation[apiserver.DNSZoneMutationProjection]{},err}
 	state:=edge.dnssecState(ctx,zone);projection:=apiserver.DNSZoneMutationProjection{ID:string(zone.ID),Name:zone.Name.String(),Serial:receipt.Serial,DNSSEC:state,Generation:zone.Generation}
 	return apiserver.EdgeMutation[apiserver.DNSZoneMutationProjection]{OperationID:receipt.EffectID,State:"applied",Generation:zone.Generation,Resource:projection},nil
 }

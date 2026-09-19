@@ -41,7 +41,7 @@ type migrationHostTarget struct {
 	hosting          hostingservice.Service
 	sites            *sqlrepo.Repository
 	files            *access.FileService
-	dns              *dns.PowerDNSControlClient
+	dns              *dns.TenantZoneAuthority
 	database         migration.CanonicalImportHandler
 	auxiliary        *migrationAuxiliaryTarget
 	certificate      *migrationCertificateTarget
@@ -50,7 +50,7 @@ type migrationHostTarget struct {
 	mu               sync.Mutex
 }
 
-func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repository, files *access.FileService, dnsClient *dns.PowerDNSControlClient, repository *migration.SQLRepository, applicationProbe migration.TargetProbe, secretsFactory func(context.Context, *sql.DB, *migration.RuntimeScopeStore) (migration.MigrationSecretGateway, error), databaseFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (migration.CanonicalImportHandler, error), auxiliaryServices migrationAuxiliaryServices, certificateFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (*migrationCertificateTarget, error), mailStore mailcontrol.SQLControlRepository, mailProjector mailcontrol.RepositorySnapshotProjector, mailRuntime *mailcontrol.MailDaemonClient) localmigration.TargetFactory {
+func migrationTargetFactory(hosting hostingservice.Service, sites *sqlrepo.Repository, files *access.FileService, dnsClient *dns.TenantZoneAuthority, repository *migration.SQLRepository, applicationProbe migration.TargetProbe, secretsFactory func(context.Context, *sql.DB, *migration.RuntimeScopeStore) (migration.MigrationSecretGateway, error), databaseFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (migration.CanonicalImportHandler, error), auxiliaryServices migrationAuxiliaryServices, certificateFactory func(context.Context, *sql.DB, *migration.ChunkStore, *migration.RuntimeScopeStore) (*migrationCertificateTarget, error), mailStore mailcontrol.SQLControlRepository, mailProjector mailcontrol.RepositorySnapshotProjector, mailRuntime *mailcontrol.MailDaemonClient) localmigration.TargetFactory {
 	return func(ctx context.Context, db *sql.DB, chunks *migration.ChunkStore, capacity migration.TargetCapacityProvider, scopes *migration.RuntimeScopeStore) (*migration.CanonicalTargetImporter, error) {
 		if sites == nil || files == nil || files.Executor == nil || dnsClient == nil || repository == nil || applicationProbe == nil || secretsFactory == nil || databaseFactory == nil || mailStore.DB == nil || mailProjector.Store == nil || mailRuntime == nil {
 			return nil, migration.ErrBlocked

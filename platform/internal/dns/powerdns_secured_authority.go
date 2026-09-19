@@ -52,13 +52,27 @@ func (authority *SecuredPowerDNSAuthority) DatabaseIdentity() PowerDNSAuthoritat
 func (authority *SecuredPowerDNSAuthority) Zone(ctx context.Context,tenant string,id ZoneID)(ZoneSpec,error){if authority==nil||!authority.database.valid(){return ZoneSpec{},ErrPowerDNSDatabaseIsolation};return (PowerDNSAuthority{DB:authority.database.database}).Zone(ctx,tenant,id)}
 func (authority *SecuredPowerDNSAuthority) ListZones(ctx context.Context,tenant string,limit int,cursor string)([]ZoneSpec,string,error){if authority==nil||!authority.database.valid(){return nil,"",ErrPowerDNSDatabaseIsolation};return (PowerDNSAuthority{DB:authority.database.database}).ListZones(ctx,tenant,limit,cursor)}
 func (authority *SecuredPowerDNSAuthority) ListRecordSets(ctx context.Context,zone ZoneSpec,limit int,cursor string)([]RecordSet,string,error){if authority==nil||!authority.database.valid(){return nil,"",ErrPowerDNSDatabaseIsolation};return (PowerDNSAuthority{DB:authority.database.database}).ListRecordSets(ctx,zone,limit,cursor)}
+func (authority *SecuredPowerDNSAuthority) ObserveZone(ctx context.Context,tenant string,id ZoneID,effect string)(ZoneSpec,AuthorityReceipt,error){if authority==nil||!authority.database.valid(){return ZoneSpec{},AuthorityReceipt{},ErrPowerDNSDatabaseIsolation};return (PowerDNSAuthority{DB:authority.database.database}).ObserveZone(ctx,tenant,id,effect)}
+func (authority *SecuredPowerDNSAuthority) ConfirmZoneAbsent(ctx context.Context,id ZoneID,name DNSName)error{if authority==nil||!authority.database.valid(){return ErrPowerDNSDatabaseIsolation};return (PowerDNSAuthority{DB:authority.database.database}).ConfirmZoneAbsent(ctx,id,name)}
+
+// AdoptZone writes an exact ownership tuple only when the selected legacy
+// domain has no ownership metadata. Exact metadata is accepted on retry; any
+// partial, duplicate, conflicting, or already-owned tuple is quarantined.
+func(authority *SecuredPowerDNSAuthority)AdoptZone(ctx context.Context,effectID string,backendDomainID int64,spec ZoneSpec)(AuthorityReceipt,error){
+	if authority==nil||!authority.database.valid(){return AuthorityReceipt{},ErrPowerDNSDatabaseIsolation};if ctx==nil||!validPowerDNSEffectID(effectID)||backendDomainID<1||spec.Generation!=1||validateZoneSpec(spec,nil,nil)!=nil{return AuthorityReceipt{},ErrInvalidDNS}
+	tx,err:=authority.database.database.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return AuthorityReceipt{},err};defer tx.Rollback();candidate,serial,err:=powerDNSAdoptionCandidate(ctx,tx,backendDomainID,spec);if err!=nil{return AuthorityReceipt{},err};if !sameZoneSpec(candidate,spec){return AuthorityReceipt{},ErrDNSConflict}
+	metadata:=map[string][]string{};for _,kind:=range []string{cyberPanelZoneIDMetadata,cyberPanelTenantMetadata,cyberPanelGenerationMetadata}{rows,queryErr:=tx.QueryContext(ctx,`SELECT content FROM domainmetadata WHERE domain_id=? AND kind=? ORDER BY id LIMIT 2`,backendDomainID,kind);if queryErr!=nil{return AuthorityReceipt{},queryErr};for rows.Next(){var value string;if err=rows.Scan(&value);err!=nil{rows.Close();return AuthorityReceipt{},err};metadata[kind]=append(metadata[kind],value)};if err=rows.Err();err!=nil{rows.Close();return AuthorityReceipt{},err};if err=rows.Close();err!=nil{return AuthorityReceipt{},err}}
+	expected:=map[string]string{cyberPanelZoneIDMetadata:string(spec.ID),cyberPanelTenantMetadata:spec.TenantID,cyberPanelGenerationMetadata:strconv.FormatUint(spec.Generation,10)};var duplicates uint64;if err=tx.QueryRowContext(ctx,`SELECT COUNT(DISTINCT domain_id) FROM domainmetadata WHERE kind=? AND content=? AND domain_id<>?`,cyberPanelZoneIDMetadata,spec.ID,backendDomainID).Scan(&duplicates);err!=nil{return AuthorityReceipt{},err};if duplicates!=0{return AuthorityReceipt{},ErrDNSConflict}
+	hasMetadata:=len(metadata[cyberPanelZoneIDMetadata])+len(metadata[cyberPanelTenantMetadata])+len(metadata[cyberPanelGenerationMetadata])!=0;if hasMetadata{for kind,value:=range expected{if len(metadata[kind])!=1||metadata[kind][0]!=value{return AuthorityReceipt{},ErrDNSConflict}};observed,observedSerial,observeErr:=powerDNSZoneObservationByDomain(ctx,tx,backendDomainID);if observeErr!=nil||!sameZoneSpec(observed,spec)||observedSerial!=serial{return AuthorityReceipt{},errors.Join(ErrDNSConflict,observeErr)};return AuthorityReceipt{EffectID:effectID,ZoneID:spec.ID,Serial:serial,ObservedAt:time.Now().UTC()},tx.Commit()}
+	if _,err=tx.ExecContext(ctx,`UPDATE domains SET account=? WHERE id=?`,spec.Account,backendDomainID);err!=nil{return AuthorityReceipt{},err};for kind,value:=range expected{if _,err=tx.ExecContext(ctx,`INSERT INTO domainmetadata(domain_id,kind,content) VALUES(?,?,?)`,backendDomainID,kind,value);err!=nil{return AuthorityReceipt{},err}};observed,observedSerial,err:=powerDNSZoneObservationByDomain(ctx,tx,backendDomainID);if err!=nil||!sameZoneSpec(observed,spec)||observedSerial!=serial{return AuthorityReceipt{},errors.Join(ErrDNSConflict,err)};if err=tx.Commit();err!=nil{return AuthorityReceipt{},err};return AuthorityReceipt{EffectID:effectID,ZoneID:spec.ID,Serial:serial,ObservedAt:time.Now().UTC()},nil
+}
 
 // ImportRecordSets replaces either the supplied RRsets or every non-SOA
 // RRset in one transaction while retaining zone ownership, transfer peers,
 // TSIG keys, DNSSEC keys, and provider metadata.
 func(authority *SecuredPowerDNSAuthority)ImportRecordSets(ctx context.Context,effectID string,spec ZoneSpec,sets []RecordSet,replace bool)(AuthorityReceipt,error){
 	if authority==nil||!authority.database.valid()||ctx==nil||!validPowerDNSEffectID(effectID)||len(sets)==0||len(sets)>10000{return AuthorityReceipt{},ErrInvalidDNS};for _,set:=range sets{if set.ZoneID!=spec.ID||set.Validate(spec.Name)!=nil{return AuthorityReceipt{},ErrInvalidDNS}}
-	tx,err:=authority.database.database.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return AuthorityReceipt{},err};defer tx.Rollback();var domainID int64;if err=tx.QueryRowContext(ctx,`SELECT d.id FROM domains d JOIN domainmetadata z ON z.domain_id=d.id AND z.kind=? JOIN domainmetadata t ON t.domain_id=d.id AND t.kind=? WHERE z.content=? AND t.content=? LIMIT 1`,cyberPanelZoneIDMetadata,cyberPanelTenantMetadata,spec.ID,spec.TenantID).Scan(&domainID);err!=nil{return AuthorityReceipt{},err};stored,err:=powerDNSZoneByDomain(ctx,tx,domainID);if err!=nil||stored.Name.String()!=spec.Name.String()||stored.Generation+1!=spec.Generation{return AuthorityReceipt{},ErrDNSConflict}
+	tx,err:=authority.database.database.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return AuthorityReceipt{},err};defer tx.Rollback();domainID,err:=exactPowerDNSDomainID(ctx,tx,spec.TenantID,spec.ID);if err!=nil{return AuthorityReceipt{},err};stored,err:=powerDNSZoneByDomain(ctx,tx,domainID);if err!=nil||stored.ID!=spec.ID||stored.TenantID!=spec.TenantID||stored.Name.String()!=spec.Name.String()||stored.Generation+1!=spec.Generation{return AuthorityReceipt{},errors.Join(ErrDNSConflict,err)}
 	removed:=uint32(0);if replace{result,deleteErr:=tx.ExecContext(ctx,`DELETE FROM records WHERE domain_id=? AND type<>'SOA'`,domainID);if deleteErr!=nil{return AuthorityReceipt{},deleteErr};count,countErr:=result.RowsAffected();if countErr!=nil{return AuthorityReceipt{},countErr};removed=uint32(count)}
 	for _,set:=range sets{canonical,_:=set.Canonical(spec.Name);owner:=absoluteOwner(canonical.Owner,spec.Name);if !replace{result,deleteErr:=tx.ExecContext(ctx,`DELETE FROM records WHERE domain_id=? AND name=? AND type=?`,domainID,owner,canonical.Kind);if deleteErr!=nil{return AuthorityReceipt{},deleteErr};count,countErr:=result.RowsAffected();if countErr!=nil{return AuthorityReceipt{},countErr};removed+=uint32(count)};for _,record:=range canonical.Records{content,priority:=powerDNSContent(canonical.Kind,record);if _,err=tx.ExecContext(ctx,`INSERT INTO records(domain_id,name,type,content,ttl,prio,disabled,auth) VALUES(?,?,?,?,?,?,?,?)`,domainID,owner,canonical.Kind,content,canonical.TTL,priority,false,true);err!=nil{return AuthorityReceipt{},err}}}
 	serial,err:=incrementPowerDNSSOASerial(ctx,tx,domainID);if err!=nil{return AuthorityReceipt{},err};result,err:=tx.ExecContext(ctx,`UPDATE domainmetadata SET content=? WHERE domain_id=? AND kind=? AND content=?`,strconv.FormatUint(spec.Generation,10),domainID,cyberPanelGenerationMetadata,strconv.FormatUint(stored.Generation,10));if err!=nil{return AuthorityReceipt{},err};affected,err:=result.RowsAffected();if err!=nil||affected!=1{return AuthorityReceipt{},ErrDNSConflict};if err=tx.Commit();err!=nil{return AuthorityReceipt{},err};return AuthorityReceipt{EffectID:effectID,ZoneID:spec.ID,Serial:serial,AppliedSets:uint32(len(sets)),RemovedSets:removed,ObservedAt:time.Now().UTC()},nil
@@ -162,7 +176,7 @@ func (authority *SecuredPowerDNSAuthority) DeleteZone(ctx context.Context, effec
 	defer tx.Rollback()
 
 	var domainID int64
-	err = tx.QueryRowContext(ctx, `SELECT d.id FROM domains d JOIN domainmetadata z ON z.domain_id=d.id AND z.kind=? JOIN domainmetadata t ON t.domain_id=d.id AND t.kind=? WHERE z.content=? AND t.content=? LIMIT 1`, cyberPanelZoneIDMetadata, cyberPanelTenantMetadata, spec.ID, spec.TenantID).Scan(&domainID)
+	domainID, err = exactPowerDNSDomainID(ctx, tx, spec.TenantID, spec.ID)
 	if err != nil {
 		return AuthorityReceipt{}, err
 	}
@@ -316,14 +330,7 @@ func admitPowerDNSZoneApply(ctx context.Context, tx *sql.Tx, spec ZoneSpec) erro
 		return ErrDNSConflict
 	}
 
-	var otherName string
-	duplicateErr := tx.QueryRowContext(ctx, `SELECT d.name FROM domains d JOIN domainmetadata m ON m.domain_id=d.id AND m.kind=? WHERE m.content=? LIMIT 1`, cyberPanelZoneIDMetadata, spec.ID).Scan(&otherName)
-	if duplicateErr == nil && otherName != spec.Name.String() {
-		return ErrDNSConflict
-	}
-	if duplicateErr != nil && !errors.Is(duplicateErr, sql.ErrNoRows) {
-		return duplicateErr
-	}
+	rows,duplicateErr:=tx.QueryContext(ctx,`SELECT DISTINCT d.id,d.name FROM domains d JOIN domainmetadata m ON m.domain_id=d.id AND m.kind=? AND m.content=? ORDER BY d.id LIMIT 2`,cyberPanelZoneIDMetadata,spec.ID);if duplicateErr!=nil{return duplicateErr};defer rows.Close();matches:=0;for rows.Next(){var domainID int64;var otherName string;if duplicateErr=rows.Scan(&domainID,&otherName);duplicateErr!=nil{return duplicateErr};matches++;if otherName!=spec.Name.String()||existingID!=0&&domainID!=existingID{return ErrDNSConflict}};if duplicateErr=rows.Err();duplicateErr!=nil{return duplicateErr};if matches>1{return ErrDNSConflict}
 	return nil
 }
 

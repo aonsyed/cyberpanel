@@ -283,7 +283,11 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize email marketing operations: %w", err)
 	}
-	dnsAuthority := dns.NewLocalPowerDNSControlClient()
+	dnsBackend := dns.NewLocalPowerDNSControlClient()
+	dnsAuthority, err := dns.NewTenantZoneAuthority(repositories.DNS, dnsBackend)
+	if err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("initialize tenant DNS authority: %w", err)
+	}
 	dnssecCoordinator := &dns.DNSSECCoordinator{Store: repositories.DNSSEC, Executor: dnsAuthority, Observer: dnsAuthority, Now: runtimeClock{}.Now}
 	dnsConsoleEdge, err := newDNSEdge(dnsAuthority, dnssecCoordinator)
 	if err != nil {
