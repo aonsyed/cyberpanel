@@ -36,9 +36,19 @@ SQLite command persistence: create a uniquely named disposable database, observe
 its presence through an independent client query, reopen SQLite and replay,
 delete the fixture, observe absence, and replay deletion. The disposable database
 was removed by the tested deletion; executor receipts remain for diagnosis.
-No secret material source was exercised. Principal authentication, grants,
-external TLS, the installed execd broker endpoint, and other OS/architecture
-combinations are not qualified by this check.
+The live test now additionally creates a managed principal and database-scoped
+grants, authenticates through a root-private temporary client option file,
+creates/inserts/selects fixture data, rejects a wrong password and access to
+`mysql.user`, rotates the password, rejects the old password, confirms the new
+password retains access, deletes the account, and rejects subsequent login.
+The fixture secret source is in-memory; real secret-broker delivery is not
+claimed. Evidence: `current-ubuntu-arm64-20260919-smoke/mariadb-lifecycle.log`.
+An initial post-removal assertion expected only error 1045, whereas this server
+returned 1698; direct observation confirmed access was denied and the account
+absent. The assertion now accepts both authentication-denial codes. The retained
+disposable database from that failed assertion was explicitly dropped; final
+inventory showed zero `cp_qemu_` databases or users. External TLS, the installed
+execd broker endpoint, and other OS/architecture combinations remain unqualified.
 
 ### External application database qualification gap
 
