@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/provisioning"
+	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 )
 
 const lifecyclePHPBinary = "/usr/local/lsws/lsphp83/bin/lsphp"
