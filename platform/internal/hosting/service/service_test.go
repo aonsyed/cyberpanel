@@ -576,6 +576,7 @@ func createCommand(t *testing.T, commandID, id, tenant string) CreateSite {
 			TenantID:        mustTenantID(t, tenant),
 			ProjectID:       mustProjectID(t, "project-1"),
 			PrimaryHostname: mustHostname(t, "example.test"),
+			PHPProfile:      site.PHPProfile83,
 		},
 	}
 }
@@ -662,6 +663,7 @@ func mustSiteAt(t *testing.T, id, tenant string, lifecycle site.Lifecycle) site.
 		TenantID:        mustTenantID(t, tenant),
 		ProjectID:       mustProjectID(t, "project-1"),
 		PrimaryHostname: mustHostname(t, "example.test"),
+		PHPProfile:      site.PHPProfile83,
 	})
 	if err != nil {
 		t.Fatal(err)
