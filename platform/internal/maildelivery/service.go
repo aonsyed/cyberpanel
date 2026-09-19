@@ -119,7 +119,8 @@ func (service *Service) SupportsRouting() bool {
 }
 
 func (service *Service) SupportsProviderEvents() bool {
-	return service != nil && service.providers != nil && service.webhook != nil
+	return service != nil && service.providers != nil && service.webhook.Keys != nil && service.webhook.Replay != nil &&
+		service.webhook.Audience != "" && len(service.webhook.AcceptedSchemaVersions) != 0
 }
 
 func (service *Service) SupportsLocalRelayControl() bool {
@@ -459,7 +460,7 @@ func (service *Service) RotateCredential(ctx context.Context, command RotateCred
 		return result, err
 	}
 	result.Binding = rotating
-	prepared := CredentialRotation{ID: derivedID("rotation", string(rotating.ID), command.Operation.IntentDigest), BindingID: rotating.ID,
+	prepared := CredentialRotation{ID: RotationID(derivedID("rotation", string(rotating.ID), command.Operation.IntentDigest)), BindingID: rotating.ID,
 		TenantID: rotating.TenantID, Sequence: command.Desired.Credential.Version*2 - 1, OldVersion: current.Credential.Version, NewVersion: command.Desired.Credential.Version,
 		OverlapUntil: service.currentTime().Add(command.Overlap), State: RotationPrepared, OccurredAt: service.currentTime()}
 	rotation, err := lifecycle.RotateCredential(ctx, CredentialRotationRequest{Binding: current, Rotation: prepared})

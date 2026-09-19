@@ -79,7 +79,7 @@ type SMTPSecretResolver interface {
 }
 
 type SMTPDNSResolver interface {
-	LookupNetIP(context.Context, string, string) ([]net.IP, error)
+	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
 }
 
 type SMTPDialer interface {
@@ -523,9 +523,8 @@ var nonPublicRelayPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("ff00::/8"),
 }
 
-func publicRelayIP(ip net.IP) bool {
-	address, ok := netip.AddrFromSlice(ip)
-	if !ok {
+func publicRelayIP(address netip.Addr) bool {
+	if !address.IsValid() {
 		return false
 	}
 	address = address.Unmap()
