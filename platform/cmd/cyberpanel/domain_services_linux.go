@@ -220,12 +220,12 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize webmail console edge: %w", err)
 	}
+	if auditService == nil {
+		return apiserver.DomainServices{}, fmt.Errorf("initialize webmail runtime: audit authority is unavailable")
+	}
 	webmailDataService, err := assembleWebmailDataService(ctx, repositories.ControlDB, repositories.MailControl, identityStore, auditService, mailHostname)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize webmail data runtime: %w", err)
-	}
-	if auditService == nil {
-		return apiserver.DomainServices{}, fmt.Errorf("initialize webmail runtime: audit authority is unavailable")
 	}
 	webmailRepository, err := securewebmail.NewSQLiteRepository(repositories.ControlDB)
 	if err != nil {
