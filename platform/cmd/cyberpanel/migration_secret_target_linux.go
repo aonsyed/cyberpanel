@@ -178,7 +178,7 @@ func (target *migrationSecretTarget) approved(ctx context.Context, id migration.
 	if err := verifier.Verify(ctx, manifest); err != nil {
 		return manifest, scope, authority, err
 	}
-	if manifest.MigrationID != id || manifest.Source != value.Source || (manifest.Source != migration.SourceCyberPanel && manifest.Source != migration.SourceCPanel && manifest.Source != migration.SourceCanonical) {
+	if manifest.MigrationID != id || manifest.Source != value.Source || (manifest.Source != migration.SourceCyberPanel && manifest.Source != migration.SourceCyberPanelBackup && manifest.Source != migration.SourceCPanel && manifest.Source != migration.SourceCanonical) {
 		return manifest, scope, authority, migration.ErrBlocked
 	}
 	digest, _, err := migrationSecretDigest(envelope)

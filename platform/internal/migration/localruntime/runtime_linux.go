@@ -148,7 +148,7 @@ func NewWithConfig(ctx context.Context, db *sql.DB, repository *migration.SQLRep
 	if backupIntake != nil {
 		localSources = append(localSources, backupIntake)
 	}
-	source := &scopedExtractorSource{scopes:scopes, locals:localSources, clients:map[migration.ID]scopedClient{}, chunks:map[string][]migration.ID{}}
+	source := &scopedExtractorSource{repository:repository, scopes:scopes, locals:localSources, clients:map[migration.ID]scopedClient{}, chunks:map[string][]migration.ID{}, clock:time.Now}
 	orchestrator, err := migration.NewOrchestrator(repository, verifier, source, source, target)
 	if err != nil {
 		return nil, err
@@ -312,7 +312,7 @@ type localMigrationSource interface {
 	Generation(context.Context, migration.RuntimeScope) (uint64, error)
 	OwnsEndpoint(string) bool
 }
-type scopedExtractorSource struct{ scopes *migration.RuntimeScopeStore; locals []localMigrationSource; mu sync.RWMutex; clients map[migration.ID]scopedClient; chunks map[string][]migration.ID }
+type scopedExtractorSource struct{ repository migration.Repository; scopes *migration.RuntimeScopeStore; locals []localMigrationSource; mu sync.RWMutex; clients map[migration.ID]scopedClient; chunks map[string][]migration.ID; clock func()time.Time }
 
 func (source *scopedExtractorSource) Discover(ctx context.Context, id migration.ID) (migration.Manifest, error) {
 	scope, local, err := source.localScope(ctx, id)
@@ -400,12 +400,21 @@ func (source *scopedExtractorSource) Generation(ctx context.Context, id migratio
 }
 
 func (source *scopedExtractorSource) Quiesce(ctx context.Context, id migration.ID, plan migration.Plan, expectedFence uint64) (migration.SourceFence, error) {
-	_, local, err := source.localScope(ctx, id)
+	state, err := source.localFenceState(ctx, id)
 	if err != nil {
 		return migration.SourceFence{}, err
 	}
-	if local != nil {
-		return migration.SourceFence{}, migration.ErrBlocked
+	if state.local != nil {
+		if expectedFence == 0 || expectedFence != state.fence || !sameLocalCutoverPlan(plan, state.plan) {
+			return migration.SourceFence{}, migration.ErrConflict
+		}
+		now := time.Now().UTC()
+		if source.clock != nil {
+			now = source.clock().UTC()
+		}
+		fence := migration.SourceFence{MigrationID:id, Generation:state.manifest.SourceGeneration, Fence:expectedFence, ExpiresAt:now.Add(plan.RollbackWindow).UTC()}
+		fence.Digest = localSourceFenceDigest(state.scope, state.manifest, state.plan, fence)
+		return fence, nil
 	}
 	client, err := source.client(ctx, id)
 	if err != nil {
@@ -415,12 +424,13 @@ func (source *scopedExtractorSource) Quiesce(ctx context.Context, id migration.I
 }
 
 func (source *scopedExtractorSource) Unquiesce(ctx context.Context, fence migration.SourceFence) error {
-	_, local, err := source.localScope(ctx, fence.MigrationID)
+	state, err := source.localFenceState(ctx, fence.MigrationID)
 	if err != nil {
 		return err
 	}
-	if local != nil {
-		return migration.ErrBlocked
+	if state.local != nil {
+		_, err = source.validateLocalFence(state, fence, false)
+		return err
 	}
 	client, err := source.client(ctx, fence.MigrationID)
 	if err != nil {
@@ -430,12 +440,19 @@ func (source *scopedExtractorSource) Unquiesce(ctx context.Context, fence migrat
 }
 
 func (source *scopedExtractorSource) FinalDelta(ctx context.Context, fence migration.SourceFence, base migration.Manifest) (migration.Manifest, error) {
-	_, local, err := source.localScope(ctx, fence.MigrationID)
+	state, err := source.localFenceState(ctx, fence.MigrationID)
 	if err != nil {
 		return migration.Manifest{}, err
 	}
-	if local != nil {
-		return migration.Manifest{}, migration.ErrBlocked
+	if state.local != nil {
+		manifest, validateErr := source.validateLocalFence(state, fence, true)
+		if validateErr != nil {
+			return migration.Manifest{}, validateErr
+		}
+		if base.MigrationID != manifest.MigrationID || base.Source != manifest.Source || base.MerkleRoot != manifest.MerkleRoot || base.SourceGeneration != manifest.SourceGeneration {
+			return migration.Manifest{}, migration.ErrConflict
+		}
+		return manifest, nil
 	}
 	client, err := source.client(ctx, fence.MigrationID)
 	if err != nil {
@@ -445,12 +462,13 @@ func (source *scopedExtractorSource) FinalDelta(ctx context.Context, fence migra
 }
 
 func (source *scopedExtractorSource) CommitSource(ctx context.Context, fence migration.SourceFence) error {
-	_, local, err := source.localScope(ctx, fence.MigrationID)
+	state, err := source.localFenceState(ctx, fence.MigrationID)
 	if err != nil {
 		return err
 	}
-	if local != nil {
-		return migration.ErrBlocked
+	if state.local != nil {
+		_, err = source.validateLocalFence(state, fence, true)
+		return err
 	}
 	client, err := source.client(ctx, fence.MigrationID)
 	if err != nil {
@@ -460,18 +478,102 @@ func (source *scopedExtractorSource) CommitSource(ctx context.Context, fence mig
 }
 
 func (source *scopedExtractorSource) RollbackSource(ctx context.Context, fence migration.SourceFence) error {
-	_, local, err := source.localScope(ctx, fence.MigrationID)
+	state, err := source.localFenceState(ctx, fence.MigrationID)
 	if err != nil {
 		return err
 	}
-	if local != nil {
-		return migration.ErrBlocked
+	if state.local != nil {
+		_, err = source.validateLocalFence(state, fence, false)
+		return err
 	}
 	client, err := source.client(ctx, fence.MigrationID)
 	if err != nil {
 		return err
 	}
 	return client.RollbackSource(ctx, fence)
+}
+
+type localFenceState struct {
+	scope    migration.RuntimeScope
+	local    localMigrationSource
+	manifest migration.Manifest
+	plan     migration.Plan
+	fence    uint64
+}
+
+func (source *scopedExtractorSource) localFenceState(ctx context.Context, id migration.ID) (localFenceState, error) {
+	if source == nil || source.repository == nil || ctx == nil || !id.Valid() {
+		return localFenceState{}, migration.ErrInvalid
+	}
+	scope, local, err := source.localScope(ctx, id)
+	if err != nil || local == nil {
+		return localFenceState{scope:scope, local:local}, err
+	}
+	manifest, err := local.Discover(ctx, scope)
+	if err != nil {
+		return localFenceState{}, err
+	}
+	record, err := source.repository.Migration(ctx, id)
+	if err != nil {
+		return localFenceState{}, err
+	}
+	plan, err := source.repository.Plan(ctx, record.PlanDigest)
+	if err != nil {
+		return localFenceState{}, err
+	}
+	if manifest.Validate() != nil || manifest.MigrationID != id || manifest.Source != record.Source || (manifest.Source != migration.SourceCPanel && manifest.Source != migration.SourceCyberPanelBackup) || manifest.MerkleRoot != record.ManifestRoot || manifest.SourceGeneration != record.SourceGeneration || plan.MigrationID != id || plan.ManifestRoot != manifest.MerkleRoot || plan.DryRunDigest != record.PlanDigest || plan.ApprovedAt == nil || plan.ApprovedAt.IsZero() || !isLocalDigest(plan.ApprovalDigest) || plan.RollbackWindow <= 0 || plan.RollbackWindow > 24*time.Hour || plan.QuiesceMode != "write_fence" || len(plan.Unsupported) != 0 {
+		return localFenceState{}, migration.ErrConflict
+	}
+	return localFenceState{scope:scope, local:local, manifest:manifest, plan:plan, fence:record.Fence}, nil
+}
+
+func (source *scopedExtractorSource) validateLocalFence(state localFenceState, fence migration.SourceFence, requireLive bool) (migration.Manifest, error) {
+	if state.local == nil || fence.MigrationID != state.manifest.MigrationID || fence.Generation != state.manifest.SourceGeneration || fence.Fence == 0 || fence.Fence != state.fence || fence.ExpiresAt.IsZero() || fence.Digest != localSourceFenceDigest(state.scope, state.manifest, state.plan, fence) {
+		return migration.Manifest{}, migration.ErrConflict
+	}
+	if requireLive {
+		now := time.Now().UTC()
+		if source.clock != nil {
+			now = source.clock().UTC()
+		}
+		if !now.Before(fence.ExpiresAt) {
+			return migration.Manifest{}, migration.ErrBlocked
+		}
+	}
+	return state.manifest, nil
+}
+
+func sameLocalCutoverPlan(left, right migration.Plan) bool {
+	if left.ApprovedAt == nil || right.ApprovedAt == nil {
+		return false
+	}
+	return left.ID == right.ID && left.MigrationID == right.MigrationID && left.ManifestRoot == right.ManifestRoot && left.DryRunDigest == right.DryRunDigest && left.ApprovalDigest == right.ApprovalDigest && left.RollbackWindow == right.RollbackWindow && left.QuiesceMode == right.QuiesceMode && left.CutoverMethod == right.CutoverMethod && left.ApprovedAt.Equal(*right.ApprovedAt)
+}
+
+func localSourceFenceDigest(scope migration.RuntimeScope, manifest migration.Manifest, plan migration.Plan, fence migration.SourceFence) string {
+	approvedAt := time.Time{}
+	if plan.ApprovedAt != nil {
+		approvedAt = plan.ApprovedAt.UTC()
+	}
+	raw, _ := json.Marshal(struct {
+		Domain               string               `json:"domain"`
+		TenantID             string               `json:"tenant_id"`
+		SourceEndpoint       string               `json:"source_endpoint"`
+		MigrationID          migration.ID         `json:"migration_id"`
+		Source               migration.SourceKind `json:"source"`
+		SourceInstallationID string               `json:"source_installation_id"`
+		TargetInstallationID string               `json:"target_installation_id"`
+		ManifestRoot         string               `json:"manifest_root"`
+		Generation           uint64               `json:"generation"`
+		Fence                uint64               `json:"fence"`
+		ExpiresAt            time.Time            `json:"expires_at"`
+		PlanID               migration.ID         `json:"plan_id"`
+		PlanDigest           string               `json:"plan_digest"`
+		ApprovalDigest       string               `json:"approval_digest"`
+		ApprovedAt           time.Time            `json:"approved_at"`
+	}{Domain:"local-immutable-source-fence-v1", TenantID:scope.TenantID, SourceEndpoint:scope.SourceEndpoint, MigrationID:manifest.MigrationID, Source:manifest.Source, SourceInstallationID:manifest.SourceInstallationID, TargetInstallationID:manifest.TargetInstallationID, ManifestRoot:manifest.MerkleRoot, Generation:fence.Generation, Fence:fence.Fence, ExpiresAt:fence.ExpiresAt.UTC(), PlanID:plan.ID, PlanDigest:plan.DryRunDigest, ApprovalDigest:plan.ApprovalDigest, ApprovedAt:approvedAt})
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
 }
 
 func (source *scopedExtractorSource) localScope(ctx context.Context, id migration.ID) (migration.RuntimeScope, localMigrationSource, error) {
