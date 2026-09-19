@@ -176,7 +176,7 @@ func main() {
 		}
 		return malwarescan.LinuxMalwareSiteRegistration{Tenant: target.Tenant, Site: target.Site, Root: target.Root, RootGeneration: binding.RootGeneration, SiteKey: binding.SiteKey, UID: binding.UID, GID: binding.GID}, nil
 	})
-	malwareWorker, err := malwarescan.NewLinuxMalwareWorkerServer(malwareResolver, controlUID)
+	malwareWorker, err := malwarescan.NewLinuxMalwareWorkerServer(malwareResolver, controlUID, mutationAdmission)
 	if err != nil {
 		log.Fatalf("initialize malware worker: %v", err)
 	}
@@ -593,7 +593,7 @@ func main() {
 			log.Fatalf("listen on package-maintenance socket: %v", err)
 		}
 		defer packageMaintenanceListener.Close()
-		packageMaintenanceServer = &packagemaint.LinuxBrokerServer{Authorizer: packagePolicy, Broker: packageBroker, MaximumConcurrent: 8}
+		packageMaintenanceServer = &packagemaint.LinuxBrokerServer{Authorizer: packagePolicy, Broker: packageBroker, Admission: mutationAdmission, MaximumConcurrent: 8}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

@@ -123,7 +123,9 @@ func runCore(configuration coreConfiguration) error {
 		RecoverySocket:apiserver.SocketOptions{Path:configuration.RecoverySocket,DirectoryMode:0750,SocketMode:0600,UID:-1,GID:-1},
 		GatewayUIDs:[]uint32{gatewayUID},EnableRecovery:true,ShutdownTimeout:30*time.Second,
 	}}
-	malwareSchedules, err := newMalwareScheduleRunner(domainServices.Malware)
+	malwareAdmission, ok := domainServices.RebootControl.(apiserver.MutationAdmission)
+	if !ok { return errors.New("malware scheduler requires reboot mutation admission") }
+	malwareSchedules, err := newMalwareScheduleRunner(domainServices.Malware, malwareAdmission)
 	if err != nil { return fmt.Errorf("initialize malware scheduler: %w", err) }
 	if domainServices.HostingPreviews != nil { go domainServices.HostingPreviews.RunJanitor(ctx, 30*time.Second) }
 	if domainServices.Campaigns != nil { go domainServices.Campaigns.RunDispatchQueue(ctx, time.Second, 4) }

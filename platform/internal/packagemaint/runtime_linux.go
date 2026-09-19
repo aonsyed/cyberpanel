@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 )
 
@@ -1272,6 +1273,7 @@ func validateLinuxBrokerExecutionShape(request ExecutionRequest) error {
 type LinuxBrokerServer struct {
 	Authorizer        secrets.MaterialPeerAuthorizer
 	Broker            *LinuxBroker
+	Admission         rebootcontrol.ExecutionAdmission
 	MaximumConcurrent uint32
 	once              sync.Once
 	semaphore         chan struct{}
@@ -1318,6 +1320,36 @@ func (server *LinuxBrokerServer) serve(connection net.Conn) {
 	_ = connection.SetDeadline(request.Deadline)
 	ctx, cancel := context.WithDeadline(context.Background(), request.Deadline)
 	defer cancel()
+	mutation := request.Operation == LinuxBrokerApply || request.Operation == LinuxBrokerHold || request.Operation == LinuxBrokerRepair
+	var lease rebootcontrol.ExecutionLease
+	var binding rebootcontrol.ExecutionBinding
+	settled := false
+	if mutation {
+		if server.Admission == nil {
+			return
+		}
+		var err error
+		binding, err = linuxBrokerExecutionBinding(request)
+		if err != nil {
+			return
+		}
+		lease, err = server.Admission.AdmitExecution(ctx, binding)
+		if err != nil {
+			return
+		}
+		if len(lease.Cached) != 0 {
+			cached, replayErr := server.replayLinuxBrokerResponse(request, binding, lease.Cached)
+			if replayErr == nil {
+				_ = writeLinuxBrokerFrame(connection, cached)
+			}
+			return
+		}
+		defer func() {
+			if !settled {
+				_ = rebootcontrol.SettleExecution(server.Admission, lease, false, nil)
+			}
+		}()
+	}
 	response := LinuxBrokerResponse{Version: linuxBrokerProtocolVersion, RequestID: request.RequestID,
 		Operation: request.Operation, CompletedAt: time.Now().UTC()}
 	var err error
@@ -1361,7 +1393,137 @@ func (server *LinuxBrokerServer) serve(connection net.Conn) {
 		response.FailureCode = classifyLinuxBrokerError(err)
 	}
 	response.CompletedAt = time.Now().UTC()
+	if mutation {
+		terminal := terminalLinuxBrokerResponse(request, response, time.Now().UTC())
+		var settlement any
+		if terminal {
+			receipt, receiptErr := newLinuxBrokerAdmissionReceipt(binding, response)
+			if receiptErr != nil {
+				return
+			}
+			settlement = receipt
+		}
+		if rebootcontrol.SettleExecution(server.Admission, lease, terminal, settlement) != nil {
+			return
+		}
+		settled = true
+	}
 	_ = writeLinuxBrokerFrame(connection, response)
+}
+
+const linuxBrokerAdmissionReceiptVersion uint8 = 1
+
+type linuxBrokerAdmissionReceipt struct {
+	Version        uint8                `json:"version"`
+	Operation      LinuxBrokerOperation `json:"operation"`
+	EffectID       string               `json:"effect_id"`
+	RequestDigest  string               `json:"request_digest"`
+	ResponseDigest string               `json:"response_digest"`
+	CompletedAt    time.Time            `json:"completed_at"`
+}
+
+func newLinuxBrokerAdmissionReceipt(binding rebootcontrol.ExecutionBinding, response LinuxBrokerResponse) (linuxBrokerAdmissionReceipt, error) {
+	canonical := response
+	canonical.RequestID = ""
+	digest := rebootcontrol.ExecutionDigest(canonical)
+	if digest == "" || response.CompletedAt.IsZero() {
+		return linuxBrokerAdmissionReceipt{}, ErrInvalid
+	}
+	return linuxBrokerAdmissionReceipt{Version: linuxBrokerAdmissionReceiptVersion, Operation: response.Operation,
+		EffectID: binding.EffectID, RequestDigest: binding.RequestDigest, ResponseDigest: digest, CompletedAt: response.CompletedAt}, nil
+}
+
+func (server *LinuxBrokerServer) replayLinuxBrokerResponse(request LinuxBrokerRequest, binding rebootcontrol.ExecutionBinding, cached []byte) (LinuxBrokerResponse, error) {
+	var receipt linuxBrokerAdmissionReceipt
+	if json.Unmarshal(cached, &receipt) != nil || receipt.Version != linuxBrokerAdmissionReceiptVersion ||
+		receipt.Operation != request.Operation || receipt.EffectID != binding.EffectID || receipt.RequestDigest != binding.RequestDigest ||
+		!validDigest(receipt.ResponseDigest) || receipt.CompletedAt.IsZero() {
+		return LinuxBrokerResponse{}, ErrAmbiguous
+	}
+	response := LinuxBrokerResponse{Version: linuxBrokerProtocolVersion, Operation: request.Operation, Succeeded: true, CompletedAt: receipt.CompletedAt}
+	switch request.Operation {
+	case LinuxBrokerApply:
+		entry, found, err := server.Broker.journal.load(request.Execution.EffectID)
+		requestDigest, digestErr := canonicalDigest(*request.Execution)
+		if err != nil || digestErr != nil || !found || entry.RequestDigest != requestDigest || entry.FailureCode != "" || entry.Receipt.EffectID == "" {
+			return LinuxBrokerResponse{}, ErrAmbiguous
+		}
+		response.Receipt = &entry.Receipt
+	case LinuxBrokerHold:
+		entry, found, err := server.Broker.journal.loadHold(request.Hold.EffectID)
+		if err != nil || !found || entry.RequestDigest != request.Hold.Digest || entry.FailureCode != "" || entry.Receipt.EffectID == "" {
+			return LinuxBrokerResponse{}, ErrAmbiguous
+		}
+		response.HoldReceipt, response.Inventory = &entry.Receipt, &entry.After
+	case LinuxBrokerRepair:
+		journal := server.Broker.journal
+		journal.mu.Lock()
+		record, found, err := journal.readRepair(journal.repairPath(request.Repair.Plan.ID))
+		journal.mu.Unlock()
+		storedDigest, storedDigestErr := canonicalDigest(record.Request)
+		requestDigest, requestDigestErr := canonicalDigest(request.Repair)
+		if err != nil || storedDigestErr != nil || requestDigestErr != nil || !found || storedDigest != requestDigest || record.State != "succeeded" || record.Result == nil {
+			return LinuxBrokerResponse{}, ErrAmbiguous
+		}
+		response.RepairResult = record.Result
+	default:
+		return LinuxBrokerResponse{}, ErrInvalid
+	}
+	if rebootcontrol.ExecutionDigest(response) != receipt.ResponseDigest {
+		return LinuxBrokerResponse{}, ErrAmbiguous
+	}
+	response.RequestID = request.RequestID
+	if !terminalLinuxBrokerResponse(request, response, time.Now().UTC()) {
+		return LinuxBrokerResponse{}, ErrAmbiguous
+	}
+	return response, nil
+}
+
+func linuxBrokerExecutionBinding(request LinuxBrokerRequest) (rebootcontrol.ExecutionBinding, error) {
+	canonical := request
+	canonical.RequestID = ""
+	canonical.Deadline = time.Time{}
+	digest := rebootcontrol.ExecutionDigest(canonical)
+	if digest == "" {
+		return rebootcontrol.ExecutionBinding{}, ErrInvalid
+	}
+	effect, node, resource := "", "", ""
+	switch request.Operation {
+	case LinuxBrokerApply:
+		effect, node, resource = request.Execution.EffectID, request.Execution.Plan.NodeID, request.Execution.Plan.Digest
+	case LinuxBrokerHold:
+		effect, node, resource = request.Hold.EffectID, request.Hold.NodeID, request.Hold.Digest
+	case LinuxBrokerRepair:
+		effect, node, resource = request.Repair.Plan.ID, request.Repair.Plan.NodeID, request.Repair.Plan.Digest
+	default:
+		return rebootcontrol.ExecutionBinding{}, ErrInvalid
+	}
+	return rebootcontrol.ExecutionBinding{Boundary: "package-maintenance", Method: string(request.Operation), EffectID: effect,
+		RequestDigest: digest, Caller: "authenticated-panel-core", Resource: rebootcontrol.ExecutionResource(struct {
+			Node, Effect, Resource, Payload string
+		}{node, effect, resource, digest})}, nil
+}
+
+func terminalLinuxBrokerResponse(request LinuxBrokerRequest, response LinuxBrokerResponse, now time.Time) bool {
+	if !response.Succeeded || response.validate(request, now) != nil {
+		return false
+	}
+	switch request.Operation {
+	case LinuxBrokerApply:
+		return response.Receipt != nil && response.Receipt.Outcome == OutcomeConfirmed &&
+			response.Receipt.EffectID == request.Execution.EffectID && response.Receipt.PlanID == request.Execution.Plan.ID &&
+			response.Receipt.PlanDigest == request.Execution.Plan.Digest && response.Receipt.Fence == request.Execution.Fence &&
+			response.Receipt.AuthorizationDigest == request.Execution.Authorization.Digest
+	case LinuxBrokerHold:
+		return response.HoldReceipt != nil && response.Inventory != nil && response.HoldReceipt.Outcome == OutcomeConfirmed &&
+			response.HoldReceipt.EffectID == request.Hold.EffectID && response.HoldReceipt.RequestDigest == request.Hold.Digest &&
+			response.HoldReceipt.AuthorizationDigest == request.Hold.Authorization.Digest
+	case LinuxBrokerRepair:
+		return response.RepairResult != nil && response.RepairResult.State == "succeeded" &&
+			response.RepairResult.PlanID == request.Repair.Plan.ID && response.RepairResult.PlanDigest == request.Repair.Plan.Digest
+	default:
+		return false
+	}
 }
 
 func ListenLinuxBroker(controlGID uint32) (*net.UnixListener, error) {
