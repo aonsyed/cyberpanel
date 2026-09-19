@@ -169,6 +169,7 @@ type enrollmentHTTPResponse struct {
 	NodeID                federation.ID     `json:"node_id"`
 	PeerID                federation.ID     `json:"peer_id"`
 	PeerSigningKeys       map[string]federation.SigningKeyTrust `json:"peer_signing_keys"`
+	Grant                 federation.MutationGrant              `json:"grant"`
 	NodeCertificate       []byte            `json:"node_certificate"`
 	CertificateExpiresAt time.Time         `json:"certificate_expires_at"`
 	AuthorityEpoch       uint64            `json:"authority_epoch"`
@@ -243,7 +244,16 @@ func (api *EnrollmentAPI) serveHTTP(writer http.ResponseWriter, request *http.Re
 		writeEnrollmentFailure(writer, err)
 		return
 	}
-	response := enrollmentHTTPResponse{enrollmentProtocolVersion, payload.NodeID, api.issuer.peer, trustedKeys, issued.PEM, issued.ExpiresAt, enrollment.Node.AuthorityEpoch}
+	response := enrollmentHTTPResponse{
+		ProtocolVersion:       enrollmentProtocolVersion,
+		NodeID:                payload.NodeID,
+		PeerID:                api.issuer.peer,
+		PeerSigningKeys:       trustedKeys,
+		Grant:                 enrollment.Grant,
+		NodeCertificate:       issued.PEM,
+		CertificateExpiresAt: issued.ExpiresAt,
+		AuthorityEpoch:       enrollment.Node.AuthorityEpoch,
+	}
 	encodedResponse, err := json.Marshal(response)
 	if err != nil || len(encodedResponse) > enrollmentMaximumResponseBytes {
 		_ = api.store.RecordEnrollmentFailure(request.Context(), payload.TokenID, "persistence_failed")

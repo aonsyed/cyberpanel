@@ -425,6 +425,7 @@ func (exchange *federationEnrollmentHTTPExchange) Enroll(ctx context.Context, re
 		NodeID                federation.ID     `json:"node_id"`
 		PeerID                federation.ID     `json:"peer_id"`
 		PeerSigningKeys      map[string]federation.SigningKeyTrust `json:"peer_signing_keys"`
+		Grant                 federation.MutationGrant `json:"grant"`
 		NodeCertificate      []byte            `json:"node_certificate"`
 		CertificateExpiresAt time.Time         `json:"certificate_expires_at"`
 		AuthorityEpoch       uint64            `json:"authority_epoch"`
@@ -443,7 +444,7 @@ func (exchange *federationEnrollmentHTTPExchange) Enroll(ctx context.Context, re
 			return federation.EnrollmentResponse{}, federation.ErrForbidden
 		}
 	}
-	return federation.EnrollmentResponse{PeerID: result.PeerID, PeerSigningKeys: result.PeerSigningKeys, NodeCertificate: result.NodeCertificate, CertificateExpiresAt: result.CertificateExpiresAt, AuthorityEpoch: result.AuthorityEpoch}, nil
+	return federation.EnrollmentResponse{PeerID: result.PeerID, PeerSigningKeys: result.PeerSigningKeys, Grant: result.Grant, NodeCertificate: result.NodeCertificate, CertificateExpiresAt: result.CertificateExpiresAt, AuthorityEpoch: result.AuthorityEpoch}, nil
 }
 
 func newFederationPinnedEnrollmentTransport(endpoint *url.URL, fingerprint string, now func() time.Time) (*http.Transport, error) {
