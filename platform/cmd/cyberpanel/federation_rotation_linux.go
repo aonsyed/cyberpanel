@@ -253,10 +253,13 @@ func prepareFederationRotation(ctx context.Context, materials *federationEnrollm
 	if err != nil {
 		return nil, err
 	}
+	// A commit error is ambiguous: SQLite may have made the row durable before
+	// reporting an I/O failure. Preserve both staged keys once commit begins so
+	// a durable rotation row can always be retried safely.
+	prepared = true
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
-	prepared = true
 	return encoded, nil
 }
 
