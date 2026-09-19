@@ -53,16 +53,7 @@ import validators
 from django.http import JsonResponse
 import ipaddress
 import requests
-from plogical.wordpressInstallerUtilities import (
-    change_php_succeeded,
-    php_binary_for_selection,
-    select_wordpress_version,
-)
-from plogical.cyberedge import (
-    download_verified_plugin,
-    public_edge_status,
-    wordpress_admin_redirect,
-)
+from plogical.wordpressInstallerUtilities import select_wordpress_version
 from websiteFunctions.wordpressEntitlements import wordpress_entitlement_required
 from websiteFunctions.apacheEntitlements import (
     apache_manager_available, apache_entitlement_required,
@@ -602,7 +593,6 @@ class WebsiteManager:
         data['url'] = 'https://%s' % (FinalURL)
         data['userName'] = 'autologin'
         data['password'] = password
-        data['redirectPath'] = wordpress_admin_redirect(request.GET.get('next'))
 
         proc = httpProc(request, 'websiteFunctions/AutoLogin.html',
                         data, 'createDatabase')
@@ -928,27 +918,9 @@ class WebsiteManager:
             version = ProcessUtilities.outputExecutioner(command, None, True)
             version = get_wordpress_version(version)
 
-            command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin get cyberedge-cache --format=json --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
-                shlex.quote(Vhuser), shlex.quote(FinalPHPPath), shlex.quote(path))
-            cyberedge_plugin_raw = str(ProcessUtilities.outputExecutioner(command, None, True) or '').strip()
-            cyberedge_installed = 0
-            cyberedge_active = 0
-            try:
-                cyberedge_plugin = json.loads(cyberedge_plugin_raw)
-                cyberedge_installed = 1
-                cyberedge_active = 1 if cyberedge_plugin.get('status') == 'active' else 0
-            except (TypeError, ValueError):
-                pass
-
-            cyberedge_connected = 0
-            edge_status = {'state': 'inactive', 'cache': '', 'node': '', 'reason': ''}
-            if cyberedge_active:
-                command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp option get cyberedge_connection_history_v1 --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
-                    shlex.quote(Vhuser), shlex.quote(FinalPHPPath), shlex.quote(path))
-                connection_history = str(ProcessUtilities.outputExecutioner(command, None, True) or '').strip()
-                cyberedge_connected = 1 if connection_history == 'v1' else 0
-                if cyberedge_connected:
-                    edge_status = public_edge_status(wpsite.FinalURL)
+            command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin status litespeed-cache --skip-plugins --skip-themes --path=%s' % (
+                Vhuser, FinalPHPPath, path)
+            lscachee = str(ProcessUtilities.outputExecutioner(command) or '')
 
             # Get current theme
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp theme list --status=active --field=name --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
@@ -963,6 +935,11 @@ class WebsiteManager:
             plugins = str(ProcessUtilities.outputExecutioner(command, None, True) or '')
             pluginCount = len([p for p in plugins.split('\n') if p.strip()])
 
+
+            if lscachee.find('Status: Active') > -1:
+                lscache = 1
+            else:
+                lscache = 0
 
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp config list --skip-plugins --skip-themes --path=%s' % (
                 Vhuser, FinalPHPPath, path)
@@ -1002,13 +979,7 @@ class WebsiteManager:
 
             fb = {
                 'version': version,
-                'cyberedge_installed': cyberedge_installed,
-                'cyberedge_active': cyberedge_active,
-                'cyberedge_connected': cyberedge_connected,
-                'cyberedge_route_state': edge_status.get('state', 'unavailable'),
-                'cyberedge_cache': edge_status.get('cache', ''),
-                'cyberedge_node': edge_status.get('node', ''),
-                'cyberedge_reason': edge_status.get('reason', ''),
+                'lscache': lscache,
                 'debugging': debugging,
                 'searchIndex': searchindex,
                 'maintenanceMode': maintenanceMode,
@@ -2071,7 +2042,6 @@ class WebsiteManager:
             'debugging': 'debugging',
             'maintenanceMode': 'maintenance-mode',
             'lscache': 'lscache',
-            'cyberedge': 'cyberedge',
             'Wpcron': 'wpcron',
             # Add more mappings as needed
         }
@@ -2169,20 +2139,6 @@ Require valid-user
                     command = f'sudo -u {Vhuser} {FinalPHPPath} -d error_reporting=0 /usr/bin/wp plugin activate litespeed-cache --skip-plugins --skip-themes --path={wpsite.path}'
                 else:
                     command = f'sudo -u {Vhuser} {FinalPHPPath} -d error_reporting=0 /usr/bin/wp plugin deactivate litespeed-cache --skip-plugins --skip-themes --path={wpsite.path}'
-            elif setting == 'cyberedge':
-                plugin_archive = download_verified_plugin()
-                try:
-                    install_command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin install %s --force --skip-plugins --skip-themes --path=%s' % (
-                        shlex.quote(Vhuser), shlex.quote(FinalPHPPath),
-                        shlex.quote(plugin_archive), shlex.quote(wpsite.path))
-                    install_result = str(ProcessUtilities.outputExecutioner(install_command) or '')
-                    if 'Error:' in install_result:
-                        raise BaseException(install_result)
-                finally:
-                    if os.path.exists(plugin_archive):
-                        os.unlink(plugin_archive)
-                command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin activate cyberedge-cache --skip-plugins --skip-themes --path=%s' % (
-                    shlex.quote(Vhuser), shlex.quote(FinalPHPPath), shlex.quote(wpsite.path))
             else:
                 resp = {'status': 0, 'error_message': 'Invalid setting type'}
                 if data.get('legacy_response'):
@@ -4312,31 +4268,9 @@ context /cyberpanel_suspension_page.html {
         confPath = virtualHostUtilities.Server_root + "/conf/vhosts/" + self.domain
         completePathToConfigFile = confPath + "/vhost.conf"
 
-        try:
-            php_binary = php_binary_for_selection(phpVersion)
-        except ValueError as msg:
-            return HttpResponse(json.dumps({
-                'status': 0, 'changePHP': 0, 'error_message': str(msg),
-            }))
-        if not os.path.isfile(php_binary):
-            return HttpResponse(json.dumps({
-                'status': 0,
-                'changePHP': 0,
-                'error_message': '%s is not installed on this server.' % phpVersion,
-            }))
-
         execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
         execPath = execPath + " changePHP --phpVersion " + shlex.quote(phpVersion) + " --path " + completePathToConfigFile
-        output = ProcessUtilities.outputExecutioner(execPath)
-        if not change_php_succeeded(output):
-            logging.CyberCPLogFileWriter.writeToFile(
-                'PHP change failed for %s: %s' % (self.domain, output)
-            )
-            return HttpResponse(json.dumps({
-                'status': 0,
-                'changePHP': 0,
-                'error_message': output or 'PHP change command failed.',
-            }))
+        ProcessUtilities.popenExecutioner(execPath)
 
         try:
             website = Websites.objects.get(domain=self.domain)
@@ -4353,17 +4287,9 @@ context /cyberpanel_suspension_page.html {
                     completePathToConfigFile = confPath + "/vhost.conf"
                     execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
                     execPath = execPath + " changePHP --phpVersion " + shlex.quote(phpVersion) + " --path " + completePathToConfigFile
-                    alias_output = ProcessUtilities.outputExecutioner(execPath)
-                    if not change_php_succeeded(alias_output):
-                        raise RuntimeError(alias_output or 'PHP change command failed.')
+                    ProcessUtilities.popenExecutioner(execPath)
                 except BaseException as msg:
                     logging.CyberCPLogFileWriter.writeToFile(f'Error changing PHP for alias: {str(msg)}')
-                    return HttpResponse(json.dumps({
-                        'status': 0,
-                        'changePHP': 0,
-                        'error_message': 'PHP changed for the website, but failed for alias %s: %s'
-                                         % (alias.domain, msg),
-                    }))
 
 
         except:

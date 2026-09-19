@@ -31,12 +31,10 @@ from plogical.wordpressInstallerUtilities import (
     build_directory_probe,
     build_wordpress_core_install_command,
     directory_allows_install,
-    php_binary_for_selection,
+    wordpress_php_change_required,
 )
 from random import randint
 import hashlib
-import shlex
-from plogical.cyberedge import download_verified_plugin
 
 
 class ApplicationInstaller(multi.Thread):
@@ -681,34 +679,46 @@ class ApplicationInstaller(multi.Thread):
             statusFile.writelines('Setting up paths,0')
             statusFile.close()
 
+            #### Before installing wordpress change php to 8.0
+
+            from plogical.virtualHostUtilities import virtualHostUtilities
+
+            completePathToConfigFile = f'/usr/local/lsws/conf/vhosts/{domainName}/vhost.conf'
+
+            from plogical.phpUtilities import phpUtilities
+
             try:
-                configured_site = ChildDomains.objects.get(domain=domainName)
-                php_selection = configured_site.phpSelection
-            except ChildDomains.DoesNotExist:
-                configured_site = Websites.objects.get(domain=domainName)
-                php_selection = configured_site.phpSelection
+                phpPath = phpUtilities.GetPHPVersionFromFile(completePathToConfigFile)
+            except:
+                phpPath = '/usr/local/lsws/lsphp83/bin/php'
 
-            phpPath = php_binary_for_selection(php_selection)
-            if not os.path.isfile(phpPath):
+            requiredPHPPath = '/usr/local/lsws/lsphp83/bin/php'
+            if wordpress_php_change_required(phpPath, requiredPHPPath):
+                execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
+                execPath = execPath + " changePHP --phpVersion 'PHP 8.3' --path " + completePathToConfigFile
+                ProcessUtilities.executioner(execPath)
+                try:
+                    phpPath = phpUtilities.GetPHPVersionFromFile(completePathToConfigFile)
+                except:
+                    phpPath = requiredPHPPath
+
+            ### lets first find php path
+
+            
+
+            command = "sed -i.bak 's/^memory_limit = .*/memory_limit = 256M/' /usr/local/lsws/lsphp83/etc/php/8.3/litespeed/php.ini"
+            ProcessUtilities.executioner(command)
+
+            command = "sed -i.bak 's/^memory_limit = .*/memory_limit = 256M/' /usr/local/lsws/lsphp83/etc/php.ini"
+            ProcessUtilities.executioner(command)
+
+            ### basically for now php 8.3 is being checked
+
+            if not os.path.exists(phpPath):
                 statusFile = open(tempStatusPath, 'w')
-                statusFile.writelines(
-                    '%s is selected for this website but is not installed. '
-                    'Install that PHP version or select an installed version before installing WordPress.[404]'
-                    % php_selection
-                )
+                statusFile.writelines('PHP 8.3 missing installing now..,20')
                 statusFile.close()
-                return 0
-
-            php_code = PHPManager.getPHPString(php_selection)
-            php_ini_candidates = (
-                '/usr/local/lsws/lsphp%s/etc/php/%s.%s/litespeed/php.ini'
-                % (php_code, php_code[0], php_code[1:]),
-                '/usr/local/lsws/lsphp%s/etc/php.ini' % php_code,
-            )
-            for php_ini in php_ini_candidates:
-                if os.path.isfile(php_ini):
-                    command = "sed -i.bak 's/^memory_limit = .*/memory_limit = 256M/' %s" % shlex.quote(php_ini)
-                    ProcessUtilities.executioner(command)
+                phpUtilities.InstallSaidPHP('83')
 
 
             finalPath = ''
@@ -770,7 +780,16 @@ class ApplicationInstaller(multi.Thread):
             command = "rm -rf " + finalPath + "index.html"
             ProcessUtilities.executioner(command, externalApp)
 
-            FinalPHPPath = phpPath
+            # Always use PHP 8.3 for WordPress installation
+            FinalPHPPath = '/usr/local/lsws/lsphp83/bin/php'
+            
+            # Ensure PHP 8.3 is installed
+            if not os.path.exists(FinalPHPPath):
+                from plogical.phpUtilities import phpUtilities
+                phpUtilities.InstallSaidPHP('83')
+                if not os.path.exists(FinalPHPPath):
+                    # Fallback to detected PHP path if 8.3 install fails
+                    FinalPHPPath = phpPath
 
             ## Security Check
 
@@ -840,17 +859,11 @@ class ApplicationInstaller(multi.Thread):
             ##
 
             statusFile = open(tempStatusPath, 'w')
-            statusFile.writelines('Installing CyberEdge Cache,80')
+            statusFile.writelines('Installing LSCache Plugin,80')
             statusFile.close()
 
-            plugin_archive = download_verified_plugin()
-            try:
-                command = '%s -d error_reporting=0 /usr/bin/wp plugin install %s --force --allow-root --path=%s' % (
-                    shlex.quote(FinalPHPPath), shlex.quote(plugin_archive), shlex.quote(finalPath))
-                result = ProcessUtilities.outputExecutioner(command, externalApp)
-            finally:
-                if os.path.exists(plugin_archive):
-                    os.unlink(plugin_archive)
+            command = f"{FinalPHPPath} -d error_reporting=0 /usr/bin/wp plugin install litespeed-cache --allow-root --path=" + finalPath
+            result = ProcessUtilities.outputExecutioner(command, externalApp)
 
             if os.path.exists(ProcessUtilities.debugPath):
                 logging.writeToFile(str(result))
@@ -859,11 +872,10 @@ class ApplicationInstaller(multi.Thread):
                 raise BaseException(result)
 
             statusFile = open(tempStatusPath, 'w')
-            statusFile.writelines('Activating CyberEdge Cache,90')
+            statusFile.writelines('Activating LSCache Plugin,90')
             statusFile.close()
 
-            command = '%s -d error_reporting=0 /usr/bin/wp plugin activate cyberedge-cache --allow-root --path=%s' % (
-                shlex.quote(FinalPHPPath), shlex.quote(finalPath))
+            command = f"{FinalPHPPath} -d error_reporting=0 /usr/bin/wp plugin activate litespeed-cache --allow-root --path=" + finalPath
             result = ProcessUtilities.outputExecutioner(command, externalApp)
 
             if os.path.exists(ProcessUtilities.debugPath):
@@ -1967,6 +1979,10 @@ class ApplicationInstaller(multi.Thread):
 
             try:
                 website = Websites.objects.get(domain=DataToPass['domainName'])
+
+                if website.phpSelection == 'PHP 7.3' or website.phpSelection == 'PHP 8.2':
+                    website.phpSelection = 'PHP 8.3'
+                    website.save()
 
                 admin = Administrator.objects.get(pk=self.extraArgs['adminID'])
 

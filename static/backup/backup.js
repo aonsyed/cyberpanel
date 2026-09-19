@@ -743,7 +743,6 @@ app.controller('remoteBackupControl', function ($scope, $http, $timeout) {
                 $scope.couldNotConnect = true;
                 $scope.errorMessage = false;
                 $scope.accountsFetched = true;
-                $scope.backupProcessStarted = true;
                 $scope.notificationsBox = false;
                 $timeout.cancel();
 
@@ -757,7 +756,6 @@ app.controller('remoteBackupControl', function ($scope, $http, $timeout) {
             $scope.couldNotConnect = false;
             $scope.errorMessage = true;
             $scope.accountsFetched = true;
-            $scope.backupProcessStarted = true;
             $scope.notificationsBox = false;
         }
     };

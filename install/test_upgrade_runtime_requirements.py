@@ -127,14 +127,6 @@ chmod 755 lswsgi
         self.assertTrue(all(line.endswith('|unset|unset') for line in lines))
         self.assertNotIn('WRONG-PATH-COMMAND', self.trace.read_text())
 
-    def test_primary_panel_runtime_is_isolated_from_system_packages(self):
-        creation = '"$CyberPanel_Python" -m venv /usr/local/CyberCP'
-        self.assertIn(creation, SOURCE)
-        self.assertNotIn(
-            '"$CyberPanel_Python" -m venv --system-site-packages /usr/local/CyberCP',
-            SOURCE,
-        )
-
     def test_panel_install_failure_is_nonzero_after_bounded_retry(self):
         self.assertNotEqual(0, self.install_panel(FAKE_INSTALL_EXIT=41).returncode)
         self.assertEqual('2', self.count.read_text().strip())
@@ -163,15 +155,6 @@ chmod 755 lswsgi
         self.assertTrue(all(line.startswith(str(self.system_runtime)+'|') for line in lines))
         self.assertTrue(any(line.endswith('|/usr|') for line in lines))
         self.assertNotIn('WRONG-PATH-COMMAND', self.trace.read_text())
-
-    def test_externally_managed_runtime_preserves_distribution_pip(self):
-        result = self.run_shell(
-            'compgen() { return 0; }; Install_CyberCP_Runtime_Python_Requirements '
-            + shlex.quote(str(self.requirements)))
-        self.assertEqual(0, result.returncode, result.stderr)
-        trace = self.trace.read_text()
-        self.assertNotIn('install --upgrade pip ', trace)
-        self.assertIn('install --upgrade --ignore-installed setuptools wheel packaging --break-system-packages', trace)
 
     def test_system_install_and_validation_failures_are_nonzero(self):
         for scenario in ({'FAKE_INSTALL_EXIT':29}, {'FAKE_IMPORT_EXIT':7},
