@@ -159,7 +159,7 @@ func (response MailBrokerResponse) Validate(request MailBrokerRequest, now time.
 	}
 	switch request.Operation {
 	case MailBrokerMaildirImport:
-		if request.Maildir == nil || response.Maildir == nil || !response.Maildir.valid(*request.Maildir) || response.FailureCode != "" {
+		if request.Maildir == nil || response.Maildir == nil || !response.Maildir.valid(*request.Maildir) {
 			return ErrInvalidReceipt
 		}
 	case MailBrokerMigrationPublication:
@@ -522,7 +522,7 @@ func (server *MailDaemonServer) serve(connection net.Conn) {
 	var request MailBrokerRequest
 	defer func() {
 		if request.Maildir != nil {
-			wipeMailBytes(request.Maildir.Archive)
+			wipeMailBytes(request.Maildir.Data)
 		}
 	}()
 	if readMailFrame(connection, &request) != nil || request.Validate(now) != nil {
@@ -589,7 +589,7 @@ func (server *MailDaemonServer) serve(connection net.Conn) {
 		response.SubmittedQueueID, err = server.Host.CampaignSubmit(ctx, request.Campaign)
 	}
 	if err != nil {
-		if request.Operation == MailBrokerApply && validEffect(response.Effect, request.Effect) || request.Operation == MailBrokerMigrationPublication && response.Publication != nil && response.Publication.valid(*request.Publication) {
+		if request.Operation == MailBrokerApply && validEffect(response.Effect, request.Effect) || request.Operation == MailBrokerMigrationPublication && response.Publication != nil && response.Publication.valid(*request.Publication) || request.Operation == MailBrokerMaildirImport && response.Maildir != nil && response.Maildir.valid(*request.Maildir) {
 			response.FailureCode = mailBrokerErrorCode(err)
 			if response.Validate(request, time.Now().UTC()) == nil {
 				_ = writeMailFrame(connection, mailWireReply{Response: response})

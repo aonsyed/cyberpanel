@@ -12,15 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
-	"strings"
 	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/daemoncfg"
+	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 )
 
 const MailBrokerMigrationPublication MailBrokerOperation = "migration_publication"
@@ -116,11 +115,11 @@ func validateMigrationPublication(bundle MigrationBundle, generation ConfigGener
 	}
 	seen := make(map[MailboxID]bool, len(bundle.Maildirs))
 	for _, request := range bundle.Maildirs {
-		if request.Operation != "observe" || len(request.Archive) != 0 || request.Validate() != nil || request.ImportID != bundle.ID || request.TenantID != bundle.Domain.Domain.Tenant || request.DomainID != bundle.Domain.Domain.ID || request.Domain != bundle.Domain.Domain.Name || seen[request.MailboxID] {
+		if request.Operation != "observe" || request.Validate() != nil || request.ImportID != bundle.ID || request.TenantID != bundle.Domain.Domain.Tenant || request.DomainID != bundle.Domain.Domain.ID || request.Domain != bundle.Domain.Domain.Name || seen[request.MailboxID] {
 			return ErrInvalidCommand
 		}
 		mailbox, ok := mailboxes[request.MailboxID]
-		if !ok || mailbox.Local != request.Local || mailbox.SiteID != request.SiteID {
+		if !ok || mailbox.Local != request.Local || mailbox.SiteID != request.SiteID || mailbox.CredentialRef != request.CredentialRef || mailbox.QuotaBytes != request.QuotaBytes {
 			return ErrConflict
 		}
 		seen[request.MailboxID] = true
@@ -566,7 +565,6 @@ func (host *LinuxMailHost) requireMigrationDomainAbsent(domain string) error {
 
 func (host *LinuxMailHost) inspectMigrationMaildir(ctx context.Context, request MaildirImportRequest, live bool) (MaildirImportReceipt, error) {
 	request.Operation = "observe"
-	request.Archive = nil
 	if request.Validate() != nil {
 		return MaildirImportReceipt{}, ErrInvalidCommand
 	}
@@ -589,79 +587,29 @@ func (host *LinuxMailHost) inspectMigrationMaildir(ctx context.Context, request 
 		return MaildirImportReceipt{}, err
 	}
 	defer syscall.Close(directory)
-	binding := request
-	binding.Operation = "stage"
-	encoded, _ := json.Marshal(binding)
-	actual, err := readMailImportFile(directory, "binding.json", 16<<10)
-	if err != nil || !bytes.Equal(actual, encoded) {
+	manifest, journal, err := loadMaildirTransfer(directory, request, identity)
+	if err != nil || journal.State != "sealed" || journal.NextChunk != manifest.Manifest.ChunkCount() {
 		return MaildirImportReceipt{}, errors.Join(ErrConflict, err)
 	}
-	manifestRaw, err := readMailImportFile(directory, "manifest.json", 1<<20)
+	if !live {
+		err = verifyMaildirPayload(ctx, directory, manifest, identity.UID, identity.GID, false)
+	} else {
+		dataRoot, openErr := mailOpenAt(root, "mailboxes/"+request.Domain+"/"+request.Local, syscall.O_RDONLY|syscall.O_DIRECTORY, 0, false)
+		if openErr != nil {
+			return MaildirImportReceipt{}, openErr
+		}
+		defer syscall.Close(dataRoot)
+		maildir, openErr := mailOpenAt(dataRoot, "Maildir", syscall.O_RDONLY|syscall.O_DIRECTORY, 0, false)
+		if openErr != nil {
+			return MaildirImportReceipt{}, openErr
+		}
+		err = verifyMaildirAt(ctx, maildir, manifest.Manifest, identity.UID, identity.GID, true)
+		syscall.Close(maildir)
+	}
 	if err != nil {
 		return MaildirImportReceipt{}, err
 	}
-	var manifest maildirManifest
-	if json.Unmarshal(manifestRaw, &manifest) != nil || manifest.UID != identity.UID || manifest.GID != identity.GID || len(manifest.Entries) > 1024 {
-		return MaildirImportReceipt{}, ErrConflict
-	}
-	dataRoot := directory
-	if live {
-		dataRoot, err = mailOpenAt(root, "mailboxes/"+request.Domain+"/"+request.Local, syscall.O_RDONLY|syscall.O_DIRECTORY, 0, false)
-		if err != nil {
-			return MaildirImportReceipt{}, err
-		}
-		defer syscall.Close(dataRoot)
-	}
-	var total uint64
-	for _, entry := range manifest.Entries {
-		if err = ctx.Err(); err != nil {
-			return MaildirImportReceipt{}, err
-		}
-		var content []byte
-		if live {
-			content, err = readOwnedMailFile(dataRoot, entry.Path, maximumMaildirImportBytes, identity.UID, identity.GID)
-		} else {
-			content, err = readMailImportFile(dataRoot, entry.Path, maximumMaildirImportBytes)
-		}
-		if err != nil {
-			return MaildirImportReceipt{}, err
-		}
-		sum := sha256.Sum256(content)
-		size := uint64(len(content))
-		wipeMailBytes(content)
-		if size != entry.Size || hex.EncodeToString(sum[:]) != entry.Digest {
-			return MaildirImportReceipt{}, ErrConflict
-		}
-		total += size
-	}
-	if total != manifest.Bytes {
-		return MaildirImportReceipt{}, ErrConflict
-	}
-	sum := sha256.Sum256(manifestRaw)
-	return MaildirImportReceipt{ImportID: request.ImportID, ArchiveDigest: request.ArchiveDigest, EvidenceDigest: hex.EncodeToString(sum[:]), State: "dark", Bytes: total, Objects: uint64(len(manifest.Entries)), ObservedAt: host.now()}, nil
-}
-
-func readOwnedMailFile(root int, name string, maximum int64, uid, gid uint32) ([]byte, error) {
-	fd, err := mailOpenAt(root, name, syscall.O_RDONLY, 0, false)
-	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), "mailbox")
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uid || stat.Gid != gid || stat.Nlink != 1 || info.Size() > maximum {
-		return nil, ErrUnauthorized
-	}
-	content := make([]byte, info.Size())
-	if _, err = file.ReadAt(content, 0); err != nil && len(content) != 0 {
-		wipeMailBytes(content)
-		return nil, err
-	}
-	return content, nil
+	return maildirTransferReceipt(request, manifest.Manifest, journal), nil
 }
 
 func (host *LinuxMailHost) publishMigrationMaildirs(ctx context.Context, bundle MigrationBundle) (string, error) {
@@ -900,19 +848,19 @@ func chownMaildirAt(parent int, uid, gid uint32) error {
 			return err
 		}
 	}
-	manifestRaw, err := readMailImportFile(parent, "manifest.json", 1<<20)
+	manifestRaw, err := readMailImportFile(parent, "manifest.json", int64(migration.MaildirManifestMaxBytes+16<<10))
 	if err != nil {
 		return err
 	}
 	var manifest maildirManifest
-	if json.Unmarshal(manifestRaw, &manifest) != nil {
+	if json.Unmarshal(manifestRaw, &manifest) != nil || manifest.Manifest.Validate() != nil {
 		return ErrConflict
 	}
-	for _, entry := range manifest.Entries {
-		if path.Clean(entry.Path) != entry.Path || !strings.HasPrefix(entry.Path, "Maildir/") {
+	for _, entry := range manifest.Manifest.Files {
+		if !migration.ValidMaildirPath(entry.Path) {
 			return ErrConflict
 		}
-		fd, openErr := mailOpenAt(parent, entry.Path, syscall.O_RDONLY, 0, false)
+		fd, openErr := mailOpenAt(parent, "Maildir/"+entry.Path, syscall.O_RDONLY, 0, false)
 		if openErr != nil {
 			return openErr
 		}

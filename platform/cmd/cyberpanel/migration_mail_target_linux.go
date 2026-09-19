@@ -32,7 +32,7 @@ type migrationMailAdmission struct {
 	scope      migration.RuntimeScope
 	bundle     mail.MigrationBundle
 	generation mail.ConfigGeneration
-	staging    []mail.MaildirImportRequest
+	staging    []migrationMailboxTransfer
 	bytes      uint64
 	objects    uint64
 }
@@ -223,7 +223,7 @@ func (target *migrationMailTarget) admit(ctx context.Context, intent migration.I
 	sort.Slice(mailboxes, func(i, j int) bool { return mailboxes[i].Address < mailboxes[j].Address })
 	for _, source := range mailboxes {
 		if source.CredentialDisposition != migration.CredentialPreserved || source.CredentialSecretID == "" || len(source.Data) > 1 {
-			return admission, fmt.Errorf("%w: mailboxes require a typed preserved bcrypt credential and at most one Maildir artifact", migration.ErrBlocked)
+			return admission, fmt.Errorf("%w: mailboxes require a typed preserved bcrypt credential and at most one canonical Maildir artifact", migration.ErrBlocked)
 		}
 		local, ok := migrationMailboxLocal(source.Address, admission.source.Name)
 		if !ok {
@@ -234,23 +234,30 @@ func (target *migrationMailTarget) admit(ctx context.Context, intent migration.I
 			return admission, resolveErr
 		}
 		mailboxID := migrationMailboxID(intent.MigrationID, intent.TargetID, source.SourceID)
+		credentialRef := mail.MailboxCredentialRef(string(metadata.ID))
 		quota := source.QuotaBytes
 		if quota == 0 {
 			quota = 1 << 50
 		}
-		projection.Mailboxes = append(projection.Mailboxes, mail.Mailbox{ID: mailboxID, Domain: domainID, SiteID: siteTarget.String(), Local: local, QuotaBytes: quota, Enabled: true, CredentialRef: mail.MailboxCredentialRef(string(metadata.ID))})
-		archive, objects, archiveErr := target.mailboxArchive(ctx, source.Data)
-		if archiveErr != nil {
-			return admission, archiveErr
+		projection.Mailboxes = append(projection.Mailboxes, mail.Mailbox{ID: mailboxID, Domain: domainID, SiteID: siteTarget.String(), Local: local, QuotaBytes: quota, Enabled: true, CredentialRef: credentialRef})
+		transfer, transferErr := target.mailboxTransfer(ctx, source.Data)
+		if transferErr != nil {
+			return admission, transferErr
 		}
-		sum := sha256.Sum256(archive)
-		request := mail.MaildirImportRequest{Operation: "stage", ImportID: migrationMailImportID(intent), TenantID: admission.scope.TenantID, SiteID: siteTarget.String(), DomainID: domainID, MailboxID: mailboxID, Domain: projection.Domain.Name, Local: local, ArchiveDigest: hex.EncodeToString(sum[:]), Archive: archive}
+		if transfer.manifest.TotalBytes > quota {
+			return admission, migration.ErrCapacity
+		}
+		request := mail.MaildirImportRequest{Operation: "observe", ImportID: migrationMailImportID(intent), TenantID: admission.scope.TenantID, SiteID: siteTarget.String(), DomainID: domainID, MailboxID: mailboxID, Domain: projection.Domain.Name, Local: local, CredentialRef: credentialRef, QuotaBytes: quota, SourceDigest: transfer.sourceDigest, ManifestRoot: transfer.manifest.RootDigest}
 		if request.Validate() != nil {
 			return admission, migration.ErrInvalid
 		}
-		admission.staging = append(admission.staging, request)
-		admission.bytes += uint64(len(archive))
-		admission.objects += objects
+		transfer.request = request
+		admission.staging = append(admission.staging, transfer)
+		if transfer.manifest.TotalBytes > ^uint64(0)-admission.bytes || transfer.manifest.TotalFiles > ^uint64(0)-admission.objects {
+			return admission, migration.ErrCapacity
+		}
+		admission.bytes += transfer.manifest.TotalBytes
+		admission.objects += transfer.manifest.TotalFiles
 	}
 	aliases, err := migrationMailAliases(intent, admission.source, domainID)
 	if err != nil {
@@ -258,10 +265,8 @@ func (target *migrationMailTarget) admit(ctx context.Context, intent migration.I
 	}
 	projection.Aliases = aliases
 	bundle := mail.MigrationBundle{ID: migrationMailImportID(intent), Domain: projection}
-	for _, request := range admission.staging {
-		request.Operation = "observe"
-		request.Archive = nil
-		bundle.Maildirs = append(bundle.Maildirs, request)
+	for _, transfer := range admission.staging {
+		bundle.Maildirs = append(bundle.Maildirs, transfer.request)
 	}
 	admission.bundle = bundle
 	admission.generation, err = target.coordinator.Prepare(ctx, bundle)
@@ -282,25 +287,6 @@ func migrationMailboxLocal(address, domain string) (string, bool) {
 		return "", false
 	}
 	return local, true
-}
-
-func (target *migrationMailTarget) mailboxArchive(ctx context.Context, chunks []migration.Chunk) ([]byte, uint64, error) {
-	if len(chunks) == 0 {
-		return make([]byte, 1024), 0, nil
-	}
-	chunk := chunks[0]
-	if chunk.Size < 1024 || chunk.Size > 16<<20 || chunk.MediaType != "application/vnd.cyberpanel.migration.mailbox-maildir+tar" || chunk.Compression != "tar" || chunk.EncryptionDomain != "mailbox-data" || chunk.ObjectCount > 1024 {
-		return nil, 0, migration.ErrBlocked
-	}
-	content, err := target.chunks.ReadRange(ctx, chunk.Digest, 0, chunk.Size)
-	if err != nil {
-		return nil, 0, err
-	}
-	sum := sha256.Sum256(content)
-	if hex.EncodeToString(sum[:]) != chunk.Digest {
-		return nil, 0, migration.ErrConflict
-	}
-	return content, chunk.ObjectCount, nil
 }
 
 func migrationMailAliases(intent migration.ImportIntent, source migration.MailDomain, domainID mail.DomainID) ([]mail.Alias, error) {
@@ -348,10 +334,6 @@ func (target *migrationMailTarget) Apply(ctx context.Context, intent migration.I
 	}
 	observed, observeErr := target.runtime.PublishMigration(ctx, mail.MailPublicationRequest{Operation: "observe", Bundle: admission.bundle, Generation: admission.generation})
 	if observeErr == nil {
-		for index := range admission.staging {
-			wipeBytes(admission.staging[index].Archive)
-			admission.staging[index].Archive = nil
-		}
 		if observed.State == "active" {
 			if err = target.coordinator.Complete(ctx, admission.bundle, observed); err != nil {
 				return migration.ImportEffect{}, err
@@ -367,16 +349,11 @@ func (target *migrationMailTarget) Apply(ctx context.Context, intent migration.I
 		return effect, nil
 	}
 	if !errors.Is(observeErr, mail.ErrNotFound) {
-		for index := range admission.staging {
-			wipeBytes(admission.staging[index].Archive)
-		}
 		return migration.ImportEffect{}, observeErr
 	}
 	proofs := []string{}
 	for index := range admission.staging {
-		receipt, stageErr := target.runtime.ImportMaildir(ctx, admission.staging[index])
-		wipeBytes(admission.staging[index].Archive)
-		admission.staging[index].Archive = nil
+		receipt, stageErr := target.stageMailboxTransfer(ctx, admission.staging[index])
 		if stageErr != nil {
 			return migration.ImportEffect{}, stageErr
 		}
@@ -396,10 +373,6 @@ func (target *migrationMailTarget) Observe(ctx context.Context, intent migration
 	admission, err := target.admit(ctx, intent)
 	if err != nil {
 		return migration.ImportEffect{}, err
-	}
-	for index := range admission.staging {
-		wipeBytes(admission.staging[index].Archive)
-		admission.staging[index].Archive = nil
 	}
 	receipt, err := target.runtime.PublishMigration(ctx, mail.MailPublicationRequest{Operation: "observe", Bundle: admission.bundle, Generation: admission.generation})
 	if err != nil {
@@ -424,10 +397,6 @@ func (target *migrationMailTarget) Activate(ctx context.Context, intent migratio
 	admission, err := target.admit(ctx, intent)
 	if err != nil {
 		return migration.ImportEffect{}, err
-	}
-	for index := range admission.staging {
-		wipeBytes(admission.staging[index].Archive)
-		admission.staging[index].Archive = nil
 	}
 	if err = target.coordinator.MarkActivating(ctx, admission.bundle.ID); err != nil {
 		return migration.ImportEffect{}, err
@@ -469,18 +438,27 @@ func (target *migrationMailTarget) Compensate(ctx context.Context, intent migrat
 	if err != nil {
 		return migration.ImportEffect{}, err
 	}
-	for index := range admission.staging {
-		wipeBytes(admission.staging[index].Archive)
-		admission.staging[index].Archive = nil
-	}
 	receipt, cancelErr := target.runtime.PublishMigration(ctx, mail.MailPublicationRequest{Operation: "cancel", Bundle: admission.bundle, Generation: admission.generation})
 	if cancelErr != nil && !errors.Is(cancelErr, mail.ErrNotFound) {
 		return migration.ImportEffect{}, cancelErr
 	}
+	proofs := []string{}
+	if receipt.EvidenceDigest != "" {
+		proofs = append(proofs, receipt.EvidenceDigest)
+	}
+	for _, transfer := range admission.staging {
+		discarded, discardErr := target.discardMailboxTransfer(ctx, transfer)
+		if discardErr != nil && !errors.Is(discardErr, mail.ErrNotFound) {
+			return migration.ImportEffect{}, discardErr
+		}
+		if discarded.EvidenceDigest != "" {
+			proofs = append(proofs, discarded.EvidenceDigest)
+		}
+	}
 	if err = target.coordinator.Cancel(ctx, admission.bundle.ID); err != nil {
 		return migration.ImportEffect{}, err
 	}
-	effect = migrationMailEffect(intent, admission, receipt, []string{receipt.EvidenceDigest})
+	effect = migrationMailEffect(intent, admission, receipt, proofs)
 	effect.Status = migration.ImportEffectCompensated
 	effect.TargetGeneration = 0
 	effect.ErrorCode = ""

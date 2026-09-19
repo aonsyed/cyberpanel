@@ -27,10 +27,10 @@ type archiveArtifactSource struct {
 	limits ArchiveLimits
 }
 
-func(s *archiveArtifactSource)MediaType()string{return s.spec.mediaType}
+func(s *archiveArtifactSource)MediaType()string{if s.spec.encryptionDomain=="mailbox-data"&&strings.Contains(s.spec.mediaType,"mailbox-maildir+"){return migration.MaildirV1MediaType};return s.spec.mediaType}
 func(s *archiveArtifactSource)Compression()string{if s.spec.tree{return"tar"};return"identity"}
 func(s *archiveArtifactSource)EncryptionDomain()string{return s.spec.encryptionDomain}
-func(s *archiveArtifactSource)WriteSnapshot(ctx context.Context,destination io.Writer)(uint64,error){if s==nil||ctx==nil||destination==nil||(s.spec.exact=="")==(!s.spec.tree)||(s.spec.tree&&s.spec.prefix==""){return 0,ErrInvalid};reader,closeReader,before,err:=openApprovedArchive(s.archive);if err!=nil{return 0,err};defer closeReader();if !s.spec.tree{return s.writeExact(ctx,reader,destination,before)};return s.writeTree(ctx,reader,destination,before)}
+func(s *archiveArtifactSource)WriteSnapshot(ctx context.Context,destination io.Writer)(uint64,error){if s==nil||ctx==nil||destination==nil||(s.spec.exact=="")==(!s.spec.tree)||(s.spec.tree&&s.spec.prefix==""){return 0,ErrInvalid};reader,closeReader,before,err:=openApprovedArchive(s.archive);if err!=nil{return 0,err};defer closeReader();if !s.spec.tree{return s.writeExact(ctx,reader,destination,before)};if s.MediaType()==migration.MaildirV1MediaType{return s.writeMaildirTree(ctx,reader,destination,before)};return s.writeTree(ctx,reader,destination,before)}
 
 func(s *archiveArtifactSource)writeExact(ctx context.Context,reader *tar.Reader,destination io.Writer,before os.FileInfo)(uint64,error){found:=false;for{select{case<-ctx.Done():return 0,ctx.Err();default:};header,err:=reader.Next();if errors.Is(err,io.EOF){break};if err!=nil{return 0,err};logical,err:=logicalArchiveName(header.Name);if err!=nil{return 0,err};if logical!=s.spec.exact{continue};if found||header.Typeflag!=tar.TypeReg&&header.Typeflag!=tar.TypeRegA||header.Size<=0||uint64(header.Size)>s.limits.MaximumExpandedBytes{return 0,ErrInvalid};written,err:=copyBounded(ctx,destination,reader,uint64(header.Size));if err!=nil||written!=uint64(header.Size){return 0,errors.Join(err,io.ErrUnexpectedEOF)};found=true};if !found{return 0,migrationNotFound()};if err:=archiveUnchanged(s.archive.path,before);err!=nil{return 0,err};return 1,nil}
 

@@ -3,13 +3,12 @@
 package mail
 
 import (
-	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,40 +20,56 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/daemoncfg"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/siteops"
+	"github.com/aonsyed/cyberpanel/platform/internal/migration"
 )
 
 const MailBrokerMaildirImport MailBrokerOperation = "maildir_import"
-const maximumMaildirImportBytes = 16 << 20
+const maximumMaildirChunkBytes = int(migration.MaildirTransportChunkMax)
 
 // This boundary is deliberately dark-only. It cannot publish a mailbox or
 // accept an asserted source-fence token. The migration coordinator must verify
 // its durable source fence before any separate mail configuration activation.
 type MaildirImportRequest struct {
-	Operation     string    `json:"operation"`
-	ImportID      string    `json:"import_id"`
-	TenantID      string    `json:"tenant_id"`
-	SiteID        string    `json:"site_id"`
-	DomainID      DomainID  `json:"domain_id"`
-	MailboxID     MailboxID `json:"mailbox_id"`
-	Domain        string    `json:"domain"`
-	Local         string    `json:"local"`
-	ArchiveDigest string    `json:"archive_digest"`
-	Archive       []byte    `json:"archive,omitempty"`
+	Operation     string                     `json:"operation"`
+	ImportID      string                     `json:"import_id"`
+	TenantID      string                     `json:"tenant_id"`
+	SiteID        string                     `json:"site_id"`
+	DomainID      DomainID                   `json:"domain_id"`
+	MailboxID     MailboxID                  `json:"mailbox_id"`
+	Domain        string                     `json:"domain"`
+	Local         string                     `json:"local"`
+	CredentialRef MailboxCredentialRef       `json:"credential_ref"`
+	QuotaBytes    uint64                     `json:"quota_bytes"`
+	SourceDigest  string                     `json:"source_digest"`
+	ManifestRoot  string                     `json:"manifest_root"`
+	Manifest      *migration.MaildirManifest `json:"manifest,omitempty"`
+	Sequence      uint64                     `json:"sequence,omitempty"`
+	ChunkDigest   string                     `json:"chunk_digest,omitempty"`
+	Data          []byte                     `json:"data,omitempty"`
 }
 
 func (request MaildirImportRequest) Validate() error {
-	if (request.Operation != "stage" && request.Operation != "observe") || !validOpaque(request.ImportID) || !validOpaque(request.TenantID) || !validOpaque(request.SiteID) || !validOpaque(string(request.DomainID)) || !validOpaque(string(request.MailboxID)) || !validHostname(request.Domain) || request.Domain != strings.ToLower(request.Domain) || !validLocalPart(request.Local) || request.Local != strings.ToLower(request.Local) || !validMailEvidenceDigest(request.ArchiveDigest) {
+	if !validOpaque(request.ImportID) || !validOpaque(request.TenantID) || !validOpaque(request.SiteID) || !validOpaque(string(request.DomainID)) || !validOpaque(string(request.MailboxID)) || !validHostname(request.Domain) || request.Domain != strings.ToLower(request.Domain) || !validLocalPart(request.Local) || request.Local != strings.ToLower(request.Local) || request.CredentialRef == "" || !validOpaque(string(request.CredentialRef)) || request.QuotaBytes == 0 || request.QuotaBytes > migration.MaildirMailboxMaxBytes || !validMailEvidenceDigest(request.SourceDigest) || !validMailEvidenceDigest(request.ManifestRoot) {
 		return ErrInvalidCommand
 	}
-	if request.Operation == "stage" {
-		if len(request.Archive) < 1024 || len(request.Archive) > maximumMaildirImportBytes {
+	switch request.Operation {
+	case "begin":
+		if request.Manifest == nil || request.Manifest.Validate() != nil || request.Manifest.RootDigest != request.ManifestRoot || request.Manifest.TotalBytes > request.QuotaBytes || request.Sequence != 0 || request.ChunkDigest != "" || len(request.Data) != 0 {
 			return ErrInvalidCommand
 		}
-		sum := sha256.Sum256(request.Archive)
-		if hex.EncodeToString(sum[:]) != request.ArchiveDigest {
+	case "chunk":
+		if request.Manifest != nil || len(request.Data) == 0 || len(request.Data) > maximumMaildirChunkBytes || !validMailEvidenceDigest(request.ChunkDigest) {
 			return ErrInvalidCommand
 		}
-	} else if len(request.Archive) != 0 {
+		sum := sha256.Sum256(request.Data)
+		if hex.EncodeToString(sum[:]) != request.ChunkDigest {
+			return ErrInvalidCommand
+		}
+	case "seal", "observe", "discard":
+		if request.Manifest != nil || request.Sequence != 0 || request.ChunkDigest != "" || len(request.Data) != 0 {
+			return ErrInvalidCommand
+		}
+	default:
 		return ErrInvalidCommand
 	}
 	return nil
@@ -62,39 +77,56 @@ func (request MaildirImportRequest) Validate() error {
 
 type MaildirImportReceipt struct {
 	ImportID       string    `json:"import_id"`
-	ArchiveDigest  string    `json:"archive_digest"`
+	SourceDigest   string    `json:"source_digest"`
+	ManifestRoot   string    `json:"manifest_root"`
 	EvidenceDigest string    `json:"evidence_digest"`
 	State          string    `json:"state"`
+	NextChunk      uint64    `json:"next_chunk"`
 	Bytes          uint64    `json:"bytes"`
 	Objects        uint64    `json:"objects"`
 	ObservedAt     time.Time `json:"observed_at"`
 }
 
 func (receipt MaildirImportReceipt) valid(request MaildirImportRequest) bool {
-	return receipt.ImportID == request.ImportID && receipt.ArchiveDigest == request.ArchiveDigest && validMailEvidenceDigest(receipt.EvidenceDigest) && receipt.State == "dark" && receipt.Bytes <= maximumMaildirImportBytes && receipt.Objects <= 1024 && !receipt.ObservedAt.IsZero()
+	return receipt.ImportID == request.ImportID && receipt.SourceDigest == request.SourceDigest && receipt.ManifestRoot == request.ManifestRoot && validMailEvidenceDigest(receipt.EvidenceDigest) && (receipt.State == "receiving" || receipt.State == "sealed" || receipt.State == "discarded") && receipt.Bytes <= request.QuotaBytes && receipt.Objects <= migration.MaildirManifestMaxFiles && !receipt.ObservedAt.IsZero()
 }
 
 func (client *MailDaemonClient) ImportMaildir(ctx context.Context, request MaildirImportRequest) (MaildirImportReceipt, error) {
 	response, err := client.request(ctx, MailBrokerRequest{Operation: MailBrokerMaildirImport, Maildir: &request})
-	if err != nil {
-		return MaildirImportReceipt{}, err
-	}
 	if response.Maildir == nil {
+		if err != nil {
+			return MaildirImportReceipt{}, err
+		}
 		return MaildirImportReceipt{}, ErrInvalidReceipt
 	}
-	return *response.Maildir, nil
+	return *response.Maildir, err
 }
 
-type maildirEntry struct {
-	Path   string
-	Size   uint64
-	Digest string
-}
 type maildirManifest struct {
-	Binding  MaildirImportRequest
-	Entries  []maildirEntry
-	Bytes    uint64
+	Version  uint8
+	Binding  maildirImportBinding
+	Manifest migration.MaildirManifest
 	UID, GID uint32
+}
+type maildirImportBinding struct {
+	ImportID      string
+	TenantID      string
+	SiteID        string
+	DomainID      DomainID
+	MailboxID     MailboxID
+	Domain        string
+	Local         string
+	CredentialRef MailboxCredentialRef
+	QuotaBytes    uint64
+	SourceDigest  string
+	ManifestRoot  string
+}
+type maildirTransferJournal struct {
+	Version   uint8
+	State     string
+	NextChunk uint64
+	UID, GID  uint32
+	UpdatedAt time.Time
 }
 
 func (host *LinuxMailHost) mailboxIdentity(tenant, siteID string) (siteops.RuntimeBinding, error) {
@@ -123,155 +155,34 @@ func (host *LinuxMailHost) ImportMaildir(ctx context.Context, request MaildirImp
 		return MaildirImportReceipt{}, err
 	}
 	defer syscall.Close(root)
-	imports, err := mailDirectory(root, "mail-imports", request.Operation == "stage")
+	imports, err := mailDirectory(root, "mail-imports", request.Operation == "begin")
 	if err != nil {
+		if request.Operation != "begin" && errors.Is(err, syscall.ENOENT) {
+			return MaildirImportReceipt{}, ErrNotFound
+		}
 		return MaildirImportReceipt{}, err
 	}
 	defer syscall.Close(imports)
-	binding := request
-	binding.Archive = nil
-	binding.Operation = "stage"
-	encoded, err := json.Marshal(binding)
-	if err != nil {
-		return MaildirImportReceipt{}, err
-	}
 	id := digestMailEvidence(request.TenantID, string(request.DomainID), string(request.MailboxID), request.ImportID)
-	directory, err := mailDirectory(imports, id, request.Operation == "stage")
+	directory, err := mailDirectory(imports, id, request.Operation == "begin")
 	if err != nil {
+		if request.Operation != "begin" && errors.Is(err, syscall.ENOENT) {
+			return MaildirImportReceipt{}, ErrNotFound
+		}
 		return MaildirImportReceipt{}, err
 	}
 	defer syscall.Close(directory)
-	if request.Operation == "stage" {
-		if err := writeMailImportFile(directory, "binding.json", encoded); err != nil {
-			return MaildirImportReceipt{}, err
-		}
-		manifest := maildirManifest{Binding: binding, UID: identity.UID, GID: identity.GID}
-		for _, name := range []string{"Maildir", "Maildir/cur", "Maildir/new", "Maildir/tmp"} {
-			fd, err := mailDirectory(directory, name, true)
-			if err != nil {
-				return MaildirImportReceipt{}, err
-			}
-			syscall.Close(fd)
-		}
-		buffer := bytes.NewReader(request.Archive)
-		archive := tar.NewReader(buffer)
-		seen := map[string]bool{}
-		headers := 0
-		for {
-			if err := ctx.Err(); err != nil {
-				return MaildirImportReceipt{}, err
-			}
-			header, err := archive.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return MaildirImportReceipt{}, ErrInvalidCommand
-			}
-			headers++
-			if headers > 4096 || len(header.PAXRecords) != 0 || len(header.Xattrs) != 0 || header.Linkname != "" {
-				return MaildirImportReceipt{}, ErrInvalidCommand
-			}
-			name := strings.TrimSuffix(header.Name, "/")
-			if name == "." && header.Typeflag == tar.TypeDir {
-				continue
-			}
-			if name == "" || path.Clean(name) != name || strings.HasPrefix(name, "/") || strings.Contains(name, "\\") {
-				return MaildirImportReceipt{}, ErrInvalidCommand
-			}
-			if name == "Maildir" && header.Typeflag == tar.TypeDir {
-				continue
-			}
-			name = strings.TrimPrefix(name, "Maildir/")
-			parts := strings.Split(name, "/")
-			if len(parts) == 1 && header.Typeflag == tar.TypeDir && (parts[0] == "cur" || parts[0] == "new" || parts[0] == "tmp") {
-				continue
-			}
-			if header.Typeflag != tar.TypeReg || len(parts) != 2 || (parts[0] != "cur" && parts[0] != "new") || !mailMessageName(parts[1]) || header.Size < 0 || header.Size > maximumMaildirImportBytes || seen[name] || len(seen) >= 1024 || manifest.Bytes+uint64(header.Size) > maximumMaildirImportBytes {
-				return MaildirImportReceipt{}, ErrInvalidCommand
-			}
-			seen[name] = true
-			content, err := io.ReadAll(io.LimitReader(archive, header.Size+1))
-			if err != nil || int64(len(content)) != header.Size {
-				return MaildirImportReceipt{}, ErrInvalidCommand
-			}
-			file := "Maildir/" + name
-			sum := sha256.Sum256(content)
-			writeErr := writeMailImportFile(directory, file, content)
-			wipeMailBytes(content)
-			if writeErr != nil {
-				return MaildirImportReceipt{}, writeErr
-			}
-			manifest.Entries = append(manifest.Entries, maildirEntry{file, uint64(header.Size), hex.EncodeToString(sum[:])})
-			manifest.Bytes += uint64(header.Size)
-		}
-		trailing, err := io.ReadAll(buffer)
-		if err != nil {
-			return MaildirImportReceipt{}, err
-		}
-		for _, value := range trailing {
-			if value != 0 {
-				return MaildirImportReceipt{}, ErrInvalidCommand
-			}
-		}
-		manifestRaw, err := json.Marshal(manifest)
-		if err != nil {
-			return MaildirImportReceipt{}, err
-		}
-		if err := writeMailImportFile(directory, "manifest.json", manifestRaw); err != nil {
-			return MaildirImportReceipt{}, err
-		}
-	}
-	actualBinding, err := readMailImportFile(directory, "binding.json", 16<<10)
-	if err != nil || !bytes.Equal(actualBinding, encoded) {
-		return MaildirImportReceipt{}, ErrConflict
-	}
-	manifestRaw, err := readMailImportFile(directory, "manifest.json", 1<<20)
-	if err != nil {
+	if err = cleanupMaildirTemporaries(directory); err != nil {
 		return MaildirImportReceipt{}, err
 	}
-	var manifest maildirManifest
-	if json.Unmarshal(manifestRaw, &manifest) != nil || manifest.UID != identity.UID || manifest.GID != identity.GID || len(manifest.Entries) > 1024 {
-		return MaildirImportReceipt{}, ErrConflict
+	if request.Operation == "begin" {
+		return host.beginMaildirTransfer(ctx, directory, request, identity)
 	}
-	storedBinding, err := json.Marshal(manifest.Binding)
-	if err != nil || !bytes.Equal(storedBinding, encoded) {
-		return MaildirImportReceipt{}, ErrConflict
+	receipt, err := host.mutateMaildirTransfer(ctx, directory, request, identity)
+	if request.Operation == "observe" && errors.Is(err, syscall.ENOENT) {
+		return MaildirImportReceipt{}, ErrNotFound
 	}
-	var total uint64
-	for _, entry := range manifest.Entries {
-		if err := ctx.Err(); err != nil {
-			return MaildirImportReceipt{}, err
-		}
-		content, err := readMailImportFile(directory, entry.Path, maximumMaildirImportBytes)
-		if err != nil {
-			return MaildirImportReceipt{}, err
-		}
-		sum := sha256.Sum256(content)
-		size := uint64(len(content))
-		wipeMailBytes(content)
-		if size != entry.Size || hex.EncodeToString(sum[:]) != entry.Digest {
-			return MaildirImportReceipt{}, ErrConflict
-		}
-		total += size
-	}
-	if total != manifest.Bytes || total > maximumMaildirImportBytes {
-		return MaildirImportReceipt{}, ErrConflict
-	}
-	sum := sha256.Sum256(manifestRaw)
-	return MaildirImportReceipt{ImportID: request.ImportID, ArchiveDigest: request.ArchiveDigest, EvidenceDigest: hex.EncodeToString(sum[:]), State: "dark", Bytes: total, Objects: uint64(len(manifest.Entries)), ObservedAt: host.now()}, nil
-}
-
-func mailMessageName(value string) bool {
-	if len(value) < 1 || len(value) > 240 || value == "." || value == ".." {
-		return false
-	}
-	for _, character := range value {
-		if character < 33 || character > 126 || character == '/' || character == '\\' {
-			return false
-		}
-	}
-	return true
+	return receipt, err
 }
 
 // The kernel confines every relative read/write to one mount beneath this
