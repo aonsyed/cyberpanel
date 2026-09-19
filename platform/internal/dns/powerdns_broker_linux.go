@@ -1018,7 +1018,8 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 				response.Zone.Notify, notifyErr = server.Host.NotifyZone(ctx, request.Zone.Name)
 				response.Zone.Notify = completePowerDNSRuntimeReceipt(response.Zone.Notify, PowerDNSNotifyZone, notifyErr, response.ObservedAt)
 			}
-			response.Zone.Probe, probeErr := server.Host.Probe(ctx)
+			var probeErr error
+			response.Zone.Probe, probeErr = server.Host.Probe(ctx)
 			response.Zone.Probe = completePowerDNSRuntimeReceipt(response.Zone.Probe, PowerDNSProbeService, probeErr, response.ObservedAt)
 			err = errors.Join(err, notifyErr, probeErr)
 		}
@@ -1032,7 +1033,8 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 			response.Zone.DatabaseCommitted = true
 			response.Zone.Rediscover, err = server.Host.Rediscover(ctx)
 			response.Zone.Rediscover = completePowerDNSRuntimeReceipt(response.Zone.Rediscover, PowerDNSRediscoverZones, err, response.ObservedAt)
-			response.Zone.Probe, probeErr := server.Host.Probe(ctx)
+			var probeErr error
+			response.Zone.Probe, probeErr = server.Host.Probe(ctx)
 			response.Zone.Probe = completePowerDNSRuntimeReceipt(response.Zone.Probe, PowerDNSProbeService, probeErr, response.ObservedAt)
 			err = errors.Join(err, probeErr)
 		}
@@ -1071,7 +1073,8 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 				response.Zone.Notify, notifyErr = server.Host.NotifyZone(ctx, request.Zone.Name)
 				response.Zone.Notify = completePowerDNSRuntimeReceipt(response.Zone.Notify, PowerDNSNotifyZone, notifyErr, response.ObservedAt)
 			}
-			response.Zone.Probe, probeErr := server.Host.Probe(ctx)
+			var probeErr error
+			response.Zone.Probe, probeErr = server.Host.Probe(ctx)
 			response.Zone.Probe = completePowerDNSRuntimeReceipt(response.Zone.Probe, PowerDNSProbeService, probeErr, response.ObservedAt)
 			err = errors.Join(err, notifyErr, probeErr)
 		}
@@ -1085,7 +1088,8 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 			} else {
 				response.Zone.Notify, zoneErr = server.Host.NotifyZone(ctx, zone.Name)
 				response.Zone.Notify = completePowerDNSRuntimeReceipt(response.Zone.Notify, PowerDNSNotifyZone, zoneErr, response.ObservedAt)
-				response.Zone.Probe, probeErr := server.Host.Probe(ctx)
+				var probeErr error
+				response.Zone.Probe, probeErr = server.Host.Probe(ctx)
 				response.Zone.Probe = completePowerDNSRuntimeReceipt(response.Zone.Probe, PowerDNSProbeService, probeErr, response.ObservedAt)
 				err = errors.Join(zoneErr, probeErr)
 			}
