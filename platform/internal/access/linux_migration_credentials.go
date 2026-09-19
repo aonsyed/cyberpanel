@@ -270,7 +270,7 @@ func linuxAccounts() (map[string]linuxAccount, map[uint32]string, error) {
 			return nil, nil, ErrIntegrity
 		}
 		uid, uidErr := strconv.ParseUint(fields[2], 10, 32)
-		gid, gidErr := strconv.ParseUint(fields[3], 10, 32)
+		_, gidErr := strconv.ParseUint(fields[3], 10, 32)
 		if uidErr != nil || gidErr != nil {
 			return nil, nil, ErrIntegrity
 		}
