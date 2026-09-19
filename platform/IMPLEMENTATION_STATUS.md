@@ -11,6 +11,21 @@ production functionality remains unimplemented. Existing tests stay parked.
 After the complete production implementation exists, run the full QEMU-only
 test, review, hardening, and qualification program on Ubuntu and AlmaLinux.
 
+## Closure scope freeze
+
+This phase closes known production blockers; it does not discover or add new
+product coverage. A worker must stay inside its assigned behavior and existing
+interfaces. It may make the smallest compatibility change needed to connect
+that behavior, but it must not introduce a new protocol, transport, subsystem,
+capability family, or adjacent feature. If an existing interface cannot safely
+express the requested behavior, the worker fails closed, reports the exact
+residual blocker, commits only the bounded work that is independently correct,
+and stops so the coordinator can make the scope decision.
+
+Failure mode to avoid: expanding a replication-lifecycle fix into a federation
+receipt redesign or a new cross-node transport. That is a separate architectural
+decision, not completion of the assigned blocker.
+
 ## Worker lane scope rule
 
 Every delegated coding lane is a bounded slice, not a subsystem rewrite. The
