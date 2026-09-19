@@ -24,6 +24,7 @@ var (
 	ErrInvalidReceipt     = errors.New("invalid database operation receipt")
 	ErrInvalidEffect      = errors.New("invalid MariaDB effect receipt")
 	ErrAmbiguous          = errors.New("MariaDB effect outcome is ambiguous")
+	ErrUnavailable        = errors.New("MariaDB instance is unavailable")
 	ErrCompensationFailed = errors.New("MariaDB compensation could not be proven")
 )
 

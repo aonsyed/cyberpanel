@@ -31,6 +31,7 @@ const (
 	BrokerCompensate     BrokerOperation = "compensate"
 	BrokerWorkspaceMetadata BrokerOperation = "workspace_metadata"
 	BrokerWorkspaceQuery    BrokerOperation = "workspace_query"
+	BrokerInstanceStatus    BrokerOperation = "instance_status"
 	BrokerMariaDBHA         BrokerOperation = "mariadb_ha"
 	BrokerMigrationRestore BrokerOperation = "migration_restore"
 )
@@ -92,6 +93,7 @@ type BrokerRequest struct {
 	Effect       *EffectRequest       `json:"effect,omitempty"`
 	Compensation *CompensationRequest `json:"compensation,omitempty"`
 	Workspace    *WorkspaceBrokerRequest `json:"workspace,omitempty"`
+	InstanceID   ResourceID              `json:"instance_id,omitempty"`
 	MariaDBHA    *MariaDBHARequest    `json:"mariadb_ha,omitempty"`
 	MigrationRestore *MigrationRestoreRequest `json:"migration_restore,omitempty"`
 }
@@ -104,6 +106,7 @@ type BrokerResponse struct {
 	Compensation *CompensationReceipt  `json:"compensation,omitempty"`
 	Metadata     *WorkspaceMetadataResult `json:"metadata,omitempty"`
 	Query        *WorkspaceQueryResult `json:"query,omitempty"`
+	InstanceStatus *MariaDBInstanceStatus `json:"instance_status,omitempty"`
 	MariaDBHA    *MariaDBHAResult      `json:"mariadb_ha,omitempty"`
 	MigrationRestore *MigrationRestoreReceipt `json:"migration_restore,omitempty"`
 	FailureCode  string                `json:"failure_code,omitempty"`
@@ -111,6 +114,7 @@ type BrokerResponse struct {
 
 func (request BrokerRequest) validate(now time.Time) error {
 	if request.Operation != BrokerMigrationRestore && request.MigrationRestore != nil { return ErrInvalidCommand }
+	if request.Operation != BrokerInstanceStatus && !request.InstanceID.IsZero() { return ErrInvalidCommand }
 	if request.Version != DatabaseBrokerProtocolVersion || !validBrokerRequestID(request.RequestID) || request.Deadline.IsZero() || !request.Deadline.After(now) || request.Deadline.After(now.Add(2*time.Minute)) {
 		return ErrInvalidCommand
 	}
@@ -136,6 +140,10 @@ func (request BrokerRequest) validate(now time.Time) error {
 		if normalized, _, err := ParseWorkspaceStatement(request.Workspace.Statement); err != nil || normalized != request.Workspace.Statement {
 			return ErrInvalidCommand
 		}
+	case BrokerInstanceStatus:
+		if request.Effect != nil || request.Compensation != nil || request.Workspace != nil || request.InstanceID.IsZero() || request.MariaDBHA != nil || request.MigrationRestore != nil {
+			return ErrInvalidCommand
+		}
 	case BrokerMariaDBHA:
 		if request.Effect != nil || request.Compensation != nil || request.Workspace != nil || request.MariaDBHA == nil || validateMariaDBHARequest(*request.MariaDBHA, now) != nil {
 			return ErrInvalidCommand
@@ -148,11 +156,12 @@ func (request BrokerRequest) validate(now time.Time) error {
 
 func (response BrokerResponse) validate(request BrokerRequest) error {
 	if request.Operation != BrokerMigrationRestore && response.MigrationRestore != nil { return ErrInvalidReceipt }
+	if request.Operation != BrokerInstanceStatus && response.InstanceStatus != nil { return ErrInvalidReceipt }
 	if response.Version != DatabaseBrokerProtocolVersion || response.RequestID != request.RequestID || response.Operation != request.Operation {
 		return ErrInvalidReceipt
 	}
 	if response.FailureCode != "" {
-		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query != nil || response.MariaDBHA != nil || response.MigrationRestore != nil || !validBrokerFailure(response.FailureCode) {
+		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query != nil || response.InstanceStatus != nil || response.MariaDBHA != nil || response.MigrationRestore != nil || !validBrokerFailure(response.FailureCode) {
 			return ErrInvalidReceipt
 		}
 		return nil
@@ -178,6 +187,11 @@ func (response BrokerResponse) validate(request BrokerRequest) error {
 		_, kind, err := ParseWorkspaceStatement(request.Workspace.Statement)
 		if err != nil || response.Query.Kind != kind { return ErrInvalidReceipt }
 		return validateWorkspaceResult(*response.Query, request.Workspace.Access)
+	case BrokerInstanceStatus:
+		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query != nil || response.InstanceStatus == nil || response.MariaDBHA != nil || response.MigrationRestore != nil {
+			return ErrInvalidReceipt
+		}
+		return response.InstanceStatus.validate(request.InstanceID)
 	case BrokerMariaDBHA:
 		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query != nil || response.MariaDBHA == nil || request.MariaDBHA == nil {
 			return ErrInvalidReceipt
@@ -380,6 +394,31 @@ func (client *BrokerClient) Compensate(ctx context.Context, compensation Compens
 	return *response.Compensation, nil
 }
 
+func (client *BrokerClient) Status(ctx context.Context, instanceID ResourceID) (MariaDBInstanceStatus, error) {
+	if instanceID.IsZero() {
+		return MariaDBInstanceStatus{}, ErrInvalidCommand
+	}
+	request, err := client.request(ctx, BrokerInstanceStatus)
+	if err != nil {
+		return MariaDBInstanceStatus{}, err
+	}
+	request.InstanceID = instanceID
+	if err = request.validate(client.now().UTC()); err != nil {
+		return MariaDBInstanceStatus{}, err
+	}
+	response, err := client.transport.RoundTrip(ctx, request)
+	if err != nil {
+		return MariaDBInstanceStatus{}, err
+	}
+	if err = response.validate(request); err != nil {
+		return MariaDBInstanceStatus{}, err
+	}
+	if response.FailureCode != "" {
+		return MariaDBInstanceStatus{}, brokerFailure(response.FailureCode)
+	}
+	return *response.InstanceStatus, nil
+}
+
 func (client *BrokerClient) BrowseWorkspaceMetadata(ctx context.Context, access WorkspaceAccess) (WorkspaceMetadataResult, error) {
 	if client == nil || client.transport == nil || ctx == nil || access.validate(client.now().UTC()) != nil {
 		return WorkspaceMetadataResult{}, ErrInvalidCommand
@@ -568,7 +607,7 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 	// Metadata and fixed SHOW/DESCRIBE grammar cannot carry an effect payload.
 	// SELECT/EXPLAIN remain conservatively gated: expressions may invoke stored
 	// functions, so a leading SELECT alone is not a read-only guarantee.
-	mutation:=request.Operation!=BrokerWorkspaceMetadata
+	mutation:=request.Operation!=BrokerWorkspaceMetadata && request.Operation!=BrokerInstanceStatus
 	if request.Operation==BrokerWorkspaceQuery {
 		_,kind,_:=ParseWorkspaceStatement(request.Workspace.Statement)
 		mutation=kind!=WorkspaceStatementShow && kind!=WorkspaceStatementDescribe
@@ -625,6 +664,19 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		var receipt CompensationReceipt
 		receipt, err = server.Executor.Compensate(ctx, *request.Compensation)
 		if compensationReceiptMatches(*request.Compensation, receipt) { response.Compensation = &receipt }
+	case BrokerInstanceStatus:
+		observer, ok := server.Executor.(interface {
+			Status(context.Context, ResourceID) (MariaDBInstanceStatus, error)
+		})
+		if !ok {
+			err = ErrInvalidCommand
+			break
+		}
+		var status MariaDBInstanceStatus
+		status, err = observer.Status(ctx, request.InstanceID)
+		if err == nil && status.validate(request.InstanceID) == nil {
+			response.InstanceStatus = &status
+		}
 	case BrokerWorkspaceMetadata:
 		workspace, ok := server.Executor.(WorkspaceExecutor)
 		if !ok { err = ErrInvalidCommand; break }
@@ -692,7 +744,7 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		}
 		if err == nil && validateMariaDBHAResult(*request.MariaDBHA, result) == nil { response.MariaDBHA = &result }
 	}
-	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil && response.MariaDBHA == nil && response.MigrationRestore == nil {
+	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil && response.InstanceStatus == nil && response.MariaDBHA == nil && response.MigrationRestore == nil {
 		response.FailureCode = classifyBrokerFailure(err)
 	}
 	if response.validate(request)!=nil{return}
@@ -755,6 +807,7 @@ func classifyBrokerFailure(err error) string {
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotency): return "conflict"
 	case errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrInvalidResource): return "invalid_request"
 	case errors.Is(err, ErrAmbiguous): return "ambiguous"
+	case errors.Is(err, ErrUnavailable): return "unavailable"
 	case err == nil: return "internal"
 	default: return "internal"
 	}
@@ -768,7 +821,8 @@ func brokerFailure(code string) error {
 	case "conflict": return ErrConflict
 	case "deadline": return context.DeadlineExceeded
 	case "ambiguous": return ErrAmbiguous
-	case "unavailable", "internal": return errors.New("database broker unavailable")
+	case "unavailable": return ErrUnavailable
+	case "internal": return errors.New("database broker unavailable")
 	default: return ErrInvalidReceipt
 	}
 }

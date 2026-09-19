@@ -177,6 +177,10 @@ type DatabaseInstanceProjection struct {
 	MaxConnections uint32 `json:"max_connections"`
 	Health         string `json:"health"`
 	Status         string `json:"status"`
+	Reachable      bool   `json:"reachable"`
+	TLSVerified    bool   `json:"tls_verified"`
+	ProofDigest    string `json:"proof_digest,omitempty"`
+	ObservedAt     time.Time `json:"observed_at,omitempty"`
 	Generation     uint64 `json:"generation"`
 }
 
@@ -1079,6 +1083,7 @@ type HostingAccessPolicyEdgeService interface {
 type DatabaseEdgeService interface {
 	ListDatabases(context.Context, EdgeCall, EdgePagePayload) (EdgePage[DatabaseProjection], error)
 	ListDatabaseInstances(context.Context, EdgeCall, EdgePagePayload) (EdgePage[DatabaseInstanceProjection], error)
+	InspectDatabaseInstance(context.Context, EdgeCall) (DatabaseInstanceProjection, error)
 	EnrollExternalDatabaseInstance(context.Context, EdgeCall, DatabaseExternalEnrollmentPayload, DatabaseExternalEnrollmentSecrets) (EdgeMutation[DatabaseInstanceProjection], error)
 }
 
@@ -1276,6 +1281,7 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("database.console.issue", "database:console", mfa, true, func() any { return &DatabaseConsolePayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("database.network.configure", "database:manage", mfa, true, func() any { return &DatabaseNetworkPayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("database.instance.list", "database:admin", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
+		consoleOperation("database.instance.health", "database:admin", password, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
 		consoleOperation("database.instance.enroll_external", "database:admin", mfa, true, func() any { return &DatabaseExternalEnrollmentPayload{} }, validateDatabaseExternalEnrollment, edgeInstallationCreateScope),
 
 		consoleOperation("access.credential.list", "access:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
@@ -2310,6 +2316,10 @@ func bindConsoleEdgeContracts(registry *Registry, services DomainServices) error
 		if err := registry.Bind("database.instance.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.DatabaseEdge.ListDatabaseInstances(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result}, nil
+		}); err != nil { return err }
+		if err := registry.Bind("database.instance.health", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
+			result, err := services.DatabaseEdge.InspectDatabaseInstance(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
+			return OperationResult{Status:http.StatusOK, Value:result, Generation:result.Generation}, nil
 		}); err != nil { return err }
 		if err := registry.Bind("database.instance.enroll_external", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			payload := value.(*DatabaseExternalEnrollmentPayload)

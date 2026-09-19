@@ -71,16 +71,6 @@ type LinuxMariaDBSecretSource interface {
 	LocalServerTLS(context.Context, ResourceID, ResourceID, TLSMode) (MariaDBServerTLS, error)
 }
 
-type MariaDBInstanceStatus struct {
-	InstanceID  ResourceID       `json:"instance_id"`
-	Placement   Placement        `json:"placement"`
-	Version     MariaDBVersion   `json:"version"`
-	Reachable   bool             `json:"reachable"`
-	TLSVerified bool             `json:"tls_verified"`
-	ProofDigest string           `json:"proof_digest"`
-	ObservedAt  time.Time        `json:"observed_at"`
-}
-
 // LinuxMariaDBExecutor is the concrete root broker for local and managed
 // external MariaDB instances. Its public surface is the closed MariaDBExecutor
 // effect sum plus a read-only typed status probe.
@@ -289,12 +279,12 @@ func (executor *LinuxMariaDBExecutor) Status(ctx context.Context, instanceID Res
 	}
 	connection, cleanup, err := executor.connection(ctx, instance)
 	if err != nil {
-		return MariaDBInstanceStatus{}, err
+		return MariaDBInstanceStatus{}, errors.Join(ErrUnavailable, err)
 	}
 	defer cleanup()
 	observed, err := connection.query(ctx, sqlObserveStatus)
 	if err != nil {
-		return MariaDBInstanceStatus{}, err
+		return MariaDBInstanceStatus{}, errors.Join(ErrUnavailable, err)
 	}
 	version, err := parseMariaDBVersion(firstField(observed))
 	if err != nil {

@@ -33,6 +33,10 @@ type databaseEdgeCoordinator interface {
 	Handle(context.Context, database.Command) (database.OperationReceipt, error)
 }
 
+type databaseEdgeStatus interface {
+	Status(context.Context, database.ResourceID) (database.MariaDBInstanceStatus, error)
+}
+
 type databaseEdgeSecretManagement interface {
 	PutExact(context.Context, secrets.PutRequest) (secrets.Metadata, error)
 }
@@ -40,16 +44,17 @@ type databaseEdgeSecretManagement interface {
 type databaseEdge struct {
 	repository    databaseEdgeRepository
 	coordinator   databaseEdgeCoordinator
+	status        databaseEdgeStatus
 	management    databaseEdgeSecretManagement
 	releaseDigest string
 }
 
-func newDatabaseEdge(repository databaseEdgeRepository, coordinator databaseEdgeCoordinator, management databaseEdgeSecretManagement, releaseDigest string) (apiserver.DatabaseEdgeService, error) {
+func newDatabaseEdge(repository databaseEdgeRepository, coordinator databaseEdgeCoordinator, status databaseEdgeStatus, management databaseEdgeSecretManagement, releaseDigest string) (apiserver.DatabaseEdgeService, error) {
 	digest, err := hex.DecodeString(releaseDigest)
-	if repository == nil || coordinator == nil || management == nil || err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != releaseDigest {
+	if repository == nil || coordinator == nil || status == nil || management == nil || err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != releaseDigest {
 		return nil, errors.New("database edge requires repository, coordinator, secret broker, and exact executor digest")
 	}
-	return &databaseEdge{repository: repository, coordinator: coordinator, management: management, releaseDigest: releaseDigest}, nil
+	return &databaseEdge{repository: repository, coordinator: coordinator, status: status, management: management, releaseDigest: releaseDigest}, nil
 }
 
 func (edge *databaseEdge) ListDatabases(ctx context.Context, call apiserver.EdgeCall, page apiserver.EdgePagePayload) (apiserver.EdgePage[apiserver.DatabaseProjection], error) {
@@ -85,6 +90,35 @@ func (edge *databaseEdge) ListDatabaseInstances(ctx context.Context, call apiser
 		items = append(items, projectDatabaseInstance(value))
 	}
 	return apiserver.EdgePage[apiserver.DatabaseInstanceProjection]{Items: items, NextCursor: next, Total: total}, nil
+}
+
+func (edge *databaseEdge) InspectDatabaseInstance(ctx context.Context, call apiserver.EdgeCall) (apiserver.DatabaseInstanceProjection, error) {
+	if edge == nil || edge.repository == nil || edge.status == nil || ctx == nil || call.TenantID != "" || call.ResourceID == "" || call.ExpectedGeneration != 0 {
+		return apiserver.DatabaseInstanceProjection{}, database.ErrUnauthorized
+	}
+	id, err := database.NewResourceID(call.ResourceID)
+	if err != nil {
+		return apiserver.DatabaseInstanceProjection{}, database.ErrInvalidResource
+	}
+	instance, err := edge.loadDatabaseInstance(ctx, id)
+	if err != nil {
+		return apiserver.DatabaseInstanceProjection{}, err
+	}
+	observed, err := edge.status.Status(ctx, id)
+	if err != nil {
+		return apiserver.DatabaseInstanceProjection{}, err
+	}
+	if observed.InstanceID != instance.ID || observed.Placement != instance.Placement || observed.Version != instance.Version || !observed.Reachable ||
+		instance.Placement == database.PlacementExternal && !observed.TLSVerified {
+		return apiserver.DatabaseInstanceProjection{}, database.ErrConflict
+	}
+	projection := projectDatabaseInstance(instance)
+	projection.Health = string(database.HealthHealthy)
+	projection.Reachable = observed.Reachable
+	projection.TLSVerified = observed.TLSVerified
+	projection.ProofDigest = observed.ProofDigest
+	projection.ObservedAt = observed.ObservedAt
+	return projection, nil
 }
 
 func (edge *databaseEdge) EnrollExternalDatabaseInstance(ctx context.Context, call apiserver.EdgeCall, payload apiserver.DatabaseExternalEnrollmentPayload, material apiserver.DatabaseExternalEnrollmentSecrets) (apiserver.EdgeMutation[apiserver.DatabaseInstanceProjection], error) {

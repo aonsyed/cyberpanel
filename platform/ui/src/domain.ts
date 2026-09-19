@@ -138,6 +138,7 @@ export const pages: Record<string, PageDefinition> = {
       {key:"approval_ref",label:"High-risk approval reference",type:"text",required:true}
     ]},
     columns:[{key:"id",label:"Instance"},{key:"placement",label:"Placement",format:"status"},{key:"endpoint",label:"Endpoint"},{key:"version",label:"MariaDB"},{key:"tls",label:"TLS",format:"status"},{key:"health",label:"Health",format:"status"},{key:"storage_bytes",label:"Storage",format:"bytes"},{key:"max_connections",label:"Connections",format:"number"},{key:"status",label:"Lifecycle",format:"status"}],
+    rowActions:[{id:"health",label:"Validate live health",operation:"database.instance.health",mutating:false,tone:"info",scope:"installation"}],
     emptyTitle:"No database instances",emptyBody:"The node has not published its local MariaDB instance or enrolled a managed external instance."
   },
   redis: {
