@@ -1,0 +1,27 @@
+{
+  "schema_version": 2,
+  "component_id": "panel_node_install",
+  "format": "tar_gzip",
+  "members": [
+    {
+      "path_id": "panel_node_install",
+      "command": "./cmd/panel-node-install",
+      "archive_path": "panel-node-install",
+      "install_path": "/usr/local/sbin/panel-node-install",
+      "mode": "0755"
+    }
+  ],
+  "operator_assets": [
+    {
+      "source": "packaging/systemd/panel-node-release-reconcile.service",
+      "install_path": "/etc/systemd/system/panel-node-release-reconcile.service",
+      "mode": "0644"
+    }
+  ],
+  "provisioning": {
+    "scope": "Install this bootstrap binary and unit from the trusted node image or operator-delivered bootstrap package, outside the active release generation.",
+    "trust": "Provision root:root public-key documents under /etc/cyberpanel/node-release/trust.d and retain historical documents while their previous releases remain rollback candidates.",
+    "bundle": "Copy one exact-target signed .tar to a root-owned, singly linked local path with no group/other write permission; panel-node-install never downloads or resolves a missing artifact.",
+    "recovery": "Enable panel-node-release-reconcile.service before the first apply so interrupted journals are re-observed and converged automatically on boot."
+  }
+}

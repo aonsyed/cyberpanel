@@ -1,0 +1,19 @@
+[Unit]
+Description=Reconcile interrupted CyberPanel node release activation
+After=local-fs.target
+ConditionPathExistsGlob=/var/lib/cyberpanel/node-release/journal/*.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/panel-node-install reconcile
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

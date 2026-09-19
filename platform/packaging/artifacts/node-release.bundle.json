@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "component_id": "node_release",
+  "format": "tar_gzip",
+  "members": [
+    {
+      "path_id": "node_release",
+      "command": "./cmd/node-release",
+      "archive_path": "node-release",
+      "install_path": "/usr/local/bin/node-release",
+      "mode": "0755"
+    }
+  ],
+  "provisioning": {
+    "scope": "Install only on the offline release-engineering host; this assembler is not a node runtime dependency.",
+    "inputs": "Provide a canonical local source tree containing every prebuilt target artifact, a strict source spec, and a singly linked mode-0600 Ed25519 signing key outside that tree.",
+    "output": "Move the new deterministic .tar bundle to the target through the operator-controlled offline channel; never copy the signing key."
+  }
+}
