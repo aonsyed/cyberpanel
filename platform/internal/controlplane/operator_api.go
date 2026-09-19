@@ -173,10 +173,11 @@ func (api *OperatorAPI) rotateNodeCertificate(writer http.ResponseWriter, reques
 		ExpectedAuthorityEpoch uint64 `json:"expected_authority_epoch"`
 		IdempotencyKey string `json:"idempotency_key"`
 		SigningPublicKey []byte `json:"signing_public_key"`
+		HPKEPublicKey []byte `json:"hpke_public_key"`
 		PreviousCertificateFingerprint string `json:"previous_certificate_fingerprint_sha256"`
 	}
 	decodeErr := decodeOperatorJSON(request, &payload)
-	rotation := NodeCertificateRotationRequest{NodeID: id, TenantID: tenant, ExpectedGeneration: payload.ExpectedGeneration, ExpectedAuthorityEpoch: payload.ExpectedAuthorityEpoch, IdempotencyKey: payload.IdempotencyKey, SigningPublicKey: payload.SigningPublicKey}
+	rotation := NodeCertificateRotationRequest{NodeID: id, TenantID: tenant, ExpectedGeneration: payload.ExpectedGeneration, ExpectedAuthorityEpoch: payload.ExpectedAuthorityEpoch, IdempotencyKey: payload.IdempotencyKey, SigningPublicKey: payload.SigningPublicKey, HPKEPublicKey: payload.HPKEPublicKey}
 	rotation.PreviousCertificateFingerprint = payload.PreviousCertificateFingerprint
 	if idErr != nil || tenantErr != nil || decodeErr != nil || rotation.validate() != nil {
 		api.reject(writer, request, operator, permission, "node", rawID, ErrInvalid)
@@ -203,6 +204,7 @@ func (api *OperatorAPI) rotateNodeCertificate(writer http.ResponseWriter, reques
 			result.RequestDigest = reservation.RequestDigest
 			result.PreviousCertificateFingerprint = rotation.PreviousCertificateFingerprint
 			result.SigningPublicKey = append([]byte(nil), rotation.SigningPublicKey...)
+			result.HPKEPublicKey = append([]byte(nil), rotation.HPKEPublicKey...)
 			result.Signature = ed25519.Sign(api.issuer.privateKey, result.SigStructure())
 			if err = api.authorizeNodeLifecycle(request.Context(), operator, permission, id); err == nil {
 				result, err = api.store.CompleteNodeCertificateRotation(request.Context(), rotation, reservation, issued, result)

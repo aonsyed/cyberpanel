@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -34,8 +35,11 @@ CREATE TABLE IF NOT EXISTS federation_certificate_rotations_v1(
  authority_epoch BIGINT NOT NULL,
  previous_certificate_ref TEXT NOT NULL,
  previous_fingerprint TEXT NOT NULL,
+ previous_hpke_key_ref TEXT NOT NULL,
  signing_key_ref TEXT NOT NULL,
  signing_public_key BLOB NOT NULL,
+ hpke_key_ref TEXT NOT NULL,
+ hpke_public_key BLOB NOT NULL,
  request_json BLOB NOT NULL,
  state TEXT NOT NULL,
  response_json BLOB NOT NULL,
@@ -51,7 +55,51 @@ type federationRotationRequest struct {
 	ExpectedAuthorityEpoch uint64 `json:"expected_authority_epoch"`
 	IdempotencyKey string `json:"idempotency_key"`
 	SigningPublicKey []byte `json:"signing_public_key"`
+	HPKEPublicKey []byte `json:"hpke_public_key"`
 	PreviousCertificateFingerprint string `json:"previous_certificate_fingerprint_sha256"`
+}
+
+func ensureFederationRotationSchema(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, federationRotationSchema); err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(federation_certificate_rotations_v1)`)
+	if err != nil {
+		return err
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var identifier, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err = rows.Scan(&identifier, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	additions := []struct {
+		name, statement string
+	}{
+		{"previous_hpke_key_ref", `ALTER TABLE federation_certificate_rotations_v1 ADD COLUMN previous_hpke_key_ref TEXT NOT NULL DEFAULT ''`},
+		{"hpke_key_ref", `ALTER TABLE federation_certificate_rotations_v1 ADD COLUMN hpke_key_ref TEXT NOT NULL DEFAULT ''`},
+		{"hpke_public_key", `ALTER TABLE federation_certificate_rotations_v1 ADD COLUMN hpke_public_key BLOB NOT NULL DEFAULT X''`},
+	}
+	for _, addition := range additions {
+		if !columns[addition.name] {
+			if _, err = db.ExecContext(ctx, addition.statement); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // The local owner prepares a public request, posts it to the central operator
@@ -96,7 +144,7 @@ func runFederationCertificateCLI(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err = db.ExecContext(ctx, federationRotationSchema); err != nil {
+	if err = ensureFederationRotationSchema(ctx, db); err != nil {
 		return err
 	}
 	if arguments[0] == "prepare" {
@@ -135,12 +183,16 @@ func prepareFederationRotation(ctx context.Context, materials *federationEnrollm
 		return nil, err
 	}
 	defer tx.Rollback()
-	var priorRequest []byte
+	var priorRequest, priorHPKEPublicKey []byte
 	var priorGeneration uint64
-	err = tx.QueryRowContext(ctx, `SELECT request_json,expected_generation FROM federation_certificate_rotations_v1 WHERE idempotency_key=?`, id).Scan(&priorRequest, &priorGeneration)
+	var priorHPKEKeyRef string
+	err = tx.QueryRowContext(ctx, `SELECT request_json,expected_generation,hpke_key_ref,hpke_public_key FROM federation_certificate_rotations_v1 WHERE idempotency_key=?`, id).Scan(&priorRequest, &priorGeneration, &priorHPKEKeyRef, &priorHPKEPublicKey)
 	if err == nil {
 		if priorGeneration != generation {
 			return nil, federation.ErrReplay
+		}
+		if priorHPKEKeyRef == "" || len(priorHPKEPublicKey) != 32 {
+			return nil, federation.ErrAmbiguous
 		}
 		return priorRequest, tx.Commit()
 	}
@@ -153,6 +205,9 @@ func prepareFederationRotation(ctx context.Context, materials *federationEnrollm
 	err = tx.QueryRowContext(ctx, `SELECT s.node_id,s.authority_epoch,p.id,p.node_certificate_ref,p.ca_fingerprint,p.hpke_key_ref,c.leaf_fingerprint_sha256 FROM federation_state s JOIN federation_peers p ON p.id=s.active_peer_id JOIN federation_node_certificates_v1 c ON c.certificate_ref=p.node_certificate_ref AND c.node_id=s.node_id WHERE s.singleton_id=1 AND p.state='active'`).Scan(&node, &epoch, &peer, &previousRef, &caFingerprint, &hpkeRef, &previousFingerprint)
 	if err != nil {
 		return nil, err
+	}
+	if hpkeRef == "" {
+		return nil, federation.ErrForbidden
 	}
 	var pending int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM federation_certificate_rotations_v1 WHERE peer_id=? AND state='prepared'`, peer).Scan(&pending); err != nil {
@@ -169,20 +224,40 @@ func prepareFederationRotation(ctx context.Context, materials *federationEnrollm
 	if err != nil {
 		return nil, err
 	}
+	hpkePublicKey, hpkeKeyRef, err := materials.CreateHPKEIdentity(ctx, node)
+	if err != nil {
+		_ = materials.Destroy(ctx, keyRef)
+		return nil, err
+	}
+	prepared := false
+	defer func() {
+		if prepared {
+			return
+		}
+		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		for _, reference := range []string{keyRef, hpkeKeyRef} {
+			_ = materials.Destroy(cleanupContext, reference)
+		}
+	}()
 	// The protected key is committed before the public request is returned. A
 	// crash before this transaction commits cannot have published that request;
 	// it can leave only an unreachable broker key, never a replaced identity.
-	request := federationRotationRequest{generation, epoch, id, publicKey, previousFingerprint}
+	request := federationRotationRequest{ExpectedGeneration: generation, ExpectedAuthorityEpoch: epoch, IdempotencyKey: id, SigningPublicKey: publicKey, HPKEPublicKey: hpkePublicKey, PreviousCertificateFingerprint: previousFingerprint}
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}
 	now := materials.now().UTC()
-	_, err = tx.ExecContext(ctx, `INSERT INTO federation_certificate_rotations_v1(idempotency_key,node_id,peer_id,expected_generation,authority_epoch,previous_certificate_ref,previous_fingerprint,signing_key_ref,signing_public_key,request_json,state,response_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,'prepared','',?,?)`, id, node, peer, generation, epoch, previousRef, previousFingerprint, keyRef, publicKey, encoded, now, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO federation_certificate_rotations_v1(idempotency_key,node_id,peer_id,expected_generation,authority_epoch,previous_certificate_ref,previous_fingerprint,previous_hpke_key_ref,signing_key_ref,signing_public_key,hpke_key_ref,hpke_public_key,request_json,state,response_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'prepared','',?,?)`, id, node, peer, generation, epoch, previousRef, previousFingerprint, hpkeRef, keyRef, publicKey, hpkeKeyRef, hpkePublicKey, encoded, now, now)
 	if err != nil {
 		return nil, err
 	}
-	return encoded, tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	prepared = true
+	return encoded, nil
 }
 
 func applyFederationRotation(ctx context.Context, materials *federationEnrollmentMaterials, id string, body []byte) (federation.NodeCertificateRotationResult, error) {
@@ -203,9 +278,9 @@ func applyFederationRotation(ctx context.Context, materials *federationEnrollmen
 	defer tx.Rollback()
 	var node, peer federation.ID
 	var generation, epoch uint64
-	var previousRef, previousFingerprint, keyRef, state string
-	var publicKey, savedResponse []byte
-	err = tx.QueryRowContext(ctx, `SELECT node_id,peer_id,expected_generation,authority_epoch,previous_certificate_ref,previous_fingerprint,signing_key_ref,signing_public_key,state,response_json FROM federation_certificate_rotations_v1 WHERE idempotency_key=?`, id).Scan(&node, &peer, &generation, &epoch, &previousRef, &previousFingerprint, &keyRef, &publicKey, &state, &savedResponse)
+	var previousRef, previousFingerprint, keyRef, hpkeKeyRef, previousHPKEKeyRef, state string
+	var publicKey, hpkePublicKey, savedResponse []byte
+	err = tx.QueryRowContext(ctx, `SELECT node_id,peer_id,expected_generation,authority_epoch,previous_certificate_ref,previous_fingerprint,previous_hpke_key_ref,signing_key_ref,signing_public_key,hpke_key_ref,hpke_public_key,state,response_json FROM federation_certificate_rotations_v1 WHERE idempotency_key=?`, id).Scan(&node, &peer, &generation, &epoch, &previousRef, &previousFingerprint, &previousHPKEKeyRef, &keyRef, &publicKey, &hpkeKeyRef, &hpkePublicKey, &state, &savedResponse)
 	if err != nil {
 		return result, err
 	}
@@ -213,33 +288,40 @@ func applyFederationRotation(ctx context.Context, materials *federationEnrollmen
 	if err = tx.QueryRowContext(ctx, `SELECT signing_key_ref FROM federation_node_certificates_v1 WHERE certificate_ref=? AND node_id=?`, previousRef, node).Scan(&previousSigningKeyRef); err != nil {
 		return result, err
 	}
-	if previousSigningKeyRef == "" || previousSigningKeyRef == keyRef {
+	if previousSigningKeyRef == "" || previousSigningKeyRef == keyRef || previousHPKEKeyRef == "" || previousHPKEKeyRef == hpkeKeyRef {
 		return result, federation.ErrForbidden
 	}
-	commitAndRetirePreviousKey := func() error {
+	previousHPKEReference, err := decodeFederationProtectedKeyReference(previousHPKEKeyRef)
+	if err != nil || previousHPKEReference.Audience.ResourceID.String() != node.String() || previousHPKEReference.Audience.Account != "node-hpke" {
+		return result, federation.ErrForbidden
+	}
+	commitAndRetirePreviousKeys := func() error {
 		if commitErr := tx.Commit(); commitErr != nil {
 			return commitErr
 		}
 		retirementContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		if retireErr := materials.Destroy(retirementContext, previousSigningKeyRef); retireErr != nil && !errors.Is(retireErr, secrets.ErrRevoked) {
-			return retireErr
+		var failures []error
+		for _, reference := range []string{previousSigningKeyRef, previousHPKEKeyRef} {
+			if retireErr := materials.Destroy(retirementContext, reference); retireErr != nil && !errors.Is(retireErr, secrets.ErrRevoked) {
+				failures = append(failures, retireErr)
+			}
 		}
-		return nil
+		return errors.Join(failures...)
 	}
 	if state == "applied" {
 		if !bytes.Equal(savedResponse, canonical) {
 			return result, federation.ErrReplay
 		}
-		return result, commitAndRetirePreviousKey()
+		return result, commitAndRetirePreviousKeys()
 	}
-	if state != "prepared" || result.NodeID != node || result.PeerID != peer || result.Generation != generation+1 || result.AuthorityEpoch != epoch || result.PreviousCertificateFingerprint != previousFingerprint || !bytes.Equal(publicKey, result.SigningPublicKey) || !validFederationEnrollmentDigest(result.RequestDigest) || len(result.Signature) != ed25519.SignatureSize {
+	if state != "prepared" || result.NodeID != node || result.PeerID != peer || result.Generation != generation+1 || result.AuthorityEpoch != epoch || result.PreviousCertificateFingerprint != previousFingerprint || !bytes.Equal(publicKey, result.SigningPublicKey) || !bytes.Equal(hpkePublicKey, result.HPKEPublicKey) || len(result.HPKEPublicKey) != 32 || !validFederationEnrollmentDigest(result.RequestDigest) || len(result.Signature) != ed25519.SignatureSize {
 		return result, federation.ErrForbidden
 	}
-	var activeRef, caFingerprint string
+	var activeRef, activeHPKEKeyRef, caFingerprint string
 	var activeEpoch uint64
-	err = tx.QueryRowContext(ctx, `SELECT p.node_certificate_ref,p.ca_fingerprint,s.authority_epoch FROM federation_state s JOIN federation_peers p ON p.id=s.active_peer_id WHERE s.singleton_id=1 AND s.node_id=? AND p.id=? AND p.state='active'`, node, peer).Scan(&activeRef, &caFingerprint, &activeEpoch)
-	if err != nil || activeRef != previousRef || activeEpoch != epoch {
+	err = tx.QueryRowContext(ctx, `SELECT p.node_certificate_ref,p.hpke_key_ref,p.ca_fingerprint,s.authority_epoch FROM federation_state s JOIN federation_peers p ON p.id=s.active_peer_id WHERE s.singleton_id=1 AND s.node_id=? AND p.id=? AND p.state='active'`, node, peer).Scan(&activeRef, &activeHPKEKeyRef, &caFingerprint, &activeEpoch)
+	if err != nil || activeRef != previousRef || activeHPKEKeyRef != previousHPKEKeyRef || activeEpoch != epoch {
 		return result, federation.ErrStale
 	}
 	chain, certificatePEM, err := parseFederationNodeCertificate(result.NodeCertificate)
@@ -271,11 +353,14 @@ func applyFederationRotation(ctx context.Context, materials *federationEnrollmen
 	if err = verifyStagedFederationSigningKey(ctx, keyRef, node, publicKey); err != nil {
 		return result, err
 	}
+	if err = verifyStagedFederationHPKEKey(ctx, hpkeKeyRef, node, hpkePublicKey); err != nil {
+		return result, err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO federation_node_certificates_v1(certificate_ref,node_id,signing_key_ref,leaf_fingerprint_sha256,certificate_pem,not_before,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?)`, result.EvidenceKeyID, node, keyRef, actualFingerprint, certificatePEM, leaf.NotBefore.UTC(), leaf.NotAfter.UTC(), now)
 	if err != nil {
 		return result, err
 	}
-	update, err := tx.ExecContext(ctx, `UPDATE federation_peers SET node_certificate_ref=?,updated_at=? WHERE id=? AND state='active' AND node_certificate_ref=?`, result.EvidenceKeyID, now, peer, previousRef)
+	update, err := tx.ExecContext(ctx, `UPDATE federation_peers SET node_certificate_ref=?,hpke_key_ref=?,updated_at=? WHERE id=? AND state='active' AND node_certificate_ref=? AND hpke_key_ref=?`, result.EvidenceKeyID, hpkeKeyRef, now, peer, previousRef, previousHPKEKeyRef)
 	if err != nil {
 		return result, err
 	}
@@ -286,7 +371,8 @@ func applyFederationRotation(ctx context.Context, materials *federationEnrollmen
 	if err != nil {
 		return result, err
 	}
-	payload, _ := json.Marshal(map[string]any{"peer_id": peer, "previous_certificate_fingerprint_sha256": previousFingerprint, "certificate_fingerprint_sha256": actualFingerprint, "generation": result.Generation})
+	hpkeFingerprint := sha256.Sum256(hpkePublicKey)
+	payload, _ := json.Marshal(map[string]any{"peer_id": peer, "previous_certificate_fingerprint_sha256": previousFingerprint, "certificate_fingerprint_sha256": actualFingerprint, "hpke_public_key_sha256": hex.EncodeToString(hpkeFingerprint[:]), "generation": result.Generation})
 	payloadDigest := sha256.Sum256(payload)
 	event := federation.NodeEvent{ID: federation.ID("rotation_"+actualFingerprint[:48]), NodeID: node, Priority: federation.PrioritySecurity, Kind: "federation.node.certificate.rotated", Generation: result.Generation, Payload: payload, PayloadDigest: hex.EncodeToString(payloadDigest[:]), OccurredAt: now}
 	eventJSON, err := json.Marshal(event)
@@ -297,7 +383,7 @@ func applyFederationRotation(ctx context.Context, materials *federationEnrollmen
 	if err != nil {
 		return result, err
 	}
-	return result, commitAndRetirePreviousKey()
+	return result, commitAndRetirePreviousKeys()
 }
 
 func verifyStagedFederationSigningKey(ctx context.Context, keyRef string, node federation.ID, publicKey []byte) error {
@@ -327,6 +413,34 @@ func verifyStagedFederationSigningKey(ctx context.Context, keyRef string, node f
 	}
 	defer wipeFederationEnrollmentBytes(private)
 	if len(private) != ed25519.PrivateKeySize || subtle.ConstantTimeCompare(private.Public().(ed25519.PublicKey), publicKey) != 1 {
+		return federation.ErrForbidden
+	}
+	return nil
+}
+
+func verifyStagedFederationHPKEKey(ctx context.Context, keyRef string, node federation.ID, publicKey []byte) error {
+	reference, err := decodeFederationProtectedKeyReference(keyRef)
+	if err != nil || reference.Audience.ResourceID.String() != node.String() || reference.Audience.Account != "node-hpke" || len(publicKey) != 32 {
+		return federation.ErrForbidden
+	}
+	client, err := secrets.NewLocalMaterialClient()
+	if err != nil {
+		return err
+	}
+	material, err := client.Read(ctx, secrets.MaterialRequest{SecretID: reference.ID, OwnerTenantID: reference.OwnerTenantID, Purpose: secrets.PurposeFederation, Operation: secrets.OperationDecrypt, AdapterID: reference.Audience.AdapterID, AdapterVersion: reference.Audience.AdapterVersion, ResourceID: reference.Audience.ResourceID})
+	if err != nil {
+		return err
+	}
+	defer wipeFederationEnrollmentBytes(material.Material)
+	if material.SecretID != reference.ID || material.SecretVersion != reference.Version || material.BindingDigest != reference.ExpectedBindingDigest {
+		return federation.ErrForbidden
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(material.Material)
+	if err != nil {
+		return federation.ErrForbidden
+	}
+	private, ok := parsed.(*ecdh.PrivateKey)
+	if !ok || subtle.ConstantTimeCompare(private.PublicKey().Bytes(), publicKey) != 1 {
 		return federation.ErrForbidden
 	}
 	return nil

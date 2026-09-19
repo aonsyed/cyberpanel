@@ -16,6 +16,7 @@ type NodeCertificateRotationResult struct {
 	RequestDigest string `json:"request_digest"`
 	PreviousCertificateFingerprint string `json:"previous_certificate_fingerprint_sha256"`
 	SigningPublicKey []byte `json:"signing_public_key"`
+	HPKEPublicKey []byte `json:"hpke_public_key"`
 	EvidenceKeyID string `json:"evidence_key_id"`
 	CertificateFingerprint string `json:"certificate_fingerprint_sha256"`
 	NodeCertificate []byte `json:"node_certificate"`
@@ -28,6 +29,6 @@ func (result NodeCertificateRotationResult) SigStructure() []byte {
 	encoded, _ := json.Marshal(struct {
 		Domain string `json:"domain"`
 		Result NodeCertificateRotationResult `json:"result"`
-	}{"cyberpanel-node-certificate-rotation-result-v1", result})
+	}{"cyberpanel-node-certificate-rotation-result-v2", result})
 	return encoded
 }
