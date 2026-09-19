@@ -53,7 +53,52 @@ func(provisioner *ApplicationDatabaseProvisioner)ProvisionApplicationDatabase(ct
 	password:=make([]byte,32);if _,err=rand.Read(password);err!=nil{return DatabaseBinding{},err};encoded:=make([]byte,base64.RawURLEncoding.EncodedLen(len(password)));base64.RawURLEncoding.Encode(encoded,password);wipeLinuxApplicationBytes(password);databaseSecret:=database.DatabaseSecretRecordID("appdb-secret-"+token);databaseAudience:=database.DatabaseAudienceID(principalID.String());if _,err=provisioner.Management.Put(ctx,secrets.PutRequest{ID:databaseSecret,OwnerTenantID:database.DatabaseTenantOwnerID(string(tenant)),Purpose:secrets.PurposeDatabase,Audience:secrets.AudienceBinding{AdapterID:database.MariaDBSecretAdapterID,AdapterVersion:database.MariaDBSecretAdapterVersion,Account:"local-mariadb",Origin:"local://panel-execd/mariadb",ResourceKind:"database_principal",ResourceID:databaseAudience,ResourceGeneration:1,Operations:[]secrets.Operation{secrets.OperationAuthenticate},ConsumerReleaseDigest:provisioner.ReleaseDigest},Plaintext:append([]byte(nil),encoded...)});err!=nil{wipeLinuxApplicationBytes(encoded);return DatabaseBinding{},err};applicationSecret:=ApplicationManagedSecretID("database",installation);_,err=provisioner.Management.Put(ctx,secrets.PutRequest{ID:applicationSecret,OwnerTenantID:ApplicationTenantOwnerID(string(tenant)),Purpose:secrets.PurposeDatabase,Audience:secrets.AudienceBinding{AdapterID:ApplicationSecretAdapterID,AdapterVersion:ApplicationSecretAdapterVersion,Account:"site-application",Origin:"local://panel-execd/applications",ResourceKind:"application_installation",ResourceID:ApplicationAudienceID(string(installation)),ResourceGeneration:1,Operations:[]secrets.Operation{secrets.OperationAuthenticate},ConsumerReleaseDigest:provisioner.ReleaseDigest},Plaintext:encoded});wipeLinuxApplicationBytes(encoded);if err!=nil{return DatabaseBinding{},err}
 	header:=database.CommandHeader{Actor:database.Actor{TenantID:tenantID,Capability:database.CapabilityTenantManage},TenantID:tenantID};status:=database.ResourceStatus{Lifecycle:database.LifecycleProvisioning,Health:database.HealthUnknown,Reconciliation:database.ReconciliationPending};db:=database.Database{Metadata:database.Metadata{ID:databaseID,TenantID:tenantID,SiteID:siteResourceID,Generation:1,Status:status},InstanceID:instance.ID,Name:databaseName,Charset:charset,Collation:collation,QuotaBytes:10<<30};header.CommandID="appdb-create-"+token;if receipt,commandErr:=provisioner.Commands.Handle(ctx,database.CreateDatabase{Header:header,Database:db});commandErr!=nil||receipt.Status!=database.OperationApplied{if commandErr==nil{commandErr=database.ErrInvalidReceipt};return DatabaseBinding{},commandErr};databaseRef,_:=database.NewSecretRef(databaseSecret.String());principal:=database.DatabasePrincipal{Metadata:database.Metadata{ID:principalID,TenantID:tenantID,SiteID:siteResourceID,Generation:1,Status:status},InstanceID:instance.ID,Name:principalName,HostScope:database.HostScopeLoopback,CredentialSecretRef:databaseRef};header.CommandID="appdb-principal-"+token;if receipt,commandErr:=provisioner.Commands.Handle(ctx,database.CreatePrincipal{Header:header,Principal:principal});commandErr!=nil||receipt.Status!=database.OperationApplied{if commandErr==nil{commandErr=database.ErrInvalidReceipt};return DatabaseBinding{},commandErr};grant:=database.Grant{Scope:database.GrantScopeDatabase,Privileges:[]database.Privilege{database.PrivilegeSelect,database.PrivilegeInsert,database.PrivilegeUpdate,database.PrivilegeDelete,database.PrivilegeCreate,database.PrivilegeAlter,database.PrivilegeIndex,database.PrivilegeDrop,database.PrivilegeCreateTemporary,database.PrivilegeExecute,database.PrivilegeCreateView,database.PrivilegeShowView,database.PrivilegeTrigger,database.PrivilegeEvent}};grantSet:=database.GrantSet{Metadata:database.Metadata{ID:grantID,TenantID:tenantID,SiteID:siteResourceID,Generation:1,Status:status},InstanceID:instance.ID,DatabaseID:databaseID,PrincipalID:principalID,Grants:[]database.Grant{grant}};header.CommandID="appdb-grant-"+token;if receipt,commandErr:=provisioner.Commands.Handle(ctx,database.ReplaceGrantSet{Header:header,GrantSet:grantSet});commandErr!=nil||receipt.Status!=database.OperationApplied{if commandErr==nil{commandErr=database.ErrInvalidReceipt};return DatabaseBinding{},commandErr};return DatabaseBinding{ID:DatabaseBindingID(databaseID.String()),Engine:"mariadb",DatabaseName:databaseName.String(),PrincipalName:principalName.String(),EndpointRef:"local-mariadb",PasswordRef:SecretRef(applicationSecret.String()),TLSRequired:true},nil}
 
-func(provisioner *ApplicationDatabaseProvisioner)RevokeApplicationDatabase(ctx context.Context,bindingID DatabaseBindingID)error{if provisioner==nil||!validID(string(bindingID)){return ErrInvalid};databaseID,err:=database.NewResourceID(string(bindingID));if err!=nil{return ErrInvalid};envelope,err:=provisioner.Repository.LoadResource(ctx,database.KindDatabase,databaseID);if err!=nil{return err};decoded,err:=database.DecodeResource(envelope);if err!=nil{return err};db,ok:=decoded.(*database.Database);if !ok{return ErrIntegrity};token:=strings.TrimPrefix(databaseID.String(),"appdb-");principalID,_:=database.NewResourceID("appuser-"+token);principalEnvelope,err:=provisioner.Repository.LoadResource(ctx,database.KindPrincipal,principalID);if err!=nil&&!errors.Is(err,database.ErrNotFound){return err};tenantID:=db.TenantID;header:=database.CommandHeader{Actor:database.Actor{TenantID:tenantID,Capability:database.CapabilityTenantManage},TenantID:tenantID};if err==nil{resource,decodeErr:=database.DecodeResource(principalEnvelope);if decodeErr!=nil{return decodeErr};principal,ok:=resource.(*database.DatabasePrincipal);if !ok{return ErrIntegrity};header.CommandID="appdb-revoke-principal-"+token;if _,deleteErr:=provisioner.Commands.Handle(ctx,database.DeletePrincipal{Header:header,PrincipalID:principal.ID,ExpectedGeneration:principal.Generation});deleteErr!=nil{return deleteErr}};approval,_:=database.NewResourceID("application-removal-"+token);header.CommandID="appdb-revoke-database-"+token;_,err=provisioner.Commands.Handle(ctx,database.DeleteDatabase{Header:header,DatabaseID:db.ID,ExpectedGeneration:db.Generation,WaiveRecovery:true,ApprovalRef:approval});return err}
+func (provisioner *ApplicationDatabaseProvisioner) RevokeApplicationDatabase(ctx context.Context, bindingID DatabaseBindingID) error {
+	if provisioner == nil || provisioner.Repository == nil || provisioner.Commands == nil || !validID(string(bindingID)) { return ErrInvalid }
+	databaseID, err := database.NewResourceID(string(bindingID))
+	if err != nil { return ErrInvalid }
+	envelope, err := provisioner.Repository.LoadResource(ctx, database.KindDatabase, databaseID)
+	if err != nil { return err }
+	decoded, err := database.DecodeResource(envelope)
+	if err != nil { return err }
+	db, ok := decoded.(*database.Database)
+	if !ok { return ErrIntegrity }
+	token := strings.TrimPrefix(databaseID.String(), "appdb-")
+	principalID, _ := database.NewResourceID("appuser-" + token)
+	principalEnvelope, err := provisioner.Repository.LoadResource(ctx, database.KindPrincipal, principalID)
+	if err != nil && !errors.Is(err, database.ErrNotFound) { return err }
+	header := database.CommandHeader{Actor: database.Actor{TenantID: db.TenantID, Capability: database.CapabilityTenantManage}, TenantID: db.TenantID}
+	if err == nil {
+		resource, decodeErr := database.DecodeResource(principalEnvelope)
+		if decodeErr != nil { return decodeErr }
+		principal, ok := resource.(*database.DatabasePrincipal)
+		if !ok { return ErrIntegrity }
+		header.CommandID = "appdb-revoke-principal-" + token
+		expected := principal.Generation
+		stored, found, lookupErr := provisioner.Repository.LookupOperation(ctx, database.OperationScope{TenantID: db.TenantID, Kind: database.KindPrincipal, ID: principal.ID}, header.CommandID)
+		if lookupErr != nil { return lookupErr }
+		if found {
+			if stored.Request.DeletePrincipal == nil || stored.Request.DeletePrincipal.Principal.ID != principal.ID || stored.Request.DeletePrincipal.Principal.Generation < 2 { return database.ErrInvalidReceipt }
+			expected = stored.Request.DeletePrincipal.Principal.Generation - 1
+		}
+		receipt, deleteErr := provisioner.Commands.Handle(ctx, database.DeletePrincipal{Header: header, PrincipalID: principal.ID, ExpectedGeneration: expected})
+		if deleteErr != nil { return deleteErr }
+		if receipt.Status != database.OperationApplied { return database.ErrInvalidReceipt }
+	}
+	approval, _ := database.NewResourceID("application-removal-" + token)
+	header.CommandID = "appdb-revoke-database-" + token
+	expected := db.Generation
+	stored, found, lookupErr := provisioner.Repository.LookupOperation(ctx, database.OperationScope{TenantID: db.TenantID, Kind: database.KindDatabase, ID: db.ID}, header.CommandID)
+	if lookupErr != nil { return lookupErr }
+	if found {
+		if stored.Request.DeleteDatabase == nil || stored.Request.DeleteDatabase.Database.ID != db.ID || stored.Request.DeleteDatabase.Database.Generation < 2 { return database.ErrInvalidReceipt }
+		expected = stored.Request.DeleteDatabase.Database.Generation - 1
+	}
+	receipt, err := provisioner.Commands.Handle(ctx, database.DeleteDatabase{Header: header, DatabaseID: db.ID, ExpectedGeneration: expected, WaiveRecovery: true, ApprovalRef: approval})
+	if err != nil { return err }
+	if receipt.Status != database.OperationApplied { return database.ErrInvalidReceipt }
+	return nil
+}
 
 func applicationShortToken(value string)string{sum:=sha256.Sum256([]byte(value));return hex.EncodeToString(sum[:])[:32]}
 func LinuxApplicationExecutorDigest()(string,error){file,err:=os.Open("/usr/local/libexec/cyberpanel/panel-execd");if err!=nil{return "",err};defer file.Close();hash:=sha256.New();copied,err:=io.Copy(hash,io.LimitReader(file,1<<30));if err!=nil||copied<=0||copied>=1<<30{return "",ErrIntegrity};return hex.EncodeToString(hash.Sum(nil)),nil}
