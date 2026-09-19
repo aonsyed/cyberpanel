@@ -757,7 +757,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		_ = migrationRuntime.Close()
 		return apiserver.DomainServices{}, fmt.Errorf("start migration chunk maintenance: %w", err)
 	}
-	rebootControlEdge, err := assembleRebootControlLinuxEdge(ctx, repositories.ControlDB, operationsExecutor, repositories.HA, runtimeClock{}.Now)
+	rebootControlEdge, err := assembleRebootControlLinuxEdge(ctx, repositories.ControlDB, operationsExecutor, repositories.HA, packageMaintenanceEdge, runtimeClock{}.Now)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize reboot-control runtime: %w", err)
 	}

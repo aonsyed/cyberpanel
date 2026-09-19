@@ -146,14 +146,18 @@ func assemblePackageMaintenanceEdge(ctx context.Context, database *sql.DB, now f
 	if err != nil {
 		return nil, err
 	}
-	if operation.State != packagemaint.OperationAuthorized && operation.State != packagemaint.OperationRunning &&
-		operation.State != packagemaint.OperationVerifying {
-		return edge, nil
+	if operation.State == packagemaint.OperationAuthorized || operation.State == packagemaint.OperationRunning ||
+		operation.State == packagemaint.OperationVerifying {
+		operation, err = edge.service.ReconcileRestart(ctx, operation.ID)
+		if err != nil && operation.State != packagemaint.OperationFailed &&
+			operation.State != packagemaint.OperationRecoveryRequired && operation.State != packagemaint.OperationRecovered {
+			return nil, fmt.Errorf("reconcile package-maintenance operation %s: %w", operation.ID, err)
+		}
 	}
-	reconciled, reconcileErr := edge.service.ReconcileRestart(ctx, operation.ID)
-	if reconcileErr != nil && reconciled.State != packagemaint.OperationFailed &&
-		reconciled.State != packagemaint.OperationRecoveryRequired && reconciled.State != packagemaint.OperationRecovered {
-		return nil, fmt.Errorf("reconcile package-maintenance operation %s: %w", operation.ID, reconcileErr)
+	if operation.State == packagemaint.OperationSucceeded || operation.State == packagemaint.OperationRecovered {
+		if _, err = edge.persistPackageMaintenanceOutcome(ctx, operation); err != nil {
+			return nil, fmt.Errorf("persist package-maintenance operation %s outcome: %w", operation.ID, err)
+		}
 	}
 	return edge, nil
 }
@@ -537,14 +541,20 @@ func (edge *packageMaintenanceLinuxEdge) ApplyPackageMaintenance(ctx context.Con
 		}
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrStalePlan
 	}
+	operationID := packageMaintenanceOperationID(call, plan)
 	snapshot, err := edge.repository.LatestInventory(ctx, edge.nodeID, edge.manager)
 	if err != nil || snapshot.ID != plan.InventoryID || snapshot.Generation != plan.InventoryGeneration || snapshot.ContentDigest != plan.InventoryDigest {
 		if err != nil {
 			return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
 		}
+		operation, operationErr := edge.repository.Operation(ctx, operationID)
+		if operationErr == nil && operation.PlanID == plan.ID && operation.PlanDigest == plan.Digest &&
+			operation.AcceptanceAuthorization.ActorID == call.PrincipalID &&
+			(operation.State == packagemaint.OperationSucceeded || operation.State == packagemaint.OperationRecovered) {
+			return edge.operationMutation(ctx, snapshot, operation)
+		}
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, packagemaint.ErrStaleInventory
 	}
-	operationID := packageMaintenanceOperationID(call, plan)
 	operation, err := edge.repository.Operation(ctx, operationID)
 	if errors.Is(err, packagemaint.ErrNotFound) {
 		latestOperation, latestErr := edge.latestOperation(ctx)
@@ -601,12 +611,142 @@ func (edge *packageMaintenanceLinuxEdge) latestOperation(ctx context.Context) (p
 
 func (edge *packageMaintenanceLinuxEdge) operationMutation(ctx context.Context, snapshot packagemaint.InventorySnapshot,
 	operation packagemaint.MaintenanceOperation) (apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection], error) {
+	if operation.State == packagemaint.OperationSucceeded || operation.State == packagemaint.OperationRecovered {
+		var err error
+		snapshot, err = edge.persistPackageMaintenanceOutcome(ctx, operation)
+		if err != nil {
+			return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
+		}
+	}
 	projection, err := edge.projection(ctx, snapshot)
 	if err != nil {
 		return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{}, err
 	}
 	return apiserver.EdgeMutation[apiserver.PackageMaintenanceProjection]{OperationID: operation.ID,
 		State: string(operation.State), Generation: projection.Generation, Resource: projection}, nil
+}
+
+func (edge *packageMaintenanceLinuxEdge) persistPackageMaintenanceOutcome(ctx context.Context,
+	operation packagemaint.MaintenanceOperation) (packagemaint.InventorySnapshot, error) {
+	if edge == nil || ctx == nil || operation.InventoryGeneration >= packageMaintenanceMaximumGeneration ||
+		operation.Receipt.EffectID != operation.ID || operation.Receipt.PlanID != operation.PlanID ||
+		operation.Receipt.PlanDigest != operation.PlanDigest || operation.Receipt.InventoryGeneration != operation.InventoryGeneration ||
+		operation.Receipt.BeforeInventoryDigest != operation.InventoryDigest || operation.Receipt.AfterInventoryDigest == "" ||
+		operation.State == packagemaint.OperationSucceeded && operation.Receipt.Outcome != packagemaint.OutcomeConfirmed ||
+		operation.State == packagemaint.OperationRecovered && operation.Receipt.Outcome != packagemaint.OutcomeRecovered ||
+		operation.State != packagemaint.OperationSucceeded && operation.State != packagemaint.OperationRecovered {
+		return packagemaint.InventorySnapshot{}, packagemaint.ErrRecoveryRequired
+	}
+	outcomeGeneration := operation.InventoryGeneration + 1
+	recorded, err := edge.repository.InventoryAtGeneration(ctx, edge.nodeID, edge.manager, outcomeGeneration)
+	if err == nil {
+		if recorded.ContentDigest != operation.Receipt.AfterInventoryDigest {
+			return packagemaint.InventorySnapshot{}, packagemaint.ErrRecoveryRequired
+		}
+		return recorded, nil
+	}
+	if !errors.Is(err, packagemaint.ErrNotFound) {
+		return packagemaint.InventorySnapshot{}, err
+	}
+	latest, err := edge.repository.LatestInventory(ctx, edge.nodeID, edge.manager)
+	if err != nil {
+		return packagemaint.InventorySnapshot{}, err
+	}
+	if latest.Generation != operation.InventoryGeneration || latest.ContentDigest != operation.InventoryDigest {
+		return packagemaint.InventorySnapshot{}, packagemaint.ErrStaleInventory
+	}
+	recorded, err = edge.inventory.Snapshot(ctx, packagemaint.InventoryRequest{NodeID: edge.nodeID,
+		Manager: edge.manager, Generation: outcomeGeneration})
+	if err != nil {
+		return packagemaint.InventorySnapshot{}, err
+	}
+	if recorded.ContentDigest != operation.Receipt.AfterInventoryDigest {
+		return packagemaint.InventorySnapshot{}, packagemaint.ErrRecoveryRequired
+	}
+	if err = edge.repository.SaveInventory(ctx, recorded, operation.InventoryGeneration); err == nil {
+		return recorded, nil
+	} else if !errors.Is(err, packagemaint.ErrConflict) {
+		return packagemaint.InventorySnapshot{}, err
+	}
+	recorded, loadErr := edge.repository.InventoryAtGeneration(ctx, edge.nodeID, edge.manager, outcomeGeneration)
+	if loadErr != nil || recorded.ContentDigest != operation.Receipt.AfterInventoryDigest {
+		if loadErr != nil {
+			return packagemaint.InventorySnapshot{}, loadErr
+		}
+		return packagemaint.InventorySnapshot{}, packagemaint.ErrRecoveryRequired
+	}
+	return recorded, nil
+}
+
+func (edge *packageMaintenanceLinuxEdge) persistPostRebootPackageOutcome(ctx context.Context,
+	operation packagemaint.MaintenanceOperation) (packagemaint.InventorySnapshot, error) {
+	if operation.InventoryGeneration >= packageMaintenanceMaximumGeneration-1 {
+		return packagemaint.InventorySnapshot{}, packagemaint.ErrConflict
+	}
+	before, err := edge.persistPackageMaintenanceOutcome(ctx, operation)
+	if err != nil {
+		return packagemaint.InventorySnapshot{}, err
+	}
+	postBootGeneration := operation.InventoryGeneration + 2
+	postBoot, err := edge.repository.InventoryAtGeneration(ctx, edge.nodeID, edge.manager, postBootGeneration)
+	if err == nil {
+		if postBoot.RebootRequired || !samePackageMaintenanceInstalledState(before, postBoot) {
+			return packagemaint.InventorySnapshot{}, packagemaint.ErrRecoveryRequired
+		}
+		return postBoot, nil
+	}
+	if !errors.Is(err, packagemaint.ErrNotFound) {
+		return packagemaint.InventorySnapshot{}, err
+	}
+	latest, err := edge.repository.LatestInventory(ctx, edge.nodeID, edge.manager)
+	if err != nil {
+		return packagemaint.InventorySnapshot{}, err
+	}
+	if latest.Generation != before.Generation || latest.ContentDigest != before.ContentDigest {
+		return packagemaint.InventorySnapshot{}, packagemaint.ErrStaleInventory
+	}
+	postBoot, err = edge.inventory.Snapshot(ctx, packagemaint.InventoryRequest{NodeID: edge.nodeID,
+		Manager: edge.manager, Generation: postBootGeneration})
+	if err != nil {
+		return packagemaint.InventorySnapshot{}, err
+	}
+	if postBoot.RebootRequired || !samePackageMaintenanceInstalledState(before, postBoot) {
+		return packagemaint.InventorySnapshot{}, packagemaint.ErrRecoveryRequired
+	}
+	if err = edge.repository.SaveInventory(ctx, postBoot, before.Generation); err == nil {
+		return postBoot, nil
+	} else if !errors.Is(err, packagemaint.ErrConflict) {
+		return packagemaint.InventorySnapshot{}, err
+	}
+	postBoot, loadErr := edge.repository.InventoryAtGeneration(ctx, edge.nodeID, edge.manager, postBootGeneration)
+	if loadErr != nil || postBoot.RebootRequired || !samePackageMaintenanceInstalledState(before, postBoot) {
+		if loadErr != nil {
+			return packagemaint.InventorySnapshot{}, loadErr
+		}
+		return packagemaint.InventorySnapshot{}, packagemaint.ErrRecoveryRequired
+	}
+	return postBoot, nil
+}
+
+func samePackageMaintenanceInstalledState(left, right packagemaint.InventorySnapshot) bool {
+	type state struct {
+		version string
+		state   packagemaint.PackageState
+	}
+	leftPackages := make(map[string]state, len(left.Packages))
+	for _, installed := range left.Packages {
+		leftPackages[installed.Name+"\x00"+installed.Architecture] = state{version: installed.InstalledVersion, state: installed.State}
+	}
+	if len(leftPackages) != len(right.Packages) {
+		return false
+	}
+	for _, installed := range right.Packages {
+		if expected, ok := leftPackages[installed.Name+"\x00"+installed.Architecture]; !ok ||
+			expected.version != installed.InstalledVersion || expected.state != installed.State {
+			return false
+		}
+	}
+	return true
 }
 
 func (edge *packageMaintenanceLinuxEdge) projection(ctx context.Context,

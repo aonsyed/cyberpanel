@@ -170,6 +170,13 @@ func (repository *SQLRepository) LatestInventory(ctx context.Context, nodeID str
 	return scanInventory(repository.db.QueryRowContext(ctx, `SELECT inventory_json FROM package_maintenance_inventories WHERE node_id=? AND manager=? ORDER BY generation DESC LIMIT 1`, nodeID, string(manager)))
 }
 
+func (repository *SQLRepository) InventoryAtGeneration(ctx context.Context, nodeID string, manager Manager, generation uint64) (InventorySnapshot, error) {
+	if repository == nil || repository.db == nil || !safeID.MatchString(nodeID) || !validManager(manager) || generation == 0 {
+		return InventorySnapshot{}, ErrInvalid
+	}
+	return scanInventory(repository.db.QueryRowContext(ctx, `SELECT inventory_json FROM package_maintenance_inventories WHERE node_id=? AND manager=? AND generation=?`, nodeID, string(manager), generation))
+}
+
 func (repository *SQLRepository) Inventory(ctx context.Context, id string) (InventorySnapshot, error) {
 	if repository == nil || repository.db == nil || !safeID.MatchString(id) {
 		return InventorySnapshot{}, ErrInvalid
