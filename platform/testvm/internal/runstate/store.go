@@ -193,10 +193,13 @@ func (s Store) Transition(expectedRevision uint64, next Phase, failure *Failure)
 
 	// Reload after acquiring the durable intent. This closes the race between
 	// the optimistic read and writer exclusion.
-	locked, lockedInfo, err := loadCurrent(root, names.state)
+	locked, lockedInfo, lockedFile, err := loadCurrentOpen(root, names.state)
 	if err != nil {
 		return State{}, err
 	}
+	// Keep the exact file we validated open through publication. Otherwise an
+	// unlinked entry's inode can be recycled before the final identity check.
+	defer lockedFile.Close()
 	if locked.RunID != current.RunID || locked.Revision != expectedRevision {
 		return State{}, fmt.Errorf("%w: state changed while acquiring write intent", ErrUnsafePath)
 	}
@@ -404,47 +407,61 @@ func writeExclusive(root rootDirectory, name string, data []byte, operations sto
 }
 
 func loadCurrent(root rootDirectory, name string) (State, os.FileInfo, error) {
+	state, info, file, err := loadCurrentOpen(root, name)
+	if file != nil {
+		file.Close()
+	}
+	return state, info, err
+}
+
+func loadCurrentOpen(root rootDirectory, name string) (State, os.FileInfo, *os.File, error) {
 	before, err := root.Lstat(name)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return State{}, nil, fmt.Errorf("%w: state file does not exist", ErrCorruptState)
+			return State{}, nil, nil, fmt.Errorf("%w: state file does not exist", ErrCorruptState)
 		}
-		return State{}, nil, fmt.Errorf("inspect run state: %w", err)
+		return State{}, nil, nil, fmt.Errorf("inspect run state: %w", err)
 	}
 	if err := validatePrivateRegular(before, "state"); err != nil {
-		return State{}, nil, err
+		return State{}, nil, nil, err
 	}
 	file, err := root.Open(name)
 	if err != nil {
-		return State{}, nil, fmt.Errorf("open run state: %w", err)
+		return State{}, nil, nil, fmt.Errorf("open run state: %w", err)
 	}
-	defer file.Close()
+	keepOpen := false
+	defer func() {
+		if !keepOpen {
+			file.Close()
+		}
+	}()
 	opened, err := file.Stat()
 	if err != nil {
-		return State{}, nil, fmt.Errorf("stat opened run state: %w", err)
+		return State{}, nil, nil, fmt.Errorf("stat opened run state: %w", err)
 	}
 	if err := validatePrivateRegular(opened, "opened state"); err != nil {
-		return State{}, nil, err
+		return State{}, nil, nil, err
 	}
 	if !os.SameFile(before, opened) {
-		return State{}, nil, fmt.Errorf("%w: state changed while opening", ErrUnsafePath)
+		return State{}, nil, nil, fmt.Errorf("%w: state changed while opening", ErrUnsafePath)
 	}
 	if err := verifyEntry(root, name, opened, "opened state"); err != nil {
-		return State{}, nil, err
+		return State{}, nil, nil, err
 	}
 
 	data, err := io.ReadAll(io.LimitReader(file, maxStateBytes+1))
 	if err != nil {
-		return State{}, nil, fmt.Errorf("read run state: %w", err)
+		return State{}, nil, nil, fmt.Errorf("read run state: %w", err)
 	}
 	if len(data) > maxStateBytes {
-		return State{}, nil, fmt.Errorf("%w: state exceeds %d bytes", ErrCorruptState, maxStateBytes)
+		return State{}, nil, nil, fmt.Errorf("%w: state exceeds %d bytes", ErrCorruptState, maxStateBytes)
 	}
 	state, err := Parse(data)
 	if err != nil {
-		return State{}, nil, err
+		return State{}, nil, nil, err
 	}
-	return state, opened, nil
+	keepOpen = true
+	return state, opened, file, nil
 }
 
 func verifyEntry(root rootDirectory, name string, want os.FileInfo, kind string) error {
