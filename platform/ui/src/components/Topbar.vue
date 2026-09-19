@@ -14,7 +14,7 @@ function cycleTheme():void{const order=["system","dark","light"] as const;const 
 
 <template>
   <header class="topbar">
-    <div class="mobile-brand"><List :size="21"/><strong>CyberPanel</strong></div>
+    <div class="mobile-brand"><button class="icon-button" type="button" aria-label="Open navigation" :aria-expanded="sessionStore.state.commandOpen" @click="sessionStore.setCommandOpen(true)"><List :size="21"/></button><strong>CyberPanel</strong></div>
     <h1>{{ pageTitle }}</h1>
     <button class="search-trigger" type="button" @click="sessionStore.setCommandOpen(true)"><MagnifyingGlass :size="17"/><span>Search resources and actions</span><kbd><Command :size="12"/> K</kbd></button>
     <div class="top-actions">

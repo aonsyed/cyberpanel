@@ -1,12 +1,29 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import * as Phosphor from "@phosphor-icons/vue";
+import { computed, type Component } from "vue";
+import {
+  PhAddressBook, PhArchive, PhArrowCircleDown, PhArrowClockwise, PhArrowsLeftRight,
+  PhArticle, PhBell, PhBellRinging, PhBug, PhCalendarCheck, PhCertificate,
+  PhChartLineUp, PhCube, PhDatabase, PhEnvelopeSimple, PhFileMagnifyingGlass,
+  PhFolderOpen, PhGauge, PhGavel, PhGlobeHemisphereWest, PhHardDrives, PhLifebuoy,
+  PhListMagnifyingGlass, PhMegaphone, PhPackage, PhPaperPlaneTilt, PhPlugsConnected,
+  PhPulse, PhShieldCheck, PhShieldWarning, PhSignpost, PhSlidersHorizontal, PhStack,
+  PhStackSimple, PhTerminalWindow, PhTray, PhTreeStructure, PhUserPlus, PhUsersThree,
+  PhCaretDoubleRight, PhCaretDoubleLeft,
+} from "@phosphor-icons/vue";
 import { navigation } from "../domain";
 import { router } from "../router";
 import { sessionStore } from "../store";
 
 const collapsed = computed(() => sessionStore.state.navigationCollapsed);
-const icons = Phosphor as unknown as Record<string, object>;
+const icons: Record<string, Component> = {
+  PhAddressBook, PhArchive, PhArrowCircleDown, PhArrowClockwise, PhArrowsLeftRight,
+  PhArticle, PhBell, PhBellRinging, PhBug, PhCalendarCheck, PhCertificate,
+  PhChartLineUp, PhCube, PhDatabase, PhEnvelopeSimple, PhFileMagnifyingGlass,
+  PhFolderOpen, PhGauge, PhGavel, PhGlobeHemisphereWest, PhHardDrives, PhLifebuoy,
+  PhListMagnifyingGlass, PhMegaphone, PhPackage, PhPaperPlaneTilt, PhPlugsConnected,
+  PhPulse, PhShieldCheck, PhShieldWarning, PhSignpost, PhSlidersHorizontal, PhStack,
+  PhStackSimple, PhTerminalWindow, PhTray, PhTreeStructure, PhUserPlus, PhUsersThree,
+};
 function navigate(event: MouseEvent, route: string): void { event.preventDefault(); router.push(route); }
 </script>
 
@@ -28,7 +45,7 @@ function navigate(event: MouseEvent, route: string): void { event.preventDefault
     <div class="sidebar-foot">
       <div class="node-light"><i></i><span v-if="!collapsed">Local node online</span></div>
       <button class="collapse" type="button" :aria-label="collapsed ? 'Expand navigation' : 'Collapse navigation'" @click="sessionStore.toggleNavigation()">
-        <component :is="collapsed ? icons.CaretDoubleRight : icons.CaretDoubleLeft" :size="17" />
+        <component :is="collapsed ? PhCaretDoubleRight : PhCaretDoubleLeft" :size="17" />
         <span v-if="!collapsed">Collapse</span>
       </button>
     </div>
