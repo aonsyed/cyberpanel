@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CheckCircle, Info, Warning, X, XCircle } from "@phosphor-icons/vue";
+import { PhCheckCircle as CheckCircle, PhInfo as Info, PhWarning as Warning, PhX as X, PhXCircle as XCircle } from "@phosphor-icons/vue";
 import { sessionStore } from "../store";
 const icons={healthy:CheckCircle,info:Info,warning:Warning,critical:XCircle};
 </script>

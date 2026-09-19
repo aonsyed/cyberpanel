@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { ArrowClockwise, ArrowRight, CheckCircle, ShieldWarning, X } from "@phosphor-icons/vue";
+import { PhArrowClockwise as ArrowClockwise, PhArrowRight as ArrowRight, PhCheckCircle as CheckCircle, PhShieldWarning as ShieldWarning, PhX as X } from "@phosphor-icons/vue";
 import { oneTimeToken, type APIClient } from "../api";
 import type { ActionDefinition, FieldDefinition } from "../domain";
 import { sessionStore } from "../store";
 
-const props=defineProps<{action:ActionDefinition;tenantId?:string;resource?:Record<string,unknown>|null;expectedGeneration?:number}>();
+const props=defineProps<{action:ActionDefinition;tenantId?:string|undefined;resource?:Record<string,unknown>|null;expectedGeneration?:number|undefined}>();
 const emit=defineEmits<{close:[];complete:[unknown]}>();
 const api=inject<APIClient>("api")!;
 const values=reactive<Record<string,unknown>>({});
@@ -102,10 +102,10 @@ onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>wi
           </section>
           <div v-for="field in action.fields||[]" :key="field.key" class="field">
             <label :for="`field-${field.key}`">{{field.label}}</label>
-            <select v-if="field.type==='select'" :id="`field-${field.key}`" v-model="values[field.key]" class="select" :required="field.required"><option value="" disabled>Select…</option><option v-for="option in fieldOptions(field)" :key="option.value" :value="option.value">{{option.label}}</option></select>
-            <textarea v-else-if="field.type==='textarea'||field.type==='json'" :id="`field-${field.key}`" v-model="values[field.key]" class="textarea" :class="{mono:field.type==='json'}" :required="field.required"></textarea>
+            <select v-if="field.type==='select'" :id="`field-${field.key}`" v-model="values[field.key]" class="select" :required="Boolean(field.required)"><option value="" disabled>Select…</option><option v-for="option in fieldOptions(field)" :key="option.value" :value="option.value">{{option.label}}</option></select>
+            <textarea v-else-if="field.type==='textarea'||field.type==='json'" :id="`field-${field.key}`" :value="String(values[field.key]??'')" @input="values[field.key]=($event.target as HTMLTextAreaElement).value" class="textarea" :class="{mono:field.type==='json'}" :required="Boolean(field.required)"></textarea>
             <label v-else-if="field.type==='boolean'" class="checkbox"><input :id="`field-${field.key}`" v-model="values[field.key]" type="checkbox"/><span>Enabled</span></label>
-            <input v-else :id="`field-${field.key}`" v-model="values[field.key]" class="input" :class="{mono:field.type==='cidr'||field.type==='cron'}" :type="field.type==='password'?'password':field.type==='number'?'number':field.type==='email'?'email':'text'" :required="field.required"/>
+            <input v-else :id="`field-${field.key}`" v-model="values[field.key]" class="input" :class="{mono:field.type==='cidr'||field.type==='cron'}" :type="field.type==='password'?'password':field.type==='number'?'number':field.type==='email'?'email':'text'" :required="Boolean(field.required)"/>
             <p v-if="field.helper" class="field-help">{{field.helper}}</p><p v-if="errors[field.key]" class="field-error">{{errors[field.key]}}</p>
           </div>
           <div v-if="action.confirmation&&!completed" class="confirmation" :class="`confirmation-${action.tone||'warning'}`"><ShieldWarning :size="22" weight="fill"/><div><strong>Confirm impact</strong><p>{{action.confirmation}}</p><label class="checkbox"><input v-model="confirmation" type="checkbox"/><span>I understand this change and its rollback boundary.</span></label></div></div>

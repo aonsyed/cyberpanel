@@ -19,8 +19,8 @@ function navigate(event: MouseEvent, route: string): void { event.preventDefault
     <nav class="navigation">
       <section v-for="group in navigation" :key="group.id" class="nav-group">
         <h2 v-if="!collapsed">{{ group.label }}</h2>
-        <a v-for="item in group.items" :key="item.id" :href="item.route" class="nav-link" :class="{ active: router.currentPath.value === item.route }" :title="collapsed ? item.label : undefined" @click="navigate($event,item.route)">
-          <component :is="icons[item.icon]" :size="19" :weight="router.currentPath.value === item.route ? 'fill' : 'regular'" aria-hidden="true" />
+        <a v-for="item in group.items" :key="item.id" :href="item.route" class="nav-link" :class="{ active: router.currentPath.value === item.route }" v-bind="collapsed ? {title:item.label} : {}" @click="navigate($event,item.route)">
+          <component :is="icons[`Ph${item.icon}`]" :size="19" :weight="router.currentPath.value === item.route ? 'fill' : 'regular'" aria-hidden="true" />
           <span v-if="!collapsed">{{ item.label }}</span>
         </a>
       </section>

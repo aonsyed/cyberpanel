@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { DotsThree, SortAscending } from "@phosphor-icons/vue";
+import { PhDotsThree as DotsThree, PhSortAscending as SortAscending } from "@phosphor-icons/vue";
 import type { ActionDefinition, ColumnDefinition } from "../domain";
 
 const props=defineProps<{columns:ColumnDefinition[];rows:Record<string,unknown>[];actions?:ActionDefinition[];selected?:string}>();

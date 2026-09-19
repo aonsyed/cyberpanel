@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, ref, watch } from "vue";
-import { ArrowClockwise, ArrowRight, FunnelSimple, MagnifyingGlass, Plus, WarningCircle } from "@phosphor-icons/vue";
+import { PhArrowClockwise as ArrowClockwise, PhArrowRight as ArrowRight, PhFunnelSimple as FunnelSimple, PhMagnifyingGlass as MagnifyingGlass, PhPlus as Plus, PhWarningCircle as WarningCircle } from "@phosphor-icons/vue";
 import type { APIClient } from "../api";
 import type { ActionDefinition, PageDefinition } from "../domain";
 import { sessionStore } from "../store";

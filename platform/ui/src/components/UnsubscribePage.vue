@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { inject, onMounted, ref } from "vue";
-import { CheckCircle, WarningCircle } from "@phosphor-icons/vue";
+import { PhCheckCircle as CheckCircle, PhWarningCircle as WarningCircle } from "@phosphor-icons/vue";
 import { APIClient } from "../api";
 
 const api = inject<APIClient>("api")!;

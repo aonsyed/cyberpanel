@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from "vue";
-import { ArrowRight, Command, MagnifyingGlass, X } from "@phosphor-icons/vue";
+import { PhArrowRight as ArrowRight, PhCommand as Command, PhMagnifyingGlass as MagnifyingGlass, PhX as X } from "@phosphor-icons/vue";
 import { navigation } from "../domain";
 import { router } from "../router";
 import { sessionStore } from "../store";
