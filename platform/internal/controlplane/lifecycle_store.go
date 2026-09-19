@@ -379,6 +379,7 @@ func (s *Store) DetachNode(ctx context.Context, request NodeDetachRequest, revoc
 		{`UPDATE fleet_enrollment_tokens SET state='revoked',completed_at=? WHERE node_id=? AND state IN ('pending','consumed')`, []any{now, node.ID}},
 		{`UPDATE fleet_lifecycle_operations SET state='cancelled',updated_at=? WHERE node_id=? AND state='reserved'`, []any{now, node.ID}},
 		{`UPDATE fleet_projections SET stale=1 WHERE node_id=?`, []any{node.ID}},
+		{`UPDATE fleet_projection_baselines_v1 SET state='invalidated',reason='authority_epoch_changed',updated_at=? WHERE node_id=? AND state='accepted'`, []any{now, node.ID}},
 		{`UPDATE fleet_encrypted_secrets SET consumed_at=? WHERE target_node_id=? AND consumed_at IS NULL`, []any{now, node.ID}},
 	}
 	for index, statement := range statements {

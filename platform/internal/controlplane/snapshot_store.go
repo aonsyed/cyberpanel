@@ -17,6 +17,11 @@ CREATE TABLE IF NOT EXISTS fleet_projection_snapshot_chunks_v1(node_id TEXT NOT 
 CREATE TABLE IF NOT EXISTS fleet_projection_snapshot_receipts_v1(node_id TEXT PRIMARY KEY,generation BIGINT NOT NULL CHECK(generation>0),watermark BIGINT NOT NULL CHECK(watermark>=0),manifest_digest TEXT NOT NULL);
 `
 
+type storedProjectionSnapshotChunk struct {
+	Chunk         federation.ProjectionSnapshotChunk `json:"chunk"`
+	Authenticated bool                               `json:"authenticated"`
+}
+
 func (s *Store) BeginProjectionSnapshot(ctx context.Context, nodeID, peerID federation.ID, epoch, received uint64) (federation.ProjectionSnapshotRequest,error) {
 	var request federation.ProjectionSnapshotRequest
 	if s==nil||s.db==nil||ctx==nil||!nodeID.Valid()||!peerID.Valid()||epoch==0{return request,ErrInvalid}
@@ -38,6 +43,7 @@ func (s *Store) BeginProjectionSnapshot(ctx context.Context, nodeID, peerID fede
 	if _,err=tx.ExecContext(ctx,`DELETE FROM fleet_projection_snapshot_chunks_v1 WHERE node_id=?`,nodeID);err!=nil{return request,err}
 	_,err=tx.ExecContext(ctx,`INSERT INTO fleet_projection_snapshots_v1(node_id,request_json,state,next_chunk,total_chunks,watermark,manifest_digest,received_bytes) VALUES(?,?,'receiving',0,0,0,'',0) ON CONFLICT(node_id) DO UPDATE SET request_json=excluded.request_json,state='receiving',next_chunk=0,total_chunks=0,watermark=0,manifest_digest='',received_bytes=0`,nodeID,raw)
 	if err!=nil{return request,err}
+	if err=invalidateProjectionBaselinesTx(ctx,tx,nodeID,"snapshot_in_progress",s.clock().UTC());err!=nil{return request,err}
 	if _,err=tx.ExecContext(ctx,`UPDATE fleet_projections SET stale=1 WHERE node_id=?`,nodeID);err!=nil{return request,err}
 	return request,tx.Commit()
 }
@@ -52,9 +58,18 @@ func (s *Store) PendingProjectionSnapshot(ctx context.Context, nodeID federation
 }
 
 func (s *Store) ReceiveProjectionSnapshot(ctx context.Context, chunk federation.ProjectionSnapshotChunk, certificateFingerprint string) (federation.ProjectionSnapshotRequest,bool,error) {
+	return s.receiveProjectionSnapshot(ctx,chunk,certificateFingerprint,false)
+}
+
+func (s *Store) receiveAuthenticatedProjectionSnapshot(ctx context.Context, chunk federation.ProjectionSnapshotChunk, certificateFingerprint string) (federation.ProjectionSnapshotRequest,bool,error) {
+	return s.receiveProjectionSnapshot(ctx,chunk,certificateFingerprint,true)
+}
+
+func (s *Store) receiveProjectionSnapshot(ctx context.Context, chunk federation.ProjectionSnapshotChunk, certificateFingerprint string, authenticated bool) (federation.ProjectionSnapshotRequest,bool,error) {
 	var request federation.ProjectionSnapshotRequest
 	content:=chunk.Content()
 	if s==nil||s.db==nil||ctx==nil||!chunk.SnapshotID.Valid()||!chunk.NodeID.Valid()||!chunk.PeerID.Valid()||chunk.AuthorityEpoch==0||chunk.SnapshotGeneration==0||chunk.Total==0||chunk.Total>federation.SnapshotMaximumChunks||chunk.Index>=chunk.Total||len(content)>federation.SnapshotMaximumChunkBytes||!validSHA256(chunk.ManifestDigest)||!validSHA256(certificateFingerprint){return request,false,ErrInvalid}
+	if chunk.Index==0 { if chunk.Baseline==nil { if authenticated{return request,false,ErrInvalid} } else if chunk.Baseline.Validate(chunk.NodeID,chunk.AuthorityEpoch,chunk.Watermark)!=nil{return request,false,ErrInvalid} } else if chunk.Baseline!=nil{return request,false,ErrInvalid}
 	tx,err:=s.db.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return request,false,err};defer tx.Rollback()
 	node,err:=loadNodeTx(ctx,tx,chunk.NodeID);if err!=nil{return request,false,err}
 	if node.AuthorityEpoch!=chunk.AuthorityEpoch||node.CertificateFingerprint!=certificateFingerprint||node.State==NodeRevoking||node.State==NodeRevoked{return request,false,ErrStale}
@@ -68,24 +83,27 @@ func (s *Store) ReceiveProjectionSnapshot(ctx context.Context, chunk federation.
 	if chunk.Index<next {
 		var existing []byte
 		if err=tx.QueryRowContext(ctx,`SELECT chunk_json FROM fleet_projection_snapshot_chunks_v1 WHERE node_id=? AND chunk_index=?`,node.ID,chunk.Index).Scan(&existing);err!=nil{return request,false,err}
-		if !bytes.Equal(existing,content){return request,false,ErrConflict}
+		stored,decodeErr:=decodeStoredProjectionSnapshotChunk(existing);if decodeErr!=nil||!bytes.Equal(stored.Chunk.Content(),content){return request,false,ErrConflict}
 		request.NextChunk=next;return request,state=="applied",tx.Commit()
 	}
 	if state!="receiving"||chunk.Index!=next||node.SnapshotGeneration+1!=chunk.SnapshotGeneration||node.ProjectionSequence+1!=request.ExpectedSequence{return request,false,ErrStale}
 	if receivedBytes+len(content)>federation.SnapshotMaximumBytes{return request,false,ErrInvalid}
-	if _,err=tx.ExecContext(ctx,`INSERT INTO fleet_projection_snapshot_chunks_v1(node_id,chunk_index,chunk_json) VALUES(?,?,?)`,node.ID,chunk.Index,content);err!=nil{return request,false,err}
+	storedJSON,marshalErr:=json.Marshal(storedProjectionSnapshotChunk{Chunk:chunk,Authenticated:authenticated});if marshalErr!=nil{return request,false,marshalErr}
+	if _,err=tx.ExecContext(ctx,`INSERT INTO fleet_projection_snapshot_chunks_v1(node_id,chunk_index,chunk_json) VALUES(?,?,?)`,node.ID,chunk.Index,storedJSON);err!=nil{return request,false,err}
 	next++
 	_,err=tx.ExecContext(ctx,`UPDATE fleet_projection_snapshots_v1 SET next_chunk=?,total_chunks=?,watermark=?,manifest_digest=?,received_bytes=? WHERE node_id=? AND state='receiving'`,next,chunk.Total,chunk.Watermark,chunk.ManifestDigest,receivedBytes+len(content),node.ID)
 	if err!=nil{return request,false,err}
 	request.NextChunk=next
 	if next<chunk.Total{return request,false,tx.Commit()}
 	rows,err:=tx.QueryContext(ctx,`SELECT chunk_json FROM fleet_projection_snapshot_chunks_v1 WHERE node_id=? ORDER BY chunk_index`,node.ID);if err!=nil{return request,false,err}
-	projections:=[]federation.SnapshotProjection{};var count uint32;previousKey:=""
+	projections:=[]federation.SnapshotProjection{};var count uint32;previousKey:="";allAuthenticated:=true;var baseline federation.ProjectionBaselineEvidence;var baselineKey,baselineSignatureDigest string
 	for rows.Next(){
-		var encoded []byte;var stored federation.ProjectionSnapshotChunk
+		var encoded []byte
 		if err=rows.Scan(&encoded);err!=nil{rows.Close();return request,false,err}
-		if json.Unmarshal(encoded,&stored)!=nil||stored.Index!=count||stored.Total!=chunk.Total||stored.Watermark!=chunk.Watermark||stored.ManifestDigest!=chunk.ManifestDigest{rows.Close();return request,false,ErrConflict}
-		for _,row:=range stored.Rows{
+		stored,decodeErr:=decodeStoredProjectionSnapshotChunk(encoded);if decodeErr!=nil||stored.Chunk.Index!=count||stored.Chunk.Total!=chunk.Total||stored.Chunk.NodeID!=chunk.NodeID||stored.Chunk.PeerID!=chunk.PeerID||stored.Chunk.AuthorityEpoch!=chunk.AuthorityEpoch||stored.Chunk.SnapshotGeneration!=chunk.SnapshotGeneration||stored.Chunk.Watermark!=chunk.Watermark||stored.Chunk.ManifestDigest!=chunk.ManifestDigest||stored.Chunk.RequestDigest!=chunk.RequestDigest{rows.Close();return request,false,ErrConflict}
+		allAuthenticated=allAuthenticated&&stored.Authenticated
+		if count==0 { if stored.Chunk.Baseline==nil { allAuthenticated=false } else if stored.Chunk.Baseline.Validate(node.ID,node.AuthorityEpoch,chunk.Watermark)!=nil{rows.Close();return request,false,ErrConflict} else { baseline=*stored.Chunk.Baseline;baselineKey=stored.Chunk.SignatureKeyID;baselineSignatureDigest=digest(stored.Chunk.Signature) } } else if stored.Chunk.Baseline!=nil{rows.Close();return request,false,ErrConflict}
+		for _,row:=range stored.Chunk.Rows{
 			key:=row.ResourceKind+"\x00"+row.ResourceID
 			if key<=previousKey||len(projections)>=federation.SnapshotMaximumRows{rows.Close();return request,false,ErrInvalid}
 			previousKey=key;projections=append(projections,row)
@@ -94,6 +112,8 @@ func (s *Store) ReceiveProjectionSnapshot(ctx context.Context, chunk federation.
 	}
 	err=rows.Err();rows.Close();if err!=nil{return request,false,err}
 	if count!=chunk.Total||federation.SnapshotManifestDigest(projections)!=chunk.ManifestDigest{return request,false,ErrConflict}
+	var attestation federation.ProjectionBaselineAttestation
+	if baseline.EventSequence!=0 { var baselineErr error;attestation,baselineErr=federation.DecodeProjectionBaselinePayload(baseline.Payload);if baselineErr!=nil||federation.ValidateProjectionBaselineState(attestation,baseline.EventSequence,projections)!=nil{return request,false,ErrConflict} }
 	// Replacement is observation-only. Node-local resource specifications and
 	// mutation grants are not touched, and no health/resource row is invented.
 	if _,err=tx.ExecContext(ctx,`DELETE FROM fleet_projections WHERE node_id=?`,node.ID);err!=nil{return request,false,err}
@@ -105,5 +125,20 @@ func (s *Store) ReceiveProjectionSnapshot(ctx context.Context, chunk federation.
 	if err!=nil{return request,false,err};if affected,rowsErr:=update.RowsAffected();rowsErr!=nil||affected!=1{return request,false,ErrStale}
 	if _,err=tx.ExecContext(ctx,`UPDATE fleet_projection_snapshots_v1 SET state='applied' WHERE node_id=?`,node.ID);err!=nil{return request,false,err}
 	if _,err=tx.ExecContext(ctx,`INSERT INTO fleet_projection_snapshot_receipts_v1(node_id,generation,watermark,manifest_digest) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,watermark=excluded.watermark,manifest_digest=excluded.manifest_digest`,node.ID,chunk.SnapshotGeneration,chunk.Watermark,chunk.ManifestDigest);err!=nil{return request,false,err}
+	if allAuthenticated {
+		if baselineKey==""||!validSHA256(baselineSignatureDigest){return request,false,ErrConflict}
+		if err=persistProjectionBaselineTx(ctx,tx,node,chunk.SnapshotGeneration,baseline,attestation,"snapshot",baselineKey,baselineSignatureDigest,s.clock().UTC());err!=nil{return request,false,err}
+	}
 	return request,true,tx.Commit()
+}
+
+func decodeStoredProjectionSnapshotChunk(encoded []byte) (storedProjectionSnapshotChunk,error) {
+	var stored storedProjectionSnapshotChunk
+	if err:=json.Unmarshal(encoded,&stored);err==nil&&stored.Chunk.SnapshotID.Valid(){return stored,nil}
+	// Pre-attestation in-flight chunks are readable only as unauthenticated;
+	// they can finish observation replacement but can never restore authority.
+	var legacy federation.ProjectionSnapshotChunk
+	if err:=json.Unmarshal(encoded,&legacy);err!=nil{return stored,err}
+	stored.Chunk=legacy
+	return stored,nil
 }

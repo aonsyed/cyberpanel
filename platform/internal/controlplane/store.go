@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS fleet_grants_node_peer ON fleet_grants(node_id,peer_i
 CREATE INDEX IF NOT EXISTS fleet_projections_tenant ON fleet_projections(tenant_id,node_id,resource_kind,resource_id);
 CREATE INDEX IF NOT EXISTS fleet_projections_tenant_cursor ON fleet_projections(tenant_id,node_id COLLATE "C",resource_kind COLLATE "C",resource_id COLLATE "C");
 CREATE INDEX IF NOT EXISTS fleet_events_occurred ON fleet_events(node_id,occurred_at);
-` + enrollmentSchema + lifecycleSchema + projectionSnapshotSchema
+` + enrollmentSchema + lifecycleSchema + projectionSnapshotSchema + projectionBaselineSchema
 type Store struct{db *authorityDB;clock func()time.Time}
 func NewStore(db *sql.DB)(*Store,error){authority,err:=newAuthorityDB(db);if err!=nil{return nil,err};return &Store{db:authority,clock:authorityNow},nil}
 func(s *Store)Bootstrap(ctx context.Context)error{return s.bootstrapPostgreSQL(ctx)}
@@ -152,6 +152,7 @@ func (s *Store) provisionEnrollmentTx(ctx context.Context, tx *authorityTx, enro
 	var existingOwner federation.ID
 	var existingEpoch uint64
 	err = tx.QueryRowContext(ctx, `SELECT owner_tenant_id,authority_epoch FROM fleet_nodes WHERE id=?`, node.ID).Scan(&existingOwner, &existingEpoch)
+	hadExistingNode := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -164,6 +165,11 @@ func (s *Store) provisionEnrollmentTx(ctx context.Context, tx *authorityTx, enro
 	}
 	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
 		return ErrConflict
+	}
+	if hadExistingNode && existingEpoch != node.AuthorityEpoch {
+		if err = invalidateProjectionBaselinesTx(ctx, tx, node.ID, "authority_epoch_changed", now); err != nil {
+			return err
+		}
 	}
 	result, err = tx.ExecContext(ctx, `INSERT INTO fleet_grants(id,node_id,peer_id,authority_epoch,state,grant_json,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state='active',grant_json=excluded.grant_json,expires_at=excluded.expires_at,updated_at=excluded.updated_at WHERE fleet_grants.node_id=excluded.node_id AND fleet_grants.peer_id=excluded.peer_id AND fleet_grants.authority_epoch=excluded.authority_epoch`, grant.ID, grant.NodeID, grant.PeerID, grant.AuthorityEpoch, "active", grantJSON, grant.ExpiresAt, now)
 	if err != nil {

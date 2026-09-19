@@ -237,7 +237,13 @@ func (s *Service) AdmitEvents(ctx context.Context, nodeID federation.ID, events 
 			return EventApplyResult{}, err
 		}
 	}
-	return s.store.ApplyEvents(ctx, nodeID, events)
+	result, err := s.store.applyAuthenticatedEvents(ctx, nodeID, events)
+	if err != nil && (errors.Is(err, ErrInvalid) || errors.Is(err, ErrConflict)) {
+		if rejectErr := s.store.rejectProjectionEvidence(ctx, nodeID, "projection_evidence_mismatch"); rejectErr != nil {
+			return EventApplyResult{}, errors.Join(err, rejectErr)
+		}
+	}
+	return result, err
 }
 
 func (s *Service) Disconnect(ctx context.Context, nodeID federation.ID) error {
@@ -272,6 +278,9 @@ func (s *Service) RevokeNode(ctx context.Context, operator Operator, nodeID fede
 	node.State = NodeRevoking
 	node.UpdatedAt = s.clock().UTC()
 	if err = s.store.PutNode(ctx, node); err != nil {
+		return federation.Revocation{}, err
+	}
+	if err = s.store.InvalidateProjectionBaseline(ctx, node.ID, "authority_epoch_changed"); err != nil {
 		return federation.Revocation{}, err
 	}
 	_ = s.audit.Record(ctx, "federation.node.revocation_queued", operator, node.ID, "node", node.ID.String(), reason)
@@ -640,7 +649,7 @@ func (n *NodeSession) handle(ctx context.Context, frame federation.Frame) error 
 		if err := decodeControlPayload(frame.Payload, &chunk); err != nil { return err }
 		if chunk.NodeID != n.nodeID || chunk.PeerID != n.service.peerID || chunk.AuthorityEpoch != n.authorityEpoch || n.service.eventVerifier == nil || chunk.SignatureKeyID == "" || len(chunk.SignatureKeyID)>256 || len(chunk.Signature)!=64 { return ErrForbidden }
 		if err := n.service.eventVerifier.VerifyNodeEvent(ctx,n.nodeID,chunk.SignatureKeyID,chunk.SigStructure(),chunk.Signature); err != nil { return ErrForbidden }
-		request, complete, err := n.store.ReceiveProjectionSnapshot(ctx, chunk, hex.EncodeToString(n.certificateFingerprint[:]))
+		request, complete, err := n.store.receiveAuthenticatedProjectionSnapshot(ctx, chunk, hex.EncodeToString(n.certificateFingerprint[:]))
 		if err != nil { return err }
 		if complete { return sendFrame(ctx,n.session,federation.FrameEventAck,eventAcknowledgement{Through:chunk.Watermark}) }
 		return sendFrame(ctx,n.session,federation.FrameSnapshotRequest,request)

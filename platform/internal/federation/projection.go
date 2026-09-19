@@ -1,11 +1,13 @@
 package federation
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -39,6 +41,12 @@ CREATE TABLE IF NOT EXISTS federation_projection_ledger_v1(
 
 var ErrProjectionBackpressure = errors.New("federation: projection spool backpressure")
 
+const (
+	ProjectionUpsertEventKind           = "federation.projection.upsert.v1"
+	ProjectionTombstoneEventKind        = "federation.projection.tombstone.v1"
+	ProjectionBaselineCompleteEventKind = "federation.projection.baseline.complete.v1"
+)
+
 type ProjectionExclusion struct {
 	ResourceKind string `json:"resourceKind"`
 	Reason       string `json:"reason"`
@@ -59,6 +67,16 @@ func NodeProjectionResourceKinds() []string {
 		"database.database", "database.instance", "database.principal", "dns.zone",
 		"host.operation_status", "host.service_status", "hosting.domain", "hosting.site",
 		"identity.tenant", "mail.alias", "mail.domain", "mail.mailbox",
+	}
+}
+
+func nodeProjectionExclusionKinds() map[string]struct{} {
+	return map[string]struct{}{
+		"application.secret_and_content": {}, "backup.content_and_provider": {},
+		"certificate.secret_and_challenge": {}, "container.secret_and_runtime": {},
+		"database.secret_and_access": {}, "dns.record_and_key_material": {},
+		"host.raw_and_audit": {}, "identity.principal_and_credential": {},
+		"mail.content_and_credential": {},
 	}
 }
 
@@ -111,39 +129,39 @@ type ProjectionSource interface {
 
 type ProjectionPublishResult struct {
 	SourceWatermark uint64
-	ManifestDigest string
-	Resources      uint64
-	Upserts        uint64
-	Tombstones     uint64
-	Baseline       bool
+	ManifestDigest  string
+	Resources       uint64
+	Upserts         uint64
+	Tombstones      uint64
+	Baseline        bool
 }
 
 type projectionLedgerEntry struct {
-	tenantID           string
-	sourceGeneration   uint64
+	tenantID            string
+	sourceGeneration    uint64
 	publishedGeneration uint64
-	statusDigest       string
-	state              string
-	authorityEpoch     uint64
+	statusDigest        string
+	state               string
+	authorityEpoch      uint64
 }
 
-type resourceProjectionPayload struct {
-	Schema               string          `json:"schema"`
-	Operation            string          `json:"operation"`
-	NodeID               ID              `json:"nodeId"`
-	AuthorityEpoch       uint64          `json:"authorityEpoch"`
-	SourceWatermark      uint64          `json:"sourceWatermark"`
-	TenantID             string          `json:"tenantId"`
-	ResourceKind         string          `json:"resourceKind"`
-	ResourceID           string          `json:"resourceId"`
-	Generation           uint64          `json:"generation"`
-	SourceGeneration     uint64          `json:"sourceGeneration"`
-	ProjectionDigest     string          `json:"projectionDigest"`
-	PreviousDigest       string          `json:"previousDigest,omitempty"`
-	Status               json.RawMessage `json:"status,omitempty"`
+type ProjectionResourcePayload struct {
+	Schema           string          `json:"schema"`
+	Operation        string          `json:"operation"`
+	NodeID           ID              `json:"nodeId"`
+	AuthorityEpoch   uint64          `json:"authorityEpoch"`
+	SourceWatermark  uint64          `json:"sourceWatermark"`
+	TenantID         string          `json:"tenantId"`
+	ResourceKind     string          `json:"resourceKind"`
+	ResourceID       string          `json:"resourceId"`
+	Generation       uint64          `json:"generation"`
+	SourceGeneration uint64          `json:"sourceGeneration"`
+	ProjectionDigest string          `json:"projectionDigest"`
+	PreviousDigest   string          `json:"previousDigest,omitempty"`
+	Status           json.RawMessage `json:"status,omitempty"`
 }
 
-type projectionBaselinePayload struct {
+type ProjectionBaselineAttestation struct {
 	Schema          string                     `json:"schema"`
 	NodeID          ID                         `json:"nodeId"`
 	AuthorityEpoch  uint64                     `json:"authorityEpoch"`
@@ -154,12 +172,190 @@ type projectionBaselinePayload struct {
 	Coverage        ProjectionCoverageManifest `json:"coverage"`
 }
 
-type projectionManifestRow struct {
+type ProjectionManifestEntry struct {
 	TenantID         string `json:"tenantId"`
 	ResourceKind     string `json:"resourceKind"`
 	ResourceID       string `json:"resourceId"`
 	SourceGeneration uint64 `json:"sourceGeneration"`
 	ProjectionDigest string `json:"projectionDigest"`
+}
+
+type ProjectionBaselineEvidence struct {
+	EventID       ID              `json:"eventId"`
+	EventSequence uint64          `json:"eventSequence"`
+	Payload       json.RawMessage `json:"payload"`
+	PayloadDigest string          `json:"payloadDigest"`
+}
+
+func NormalizeProjectionCoverage(value ProjectionCoverageManifest) (ProjectionCoverageManifest, error) {
+	value, _, err := normalizeProjectionCoverage(value)
+	return value, err
+}
+
+func ProjectionManifestDigest(coverage ProjectionCoverageManifest, entries []ProjectionManifestEntry) (string, error) {
+	coverage, included, err := normalizeProjectionCoverage(coverage)
+	if err != nil {
+		return "", err
+	}
+	entries = append([]ProjectionManifestEntry(nil), entries...)
+	sort.Slice(entries, func(left, right int) bool {
+		if entries[left].ResourceKind == entries[right].ResourceKind {
+			return entries[left].ResourceID < entries[right].ResourceID
+		}
+		return entries[left].ResourceKind < entries[right].ResourceKind
+	})
+	for index, entry := range entries {
+		if !validProjectionPart(entry.ResourceKind, 256) || !validProjectionPart(entry.ResourceID, 256) || entry.TenantID != "" && !validProjectionPart(entry.TenantID, 256) || entry.SourceGeneration > projectionMaximumGeneration || !validSHA256Digest(entry.ProjectionDigest) {
+			return "", ErrInvalid
+		}
+		if _, ok := included[entry.ResourceKind]; !ok {
+			return "", ErrInvalid
+		}
+		if index > 0 && entries[index-1].ResourceKind == entry.ResourceKind && entries[index-1].ResourceID == entry.ResourceID {
+			return "", ErrInvalid
+		}
+	}
+	encoded, err := json.Marshal(struct {
+		Coverage  ProjectionCoverageManifest `json:"coverage"`
+		Resources []ProjectionManifestEntry  `json:"resources"`
+	}{coverage, entries})
+	if err != nil {
+		return "", err
+	}
+	return digest(encoded), nil
+}
+
+func DecodeProjectionResourcePayload(raw json.RawMessage) (ProjectionResourcePayload, error) {
+	var value ProjectionResourcePayload
+	if len(raw) == 0 || len(raw) > SnapshotMaximumChunkBytes/2 || decodeProjectionJSON(raw, &value) != nil {
+		return value, ErrInvalid
+	}
+	canonical, err := canonicalJSON(raw)
+	if err != nil || !bytes.Equal(canonical, raw) || value.Schema != "cyberpanel.federation.resource-projection.v1" || value.Operation != "upsert" && value.Operation != "tombstone" || !value.NodeID.Valid() || value.AuthorityEpoch == 0 || value.SourceWatermark == 0 || value.SourceWatermark > projectionMaximumGeneration || !validProjectionPart(value.ResourceKind, 256) || !validProjectionPart(value.ResourceID, 256) || value.TenantID != "" && !validProjectionPart(value.TenantID, 256) || value.Generation == 0 || value.Generation > projectionMaximumGeneration || value.SourceGeneration > projectionMaximumGeneration || !validSHA256Digest(value.ProjectionDigest) {
+		return value, ErrInvalid
+	}
+	if value.Operation == "upsert" {
+		status, statusErr := canonicalJSON(value.Status)
+		if statusErr != nil || !bytes.Equal(status, value.Status) || len(status) == 0 || len(status) > projectionMaximumStatusBytes || digest(status) != value.ProjectionDigest || value.PreviousDigest != "" {
+			return value, ErrInvalid
+		}
+	} else if len(value.Status) != 0 || value.ProjectionDigest != digest([]byte("null")) || !validSHA256Digest(value.PreviousDigest) {
+		return value, ErrInvalid
+	}
+	return value, nil
+}
+
+func DecodeProjectionBaselinePayload(raw json.RawMessage) (ProjectionBaselineAttestation, error) {
+	var value ProjectionBaselineAttestation
+	if len(raw) == 0 || len(raw) > SnapshotMaximumChunkBytes/2 || decodeProjectionJSON(raw, &value) != nil {
+		return value, ErrInvalid
+	}
+	canonical, err := canonicalJSON(raw)
+	if err != nil || !bytes.Equal(canonical, raw) || value.Schema != "cyberpanel.federation.projection-baseline.v1" || !value.NodeID.Valid() || value.AuthorityEpoch == 0 || value.SourceWatermark == 0 || value.SourceWatermark > projectionMaximumGeneration || value.ResourceCount > ProjectionMaximumRows || value.TombstoneCount > 100000 || !validSHA256Digest(value.ManifestDigest) {
+		return value, ErrInvalid
+	}
+	value.Coverage, err = NormalizeProjectionCoverage(value.Coverage)
+	if err != nil {
+		return value, err
+	}
+	normalized, err := json.Marshal(value)
+	if err == nil {
+		normalized, err = canonicalJSON(normalized)
+	}
+	if err != nil || !bytes.Equal(normalized, raw) {
+		return value, ErrInvalid
+	}
+	return value, nil
+}
+
+func ProjectionBaselineEvidenceFromEvent(event NodeEvent) (ProjectionBaselineEvidence, ProjectionBaselineAttestation, error) {
+	var evidence ProjectionBaselineEvidence
+	if event.Kind != ProjectionBaselineCompleteEventKind || event.Sequence == 0 || event.ResourceKind != "" || event.ResourceID != "" || event.TenantID != "" || event.Generation == 0 || event.PayloadDigest != digest(event.Payload) {
+		return evidence, ProjectionBaselineAttestation{}, ErrInvalid
+	}
+	attestation, err := DecodeProjectionBaselinePayload(event.Payload)
+	if err != nil || event.NodeID != attestation.NodeID || event.Generation != attestation.SourceWatermark {
+		return evidence, attestation, ErrInvalid
+	}
+	evidence = ProjectionBaselineEvidence{EventID: event.ID, EventSequence: event.Sequence, Payload: append(json.RawMessage(nil), event.Payload...), PayloadDigest: event.PayloadDigest}
+	if err = evidence.Validate(event.NodeID, attestation.AuthorityEpoch, event.Sequence); err != nil {
+		return ProjectionBaselineEvidence{}, attestation, err
+	}
+	return evidence, attestation, nil
+}
+
+func (evidence ProjectionBaselineEvidence) Validate(node ID, epoch, watermark uint64) error {
+	if !evidence.EventID.Valid() || evidence.EventSequence == 0 || evidence.EventSequence > watermark || evidence.PayloadDigest != digest(evidence.Payload) {
+		return ErrInvalid
+	}
+	attestation, err := DecodeProjectionBaselinePayload(evidence.Payload)
+	if err != nil || attestation.NodeID != node || attestation.AuthorityEpoch != epoch {
+		return ErrInvalid
+	}
+	identifier := digest([]byte(fmt.Sprintf("cyberpanel-federation-projection-event-v1\x00%s\x00%d\x00\x00\x00\x00%d\x00%s", node, epoch, attestation.SourceWatermark, evidence.PayloadDigest)))
+	if evidence.EventID != ID("projection_"+identifier[:48]) {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func ValidateProjectionBaselineState(attestation ProjectionBaselineAttestation, markerSequence uint64, rows []SnapshotProjection) error {
+	coverage, included, err := normalizeProjectionCoverage(attestation.Coverage)
+	if err != nil || coverage.SchemaVersion != attestation.Coverage.SchemaVersion || markerSequence == 0 || len(rows) > 100000 {
+		return ErrInvalid
+	}
+	entries := make([]ProjectionManifestEntry, 0, attestation.ResourceCount)
+	var tombstones uint64
+	seen := make(map[string]struct{})
+	for _, row := range rows {
+		if _, covered := included[row.ResourceKind]; !covered {
+			continue
+		}
+		payload, payloadErr := DecodeProjectionResourcePayload(row.Payload)
+		if payloadErr != nil || payload.NodeID != attestation.NodeID || payload.AuthorityEpoch != attestation.AuthorityEpoch || payload.SourceWatermark > attestation.SourceWatermark || payload.TenantID != row.TenantID || payload.ResourceKind != row.ResourceKind || payload.ResourceID != row.ResourceID || payload.Generation != row.Generation || row.EventSequence == 0 || row.EventSequence >= markerSequence || row.PayloadDigest != digest(row.Payload) {
+			return ErrInvalid
+		}
+		key := row.ResourceKind + "\x00" + row.ResourceID
+		if _, duplicate := seen[key]; duplicate {
+			return ErrInvalid
+		}
+		seen[key] = struct{}{}
+		if payload.Operation == "tombstone" {
+			tombstones++
+			continue
+		}
+		entries = append(entries, ProjectionManifestEntry{TenantID: payload.TenantID, ResourceKind: payload.ResourceKind, ResourceID: payload.ResourceID, SourceGeneration: payload.SourceGeneration, ProjectionDigest: payload.ProjectionDigest})
+	}
+	manifestDigest, err := ProjectionManifestDigest(coverage, entries)
+	if err != nil || uint64(len(entries)) != attestation.ResourceCount || tombstones != attestation.TombstoneCount || manifestDigest != attestation.ManifestDigest {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func decodeProjectionJSON(raw []byte, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validSHA256Digest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) PublishProjection(ctx context.Context, source ProjectionSource) (ProjectionPublishResult, error) {
@@ -195,7 +391,8 @@ VALUES(1,?,?,1,0,'',0,?) ON CONFLICT(singleton_id) DO UPDATE SET
 		return result, err
 	}
 	var baselineComplete, sourceComplete int
-	if err = tx.QueryRowContext(ctx, `SELECT p.scan_watermark,p.baseline_complete,s.complete FROM federation_projection_publisher_v1 p JOIN federation_projection_source_v1 s ON s.singleton_id=1 WHERE p.singleton_id=1`).Scan(&result.SourceWatermark, &baselineComplete, &sourceComplete); err != nil {
+	var previousManifest string
+	if err = tx.QueryRowContext(ctx, `SELECT p.scan_watermark,p.baseline_complete,p.manifest_digest,s.complete FROM federation_projection_publisher_v1 p JOIN federation_projection_source_v1 s ON s.singleton_id=1 WHERE p.singleton_id=1`).Scan(&result.SourceWatermark, &baselineComplete, &previousManifest, &sourceComplete); err != nil {
 		return result, err
 	}
 	scan, err := source.ScanProjection(ctx, tx)
@@ -213,11 +410,10 @@ VALUES(1,?,?,1,0,'',0,?) ON CONFLICT(singleton_id) DO UPDATE SET
 	if len(resources) > ProjectionMaximumRows || sourceBytes > ProjectionMaximumSourceBytes {
 		return result, ErrProjectionBackpressure
 	}
-	manifestJSON, _ := json.Marshal(struct {
-		Coverage  ProjectionCoverageManifest `json:"coverage"`
-		Resources []projectionManifestRow     `json:"resources"`
-	}{coverage, manifestRows})
-	result.ManifestDigest = digest(manifestJSON)
+	result.ManifestDigest, err = ProjectionManifestDigest(coverage, manifestRows)
+	if err != nil {
+		return result, err
+	}
 	result.Resources = uint64(len(resources))
 	result.Baseline = baselineComplete != 1 || sourceComplete != 1
 	ledger, err := loadProjectionLedger(ctx, tx)
@@ -249,8 +445,8 @@ VALUES(1,?,?,1,0,'',0,?) ON CONFLICT(singleton_id) DO UPDATE SET
 			}
 			published = previous.publishedGeneration + 1
 		}
-		payload := resourceProjectionPayload{Schema: "cyberpanel.federation.resource-projection.v1", Operation: "upsert", NodeID: node, AuthorityEpoch: epoch, SourceWatermark: result.SourceWatermark, TenantID: resource.TenantID, ResourceKind: resource.ResourceKind, ResourceID: resource.ResourceID, Generation: published, SourceGeneration: resource.Generation, ProjectionDigest: statusDigest, Status: resource.SanitizedJSON}
-		event, eventErr := newProjectionEvent(node, epoch, resource.TenantID, resource.ResourceKind, resource.ResourceID, published, "federation.projection.upsert.v1", payload, now)
+		payload := ProjectionResourcePayload{Schema: "cyberpanel.federation.resource-projection.v1", Operation: "upsert", NodeID: node, AuthorityEpoch: epoch, SourceWatermark: result.SourceWatermark, TenantID: resource.TenantID, ResourceKind: resource.ResourceKind, ResourceID: resource.ResourceID, Generation: published, SourceGeneration: resource.Generation, ProjectionDigest: statusDigest, Status: resource.SanitizedJSON}
+		event, eventErr := newProjectionEvent(node, epoch, resource.TenantID, resource.ResourceKind, resource.ResourceID, published, ProjectionUpsertEventKind, payload, now)
 		if eventErr != nil {
 			return result, eventErr
 		}
@@ -287,8 +483,8 @@ VALUES(1,?,?,1,0,'',0,?) ON CONFLICT(singleton_id) DO UPDATE SET
 			return result, ErrInvalid
 		}
 		published := previous.publishedGeneration + 1
-		payload := resourceProjectionPayload{Schema: "cyberpanel.federation.resource-projection.v1", Operation: "tombstone", NodeID: node, AuthorityEpoch: epoch, SourceWatermark: result.SourceWatermark, TenantID: previous.tenantID, ResourceKind: parts[0], ResourceID: parts[1], Generation: published, SourceGeneration: previous.sourceGeneration, ProjectionDigest: digest([]byte("null")), PreviousDigest: previous.statusDigest}
-		event, eventErr := newProjectionEvent(node, epoch, previous.tenantID, parts[0], parts[1], published, "federation.projection.tombstone.v1", payload, now)
+		payload := ProjectionResourcePayload{Schema: "cyberpanel.federation.resource-projection.v1", Operation: "tombstone", NodeID: node, AuthorityEpoch: epoch, SourceWatermark: result.SourceWatermark, TenantID: previous.tenantID, ResourceKind: parts[0], ResourceID: parts[1], Generation: published, SourceGeneration: previous.sourceGeneration, ProjectionDigest: digest([]byte("null")), PreviousDigest: previous.statusDigest}
+		event, eventErr := newProjectionEvent(node, epoch, previous.tenantID, parts[0], parts[1], published, ProjectionTombstoneEventKind, payload, now)
 		if eventErr != nil {
 			return result, eventErr
 		}
@@ -305,15 +501,48 @@ VALUES(1,?,?,1,0,'',0,?) ON CONFLICT(singleton_id) DO UPDATE SET
 		}
 		return events[left].ResourceKind < events[right].ResourceKind
 	})
-	baselineFinished := !result.Baseline
-	if result.Baseline && !pendingTombstones && len(events) < ProjectionMaximumEvents {
-		marker := projectionBaselinePayload{Schema: "cyberpanel.federation.projection-baseline.v1", NodeID: node, AuthorityEpoch: epoch, SourceWatermark: result.SourceWatermark, ManifestDigest: result.ManifestDigest, ResourceCount: result.Resources, TombstoneCount: result.Tombstones, Coverage: coverage}
-		event, markerErr := newProjectionEvent(node, epoch, "", "", "", result.SourceWatermark, "federation.projection.baseline.complete.v1", marker, now)
-		if markerErr != nil {
-			return result, markerErr
+	projectedLedger := make(map[string]projectionLedgerEntry, len(ledger)+len(ledgerUpdates))
+	for key, entry := range ledger {
+		projectedLedger[key] = entry
+	}
+	for _, update := range ledgerUpdates {
+		projectedLedger[projectionLedgerKey(update.resource.ResourceKind, update.resource.ResourceID)] = update.entry
+	}
+	var tombstoneCount uint64
+	for key, entry := range projectedLedger {
+		parts := strings.SplitN(key, "\x00", 2)
+		if len(parts) == 2 && entry.authorityEpoch == epoch && entry.state == "tombstone" {
+			if _, covered := included[parts[0]]; covered {
+				tombstoneCount++
+			}
 		}
-		events = append(events, event)
-		baselineFinished = true
+	}
+	baselineFinished := !pendingTombstones
+	markerCurrent := false
+	var markerSequence uint64
+	var markerJSON []byte
+	if markerErr := tx.QueryRowContext(ctx, `SELECT sequence,payload_json FROM federation_events WHERE kind=? ORDER BY sequence DESC LIMIT 1`, ProjectionBaselineCompleteEventKind).Scan(&markerSequence, &markerJSON); markerErr == nil {
+		var markerEvent NodeEvent
+		if json.Unmarshal(markerJSON, &markerEvent) == nil {
+			markerEvent.Sequence = markerSequence
+			_, previous, evidenceErr := ProjectionBaselineEvidenceFromEvent(markerEvent)
+			markerCurrent = evidenceErr == nil && previous.NodeID == node && previous.AuthorityEpoch == epoch && previous.ManifestDigest == result.ManifestDigest && previous.ResourceCount == result.Resources && previous.TombstoneCount == tombstoneCount
+		}
+	} else if !errors.Is(markerErr, sql.ErrNoRows) {
+		return result, markerErr
+	}
+	markerNeeded := result.Baseline || previousManifest != result.ManifestDigest || !markerCurrent
+	if markerNeeded && baselineFinished {
+		if len(events) >= ProjectionMaximumEvents {
+			baselineFinished = false
+		} else {
+			marker := ProjectionBaselineAttestation{Schema: "cyberpanel.federation.projection-baseline.v1", NodeID: node, AuthorityEpoch: epoch, SourceWatermark: result.SourceWatermark, ManifestDigest: result.ManifestDigest, ResourceCount: result.Resources, TombstoneCount: tombstoneCount, Coverage: coverage}
+			event, markerErr := newProjectionEvent(node, epoch, "", "", "", result.SourceWatermark, ProjectionBaselineCompleteEventKind, marker, now)
+			if markerErr != nil {
+				return result, markerErr
+			}
+			events = append(events, event)
+		}
 	}
 	eventBytes := 0
 	for _, event := range events {
@@ -344,15 +573,17 @@ VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(resource_kind,resource_id) DO UPDATE SET
 			return result, err
 		}
 	}
-	if result.Baseline {
-		complete := 0
-		if baselineFinished { complete = 1 }
-		if _, err = tx.ExecContext(ctx, `UPDATE federation_projection_source_v1 SET complete=? WHERE singleton_id=1`, complete); err != nil {
-			return result, err
-		}
+	complete := 0
+	if baselineFinished {
+		complete = 1
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE federation_projection_source_v1 SET complete=? WHERE singleton_id=1`, complete); err != nil {
+		return result, err
 	}
 	publisherReady := 0
-	if baselineFinished { publisherReady = 1 }
+	if baselineFinished {
+		publisherReady = 1
+	}
 	publisherUpdate, err := tx.ExecContext(ctx, `UPDATE federation_projection_publisher_v1 SET baseline_complete=?,manifest_digest=?,resource_count=?,updated_at=? WHERE singleton_id=1 AND node_id=? AND authority_epoch=? AND scan_watermark=?`, publisherReady, result.ManifestDigest, result.Resources, now, node, epoch, result.SourceWatermark)
 	if err != nil {
 		return result, err
@@ -391,13 +622,22 @@ func normalizeProjectionCoverage(value ProjectionCoverageManifest) (ProjectionCo
 	value.Included = append([]string(nil), value.Included...)
 	value.Excluded = append([]ProjectionExclusion(nil), value.Excluded...)
 	sort.Strings(value.Included)
-	sort.Slice(value.Excluded, func(left, right int) bool { return value.Excluded[left].ResourceKind < value.Excluded[right].ResourceKind })
+	sort.Slice(value.Excluded, func(left, right int) bool {
+		return value.Excluded[left].ResourceKind < value.Excluded[right].ResourceKind
+	})
 	if value.SchemaVersion != 1 || len(value.Included) == 0 || len(value.Included) > 128 || len(value.Excluded) > 256 {
 		return value, nil, ErrInvalid
+	}
+	allowlist := make(map[string]struct{}, len(NodeProjectionResourceKinds()))
+	for _, kind := range NodeProjectionResourceKinds() {
+		allowlist[kind] = struct{}{}
 	}
 	included := make(map[string]struct{}, len(value.Included))
 	for _, kind := range value.Included {
 		if !validProjectionPart(kind, 256) {
+			return value, nil, ErrInvalid
+		}
+		if _, allowed := allowlist[kind]; !allowed {
 			return value, nil, ErrInvalid
 		}
 		if _, exists := included[kind]; exists {
@@ -405,15 +645,34 @@ func normalizeProjectionCoverage(value ProjectionCoverageManifest) (ProjectionCo
 		}
 		included[kind] = struct{}{}
 	}
+	exclusionKinds := nodeProjectionExclusionKinds()
+	accounted := make(map[string]struct{}, len(included))
+	for kind := range included {
+		accounted[kind] = struct{}{}
+	}
 	for index, exclusion := range value.Excluded {
 		if !validProjectionPart(exclusion.ResourceKind, 256) || strings.TrimSpace(exclusion.Reason) == "" || len(exclusion.Reason) > 512 || strings.ContainsAny(exclusion.Reason, "\x00\r\n") || index > 0 && value.Excluded[index-1].ResourceKind == exclusion.ResourceKind {
 			return value, nil, ErrInvalid
 		}
+		_, allowedKind := allowlist[exclusion.ResourceKind]
+		_, allowedCategory := exclusionKinds[exclusion.ResourceKind]
+		if !allowedKind && !allowedCategory {
+			return value, nil, ErrInvalid
+		}
+		if _, duplicate := accounted[exclusion.ResourceKind]; duplicate {
+			return value, nil, ErrInvalid
+		}
+		if allowedKind {
+			accounted[exclusion.ResourceKind] = struct{}{}
+		}
+	}
+	if len(accounted) != len(allowlist) {
+		return value, nil, ErrInvalid
 	}
 	return value, included, nil
 }
 
-func normalizeProjectionResources(values []ProjectionResource, included map[string]struct{}) ([]ProjectionResource, []projectionManifestRow, int, error) {
+func normalizeProjectionResources(values []ProjectionResource, included map[string]struct{}) ([]ProjectionResource, []ProjectionManifestEntry, int, error) {
 	resources := append([]ProjectionResource(nil), values...)
 	sort.Slice(resources, func(left, right int) bool {
 		if resources[left].ResourceKind == resources[right].ResourceKind {
@@ -421,7 +680,7 @@ func normalizeProjectionResources(values []ProjectionResource, included map[stri
 		}
 		return resources[left].ResourceKind < resources[right].ResourceKind
 	})
-	manifest := make([]projectionManifestRow, 0, len(resources))
+	manifest := make([]ProjectionManifestEntry, 0, len(resources))
 	bytesUsed := 0
 	for index := range resources {
 		resource := &resources[index]
@@ -440,7 +699,7 @@ func normalizeProjectionResources(values []ProjectionResource, included map[stri
 		}
 		resource.SanitizedJSON = canonical
 		bytesUsed += len(canonical)
-		manifest = append(manifest, projectionManifestRow{resource.TenantID, resource.ResourceKind, resource.ResourceID, resource.Generation, digest(canonical)})
+		manifest = append(manifest, ProjectionManifestEntry{resource.TenantID, resource.ResourceKind, resource.ResourceID, resource.Generation, digest(canonical)})
 	}
 	return resources, manifest, bytesUsed, nil
 }

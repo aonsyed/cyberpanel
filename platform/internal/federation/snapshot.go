@@ -64,6 +64,7 @@ type ProjectionSnapshotChunk struct {
 	Total uint32 `json:"total"`
 	ManifestDigest string `json:"manifestDigest"`
 	RequestDigest string `json:"requestDigest"`
+	Baseline *ProjectionBaselineEvidence `json:"baseline,omitempty"`
 	Rows []SnapshotProjection `json:"rows"`
 	SignatureKeyID string `json:"signatureKeyId"`
 	Signature []byte `json:"signature"`
@@ -128,6 +129,10 @@ func (s *Store) ProjectionSnapshotChunk(ctx context.Context, request ProjectionS
 	var watermark uint64
 	if err=tx.QueryRowContext(ctx,`SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='federation_events'),0)`).Scan(&watermark);err!=nil{return chunk,err}
 	if watermark<request.ExpectedSequence-1||watermark<request.ReceivedSequence{return chunk,ErrStale}
+	var baselineSequence uint64;var baselineJSON []byte;var baselineEvent NodeEvent
+	if err=tx.QueryRowContext(ctx,`SELECT sequence,payload_json FROM federation_events WHERE kind=? AND sequence<=? ORDER BY sequence DESC LIMIT 1`,ProjectionBaselineCompleteEventKind,watermark).Scan(&baselineSequence,&baselineJSON);err!=nil{return chunk,errors.Join(ErrProjectionSourceIncomplete,err)}
+	if json.Unmarshal(baselineJSON,&baselineEvent)!=nil{return chunk,ErrInvalid};baselineEvent.Sequence=baselineSequence
+	baseline,attestation,baselineErr:=ProjectionBaselineEvidenceFromEvent(baselineEvent);if baselineErr!=nil||attestation.NodeID!=node||attestation.AuthorityEpoch!=epoch{return chunk,errors.Join(ErrProjectionSourceIncomplete,baselineErr)}
 	rows,err:=tx.QueryContext(ctx,`SELECT event_json FROM federation_projection_latest_v1 ORDER BY resource_kind,resource_id LIMIT ?`,SnapshotMaximumRows+1);if err!=nil{return chunk,err}
 	projections:=[]SnapshotProjection{}
 	bytesUsed:=0
@@ -141,13 +146,14 @@ func (s *Store) ProjectionSnapshotChunk(ctx context.Context, request ProjectionS
 		if len(projections)>SnapshotMaximumRows||bytesUsed>SnapshotMaximumBytes{rows.Close();return chunk,ErrInvalid}
 	}
 	err=rows.Err();rows.Close();if err!=nil{return chunk,err}
+	if ValidateProjectionBaselineState(attestation,baseline.EventSequence,projections)!=nil{return chunk,ErrProjectionSourceIncomplete}
 	digest:=SnapshotManifestDigest(projections)
 	chunks:=[]ProjectionSnapshotChunk{}
-	current:=ProjectionSnapshotChunk{SnapshotID:request.SnapshotID,NodeID:node,PeerID:peer,AuthorityEpoch:epoch,SnapshotGeneration:request.SnapshotGeneration,Watermark:watermark,ManifestDigest:digest,RequestDigest:request.Digest(),Rows:[]SnapshotProjection{}}
+	current:=ProjectionSnapshotChunk{SnapshotID:request.SnapshotID,NodeID:node,PeerID:peer,AuthorityEpoch:epoch,SnapshotGeneration:request.SnapshotGeneration,Watermark:watermark,ManifestDigest:digest,RequestDigest:request.Digest(),Baseline:&baseline,Rows:[]SnapshotProjection{}}
 	for _,row:=range projections{
 		candidate:=current;candidate.Rows=append(append([]SnapshotProjection(nil),current.Rows...),row)
 		if len(candidate.Content())>SnapshotMaximumChunkBytes-2048 {
-			if len(current.Rows)==0{return chunk,ErrInvalid};chunks=append(chunks,current);current.Rows=[]SnapshotProjection{row}
+			if len(current.Rows)==0{return chunk,ErrInvalid};chunks=append(chunks,current);current.Rows=[]SnapshotProjection{row};current.Baseline=nil
 		}else{current=candidate}
 	}
 	chunks=append(chunks,current)
