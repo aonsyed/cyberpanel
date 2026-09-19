@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net"
@@ -263,6 +264,55 @@ func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
 	source.clientCertificate, source.clientKey = clientCertificate, clientKey
 	if _, err := query(instance); err != nil {
 		t.Fatalf("mutual TLS positive control after rejection: %v", err)
+	}
+	if os.Getenv("CYBERPANEL_QEMU_LIVE_WORDPRESS_TLS") == "1" {
+		if _, err := rootQuery("CREATE DATABASE qemu_wordpress; GRANT ALL ON qemu_wordpress.* TO 'qemu_tls'@'127.0.0.1'; ALTER USER 'qemu_tls'@'127.0.0.1' REQUIRE SSL;"); err != nil {
+			t.Fatal(err)
+		}
+		wordpressRoot := filepath.Join(root, "wordpress")
+		if err := os.Mkdir(wordpressRoot, 0700); err != nil {
+			t.Fatal(err)
+		}
+		dropin, err := os.ReadFile("../apps/wordpress_db_tls.php")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wordpressRoot, "db.php"), dropin, 0600); err != nil {
+			t.Fatal(err)
+		}
+		check := func(name, host string, authority, clientCert, privateKey []byte, mutual, accept, tlsError bool) {
+			t.Helper()
+			configuration, err := json.Marshal(map[string]any{"version": 1, "host": host, "port": port, "mutual": mutual})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for file, value := range map[string][]byte{".cyberpanel-db-tls.json": configuration, ".cyberpanel-db-ca.pem": authority, ".cyberpanel-db-client.pem": clientCert, ".cyberpanel-db-client.key": privateKey} {
+				if err := os.WriteFile(filepath.Join(wordpressRoot, file), value, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			input, err := json.Marshal(map[string]any{"password": string(password), "host": host, "port": port, "accept": accept, "tls_error": tlsError, "wpdb": "/home/harness/class-wpdb-7.1.php", "dropin": filepath.Join(wordpressRoot, "db.php")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer wipeBytes(input)
+			command := exec.CommandContext(ctx, "/usr/bin/php8.3", "../apps/testdata/wordpress_db_tls_check.php")
+			command.Stdin = strings.NewReader(string(input))
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("WordPress %s: %v: %s", name, err, output)
+			}
+			t.Logf("WordPress %s: %s", name, strings.TrimSpace(string(output)))
+		}
+		check("trusted TLS", "127.0.0.1", ca, nil, nil, false, true, false)
+		check("wrong CA", "127.0.0.1", wrongCA, nil, nil, false, false, true)
+		check("wrong identity", "127.1", ca, nil, nil, false, false, true)
+		if _, err := rootQuery("ALTER USER 'qemu_tls'@'127.0.0.1' REQUIRE X509;"); err != nil {
+			t.Fatal(err)
+		}
+		check("missing client identity", "127.0.0.1", ca, nil, nil, false, false, false)
+		check("trusted mutual TLS", "127.0.0.1", ca, clientCertificate, clientKey, true, true, false)
+		check("wrong client identity", "127.0.0.1", ca, wrongClientCertificate, wrongClientKey, true, false, true)
 	}
 	t.Log("actual MariaDB TCP TLS and mutual TLS: valid identities accepted; wrong CA, wrong hostname, missing and untrusted client identities rejected")
 }

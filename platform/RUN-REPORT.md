@@ -195,6 +195,45 @@ execd broker endpoint, and other OS/architecture combinations remain unqualified
 
 ### External application database qualification gap
 
+Implementation in progress: `internal/apps/wordpress_db_tls.php` now contains a
+managed WordPress database connection implementation that configures the pinned
+CA and optional client identity before connecting, enforces the configured TCP
+endpoint and peer verification, and checks that the session negotiated a TLS
+cipher. It preserves WordPress charset/SQL-mode/database initialization and has
+its own connection-initialization state because WordPress's corresponding
+property is private. This asset is **not yet wired into install/clone**.
+
+Driver-level qualification now passes inside QEMU using actual WordPress
+`wpdb`, PHP mysqli/mysqlnd and the isolated real MariaDB TLS fixture. Trusted
+TLS and mutual TLS both execute queries, select the expected database, apply
+utf8mb4 and reconnect successfully. Wrong CA, mismatched identity (`127.1`
+versus a certificate for `127.0.0.1`), missing client identity, and a client
+certificate signed by an unrelated CA are rejected. Negative TLS cases require
+an actual TLS error/warning, not merely any failure. WordPress bootstrap hooks
+and constants are minimal test fixtures; this is **not** a full WordPress
+installation or browser journey.
+
+The initial connector incorrectly required
+`mysqli_options(MYSQLI_OPT_SSL_VERIFY_SERVER_CERT, true)` to succeed. QEMU
+proved that mysqlnd 8.3.6 rejects that legacy option. The connector now supplies
+the pinned CA and the SSL-only connection flag, never the verification-bypass
+flag. This matches the
+[mysqlnd TLS implementation](https://raw.githubusercontent.com/php/php-src/PHP-8.3/ext/mysqlnd/mysqlnd_vio.c),
+and the live negative-certificate/hostname checks confirm rejection. Temporary
+diagnostic logging was removed before the final passing run.
+
+Command inside the Ubuntu ARM64 guest:
+`CYBERPANEL_QEMU_LIVE_MARIADB=1 CYBERPANEL_QEMU_LIVE_WORDPRESS_TLS=1 go test ./internal/database -run TestQEMULiveMariaDBExternalTLS -count=1 -v`.
+The fixture removes its server, data and keys on exit. Installed MariaDB and
+the signed component services were not reconfigured by this test.
+
+PHP 8.3 CLI and its MySQL driver were installed only inside Ubuntu ARM64 QEMU
+for those checks (3.3 MB of package downloads, no VM image downloads). Official
+WordPress 7.1 `class-wpdb.php` was retrieved into that guest as a test dependency;
+this does not select or certify a production WordPress recipe version.
+The tested source SHA256 is
+`e15403e90032dd0508811301505e491d4212de5152581a98f51b744a1a3903bd`.
+
 The WordPress integration point has been checked against primary documentation:
 [`wpdb::db_connect`](https://developer.wordpress.org/reference/classes/wpdb/db_connect/)
 uses client flags but does not set the selected instance's pinned CA before
