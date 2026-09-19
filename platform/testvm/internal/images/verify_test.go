@@ -302,8 +302,8 @@ func TestVerifyAcceptsQEMU1103BlockGraphChildren(t *testing.T) {
 
 func TestVerifyRejectsUnsafeImageInfo(t *testing.T) {
 	sourcePath := writeTestImage(t, "base.qcow2", testImageContents())
-	request := newAdmitRequest(t, testImage(), sourcePath)
-	valid := string(validInfoJSON(admittedPath(request)))
+	const fixturePath = "/protected/base.qcow2"
+	valid := string(validInfoJSON(fixturePath))
 	record := valid[1 : len(valid)-1]
 	tests := []struct {
 		name    string
@@ -370,8 +370,9 @@ func TestVerifyRejectsUnsafeImageInfo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runner := successfulVerifyRunner(t, []byte(tt.info))
 			request := newAdmitRequest(t, testImage(), sourcePath)
+			info := strings.ReplaceAll(tt.info, fixturePath, admittedPath(request))
+			runner := successfulVerifyRunner(t, []byte(info))
 			request.Runner = runner
 			_, err := AdmitAndVerify(context.Background(), request)
 			assertVerifyErrorContains(t, err, tt.wantErr)
@@ -384,37 +385,32 @@ func TestVerifyRejectsUnsafeImageInfo(t *testing.T) {
 
 func TestVerifyRejectsOversizedCommandOutput(t *testing.T) {
 	sourcePath := writeTestImage(t, "base.qcow2", testImageContents())
-	request := newAdmitRequest(t, testImage(), sourcePath)
 	tests := []struct {
-		name   string
-		runner *fakeRunner
+		name    string
+		results func(string) []CommandResult
 	}{
 		{
 			name: "info output",
-			runner: &fakeRunner{
-				t: t,
-				results: []CommandResult{
-					{Stdout: bytes.Repeat([]byte("x"), int(MaxCommandOutputBytes)+1)},
-				},
+			results: func(string) []CommandResult {
+				return []CommandResult{{Stdout: bytes.Repeat([]byte("x"), int(MaxCommandOutputBytes)+1)}}
 			},
 		},
 		{
 			name: "check output",
-				runner: &fakeRunner{
-					t: t,
-					results: []CommandResult{
-						{Stdout: validInfoJSON(admittedPath(request))},
+			results: func(path string) []CommandResult {
+				return []CommandResult{
+					{Stdout: validInfoJSON(path)},
 					{Stderr: bytes.Repeat([]byte("x"), int(MaxCommandOutputBytes)+1)},
-				},
+				}
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.runner.t = t
 			request := newAdmitRequest(t, testImage(), sourcePath)
-			request.Runner = tt.runner
+			runner := &fakeRunner{t: t, results: tt.results(admittedPath(request))}
+			request.Runner = runner
 			_, err := AdmitAndVerify(context.Background(), request)
 			assertVerifyErrorContains(t, err, "output limit")
 		})
@@ -730,6 +726,23 @@ func newAdmitRequest(t *testing.T, image Image, sourcePath string) AdmitRequest 
 	if err := os.Chmod(cacheRoot, 0o700); err != nil {
 		t.Fatalf("protect cache root: %v", err)
 	}
+	digestDirectory := filepath.Dir(filepath.Join(cacheRoot, filepath.FromSlash(image.RuntimePath)))
+	t.Cleanup(func() {
+		info, err := os.Lstat(digestDirectory)
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if err != nil {
+			t.Errorf("inspect protected cache for cleanup: %v", err)
+			return
+		}
+		if !info.IsDir() {
+			return
+		}
+		if err := os.Chmod(digestDirectory, 0o700); err != nil {
+			t.Errorf("unlock protected cache for cleanup: %v", err)
+		}
+	})
 	return AdmitRequest{
 		Image:       image,
 		SourcePath:  sourcePath,
