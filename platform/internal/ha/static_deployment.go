@@ -215,7 +215,12 @@ const staticDeploymentSchema = `CREATE TABLE IF NOT EXISTS ha_static_deployments
  node_id TEXT PRIMARY KEY, bundle_id TEXT NOT NULL UNIQUE, deployment_epoch INTEGER NOT NULL,
  authority_epoch INTEGER NOT NULL, bundle_digest TEXT NOT NULL, topology_digest TEXT NOT NULL,
  admitted_at TIMESTAMP NOT NULL
-)`
+);
+CREATE TABLE IF NOT EXISTS ha_static_deployment_grants_v1 (
+ node_id TEXT NOT NULL, grant_id TEXT NOT NULL, deployment_epoch INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('active','staged','revoked')),
+ PRIMARY KEY(node_id,grant_id)
+);`
 
 type StaticDeploymentService struct { DB *sql.DB }
 
@@ -274,6 +279,10 @@ func (service *StaticDeploymentService) Admit(ctx context.Context, bundle Static
 		clusterRaw, _ := json.Marshal(bundle.Cluster)
 		if err = insertStaticJSON(ctx, tx, `SELECT cluster_json FROM ha_database_clusters WHERE id=?`, []any{bundle.Cluster.ID}, clusterRaw, `INSERT INTO ha_database_clusters(id,group_id,topology,state,generation,cluster_json,updated_at) VALUES(?,?,?,?,?,?,?)`, bundle.Cluster.ID, bundle.Cluster.GroupID, bundle.Cluster.Topology, bundle.Cluster.State, bundle.Cluster.Generation, clusterRaw, bundle.Cluster.UpdatedAt); err != nil { return StaticDeploymentReceipt{}, err }
 	}
+	if peer.Valid() {
+		if _, err = tx.ExecContext(ctx, `UPDATE federation_grants SET state='staged',updated_at=? WHERE id IN (SELECT grant_id FROM ha_static_deployment_grants_v1 WHERE node_id=? AND state='active') AND state='active'`, time.Now().UTC(), node); err != nil { return StaticDeploymentReceipt{}, err }
+		if _, err = tx.ExecContext(ctx, `UPDATE ha_static_deployment_grants_v1 SET state='staged' WHERE node_id=? AND state='active'`, node); err != nil { return StaticDeploymentReceipt{}, err }
+	}
 	bindings := make(map[string]federation.FederatedPrincipalBinding)
 	for _, grant := range bundle.Grants {
 		for _, binding := range grant.PrincipalBindings {
@@ -300,9 +309,22 @@ func (service *StaticDeploymentService) Admit(ctx context.Context, bundle Static
 		var stored []byte
 		var state string
 		loadErr := tx.QueryRowContext(ctx, `SELECT grant_json,state FROM federation_grants WHERE id=?`, grant.ID).Scan(&stored, &state)
-		if loadErr == nil { if state != "active" || !sameStaticJSON(stored, raw) { return StaticDeploymentReceipt{}, ErrConflict }; continue }
-		if !errors.Is(loadErr, sql.ErrNoRows) { return StaticDeploymentReceipt{}, loadErr }
-		if _, err = tx.ExecContext(ctx, `INSERT INTO federation_grants(id,peer_id,authority_epoch,state,grant_json,expires_at,updated_at) VALUES(?,?,?,?,?,?,?)`, grant.ID, grant.PeerID, grant.AuthorityEpoch, "active", raw, grant.ExpiresAt, time.Now().UTC()); err != nil { return StaticDeploymentReceipt{}, err }
+		if loadErr == nil {
+			if state != "active" && state != "staged" || !sameStaticJSON(stored, raw) { return StaticDeploymentReceipt{}, ErrConflict }
+			result, updateErr := tx.ExecContext(ctx, `UPDATE federation_grants SET state='active',updated_at=? WHERE id=? AND state IN ('active','staged')`, time.Now().UTC(), grant.ID)
+			if updateErr != nil { return StaticDeploymentReceipt{}, updateErr }
+			if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 { return StaticDeploymentReceipt{}, ErrConflict }
+		} else {
+			if !errors.Is(loadErr, sql.ErrNoRows) { return StaticDeploymentReceipt{}, loadErr }
+			if _, err = tx.ExecContext(ctx, `INSERT INTO federation_grants(id,peer_id,authority_epoch,state,grant_json,expires_at,updated_at) VALUES(?,?,?,?,?,?,?)`, grant.ID, grant.PeerID, grant.AuthorityEpoch, "active", raw, grant.ExpiresAt, time.Now().UTC()); err != nil { return StaticDeploymentReceipt{}, err }
+		}
+		mappingResult, mappingErr := tx.ExecContext(ctx, `INSERT INTO ha_static_deployment_grants_v1(node_id,grant_id,deployment_epoch,state) VALUES(?,?,?,'active') ON CONFLICT(node_id,grant_id) DO UPDATE SET deployment_epoch=excluded.deployment_epoch,state='active' WHERE ha_static_deployment_grants_v1.state IN ('active','staged')`, node,grant.ID,bundle.DeploymentEpoch)
+		if mappingErr != nil { return StaticDeploymentReceipt{}, mappingErr }
+		if affected, rowsErr := mappingResult.RowsAffected(); rowsErr != nil || affected != 1 { return StaticDeploymentReceipt{}, ErrConflict }
+	}
+	if peer.Valid() {
+		if _, err = tx.ExecContext(ctx, `UPDATE federation_grants SET state='revoked',updated_at=? WHERE id IN (SELECT grant_id FROM ha_static_deployment_grants_v1 WHERE node_id=? AND state='staged') AND state='staged'`, time.Now().UTC(), node); err != nil { return StaticDeploymentReceipt{}, err }
+		if _, err = tx.ExecContext(ctx, `UPDATE ha_static_deployment_grants_v1 SET state='revoked' WHERE node_id=? AND state='staged'`, node); err != nil { return StaticDeploymentReceipt{}, err }
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO ha_static_deployments_v1(node_id,bundle_id,deployment_epoch,authority_epoch,bundle_digest,topology_digest,admitted_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET bundle_id=excluded.bundle_id,deployment_epoch=excluded.deployment_epoch,authority_epoch=excluded.authority_epoch,bundle_digest=excluded.bundle_digest,admitted_at=excluded.admitted_at`, node, bundle.ID, bundle.DeploymentEpoch, epoch, digest, topologyDigest, time.Now().UTC())
 	if err != nil { return StaticDeploymentReceipt{}, err }
