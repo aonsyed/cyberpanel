@@ -254,6 +254,16 @@ unqualified, including recovery-point creation when the clone never completed.
 An installation persistence failure before execution still requires recovery
 of provisioned database resources. No new recovery protocol was introduced.
 
+### Clone access-policy admission consistency
+
+The SQLite success-path fixture exposed that `CloneRequest.Validate` accepted
+policy IDs later rejected by `StagingRelation.Validate`. A QEMU regression
+reproduced five such mismatches. Clone admission now uses the existing shared
+policy-ID validator, rejecting malformed IDs before operation admission,
+snapshot creation or database provisioning. The valid scoped policy remains
+accepted. The fresh apps suite and core/execd builds passed in Ubuntu ARM64 QEMU;
+no installed HTTP or other-architecture rerun is implied by this focused fix.
+
 ### Application connection authority and integrated Go check — 2026-09-20
 
 `TestQEMUApplicationConnectionAuthority` exercises the production resolver

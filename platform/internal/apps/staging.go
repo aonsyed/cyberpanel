@@ -49,7 +49,7 @@ func (request CloneRequest) Validate(now time.Time) error {
 	if err := requireID("target installation", string(request.TargetInstallationID)); err != nil { return err }
 	if request.TargetDatabaseClientIdentityRef!="" && request.TargetDatabaseClientIdentityRef!=SecretRef(ApplicationManagedSecretID("database_tls",request.TargetInstallationID).String()) { return ErrPolicyDenied }
 	if err := requireID("target database instance", string(request.TargetDatabaseInstanceID)); err != nil { return err }
-	if request.TargetSiteUID < 1000 || request.TargetSiteID == request.Source.SiteID || request.TargetInstallationID == request.Source.ID || request.SourceURL == "" || request.TargetURL == "" || request.TargetRuntimeID == "" || !request.CreateDatabase || !request.MailSuppressed || !request.ExternalActionsDenied || request.AccessPolicyID == "" {
+	if request.TargetSiteUID < 1000 || request.TargetSiteID == request.Source.SiteID || request.TargetInstallationID == request.Source.ID || request.SourceURL == "" || request.TargetURL == "" || request.TargetRuntimeID == "" || !request.CreateDatabase || !request.MailSuppressed || !request.ExternalActionsDenied || !validWebAccessPolicyID(request.AccessPolicyID) {
 		return fmt.Errorf("%w: clone request", ErrInvalid)
 	}
 	return nil
