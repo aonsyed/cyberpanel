@@ -27,6 +27,8 @@ import (
 
 type mariaDBConnection struct {
 	arguments []string
+	executor *LinuxMariaDBExecutor
+	localRoot bool
 }
 
 type mariaDBStatement uint8
@@ -55,6 +57,10 @@ const (
 	sqlWaitReplication
 	sqlObserveReplicationPrincipal
 	sqlCreateReplicationPrincipal
+	sqlWriterSessionAudit
+	sqlWriterSessions
+	sqlKillWriterSession
+	sqlStopWriterReplication
 )
 
 type principalMutation struct {
@@ -75,8 +81,12 @@ func (executor *LinuxMariaDBExecutor) connection(ctx context.Context, instance D
 	}
 	base := []string{"--batch", "--skip-column-names", "--raw", "--binary-mode", "--connect-timeout=8", "--default-character-set=utf8mb4"}
 	if instance.Placement == PlacementLocal {
-		arguments := append(base, "--protocol=socket", "--socket="+mariaDBSocket, "--user=root")
-		return &mariaDBConnection{arguments: arguments}, func() {}, nil
+		// --no-defaults must be first. Otherwise a root-owned client option file
+		// can silently select another account, transport, or initialization path
+		// and bypass the exclusive root@localhost unix_socket prerequisite.
+		arguments := append([]string{"--no-defaults"}, base...)
+		arguments = append(arguments, "--protocol=socket", "--socket="+mariaDBSocket, "--user=root")
+		return &mariaDBConnection{arguments: arguments, executor:executor, localRoot:true}, func() {}, nil
 	}
 	if instance.External == nil || !sameServerName(instance.External.Endpoint.Host, instance.External.ServerName) {
 		return nil, func() {}, ErrInvalidResource
@@ -129,7 +139,7 @@ func (executor *LinuxMariaDBExecutor) connection(ctx context.Context, instance D
 		cleanup()
 		return nil, func() {}, err
 	}
-	arguments := []string{"--defaults-extra-file=" + credentialFile}
+	arguments := []string{"--defaults-file=" + credentialFile}
 	arguments = append(arguments, base...)
 	arguments = append(arguments,
 		"--protocol=tcp",
@@ -187,8 +197,18 @@ func optionFileValue(value []byte) (string, error) {
 }
 
 func (connection *mariaDBConnection) query(ctx context.Context, statement mariaDBStatement, value ...any) ([]byte, error) {
-	if connection == nil {
+	if connection == nil || ctx == nil {
 		return nil, ErrInvalidCommand
+	}
+	if connection.executor != nil {
+		guarded,release,err:=connection.executor.guardRootSQL(ctx,statement)
+		if err!=nil{return nil,err};defer release();ctx=guarded
+	}
+	if connection.localRoot {
+		info, err := os.Lstat(mariaDBSocket)
+		if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0 {
+			return nil, ErrUnauthorized
+		}
 	}
 	script, err := buildMariaDBStatement(statement, value...)
 	if err != nil {
@@ -212,6 +232,7 @@ func (connection *mariaDBConnection) query(ctx context.Context, statement mariaD
 }
 
 func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, error) {
+	if statement==sqlWriterSessionAudit||statement==sqlWriterSessions||statement==sqlKillWriterSession||statement==sqlStopWriterReplication{return buildWriterGateStatement(statement,values...)}
 	if statement==sqlObserveReplication||statement==sqlConfigureReplication||statement==sqlWaitReplication||statement==sqlObserveReplicationPrincipal||statement==sqlCreateReplicationPrincipal{return buildReplicationStatement(statement,values...)}
 	switch statement {
 	case sqlObserveStatus:
@@ -524,14 +545,7 @@ func (executor *LinuxMariaDBExecutor) FreezeDatabaseWrites(ctx context.Context, 
 }
 
 func (executor *LinuxMariaDBExecutor) PromoteDatabaseWriter(ctx context.Context, cluster ha.DatabaseCluster, node ha.NodeID, lease ha.WriterLease) (string, uint64, error) {
-	if lease.Validate(executor.now().UTC()) != nil || lease.State != ha.LeaseActive || lease.GroupID != cluster.GroupID || lease.ResourceID != string(cluster.ID) || lease.HolderNodeID != node {
-		return "", 0, ErrInvalidCommand
-	}
-	receipt, err := executor.applyLocalHA(ctx, MariaDBHAPromote, cluster, node, lease.FencingToken, lease.ID, sqlPromoteHA, false)
-	if err != nil { return receipt, 0, err }
-	var parsed localMariaDBHAReceipt
-	if json.Unmarshal([]byte(receipt), &parsed) != nil || parsed.Frontier == 0 { return receipt, 0, ErrAmbiguous }
-	return receipt, parsed.Frontier, nil
+	return executor.activateDatabaseWriter(ctx,cluster,node,lease)
 }
 
 func (executor *LinuxMariaDBExecutor) DemoteDatabaseWriter(ctx context.Context, cluster ha.DatabaseCluster, node ha.NodeID, fencingToken uint64) (string, error) {
@@ -539,12 +553,21 @@ func (executor *LinuxMariaDBExecutor) DemoteDatabaseWriter(ctx context.Context, 
 }
 
 func (executor *LinuxMariaDBExecutor) SignWritePermit(ctx context.Context, permit ha.WritePermit) (ha.WritePermit, error) {
-	if executor == nil || ctx == nil || permit.ResourceID != "mariadb-local" || permit.NodeID != ha.NodeID("local") || permit.LeaseID == "" || permit.FencingToken == 0 || permit.AuthorityEpoch == 0 || len(permit.WritePaths) == 0 || permit.Signature != "" || permit.IssuedAt.IsZero() || !permit.ExpiresAt.After(permit.IssuedAt) || !executor.now().UTC().Before(permit.ExpiresAt) {
+	if executor == nil || ctx == nil || permit.ResourceID != "mariadb-local" || permit.NodeID == "" || permit.LeaseID == "" || permit.FencingToken == 0 || permit.AuthorityEpoch == 0 || len(permit.WritePaths) == 0 || permit.Signature != "" || permit.IssuedAt.IsZero() || !permit.ExpiresAt.After(permit.IssuedAt) || !executor.now().UTC().Before(permit.ExpiresAt) {
 		return ha.WritePermit{}, ErrInvalidCommand
 	}
 	select { case <-ctx.Done(): return ha.WritePermit{}, ctx.Err(); default: }
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
+	guarded,release,gateErr:=executor.beginWriterMutation(ctx)
+	if gateErr!=nil{return ha.WritePermit{},gateErr};defer release();ctx=guarded
+	executor.writer.mu.Lock();active,managed:=executor.writer.active,executor.writer.managed;executor.writer.mu.Unlock()
+	if managed{
+		if active==nil{return ha.WritePermit{},ErrUnauthorized}
+		permitNode:=permit.NodeID;if permitNode==ha.NodeID("local"){permitNode=active.Certificate.Candidate}
+		if active.Certificate.Candidate!=permitNode||active.Certificate.Lease.ID!=permit.LeaseID||active.Certificate.Lease.FencingToken!=permit.FencingToken||active.Certificate.Lease.AuthorityEpoch!=permit.AuthorityEpoch||active.Certificate.Lease.ResourceID!=permit.ResourceID||!sameWriterValue(active.Certificate.Lease.EnforcedWritePaths,permit.WritePaths)||permit.IssuedAt.Before(active.Certificate.Lease.IssuedAt)||permit.IssuedAt.After(executor.now().UTC().Add(5*time.Second))||permit.ExpiresAt.After(active.Certificate.ExpiresAt)||permit.ExpiresAt.After(active.Certificate.Lease.ExpiresAt){return ha.WritePermit{},ErrUnauthorized}
+	}
+	if !managed&&permit.NodeID!=ha.NodeID("local"){return ha.WritePermit{},ErrUnauthorized}
 	key, err := executor.localHAPermitKey()
 	if err != nil { return ha.WritePermit{}, err }
 	unsigned, err := json.Marshal(struct {
@@ -565,6 +588,7 @@ func validLocalHACluster(cluster ha.DatabaseCluster) bool {
 
 func (executor *LinuxMariaDBExecutor) applyLocalHA(ctx context.Context, action MariaDBHAAction, cluster ha.DatabaseCluster, node ha.NodeID, fencingToken uint64, leaseID ha.WriterLeaseID, statement mariaDBStatement, wantReadOnly bool) (string, error) {
 	if executor == nil || ctx == nil || !validLocalHACluster(cluster) || node != ha.NodeID("local") || fencingToken == 0 { return "", ErrInvalidCommand }
+	if !wantReadOnly||statement!=sqlFreezeHA||(action!=MariaDBHAFreeze&&action!=MariaDBHADemote)||leaseID!=""{return "",ErrUnauthorized}
 	effectID := localMariaDBHAEffectID(action, cluster.ID, node, fencingToken, leaseID)
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
@@ -572,12 +596,15 @@ func (executor *LinuxMariaDBExecutor) applyLocalHA(ctx context.Context, action M
 	if cursorErr:=executor.readNamed("effects","ha-fence-cursor.json",&cursor);cursorErr==nil{
 		if cursor.ClusterID!=cluster.ID||fencingToken<cursor.FencingToken{return "",ErrUnauthorized}
 	}else if !errors.Is(cursorErr,ErrNotFound){return "",cursorErr}
+	if err:=executor.latchWriterGate("explicit_fence");err!=nil{return "",err}
+	if err:=executor.closeWriterGate(ctx,"explicit_fence");err!=nil{return "",err}
 	var existing localMariaDBHAReceipt
 	if err := executor.readNamed("effects", effectID+".json", &existing); err == nil {
 		if existing.EffectID != effectID || existing.Action != action || existing.ClusterID != cluster.ID || existing.NodeID != node || existing.FencingToken != fencingToken || existing.LeaseID != leaseID || existing.ReadOnly != wantReadOnly || existing.ProofDigest == "" || existing.AppliedAt.IsZero() {
 			return "", ErrIdempotency
 		}
 		if cursor.EffectID!=effectID{return "",ErrUnauthorized}
+		if err=executor.writeNamed("effects","ha-fence-cursor.json",existing);err!=nil{return "",err}
 		encoded, encodeErr := json.Marshal(existing)
 		return string(encoded), encodeErr
 	} else if !errors.Is(err, ErrNotFound) { return "", err }
@@ -589,7 +616,8 @@ func (executor *LinuxMariaDBExecutor) applyLocalHA(ctx context.Context, action M
 	if err != nil { return "", err }
 	defer cleanup()
 	if err=executor.writeNamed("effects","ha-fence-cursor.json",localMariaDBHAReceipt{EffectID:effectID,Action:action,ClusterID:cluster.ID,NodeID:node,FencingToken:fencingToken,LeaseID:leaseID,ReadOnly:wantReadOnly});err!=nil{return "",err}
-	output, err := connection.query(ctx, statement)
+	fenceContext:=context.WithValue(ctx,writerFenceCapability{},true)
+	output, err := connection.query(fenceContext, statement)
 	if err != nil { return "", errors.Join(ErrAmbiguous, err) }
 	member, proof, err := parseLocalHAMember(output, executor.now().UTC())
 	if err != nil || member.ReadOnly != wantReadOnly { return "", errors.Join(ErrAmbiguous, err) }

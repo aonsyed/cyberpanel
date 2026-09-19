@@ -27,6 +27,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/dns"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/siteops"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/webactivation"
+	"github.com/aonsyed/cyberpanel/platform/internal/ha"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
 	"github.com/aonsyed/cyberpanel/platform/internal/malwarescan"
 	"github.com/aonsyed/cyberpanel/platform/internal/operations"
@@ -92,7 +93,23 @@ type startupRecoveryReceipt struct {
 	CompletedAt    time.Time `json:"completed_at"`
 }
 
+type writerAuthorityRecovery interface {
+	VerifyDatabaseWriterFenceAuthority(context.Context, json.RawMessage) error
+	VerifyDatabaseWriterCandidateAuthority(context.Context, json.RawMessage) error
+	LoadWriterActivation(context.Context, ha.WriterLease) (json.RawMessage, error)
+	AdmitWriterActivation(context.Context, json.RawMessage) error
+	VerifyActiveWriterAuthority(context.Context, json.RawMessage) error
+}
+
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--mariadb-writer-supervisor" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := database.RunMariaDBWriterSupervisor(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Fatal("MariaDB independent writer supervisor failed")
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == management.LinuxLifecycleWorkerMode {
 		if err := management.RunLinuxLifecycleWorker(); err != nil {
 			log.Fatalf("run private web-engine candidate: %v", err)
@@ -261,6 +278,28 @@ func main() {
 		log.Fatalf("initialize database replication authority: %v", err)
 	}
 	databaseExecutor.VerifyReplicationAuthority = replicationAuthority.VerifyStaticHAReplication
+	if authority, ok := any(replicationAuthority).(writerAuthorityRecovery); ok {
+		databaseExecutor.LoadWriterTransferJSON = authority.LoadWriterActivation
+		databaseExecutor.ConfigureWriterAuthorityVerifiers(authority.VerifyDatabaseWriterFenceAuthority, authority.VerifyDatabaseWriterCandidateAuthority, authority.AdmitWriterActivation, authority.VerifyActiveWriterAuthority)
+	}
+	// Missing recovery methods leave every writer-authority callback nil and
+	// closed. Start fencing before the database broker begins serving.
+	writerContext, writerCancel := context.WithCancel(context.Background())
+	defer func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		if databaseExecutor.ShutdownWriterGate(shutdown) != nil {
+			log.Printf("MariaDB shutdown fence unconfirmed")
+		}
+		writerCancel()
+	}()
+	if err = databaseExecutor.StartWriterWatchdog(writerContext); err != nil {
+		shutdown, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		_ = databaseExecutor.ShutdownWriterGate(shutdown)
+		cancel()
+		writerCancel()
+		log.Fatal("MariaDB writer gate failed closed")
+	}
 	databasePolicy, err := database.NewDatabaseBrokerPeerPolicy(controlUID)
 	if err != nil {
 		log.Fatalf("initialize database peer policy: %v", err)

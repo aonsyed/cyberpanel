@@ -212,7 +212,7 @@ func (executor *LinuxMariaDBExecutor) workspaceConnection(ctx context.Context, i
 		return nil, func() {}, err
 	}
 	wipeBytes(credential)
-	arguments := []string{"--defaults-extra-file=" + credentialFile, "--batch", "--binary-mode", "--xml", "--quick", "--binary-as-hex", "--connect-timeout=8", "--default-character-set=utf8mb4", "--database=" + database.Name.String()}
+	arguments := []string{"--defaults-file=" + credentialFile, "--batch", "--binary-mode", "--xml", "--quick", "--binary-as-hex", "--connect-timeout=8", "--default-character-set=utf8mb4", "--database=" + database.Name.String()}
 	if instance.Placement == PlacementLocal {
 		arguments = append(arguments, "--protocol=socket", "--socket="+mariaDBSocket)
 		return &workspaceMariaDBConnection{arguments: arguments}, cleanup, nil

@@ -503,7 +503,7 @@ func runFixedHost(ctx context.Context, operation fixedHostOperation) ([]byte, er
 	case hostUpgradeMariaDBAlma:
 		executable, arguments = "/usr/bin/dnf", []string{"-q", "-y", "upgrade", "MariaDB-server", "MariaDB-client", "MariaDB-backup"}
 	case hostRunMariaDBUpgrade:
-		executable, arguments = "/usr/bin/mariadb-upgrade", []string{"--skip-write-binlog", "--protocol=socket", "--socket=" + mariaDBSocket}
+		executable, arguments = "/usr/bin/mariadb-upgrade", []string{"--no-defaults", "--skip-write-binlog", "--protocol=socket", "--socket=" + mariaDBSocket, "--user=root"}
 	default:
 		return nil, ErrInvalidCommand
 	}

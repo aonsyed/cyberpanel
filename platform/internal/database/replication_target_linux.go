@@ -157,6 +157,7 @@ func(executor *LinuxMariaDBExecutor)CatchUpReplica(ctx context.Context,channel h
 	if executor==nil||ctx==nil||!validMariaDBReplicationChannel(channel){return ha.ReplicationReceipt{},ErrInvalidCommand}
 	executor.mu.Lock();defer executor.mu.Unlock()
 	binding,node,epoch,err:=executor.replicationBinding(ctx,channel.ID);if err!=nil||!bindingMatchesChannel(binding,node,channel,"target"){return ha.ReplicationReceipt{},ErrUnauthorized}
+	ctx=context.WithValue(ctx,sqlMaintenanceCapability{},true)
 	credential,err:=executor.replicationCredential(ctx,binding,channel,epoch);if err!=nil{return ha.ReplicationReceipt{},err};defer credential.Wipe()
 	if !verifyReplicationCheckpoint(checkpoint,channel,credential)||checkpoint.CreatedAt.After(executor.now().Add(time.Minute)){return ha.ReplicationReceipt{},ha.ErrCheckpointStale}
 	fence,err:=executor.replicationFence();if err!=nil{return ha.ReplicationReceipt{},err}

@@ -46,6 +46,7 @@ func(executor *LinuxMariaDBExecutor)CreateDatabaseCheckpoint(ctx context.Context
 	if executor==nil||ctx==nil||!validMariaDBReplicationChannel(channel)||generation==0{return ha.ReplicationCheckpoint{},ErrInvalidCommand}
 	executor.mu.Lock();defer executor.mu.Unlock()
 	binding,node,epoch,err:=executor.replicationBinding(ctx,channel.ID);if err!=nil||!bindingMatchesChannel(binding,node,channel,"source"){return ha.ReplicationCheckpoint{},ErrUnauthorized}
+	ctx=context.WithValue(ctx,sqlMaintenanceCapability{},true)
 	credential,err:=executor.replicationCredential(ctx,binding,channel,epoch);if err!=nil{return ha.ReplicationCheckpoint{},err};defer credential.Wipe()
 	encoded,err:=json.Marshal(struct{Channel ha.ReplicationChannel;Generation uint64}{channel,generation});if err!=nil{return ha.ReplicationCheckpoint{},err}
 	identity:=digestBytes(encoded);name:="ha-checkpoint-"+identity[:40]+".json"

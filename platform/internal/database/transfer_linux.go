@@ -171,7 +171,7 @@ func (backend *LinuxTransferBackend) Import(ctx context.Context, job TransferJob
 		lastSafeBytes = verifiedInput.count
 		return checkpoint(TransferStreamProgress{Bytes: verifiedInput.count, Rows: 0, SafePoint: true})
 	})
-	arguments := []string{"--defaults-extra-file=" + descriptor.Path, "--protocol=socket", "--socket=" + mariaDBSocket, "--skip-auto-rehash", "--binary-mode=0", "--database=" + database.String()}
+	arguments := []string{"--defaults-file=" + descriptor.Path, "--protocol=socket", "--socket=" + mariaDBSocket, "--skip-auto-rehash", "--binary-mode=0", "--database=" + database.String()}
 	processContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	command := exec.CommandContext(processContext, mariaDBClientBinary, arguments...)
@@ -200,7 +200,7 @@ func (backend *LinuxTransferBackend) Import(ctx context.Context, job TransferJob
 }
 
 func transferDumpArguments(configPath string, database SQLIdentifier, selection TransferSelection) []string {
-	arguments := []string{"--defaults-extra-file=" + configPath, "--protocol=socket", "--socket=" + mariaDBSocket, "--single-transaction", "--quick", "--skip-lock-tables",
+	arguments := []string{"--defaults-file=" + configPath, "--protocol=socket", "--socket=" + mariaDBSocket, "--single-transaction", "--quick", "--skip-lock-tables",
 		"--skip-comments", "--skip-dump-date", "--hex-blob", "--skip-triggers", "--skip-events", "--skip-extended-insert", "--skip-add-locks", "--skip-disable-keys"}
 	if !selection.Schema { arguments = append(arguments, "--no-create-info") }
 	if !selection.Data { arguments = append(arguments, "--no-data") }

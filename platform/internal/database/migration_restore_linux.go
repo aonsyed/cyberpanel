@@ -31,6 +31,10 @@ type migrationRestoreState struct {
 func (executor *LinuxMariaDBExecutor) RestoreMigrationDatabase(ctx context.Context, request MigrationRestoreRequest) (MigrationRestoreReceipt,error) {
 	if executor==nil || os.Geteuid()!=0 || request.validate()!=nil { return MigrationRestoreReceipt{},ErrUnauthorized }
 	executor.mu.Lock(); defer executor.mu.Unlock()
+	// Even observe may clean up a transient loader account. It therefore uses
+	// the mutation gate; read-only status remains available through Status.
+	ctx,release,gateErr:=executor.beginWriterMutation(ctx)
+	if gateErr!=nil{return MigrationRestoreReceipt{},gateErr};defer release()
 	if request.Action=="discard" { return executor.discardMigrationRestore(ctx,request) }
 	var target Database
 	var principal DatabasePrincipal
@@ -147,7 +151,7 @@ func migrationSQLStream(file *os.File,source SQLIdentifier,target Database)(*con
 }
 
 func migrationClientArguments(path string,name SQLIdentifier) []string {
-	return []string{"--defaults-extra-file="+path,"--protocol=socket","--socket="+mariaDBSocket,"--skip-auto-rehash","--binary-mode=1","--batch","--skip-column-names","--database="+name.String()}
+	return []string{"--defaults-file="+path,"--protocol=socket","--socket="+mariaDBSocket,"--skip-auto-rehash","--binary-mode=1","--batch","--skip-column-names","--database="+name.String()}
 }
 
 func (executor *LinuxMariaDBExecutor) migrationTransferConfig(ctx context.Context,target Database,principal DatabasePrincipal)(TransferClientConfigDescriptor,error) {

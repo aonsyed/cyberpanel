@@ -46,6 +46,9 @@ const (
 	MariaDBHACheckpoint MariaDBHAAction = "checkpoint"
 	MariaDBHACatchUp MariaDBHAAction = "catch_up"
 	MariaDBHARejoin MariaDBHAAction = "rejoin"
+	MariaDBHAWriterCertificate MariaDBHAAction = "writer_certificate"
+	MariaDBHAWriterFenceEvidence MariaDBHAAction = "writer_fence_evidence"
+	MariaDBHAWriterCandidateEvidence MariaDBHAAction = "writer_candidate_evidence"
 )
 
 // MariaDBHARequest is the closed privileged surface used by the local HA
@@ -62,6 +65,7 @@ type MariaDBHARequest struct {
 	Checkpoint *ha.ReplicationCheckpoint `json:"checkpoint,omitempty"`
 	SourceGeneration uint64 `json:"source_generation,omitempty"`
 	AuthorityEpoch uint64 `json:"authority_epoch,omitempty"`
+	WriterAuthority json.RawMessage `json:"writer_authority,omitempty"`
 }
 
 type MariaDBHAResult struct {
@@ -71,6 +75,8 @@ type MariaDBHAResult struct {
 	Permit   *ha.WritePermit     `json:"permit,omitempty"`
 	Checkpoint *ha.ReplicationCheckpoint `json:"checkpoint,omitempty"`
 	Replication *ha.ReplicationReceipt `json:"replication,omitempty"`
+	WriterCertificate *DatabaseWriterCertificate `json:"writer_certificate,omitempty"`
+	WriterFenceEvidence *DatabaseWriterFenceEvidence `json:"writer_fence_evidence,omitempty"`
 }
 
 type WorkspaceBrokerRequest struct {
@@ -183,6 +189,20 @@ func (response BrokerResponse) validate(request BrokerRequest) error {
 }
 
 func validateMariaDBHARequest(request MariaDBHARequest, now time.Time) error {
+	if request.Action == MariaDBHAWriterCertificate || request.Action == MariaDBHAWriterFenceEvidence || request.Action == MariaDBHAWriterCandidateEvidence {
+		if request.NodeID != "" || request.FencingToken != 0 || request.Lease != nil || request.Permit != nil || request.Channel != nil || request.Checkpoint != nil || request.SourceGeneration != 0 || request.AuthorityEpoch != 0 || !sameWriterValue(request.Cluster, ha.DatabaseCluster{}) {
+			return ErrInvalidCommand
+		}
+		if request.Action == MariaDBHAWriterFenceEvidence {
+			_, err := decodeDatabaseWriterFenceAuthority(request.WriterAuthority)
+			return err
+		}
+		_, err := decodeDatabaseWriterCandidateAuthority(request.WriterAuthority)
+		return err
+	}
+	if len(request.WriterAuthority) != 0 {
+		return ErrInvalidCommand
+	}
 	if request.Action==MariaDBHACheckpoint || request.Action==MariaDBHACatchUp || request.Action==MariaDBHARejoin { return validateMariaDBReplicationRequest(request) }
 	if request.Channel!=nil || request.Checkpoint!=nil || request.SourceGeneration!=0 || request.AuthorityEpoch!=0 { return ErrInvalidCommand }
 	const localResource = ha.ID("mariadb-local")
@@ -192,7 +212,7 @@ func validateMariaDBHARequest(request MariaDBHARequest, now time.Time) error {
 			return ErrInvalidCommand
 		}
 		permit := *request.Permit
-		if permit.ResourceID != string(localResource) || permit.NodeID != localNode || permit.LeaseID == "" || permit.FencingToken == 0 || permit.AuthorityEpoch == 0 || len(permit.WritePaths) == 0 || permit.Signature != "" || permit.IssuedAt.IsZero() || !permit.ExpiresAt.After(permit.IssuedAt) || !now.Before(permit.ExpiresAt) {
+		if permit.ResourceID != string(localResource) || permit.NodeID == "" || permit.LeaseID == "" || permit.FencingToken == 0 || permit.AuthorityEpoch == 0 || len(permit.WritePaths) == 0 || permit.Signature != "" || permit.IssuedAt.IsZero() || !permit.ExpiresAt.After(permit.IssuedAt) || !now.Before(permit.ExpiresAt) {
 			return ErrInvalidCommand
 		}
 		return nil
@@ -206,9 +226,9 @@ func validateMariaDBHARequest(request MariaDBHARequest, now time.Time) error {
 	case MariaDBHAFreeze, MariaDBHADemote:
 		if request.NodeID != localNode || request.FencingToken == 0 || request.Lease != nil { return ErrInvalidCommand }
 	case MariaDBHAPromote:
-		if request.NodeID != localNode || request.FencingToken == 0 || request.Lease == nil { return ErrInvalidCommand }
+		if request.NodeID == "" || request.FencingToken == 0 || request.Lease == nil { return ErrInvalidCommand }
 		lease := *request.Lease
-		if lease.Validate(now) != nil || lease.State != ha.LeaseActive || lease.ResourceID != string(localResource) || lease.HolderNodeID != localNode || lease.FencingToken != request.FencingToken || lease.GroupID != request.Cluster.GroupID {
+		if lease.Validate(now) != nil || lease.State != ha.LeaseActive || lease.ResourceID != string(localResource) || lease.HolderNodeID != request.NodeID || lease.FencingToken != request.FencingToken || lease.GroupID != request.Cluster.GroupID {
 			return ErrInvalidCommand
 		}
 	default:
@@ -218,6 +238,41 @@ func validateMariaDBHARequest(request MariaDBHARequest, now time.Time) error {
 }
 
 func validateMariaDBHAResult(request MariaDBHARequest, result MariaDBHAResult) error {
+	if request.Action == MariaDBHAWriterCertificate || request.Action == MariaDBHAWriterFenceEvidence || request.Action == MariaDBHAWriterCandidateEvidence {
+		if result.Cluster != nil || result.Receipt != "" || result.Frontier != 0 || result.Permit != nil || result.Checkpoint != nil || result.Replication != nil {
+			return ErrInvalidReceipt
+		}
+		if request.Action == MariaDBHAWriterCertificate {
+			authority, err := decodeDatabaseWriterCandidateAuthority(request.WriterAuthority)
+			if err != nil || result.WriterCertificate == nil || result.WriterFenceEvidence != nil {
+				return ErrInvalidReceipt
+			}
+			receipt, err := decodeDatabaseSourceFenceReceipt(authority.SourceFenceReceipt)
+			value := *result.WriterCertificate
+			if err != nil || !validDatabaseWriterCertificate(value, time.Now().UTC()) || !sameWriterValue(value.Channel, authority.Channel) || !sameWriterValue(value.Checkpoint, authority.Checkpoint) || !sameWriterValue(value.Lease, authority.Lease) || value.ClusterID != authority.Cluster.ID || value.ClusterGeneration != authority.Cluster.Generation || value.TopologyDigest != authority.TopologyDigest || value.DeploymentEpoch != authority.DeploymentEpoch || value.DeploymentDigest != authority.DeploymentDigest || value.AuthorityEpoch != authority.AuthorityEpoch || value.OldWriter != authority.SourceNodeID || value.Candidate != authority.CandidateNodeID || value.FenceEffectID != receipt.EffectID || value.FenceDigest != writerDigestBytes(authority.SourceFenceReceipt) {
+				return ErrInvalidReceipt
+			}
+			return nil
+		}
+		if result.WriterFenceEvidence == nil || result.WriterCertificate != nil || !validDatabaseWriterFenceEvidence(*result.WriterFenceEvidence) {
+			return ErrInvalidReceipt
+		}
+		value := *result.WriterFenceEvidence
+		if request.Action == MariaDBHAWriterFenceEvidence {
+			authority, err := decodeDatabaseWriterFenceAuthority(request.WriterAuthority)
+			receipt, receiptErr := decodeDatabaseSourceFenceReceipt(value.SourceFenceReceipt)
+			if err != nil || receiptErr != nil || value.NodeID != authority.SourceNodeID || !sameWriterValue(value.Channel, authority.Channel) || !sameWriterValue(value.Checkpoint, authority.Checkpoint) || value.AuthorityEpoch != authority.AuthorityEpoch || value.DeploymentEpoch != authority.DeploymentEpoch || value.DeploymentDigest != authority.DeploymentDigest || value.FencingToken != authority.FencingToken || !sourceFenceReceiptMatchesAuthority(receipt, authority) {
+				return ErrInvalidReceipt
+			}
+			return nil
+		}
+		authority, err := decodeDatabaseWriterCandidateAuthority(request.WriterAuthority)
+		if err != nil || value.NodeID != authority.CandidateNodeID || !sameWriterValue(value.Channel, authority.Channel) || !sameWriterValue(value.Checkpoint, authority.Checkpoint) || value.AuthorityEpoch != authority.AuthorityEpoch || value.DeploymentEpoch != authority.DeploymentEpoch || value.DeploymentDigest != authority.DeploymentDigest || value.FencingToken != authority.FencingToken || !bytes.Equal(value.SourceFenceReceipt, authority.SourceFenceReceipt) {
+			return ErrInvalidReceipt
+		}
+		return nil
+	}
+	if result.WriterCertificate!=nil||result.WriterFenceEvidence!=nil{return ErrInvalidReceipt}
 	if request.Action==MariaDBHACheckpoint || request.Action==MariaDBHACatchUp || request.Action==MariaDBHARejoin { return validateMariaDBReplicationResult(request,result) }
 	if result.Checkpoint!=nil || result.Replication!=nil { return ErrInvalidReceipt }
 	switch request.Action {
@@ -588,6 +643,24 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		executor, ok := server.Executor.(ha.DatabaseReplicationExecutor)
 		if !ok { err = ErrInvalidCommand; break }
 		switch request.MariaDBHA.Action {
+		case MariaDBHAWriterCertificate:
+			issuer,issuerOK:=server.Executor.(interface{IssueDatabaseWriterCertificate(context.Context,json.RawMessage)(DatabaseWriterCertificate,error)})
+			if !issuerOK{err=ErrUnauthorized;break}
+			var certificate DatabaseWriterCertificate
+			certificate,err=issuer.IssueDatabaseWriterCertificate(ctx,request.MariaDBHA.WriterAuthority)
+			if err==nil{result.WriterCertificate=&certificate}
+		case MariaDBHAWriterFenceEvidence:
+			observer,observerOK:=server.Executor.(interface{ObserveDatabaseWriterFence(context.Context,json.RawMessage)(DatabaseWriterFenceEvidence,error)})
+			if !observerOK{err=ErrUnauthorized;break}
+			var evidence DatabaseWriterFenceEvidence
+			evidence,err=observer.ObserveDatabaseWriterFence(ctx,request.MariaDBHA.WriterAuthority)
+			if err==nil{result.WriterFenceEvidence=&evidence}
+		case MariaDBHAWriterCandidateEvidence:
+			observer,observerOK:=server.Executor.(interface{ObserveDatabaseWriterCandidate(context.Context,json.RawMessage)(DatabaseWriterFenceEvidence,error)})
+			if !observerOK{err=ErrUnauthorized;break}
+			var evidence DatabaseWriterFenceEvidence
+			evidence,err=observer.ObserveDatabaseWriterCandidate(ctx,request.MariaDBHA.WriterAuthority)
+			if err==nil{result.WriterFenceEvidence=&evidence}
 		case MariaDBHACheckpoint:
 			var checkpoint ha.ReplicationCheckpoint
 			checkpoint,err=executor.CreateDatabaseCheckpoint(ctx,*request.MariaDBHA.Channel,request.MariaDBHA.SourceGeneration)

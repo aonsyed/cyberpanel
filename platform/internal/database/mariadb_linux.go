@@ -86,12 +86,42 @@ type MariaDBInstanceStatus struct {
 // effect sum plus a read-only typed status probe.
 type LinuxMariaDBExecutor struct {
 	VerifyReplicationAuthority func(context.Context,ha.StaticReplicationBinding,ha.NodeID,uint64)error
+	// These JSON callbacks are the only HA writer-authority seam. They must read
+	// and verify protected HA storage over a root-controlled channel. Caller
+	// claims, prepare votes, and an agreed tuple are never valid substitutes.
+	// Nil callbacks fail closed for both evidence and activation.
+	VerifyWriterFenceAuthorityJSON     func(context.Context, json.RawMessage) error
+	VerifyWriterCandidateAuthorityJSON func(context.Context, json.RawMessage) error
+	LoadWriterTransferJSON             func(context.Context, ha.WriterLease) (json.RawMessage, error)
+	AdmitWriterTransferJSON            func(context.Context, json.RawMessage) error
+	VerifyWriterTransferJSON           func(context.Context, json.RawMessage) error
+	writer mariaDBWriterGate
 	secrets      LinuxMariaDBSecretSource
 	distribution LinuxMariaDBDistribution
 	now          func() time.Time
 	mu           sync.Mutex
 	workspaceMu  sync.Mutex
 	workspaceConnections map[string]uint16
+}
+
+// ConfigureWriterAuthorityVerifiers installs the domain-separated root-side
+// verifier seam. It is intentionally all-or-nothing; any nil callback leaves
+// every writer-authority path closed.
+func (executor *LinuxMariaDBExecutor) ConfigureWriterAuthorityVerifiers(fence, candidate, admit, verify func(context.Context, json.RawMessage) error) {
+	if executor == nil {
+		return
+	}
+	if fence == nil || candidate == nil || admit == nil || verify == nil {
+		executor.VerifyWriterFenceAuthorityJSON = nil
+		executor.VerifyWriterCandidateAuthorityJSON = nil
+		executor.AdmitWriterTransferJSON = nil
+		executor.VerifyWriterTransferJSON = nil
+		return
+	}
+	executor.VerifyWriterFenceAuthorityJSON = fence
+	executor.VerifyWriterCandidateAuthorityJSON = candidate
+	executor.AdmitWriterTransferJSON = admit
+	executor.VerifyWriterTransferJSON = verify
 }
 
 type effectApplication struct {
@@ -155,6 +185,7 @@ func NewLinuxMariaDBExecutor(secrets LinuxMariaDBSecretSource, distribution Linu
 			return nil, err
 		}
 	}
+	if err := executor.initializeWriterGate(); err != nil { return nil, err }
 	return executor, nil
 }
 
@@ -169,6 +200,9 @@ func (executor *LinuxMariaDBExecutor) ObserveOrApply(ctx context.Context, reques
 	}
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
+	ctx, release, gateErr := executor.beginWriterMutation(ctx)
+	if gateErr != nil { return EffectReceipt{}, gateErr }
+	defer release()
 
 	var prior EffectReceipt
 	if err := executor.readNamed("effects", request.EffectID, &prior); err == nil {
@@ -217,6 +251,9 @@ func (executor *LinuxMariaDBExecutor) Compensate(ctx context.Context, request Co
 	}
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
+	ctx, release, gateErr := executor.beginWriterMutation(ctx)
+	if gateErr != nil { return receipt, gateErr }
+	defer release()
 	var compensation mariaDBCompensation
 	if err := executor.readResource("compensations", request.CompensationToken, &compensation); err != nil {
 		receipt.Outcome = EffectRejected
