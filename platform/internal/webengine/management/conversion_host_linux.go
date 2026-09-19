@@ -346,10 +346,10 @@ func (host *LinuxLifecycleHost) continueEdition(ctx context.Context, targetInput
 				}
 			}
 			record.TargetLicense, host.journal.License = license, license
-			if err = host.persist(); err != nil {
+			if err := host.persist(); err != nil {
 				return record.Receipt, err
 			}
-			if err = host.conversionPhase(conversionPhaseStartTarget); err != nil {
+			if err := host.conversionPhase(conversionPhaseStartTarget); err != nil {
 				return record.Receipt, err
 			}
 		case conversionPhaseStartTarget:
