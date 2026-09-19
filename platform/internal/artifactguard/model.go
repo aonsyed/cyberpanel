@@ -652,6 +652,7 @@ func sortedFindingCounts(counts map[FindingCode]uint64) []FindingCount {
 		if count != 0 {
 			codes = append(codes, string(code))
 		}
+	}
 	sort.Strings(codes)
 	result := make([]FindingCount, 0, len(codes))
 	for _, code := range codes {
