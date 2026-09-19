@@ -31,22 +31,483 @@ CREATE TABLE IF NOT EXISTS mail_dkim_rotations_v2 (
 );
 CREATE INDEX IF NOT EXISTS mail_resources_v2_list ON mail_resources_v2 (tenant_id,kind,resource_id);
 CREATE INDEX IF NOT EXISTS mail_operations_v2_scope ON mail_operations_v2 (tenant_id,kind,resource_id,accepted_at);
-`
+` + MigrationControlSchema
 
-type SQLControlRepository struct { DB *sql.DB }
-func (r SQLControlRepository) Bootstrap(ctx context.Context)error{if r.DB==nil{return errors.New("mail control database required")};_,err:=r.DB.ExecContext(ctx,ControlSchema);return err}
-func (r SQLControlRepository) Lookup(ctx context.Context,commandID,digest string)(OperationReceipt,bool,error){if r.DB==nil{return OperationReceipt{},false,errors.New("mail control database required")};var raw []byte;err:=r.DB.QueryRowContext(ctx,`SELECT receipt_json FROM mail_operations_v2 WHERE command_id = ? AND command_digest = ?`,commandID,digest).Scan(&raw);if errors.Is(err,sql.ErrNoRows){return OperationReceipt{},false,nil};if err!=nil{return OperationReceipt{},false,err};var receipt OperationReceipt;if err=strictJSON(raw,&receipt);err!=nil{return OperationReceipt{},false,err};return receipt,true,nil}
-func (r SQLControlRepository) Load(ctx context.Context,tenant string,kind ResourceKind,id string)(ResourceEnvelope,bool,error){if r.DB==nil{return ResourceEnvelope{},false,errors.New("mail control database required")};var raw []byte;err:=r.DB.QueryRowContext(ctx,`SELECT resource_json FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`,tenant,kind,id).Scan(&raw);if errors.Is(err,sql.ErrNoRows){return ResourceEnvelope{},false,nil};if err!=nil{return ResourceEnvelope{},false,err};var resource ResourceEnvelope;if err=strictJSON(raw,&resource);err!=nil{return ResourceEnvelope{},false,err};return resource,true,nil}
-func (r SQLControlRepository) LoadDKIMRotation(ctx context.Context,tenant string,domainID DomainID)(dkimRotationRecord,bool,error){if r.DB==nil{return dkimRotationRecord{},false,errors.New("mail control database required")};if !validOpaque(tenant)||!validOpaque(string(domainID)){return dkimRotationRecord{},false,ErrInvalidCommand};var raw []byte;err:=r.DB.QueryRowContext(ctx,`SELECT rotation_json FROM mail_dkim_rotations_v2 WHERE tenant_id=? AND domain_id=?`,tenant,domainID).Scan(&raw);if errors.Is(err,sql.ErrNoRows){return dkimRotationRecord{},false,nil};if err!=nil{return dkimRotationRecord{},false,err};var record dkimRotationRecord;if err=strictJSON(raw,&record);err!=nil||!validDKIMRotationRecord(record){return dkimRotationRecord{},false,errors.Join(ErrInvalidReceipt,err)};return record,true,nil}
-func (r SQLControlRepository) SavePreparedDKIMRotation(ctx context.Context,record dkimRotationRecord,expected uint64)error{if r.DB==nil{return errors.New("mail control database required")};if !validDKIMRotationRecord(record)||record.State!=DKIMRotationPrepared||record.BoundGeneration!=expected{return ErrInvalidCommand};tx,err:=r.DB.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return err};defer tx.Rollback();var generation uint64;if err=tx.QueryRowContext(ctx,`SELECT generation FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`,record.TenantID,ResourceDomain,record.DomainID).Scan(&generation);errors.Is(err,sql.ErrNoRows){return ErrNotFound};if err!=nil{return err};if generation!=expected{return ErrConflict};var existingRaw []byte;loadErr:=tx.QueryRowContext(ctx,`SELECT rotation_json FROM mail_dkim_rotations_v2 WHERE tenant_id=? AND domain_id=?`,record.TenantID,record.DomainID).Scan(&existingRaw);if loadErr==nil{var existing dkimRotationRecord;if strictJSON(existingRaw,&existing)!=nil||!validDKIMRotationRecord(existing){return ErrInvalidReceipt};if existing.State==DKIMRotationPrepared&&existing.PrepareToken==record.PrepareToken&&existing.BoundGeneration==record.BoundGeneration{return tx.Commit()};if existing.State!=DKIMRotationComplete{return ErrConflict}}else if !errors.Is(loadErr,sql.ErrNoRows){return loadErr};raw,err:=json.Marshal(record);if err!=nil{return err};_,err=tx.ExecContext(ctx,`INSERT INTO mail_dkim_rotations_v2(tenant_id,domain_id,domain_generation,state,rotation_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(tenant_id,domain_id) DO UPDATE SET domain_generation=excluded.domain_generation,state=excluded.state,rotation_json=excluded.rotation_json,updated_at=excluded.updated_at`,record.TenantID,record.DomainID,record.BoundGeneration,record.State,raw,record.PreparedAt);if err!=nil{return err};return tx.Commit()}
-func (r SQLControlRepository) ActivateDKIMRotation(ctx context.Context,record dkimRotationRecord,resource ResourceEnvelope,expected uint64)error{if r.DB==nil{return errors.New("mail control database required")};if !validDKIMRotationRecord(record)||(record.State!=DKIMRotationOverlap&&record.State!=DKIMRotationComplete)||record.BoundGeneration!=expected||record.ActiveGeneration!=expected+1||resource.TenantID!=record.TenantID||resource.Kind!=ResourceDomain||resource.ID!=string(record.DomainID)||resource.Generation!=record.ActiveGeneration{return ErrInvalidCommand};tx,err:=r.DB.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return err};defer tx.Rollback();var generation uint64;if err=tx.QueryRowContext(ctx,`SELECT generation FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`,record.TenantID,ResourceDomain,record.DomainID).Scan(&generation);errors.Is(err,sql.ErrNoRows){return ErrNotFound};if err!=nil{return err};if generation!=expected{return ErrConflict};var preparedRaw []byte;if err=tx.QueryRowContext(ctx,`SELECT rotation_json FROM mail_dkim_rotations_v2 WHERE tenant_id=? AND domain_id=?`,record.TenantID,record.DomainID).Scan(&preparedRaw);errors.Is(err,sql.ErrNoRows){return ErrNotFound};if err!=nil{return err};var prepared dkimRotationRecord;if strictJSON(preparedRaw,&prepared)!=nil||prepared.State!=DKIMRotationPrepared||prepared.PrepareToken!=record.PrepareToken||prepared.BoundGeneration!=expected||!sameDKIM(prepared.Pending,record.Pending){return ErrConflict};resourceRaw,err:=json.Marshal(resource);if err!=nil{return err};rotationRaw,err:=json.Marshal(record);if err!=nil{return err};result,err:=tx.ExecContext(ctx,`UPDATE mail_resources_v2 SET generation=?,state=?,resource_json=?,updated_at=? WHERE tenant_id=? AND kind=? AND resource_id=? AND generation=?`,resource.Generation,resource.State,resourceRaw,resource.UpdatedAt,record.TenantID,ResourceDomain,record.DomainID,expected);if err!=nil{return err};affected,err:=result.RowsAffected();if err!=nil||affected!=1{return errors.Join(ErrConflict,err)};result,err=tx.ExecContext(ctx,`UPDATE mail_dkim_rotations_v2 SET domain_generation=?,state=?,rotation_json=?,updated_at=? WHERE tenant_id=? AND domain_id=? AND domain_generation=? AND state=?`,record.ActiveGeneration,record.State,rotationRaw,resource.UpdatedAt,record.TenantID,record.DomainID,expected,DKIMRotationPrepared);if err!=nil{return err};affected,err=result.RowsAffected();if err!=nil||affected!=1{return errors.Join(ErrConflict,err)};return tx.Commit()}
-func (r SQLControlRepository) CompleteDKIMRotation(ctx context.Context,record dkimRotationRecord,expected uint64)error{if r.DB==nil{return errors.New("mail control database required")};if !validDKIMRotationRecord(record)||record.State!=DKIMRotationComplete||record.ActiveGeneration!=expected||record.PreviousRevokedAt==nil{return ErrInvalidCommand};tx,err:=r.DB.BeginTx(ctx,&sql.TxOptions{Isolation:sql.LevelSerializable});if err!=nil{return err};defer tx.Rollback();var generation uint64;if err=tx.QueryRowContext(ctx,`SELECT generation FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`,record.TenantID,ResourceDomain,record.DomainID).Scan(&generation);errors.Is(err,sql.ErrNoRows){return ErrNotFound};if err!=nil{return err};if generation!=expected{return ErrConflict};var currentRaw []byte;if err=tx.QueryRowContext(ctx,`SELECT rotation_json FROM mail_dkim_rotations_v2 WHERE tenant_id=? AND domain_id=?`,record.TenantID,record.DomainID).Scan(&currentRaw);errors.Is(err,sql.ErrNoRows){return ErrNotFound};if err!=nil{return err};var current dkimRotationRecord;if strictJSON(currentRaw,&current)!=nil||current.State!=DKIMRotationOverlap||current.ActiveGeneration!=expected||current.PrepareToken!=record.PrepareToken{return ErrConflict};raw,err:=json.Marshal(record);if err!=nil{return err};result,err:=tx.ExecContext(ctx,`UPDATE mail_dkim_rotations_v2 SET state=?,rotation_json=?,updated_at=? WHERE tenant_id=? AND domain_id=? AND domain_generation=? AND state=?`,record.State,raw,*record.PreviousRevokedAt,record.TenantID,record.DomainID,expected,DKIMRotationOverlap);if err!=nil{return err};affected,err:=result.RowsAffected();if err!=nil||affected!=1{return errors.Join(ErrConflict,err)};return tx.Commit()}
-func (r SQLControlRepository) Admit(ctx context.Context,admission Admission)(AdmissionResult,error){if r.DB==nil{return AdmissionResult{},errors.New("mail control database required")};tx,err:=r.DB.BeginTx(ctx,nil);if err!=nil{return AdmissionResult{},err};defer tx.Rollback();var raw []byte;err=tx.QueryRowContext(ctx,`SELECT receipt_json FROM mail_operations_v2 WHERE command_id=? OR (tenant_id=? AND idempotency_key=?) LIMIT 1`,admission.Command.ID,admission.Command.TenantID,admission.Command.IdempotencyKey).Scan(&raw);if err==nil{var receipt OperationReceipt;if err=strictJSON(raw,&receipt);err!=nil{return AdmissionResult{},err};if receipt.CommandDigest!=admission.Digest{return AdmissionResult{},ErrConflict};if err=tx.Commit();err!=nil{return AdmissionResult{},err};return AdmissionResult{Receipt:receipt},nil};if !errors.Is(err,sql.ErrNoRows){return AdmissionResult{},err}
-	if admission.Command.Action==ActionCreate{var count int;if err=tx.QueryRowContext(ctx,`SELECT COUNT(*) FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`,admission.Command.TenantID,admission.Command.Kind,admission.Command.ResourceID).Scan(&count);err!=nil{return AdmissionResult{},err};if count!=0{return AdmissionResult{},ErrConflict}}else{var generation uint64;if err=tx.QueryRowContext(ctx,`SELECT generation FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`,admission.Command.TenantID,admission.Command.Kind,admission.Command.ResourceID).Scan(&generation);if errors.Is(err,sql.ErrNoRows){return AdmissionResult{},ErrNotFound};if err!=nil{return AdmissionResult{},err};if generation!=admission.Command.ExpectedGeneration{return AdmissionResult{},ErrConflict}}
-	now:=time.Now().UTC();receipt:=OperationReceipt{CommandID:admission.Command.ID,CommandDigest:admission.Digest,TenantID:admission.Command.TenantID,Kind:admission.Command.Kind,ResourceID:admission.Command.ResourceID,Status:OperationAccepted,Request:admission.Request,AcceptedAt:now};encoded,err:=json.Marshal(receipt);if err!=nil{return AdmissionResult{},err};if _,err=tx.ExecContext(ctx,`INSERT INTO mail_operations_v2(command_id,command_digest,idempotency_key,tenant_id,kind,resource_id,status,receipt_json,accepted_at) VALUES(?,?,?,?,?,?,?,?,?)`,admission.Command.ID,admission.Digest,admission.Command.IdempotencyKey,admission.Command.TenantID,admission.Command.Kind,admission.Command.ResourceID,receipt.Status,encoded,now);err!=nil{return AdmissionResult{},err};if err=tx.Commit();err!=nil{return AdmissionResult{},err};return AdmissionResult{New:true,Receipt:receipt},nil}
-func (r SQLControlRepository) Complete(ctx context.Context,completion Completion)(OperationReceipt,error){if r.DB==nil{return OperationReceipt{},errors.New("mail control database required")};tx,err:=r.DB.BeginTx(ctx,nil);if err!=nil{return OperationReceipt{},err};defer tx.Rollback();var raw []byte;var currentStatus OperationStatus;if err=tx.QueryRowContext(ctx,`SELECT status,receipt_json FROM mail_operations_v2 WHERE command_id=? AND command_digest=? AND tenant_id=?`,completion.CommandID,completion.CommandDigest,completion.TenantID).Scan(&currentStatus,&raw);err!=nil{return OperationReceipt{},err};var receipt OperationReceipt;if err=strictJSON(raw,&receipt);err!=nil{return OperationReceipt{},err};if !requestsEqual(receipt.Request,completion.Request){return OperationReceipt{},ErrInvalidReceipt};if currentStatus!=OperationAccepted&&currentStatus!=OperationAmbiguous{if err=tx.Commit();err!=nil{return OperationReceipt{},err};return receipt,nil};now:=time.Now().UTC();receipt.Status=completion.Status;receipt.Effect=completion.Effect;receipt.CompletedAt=&now;encoded,err:=json.Marshal(receipt);if err!=nil{return OperationReceipt{},err};if completion.Status==OperationApplied&&completion.Resource!=nil{resourceRaw,marshalErr:=json.Marshal(completion.Resource);if marshalErr!=nil{return OperationReceipt{},marshalErr};if completion.Resource.State==StateDeleted{_,err=tx.ExecContext(ctx,`DELETE FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`,completion.Resource.TenantID,completion.Resource.Kind,completion.Resource.ID)}else{_,err=tx.ExecContext(ctx,`INSERT INTO mail_resources_v2(tenant_id,kind,resource_id,generation,state,resource_json,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant_id,kind,resource_id) DO UPDATE SET generation=excluded.generation,state=excluded.state,resource_json=excluded.resource_json,updated_at=excluded.updated_at`,completion.Resource.TenantID,completion.Resource.Kind,completion.Resource.ID,completion.Resource.Generation,completion.Resource.State,resourceRaw,completion.Resource.UpdatedAt)};if err!=nil{return OperationReceipt{},err}};if _,err=tx.ExecContext(ctx,`UPDATE mail_operations_v2 SET status=?,receipt_json=?,completed_at=? WHERE command_id=? AND command_digest=?`,receipt.Status,encoded,now,completion.CommandID,completion.CommandDigest);err!=nil{return OperationReceipt{},err};if err=tx.Commit();err!=nil{return OperationReceipt{},err};return receipt,nil}
-func (r SQLControlRepository) List(ctx context.Context,tenant string,kind ResourceKind,limit int,cursor string)([]ResourceEnvelope,string,error){if r.DB==nil{return nil,"",errors.New("mail control database required")};if limit<1||limit>500{limit=100};after,err:=decodeCursor(cursor);if err!=nil{return nil,"",err};rows,err:=r.DB.QueryContext(ctx,`SELECT resource_id,resource_json FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id>? ORDER BY resource_id LIMIT ?`,tenant,kind,after,limit+1);if err!=nil{return nil,"",err};defer rows.Close();resources:=make([]ResourceEnvelope,0,limit+1);ids:=make([]string,0,limit+1);for rows.Next(){var id string;var raw []byte;if err=rows.Scan(&id,&raw);err!=nil{return nil,"",err};var resource ResourceEnvelope;if err=strictJSON(raw,&resource);err!=nil{return nil,"",err};resources=append(resources,resource);ids=append(ids,id)};if err=rows.Err();err!=nil{return nil,"",err};next:="";if len(resources)>limit{next=base64.RawURLEncoding.EncodeToString([]byte(ids[limit-1]));resources=resources[:limit]};return resources,next,nil}
-func (r SQLControlRepository) ListAll(ctx context.Context,kind ResourceKind,limit int,cursor string)([]ResourceEnvelope,string,error){if r.DB==nil{return nil,"",errors.New("mail control database required")};if limit<1||limit>500{limit=100};tenantAfter,idAfter,err:=decodeNodeCursor(cursor);if err!=nil{return nil,"",err};rows,err:=r.DB.QueryContext(ctx,`SELECT tenant_id,resource_id,resource_json FROM mail_resources_v2 WHERE kind=? AND (tenant_id>? OR (tenant_id=? AND resource_id>?)) ORDER BY tenant_id,resource_id LIMIT ?`,kind,tenantAfter,tenantAfter,idAfter,limit+1);if err!=nil{return nil,"",err};defer rows.Close();resources:=make([]ResourceEnvelope,0,limit+1);tenants:=make([]string,0,limit+1);ids:=make([]string,0,limit+1);for rows.Next(){var tenant,id string;var raw []byte;if err=rows.Scan(&tenant,&id,&raw);err!=nil{return nil,"",err};var resource ResourceEnvelope;if err=strictJSON(raw,&resource);err!=nil{return nil,"",err};if resource.TenantID!=tenant||resource.ID!=id||resource.Kind!=kind{return nil,"",ErrInvalidReceipt};resources=append(resources,resource);tenants=append(tenants,tenant);ids=append(ids,id)};if err=rows.Err();err!=nil{return nil,"",err};next:="";if len(resources)>limit{next=base64.RawURLEncoding.EncodeToString([]byte(tenants[limit-1]+"\x00"+ids[limit-1]));resources=resources[:limit]};return resources,next,nil}
-func strictJSON(raw []byte,target any)error{if len(raw)==0||len(raw)>8<<20{return fmt.Errorf("invalid stored mail JSON")};decoder:=json.NewDecoder(strings.NewReader(string(raw)));decoder.DisallowUnknownFields();if err:=decoder.Decode(target);err!=nil{return err};var trailing any;if err:=decoder.Decode(&trailing);!errors.Is(err,io.EOF){return fmt.Errorf("trailing stored mail JSON")};canonical,err:=json.Marshal(target);if err!=nil{return err};if len(canonical)==0{return fmt.Errorf("empty stored mail JSON")};return nil}
-func decodeCursor(cursor string)(string,error){if cursor==""{return "",nil};raw,err:=base64.RawURLEncoding.DecodeString(cursor);if err!=nil||!validOpaque(string(raw)){return "",ErrInvalidCommand};return string(raw),nil}
-func decodeNodeCursor(cursor string)(string,string,error){if cursor==""{return "","",nil};raw,err:=base64.RawURLEncoding.DecodeString(cursor);if err!=nil{return "","",ErrInvalidCommand};parts:=strings.Split(string(raw),"\x00");if len(parts)!=2||!validOpaque(parts[0])||!validOpaque(parts[1]){return "","",ErrInvalidCommand};return parts[0],parts[1],nil}
+type SQLControlRepository struct{ DB *sql.DB }
+
+func (r SQLControlRepository) Bootstrap(ctx context.Context) error {
+	if r.DB == nil {
+		return errors.New("mail control database required")
+	}
+	_, err := r.DB.ExecContext(ctx, ControlSchema)
+	return err
+}
+func (r SQLControlRepository) Lookup(ctx context.Context, commandID, digest string) (OperationReceipt, bool, error) {
+	if r.DB == nil {
+		return OperationReceipt{}, false, errors.New("mail control database required")
+	}
+	var raw []byte
+	err := r.DB.QueryRowContext(ctx, `SELECT receipt_json FROM mail_operations_v2 WHERE command_id = ? AND command_digest = ?`, commandID, digest).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return OperationReceipt{}, false, nil
+	}
+	if err != nil {
+		return OperationReceipt{}, false, err
+	}
+	var receipt OperationReceipt
+	if err = strictJSON(raw, &receipt); err != nil {
+		return OperationReceipt{}, false, err
+	}
+	return receipt, true, nil
+}
+func (r SQLControlRepository) Load(ctx context.Context, tenant string, kind ResourceKind, id string) (ResourceEnvelope, bool, error) {
+	if r.DB == nil {
+		return ResourceEnvelope{}, false, errors.New("mail control database required")
+	}
+	var raw []byte
+	err := r.DB.QueryRowContext(ctx, `SELECT resource_json FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`, tenant, kind, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ResourceEnvelope{}, false, nil
+	}
+	if err != nil {
+		return ResourceEnvelope{}, false, err
+	}
+	var resource ResourceEnvelope
+	if err = strictJSON(raw, &resource); err != nil {
+		return ResourceEnvelope{}, false, err
+	}
+	return resource, true, nil
+}
+func (r SQLControlRepository) LoadDKIMRotation(ctx context.Context, tenant string, domainID DomainID) (dkimRotationRecord, bool, error) {
+	if r.DB == nil {
+		return dkimRotationRecord{}, false, errors.New("mail control database required")
+	}
+	if !validOpaque(tenant) || !validOpaque(string(domainID)) {
+		return dkimRotationRecord{}, false, ErrInvalidCommand
+	}
+	var raw []byte
+	err := r.DB.QueryRowContext(ctx, `SELECT rotation_json FROM mail_dkim_rotations_v2 WHERE tenant_id=? AND domain_id=?`, tenant, domainID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dkimRotationRecord{}, false, nil
+	}
+	if err != nil {
+		return dkimRotationRecord{}, false, err
+	}
+	var record dkimRotationRecord
+	if err = strictJSON(raw, &record); err != nil || !validDKIMRotationRecord(record) {
+		return dkimRotationRecord{}, false, errors.Join(ErrInvalidReceipt, err)
+	}
+	return record, true, nil
+}
+func (r SQLControlRepository) SavePreparedDKIMRotation(ctx context.Context, record dkimRotationRecord, expected uint64) error {
+	if r.DB == nil {
+		return errors.New("mail control database required")
+	}
+	if !validDKIMRotationRecord(record) || record.State != DKIMRotationPrepared || record.BoundGeneration != expected {
+		return ErrInvalidCommand
+	}
+	tx, err := r.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var generation uint64
+	if err = tx.QueryRowContext(ctx, `SELECT generation FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`, record.TenantID, ResourceDomain, record.DomainID).Scan(&generation); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if generation != expected {
+		return ErrConflict
+	}
+	var existingRaw []byte
+	loadErr := tx.QueryRowContext(ctx, `SELECT rotation_json FROM mail_dkim_rotations_v2 WHERE tenant_id=? AND domain_id=?`, record.TenantID, record.DomainID).Scan(&existingRaw)
+	if loadErr == nil {
+		var existing dkimRotationRecord
+		if strictJSON(existingRaw, &existing) != nil || !validDKIMRotationRecord(existing) {
+			return ErrInvalidReceipt
+		}
+		if existing.State == DKIMRotationPrepared && existing.PrepareToken == record.PrepareToken && existing.BoundGeneration == record.BoundGeneration {
+			return tx.Commit()
+		}
+		if existing.State != DKIMRotationComplete {
+			return ErrConflict
+		}
+	} else if !errors.Is(loadErr, sql.ErrNoRows) {
+		return loadErr
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO mail_dkim_rotations_v2(tenant_id,domain_id,domain_generation,state,rotation_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(tenant_id,domain_id) DO UPDATE SET domain_generation=excluded.domain_generation,state=excluded.state,rotation_json=excluded.rotation_json,updated_at=excluded.updated_at`, record.TenantID, record.DomainID, record.BoundGeneration, record.State, raw, record.PreparedAt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func (r SQLControlRepository) ActivateDKIMRotation(ctx context.Context, record dkimRotationRecord, resource ResourceEnvelope, expected uint64) error {
+	if r.DB == nil {
+		return errors.New("mail control database required")
+	}
+	if !validDKIMRotationRecord(record) || (record.State != DKIMRotationOverlap && record.State != DKIMRotationComplete) || record.BoundGeneration != expected || record.ActiveGeneration != expected+1 || resource.TenantID != record.TenantID || resource.Kind != ResourceDomain || resource.ID != string(record.DomainID) || resource.Generation != record.ActiveGeneration {
+		return ErrInvalidCommand
+	}
+	tx, err := r.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var generation uint64
+	if err = tx.QueryRowContext(ctx, `SELECT generation FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`, record.TenantID, ResourceDomain, record.DomainID).Scan(&generation); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if generation != expected {
+		return ErrConflict
+	}
+	var preparedRaw []byte
+	if err = tx.QueryRowContext(ctx, `SELECT rotation_json FROM mail_dkim_rotations_v2 WHERE tenant_id=? AND domain_id=?`, record.TenantID, record.DomainID).Scan(&preparedRaw); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	var prepared dkimRotationRecord
+	if strictJSON(preparedRaw, &prepared) != nil || prepared.State != DKIMRotationPrepared || prepared.PrepareToken != record.PrepareToken || prepared.BoundGeneration != expected || !sameDKIM(prepared.Pending, record.Pending) {
+		return ErrConflict
+	}
+	resourceRaw, err := json.Marshal(resource)
+	if err != nil {
+		return err
+	}
+	rotationRaw, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE mail_resources_v2 SET generation=?,state=?,resource_json=?,updated_at=? WHERE tenant_id=? AND kind=? AND resource_id=? AND generation=?`, resource.Generation, resource.State, resourceRaw, resource.UpdatedAt, record.TenantID, ResourceDomain, record.DomainID, expected)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return errors.Join(ErrConflict, err)
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE mail_dkim_rotations_v2 SET domain_generation=?,state=?,rotation_json=?,updated_at=? WHERE tenant_id=? AND domain_id=? AND domain_generation=? AND state=?`, record.ActiveGeneration, record.State, rotationRaw, resource.UpdatedAt, record.TenantID, record.DomainID, expected, DKIMRotationPrepared)
+	if err != nil {
+		return err
+	}
+	affected, err = result.RowsAffected()
+	if err != nil || affected != 1 {
+		return errors.Join(ErrConflict, err)
+	}
+	return tx.Commit()
+}
+func (r SQLControlRepository) CompleteDKIMRotation(ctx context.Context, record dkimRotationRecord, expected uint64) error {
+	if r.DB == nil {
+		return errors.New("mail control database required")
+	}
+	if !validDKIMRotationRecord(record) || record.State != DKIMRotationComplete || record.ActiveGeneration != expected || record.PreviousRevokedAt == nil {
+		return ErrInvalidCommand
+	}
+	tx, err := r.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var generation uint64
+	if err = tx.QueryRowContext(ctx, `SELECT generation FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`, record.TenantID, ResourceDomain, record.DomainID).Scan(&generation); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if generation != expected {
+		return ErrConflict
+	}
+	var currentRaw []byte
+	if err = tx.QueryRowContext(ctx, `SELECT rotation_json FROM mail_dkim_rotations_v2 WHERE tenant_id=? AND domain_id=?`, record.TenantID, record.DomainID).Scan(&currentRaw); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	var current dkimRotationRecord
+	if strictJSON(currentRaw, &current) != nil || current.State != DKIMRotationOverlap || current.ActiveGeneration != expected || current.PrepareToken != record.PrepareToken {
+		return ErrConflict
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE mail_dkim_rotations_v2 SET state=?,rotation_json=?,updated_at=? WHERE tenant_id=? AND domain_id=? AND domain_generation=? AND state=?`, record.State, raw, *record.PreviousRevokedAt, record.TenantID, record.DomainID, expected, DKIMRotationOverlap)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return errors.Join(ErrConflict, err)
+	}
+	return tx.Commit()
+}
+func (r SQLControlRepository) Admit(ctx context.Context, admission Admission) (AdmissionResult, error) {
+	if r.DB == nil {
+		return AdmissionResult{}, errors.New("mail control database required")
+	}
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return AdmissionResult{}, err
+	}
+	defer tx.Rollback()
+	var raw []byte
+	err = tx.QueryRowContext(ctx, `SELECT receipt_json FROM mail_operations_v2 WHERE command_id=? OR (tenant_id=? AND idempotency_key=?) LIMIT 1`, admission.Command.ID, admission.Command.TenantID, admission.Command.IdempotencyKey).Scan(&raw)
+	if err == nil {
+		var receipt OperationReceipt
+		if err = strictJSON(raw, &receipt); err != nil {
+			return AdmissionResult{}, err
+		}
+		if receipt.CommandDigest != admission.Digest {
+			return AdmissionResult{}, ErrConflict
+		}
+		if err = tx.Commit(); err != nil {
+			return AdmissionResult{}, err
+		}
+		return AdmissionResult{Receipt: receipt}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return AdmissionResult{}, err
+	}
+	var reserved int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM mail_migration_reservation_v1`).Scan(&reserved); err != nil {
+		return AdmissionResult{}, err
+	}
+	if reserved != 0 {
+		return AdmissionResult{}, ErrConflict
+	}
+	if admission.Command.Action == ActionCreate {
+		var count int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`, admission.Command.TenantID, admission.Command.Kind, admission.Command.ResourceID).Scan(&count); err != nil {
+			return AdmissionResult{}, err
+		}
+		if count != 0 {
+			return AdmissionResult{}, ErrConflict
+		}
+	} else {
+		var generation uint64
+		if err = tx.QueryRowContext(ctx, `SELECT generation FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`, admission.Command.TenantID, admission.Command.Kind, admission.Command.ResourceID).Scan(&generation); errors.Is(err, sql.ErrNoRows) {
+			return AdmissionResult{}, ErrNotFound
+		}
+		if err != nil {
+			return AdmissionResult{}, err
+		}
+		if generation != admission.Command.ExpectedGeneration {
+			return AdmissionResult{}, ErrConflict
+		}
+	}
+	now := time.Now().UTC()
+	receipt := OperationReceipt{CommandID: admission.Command.ID, CommandDigest: admission.Digest, TenantID: admission.Command.TenantID, Kind: admission.Command.Kind, ResourceID: admission.Command.ResourceID, Status: OperationAccepted, Request: admission.Request, AcceptedAt: now}
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		return AdmissionResult{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO mail_operations_v2(command_id,command_digest,idempotency_key,tenant_id,kind,resource_id,status,receipt_json,accepted_at) VALUES(?,?,?,?,?,?,?,?,?)`, admission.Command.ID, admission.Digest, admission.Command.IdempotencyKey, admission.Command.TenantID, admission.Command.Kind, admission.Command.ResourceID, receipt.Status, encoded, now); err != nil {
+		return AdmissionResult{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return AdmissionResult{}, err
+	}
+	return AdmissionResult{New: true, Receipt: receipt}, nil
+}
+func (r SQLControlRepository) Complete(ctx context.Context, completion Completion) (OperationReceipt, error) {
+	if r.DB == nil {
+		return OperationReceipt{}, errors.New("mail control database required")
+	}
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return OperationReceipt{}, err
+	}
+	defer tx.Rollback()
+	var raw []byte
+	var currentStatus OperationStatus
+	if err = tx.QueryRowContext(ctx, `SELECT status,receipt_json FROM mail_operations_v2 WHERE command_id=? AND command_digest=? AND tenant_id=?`, completion.CommandID, completion.CommandDigest, completion.TenantID).Scan(&currentStatus, &raw); err != nil {
+		return OperationReceipt{}, err
+	}
+	var receipt OperationReceipt
+	if err = strictJSON(raw, &receipt); err != nil {
+		return OperationReceipt{}, err
+	}
+	if !requestsEqual(receipt.Request, completion.Request) {
+		return OperationReceipt{}, ErrInvalidReceipt
+	}
+	if currentStatus != OperationAccepted && currentStatus != OperationAmbiguous {
+		if err = tx.Commit(); err != nil {
+			return OperationReceipt{}, err
+		}
+		return receipt, nil
+	}
+	now := time.Now().UTC()
+	receipt.Status = completion.Status
+	receipt.Effect = completion.Effect
+	receipt.CompletedAt = &now
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		return OperationReceipt{}, err
+	}
+	if completion.Status == OperationApplied && completion.Resource != nil {
+		resourceRaw, marshalErr := json.Marshal(completion.Resource)
+		if marshalErr != nil {
+			return OperationReceipt{}, marshalErr
+		}
+		if completion.Resource.State == StateDeleted {
+			_, err = tx.ExecContext(ctx, `DELETE FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id=?`, completion.Resource.TenantID, completion.Resource.Kind, completion.Resource.ID)
+		} else {
+			_, err = tx.ExecContext(ctx, `INSERT INTO mail_resources_v2(tenant_id,kind,resource_id,generation,state,resource_json,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant_id,kind,resource_id) DO UPDATE SET generation=excluded.generation,state=excluded.state,resource_json=excluded.resource_json,updated_at=excluded.updated_at`, completion.Resource.TenantID, completion.Resource.Kind, completion.Resource.ID, completion.Resource.Generation, completion.Resource.State, resourceRaw, completion.Resource.UpdatedAt)
+		}
+		if err != nil {
+			return OperationReceipt{}, err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE mail_operations_v2 SET status=?,receipt_json=?,completed_at=? WHERE command_id=? AND command_digest=?`, receipt.Status, encoded, now, completion.CommandID, completion.CommandDigest); err != nil {
+		return OperationReceipt{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return OperationReceipt{}, err
+	}
+	return receipt, nil
+}
+func (r SQLControlRepository) List(ctx context.Context, tenant string, kind ResourceKind, limit int, cursor string) ([]ResourceEnvelope, string, error) {
+	if r.DB == nil {
+		return nil, "", errors.New("mail control database required")
+	}
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	after, err := decodeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := r.DB.QueryContext(ctx, `SELECT resource_id,resource_json FROM mail_resources_v2 WHERE tenant_id=? AND kind=? AND resource_id>? ORDER BY resource_id LIMIT ?`, tenant, kind, after, limit+1)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	resources := make([]ResourceEnvelope, 0, limit+1)
+	ids := make([]string, 0, limit+1)
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err = rows.Scan(&id, &raw); err != nil {
+			return nil, "", err
+		}
+		var resource ResourceEnvelope
+		if err = strictJSON(raw, &resource); err != nil {
+			return nil, "", err
+		}
+		resources = append(resources, resource)
+		ids = append(ids, id)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(resources) > limit {
+		next = base64.RawURLEncoding.EncodeToString([]byte(ids[limit-1]))
+		resources = resources[:limit]
+	}
+	return resources, next, nil
+}
+func (r SQLControlRepository) ListAll(ctx context.Context, kind ResourceKind, limit int, cursor string) ([]ResourceEnvelope, string, error) {
+	if r.DB == nil {
+		return nil, "", errors.New("mail control database required")
+	}
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	tenantAfter, idAfter, err := decodeNodeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := r.DB.QueryContext(ctx, `SELECT tenant_id,resource_id,resource_json FROM mail_resources_v2 WHERE kind=? AND (tenant_id>? OR (tenant_id=? AND resource_id>?)) ORDER BY tenant_id,resource_id LIMIT ?`, kind, tenantAfter, tenantAfter, idAfter, limit+1)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	resources := make([]ResourceEnvelope, 0, limit+1)
+	tenants := make([]string, 0, limit+1)
+	ids := make([]string, 0, limit+1)
+	for rows.Next() {
+		var tenant, id string
+		var raw []byte
+		if err = rows.Scan(&tenant, &id, &raw); err != nil {
+			return nil, "", err
+		}
+		var resource ResourceEnvelope
+		if err = strictJSON(raw, &resource); err != nil {
+			return nil, "", err
+		}
+		if resource.TenantID != tenant || resource.ID != id || resource.Kind != kind {
+			return nil, "", ErrInvalidReceipt
+		}
+		resources = append(resources, resource)
+		tenants = append(tenants, tenant)
+		ids = append(ids, id)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(resources) > limit {
+		next = base64.RawURLEncoding.EncodeToString([]byte(tenants[limit-1] + "\x00" + ids[limit-1]))
+		resources = resources[:limit]
+	}
+	return resources, next, nil
+}
+func strictJSON(raw []byte, target any) error {
+	if len(raw) == 0 || len(raw) > 8<<20 {
+		return fmt.Errorf("invalid stored mail JSON")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("trailing stored mail JSON")
+	}
+	canonical, err := json.Marshal(target)
+	if err != nil {
+		return err
+	}
+	if len(canonical) == 0 {
+		return fmt.Errorf("empty stored mail JSON")
+	}
+	return nil
+}
+func decodeCursor(cursor string) (string, error) {
+	if cursor == "" {
+		return "", nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil || !validOpaque(string(raw)) {
+		return "", ErrInvalidCommand
+	}
+	return string(raw), nil
+}
+func decodeNodeCursor(cursor string) (string, string, error) {
+	if cursor == "" {
+		return "", "", nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", "", ErrInvalidCommand
+	}
+	parts := strings.Split(string(raw), "\x00")
+	if len(parts) != 2 || !validOpaque(parts[0]) || !validOpaque(parts[1]) {
+		return "", "", ErrInvalidCommand
+	}
+	return parts[0], parts[1], nil
+}
