@@ -5,6 +5,7 @@ package containers
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,10 +33,8 @@ func readPackagedApplicationRecipe(ctx context.Context, verifier RecipeVerifier,
 	if err != nil { return recipe, err }
 	executable, err = filepath.EvalSymlinks(executable)
 	if err != nil { return recipe, err }
-	parent := filepath.Dir(executable)
-	if filepath.Base(executable) != "cyberpanel" || !strings.HasPrefix(parent, "/opt/cyberpanel/slots/") || filepath.Base(parent) != "panel" || filepath.Base(filepath.Dir(parent)) != "components" {
-		return recipe, ErrForbidden
-	}
+	parent, err := packagedRecipeParent(executable)
+	if err != nil { return recipe, err }
 	path := filepath.Join(parent, "container-recipes", name+".json")
 	for current := filepath.Dir(path); ; current = filepath.Dir(current) {
 		info, statErr := os.Lstat(current)
@@ -58,4 +57,19 @@ func readPackagedApplicationRecipe(ctx context.Context, verifier RecipeVerifier,
 	if decoder.Decode(&recipe) != nil || decoder.Decode(&struct{}{}) != io.EOF || recipe.Name != name { return recipe, ErrInvalid }
 	if err = verifier.Verify(ctx, recipe); err != nil { return recipe, fmt.Errorf("packaged %s signature: %w", name, err) }
 	return recipe, nil
+}
+
+// Both supported installers keep recipes beside the immutable panel executable.
+// A node-release path must match the exact digest generation and payload layout;
+// merely being somewhere beneath node-releases is not sufficient authority.
+func packagedRecipeParent(executable string) (string, error) {
+	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable || filepath.Base(executable) != "cyberpanel" { return "", ErrForbidden }
+	parent := filepath.Dir(executable)
+	if strings.HasPrefix(parent, "/opt/cyberpanel/slots/") && filepath.Base(parent) == "panel" && filepath.Base(filepath.Dir(parent)) == "components" { return parent, nil }
+	const releases = "/opt/cyberpanel/node-releases/"
+	if !strings.HasPrefix(executable, releases) { return "", ErrForbidden }
+	generation, payload, found := strings.Cut(strings.TrimPrefix(executable, releases), "/")
+	if !found || len(generation) != 64 || generation != strings.ToLower(generation) || payload != "root/usr/lib/cyberpanel/bin/cyberpanel" { return "", ErrForbidden }
+	if _, err := hex.DecodeString(generation); err != nil { return "", ErrForbidden }
+	return parent, nil
 }

@@ -22,6 +22,21 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Results
 
+### Packaged recipe loader and node-release layout
+
+Inspection found a concrete startup mismatch: the container recipe loader
+accepted only `/opt/cyberpanel/slots/.../components/panel/cyberpanel`, while the
+offline signed node installer places the executable at
+`/opt/cyberpanel/node-releases/<64-lowercase-hex>/root/usr/lib/cyberpanel/bin/cyberpanel`.
+The loader now accepts that exact additional layout. Root ownership, safe
+ancestor modes, no-follow recipe reads, strict JSON decoding and signature
+verification are unchanged. QEMU tests accept both supported installer layouts
+and reject malformed generations, sibling paths, wrong payload locations,
+traversal and wrong executable names; the cyberpanel command builds in QEMU.
+This removes a source-level prerequisite mismatch, not the need to supply real
+signed n8n/Hermes and PHP application release inputs. Installed core startup is
+not yet qualified by these path tests.
+
 ### Secret material identity privilege decision
 
 Read-only transient systemd probes in the Ubuntu ARM64 guest inspected the
