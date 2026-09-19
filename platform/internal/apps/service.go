@@ -91,8 +91,7 @@ func (service ApplicationService) Install(ctx context.Context, request InstallRe
 	installation.DatabaseBindingID = database.ID
 	configurationSecret, err := service.Secrets.IssueApplicationSecret(ctx, request.TenantID, request.SiteID, request.InstallationID, "configuration")
 	if err != nil {
-		_ = service.Databases.RevokeApplicationDatabase(ctx, database.ID)
-		return ApplicationInstallation{}, service.fail(ctx, operation, "issue_secret", err)
+		return ApplicationInstallation{}, service.compensateInstall(ctx, operation, database.ID, secretRefs, err)
 	}
 	secretRefs = append(secretRefs, configurationSecret)
 	installation.SecretRefs = secretRefs
