@@ -284,7 +284,17 @@ func (service *StaticDeploymentService) Admit(ctx context.Context, bundle Static
 		if _, err = tx.ExecContext(ctx, `UPDATE ha_static_deployment_grants_v1 SET state='staged' WHERE node_id=? AND state='active'`, node); err != nil { return StaticDeploymentReceipt{}, err }
 	}
 	bindings := make(map[string]federation.FederatedPrincipalBinding)
+	signingKeys := make(map[string]federation.SigningKeyTrust)
 	for _, grant := range bundle.Grants {
+		for _, signingKey := range grant.SigningKeys {
+			if prior, exists := signingKeys[signingKey.ID]; exists {
+				priorRaw, priorErr := json.Marshal(prior); signingKeyRaw, signingKeyErr := json.Marshal(signingKey)
+				if priorErr != nil || signingKeyErr != nil || !sameStaticJSON(priorRaw,signingKeyRaw) { return StaticDeploymentReceipt{}, ErrConflict }
+				continue
+			}
+			if len(signingKeys) == 16 { return StaticDeploymentReceipt{}, ErrForbidden }
+			signingKeys[signingKey.ID] = signingKey
+		}
 		for _, binding := range grant.PrincipalBindings {
 			identity := binding.PeerID.String()+"\x00"+binding.Issuer+"\x00"+binding.Subject
 			if prior, exists := bindings[identity]; exists {
@@ -296,6 +306,10 @@ func (service *StaticDeploymentService) Admit(ctx context.Context, bundle Static
 		}
 	}
 	if peer.Valid() {
+		if len(signingKeys) == 0 { return StaticDeploymentReceipt{}, ErrForbidden }
+		signingKeysRaw, marshalErr := json.Marshal(signingKeys); if marshalErr != nil { return StaticDeploymentReceipt{}, marshalErr }
+		result, updateErr := tx.ExecContext(ctx, `UPDATE federation_peers SET signing_keys_json=?,updated_at=? WHERE id=? AND state='active'`, signingKeysRaw,time.Now().UTC(),peer)
+		if updateErr != nil { return StaticDeploymentReceipt{}, updateErr }; if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 { return StaticDeploymentReceipt{}, ErrConflict }
 		if _, err = tx.ExecContext(ctx, `UPDATE federation_principal_bindings SET state='staged',updated_at=? WHERE peer_id=? AND state='active'`, time.Now().UTC(), peer); err != nil { return StaticDeploymentReceipt{}, err }
 		for _, binding := range bindings {
 			raw, marshalErr := json.Marshal(binding); if marshalErr != nil { return StaticDeploymentReceipt{}, marshalErr }
