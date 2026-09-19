@@ -764,7 +764,7 @@ type commandDigestDTO struct {
 	ExpectedGeneration uint64 `json:"expected_generation,omitempty"`
 }
 
-func canonicalDigest(value commandDigestDTO) string {
+func canonicalDigest(value any) string {
 	encoded, _ := json.Marshal(value)
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
