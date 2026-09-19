@@ -209,11 +209,29 @@ func applyFederationRotation(ctx context.Context, materials *federationEnrollmen
 	if err != nil {
 		return result, err
 	}
+	var previousSigningKeyRef string
+	if err = tx.QueryRowContext(ctx, `SELECT signing_key_ref FROM federation_node_certificates_v1 WHERE certificate_ref=? AND node_id=?`, previousRef, node).Scan(&previousSigningKeyRef); err != nil {
+		return result, err
+	}
+	if previousSigningKeyRef == "" || previousSigningKeyRef == keyRef {
+		return result, federation.ErrForbidden
+	}
+	commitAndRetirePreviousKey := func() error {
+		if commitErr := tx.Commit(); commitErr != nil {
+			return commitErr
+		}
+		retirementContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if retireErr := materials.Destroy(retirementContext, previousSigningKeyRef); retireErr != nil && !errors.Is(retireErr, secrets.ErrRevoked) {
+			return retireErr
+		}
+		return nil
+	}
 	if state == "applied" {
 		if !bytes.Equal(savedResponse, canonical) {
 			return result, federation.ErrReplay
 		}
-		return result, tx.Commit()
+		return result, commitAndRetirePreviousKey()
 	}
 	if state != "prepared" || result.NodeID != node || result.PeerID != peer || result.Generation != generation+1 || result.AuthorityEpoch != epoch || result.PreviousCertificateFingerprint != previousFingerprint || !bytes.Equal(publicKey, result.SigningPublicKey) || !validFederationEnrollmentDigest(result.RequestDigest) || len(result.Signature) != ed25519.SignatureSize {
 		return result, federation.ErrForbidden
@@ -279,7 +297,7 @@ func applyFederationRotation(ctx context.Context, materials *federationEnrollmen
 	if err != nil {
 		return result, err
 	}
-	return result, tx.Commit()
+	return result, commitAndRetirePreviousKey()
 }
 
 func verifyStagedFederationSigningKey(ctx context.Context, keyRef string, node federation.ID, publicKey []byte) error {
