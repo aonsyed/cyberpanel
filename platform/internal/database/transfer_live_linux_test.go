@@ -103,7 +103,7 @@ func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
 	}
 	defer wipeBytes(passwordBytes)
 	password := hex.EncodeToString(passwordBytes)
-	if _, err = query(ctx, "CREATE USER '"+importUser+"'@'localhost' IDENTIFIED BY '"+password+"'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,LOCK TABLES ON `"+target.String()+"`.* TO '"+importUser+"'@'localhost';"); err != nil {
+	if _, err = query(ctx, "CREATE USER '"+importUser+"'@'localhost' IDENTIFIED BY '"+password+"'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,CREATE VIEW,ALTER,INDEX,DROP,LOCK TABLES ON `"+target.String()+"`.* TO '"+importUser+"'@'localhost';"); err != nil {
 		t.Fatal("scoped import account setup failed")
 	}
 	t.Cleanup(func() {
@@ -783,7 +783,7 @@ func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *Linux
 		t.Fatal("invalid native dump fixture", err)
 	}
 	raw = bytes.TrimPrefix(raw, []byte(transferSQLMagic))
-	for index, form := range []string{"ordinary", "utf8-bom", "insert-ignore", "replace"} {
+	for index, form := range []string{"ordinary", "utf8-bom", "insert-ignore", "replace", "view-load"} {
 		t.Run(form, func(t *testing.T) {
 			plain := append([]byte(nil), raw...)
 			if form == "utf8-bom" {
@@ -794,6 +794,9 @@ func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *Linux
 			}
 			if form == "replace" {
 				plain = append(plain, []byte("\nREPLACE INTO `sample` VALUES (2,'replacement',NULL);\n")...)
+			}
+			if form == "view-load" {
+				plain = append(plain, []byte("\n/*!50001 CREATE ALGORITHM=UNDEFINED */ /*!50013 DEFINER=`root`@`localhost` SQL SECURITY DEFINER */ /*!50001 VIEW `sample_view` AS SELECT id,body FROM sample */;\n")...)
 			}
 			data := plain
 			if job.Compression == TransferCompressionGzip {
@@ -852,6 +855,19 @@ func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *Linux
 			}
 			if err != nil || got != expected {
 				t.Fatal("ordinary import contents differ", err)
+			}
+			if form == "view-load" {
+				got, err := query(ctx, "SELECT SECURITY_TYPE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='"+target.String()+"' AND TABLE_NAME='sample_view';")
+				if err != nil || got != "INVOKER" {
+					t.Fatal("dump definer security survived rewrite", got, err)
+				}
+				got, err = query(ctx, "SELECT COUNT(*) FROM `"+target.String()+"`.sample_view;")
+				if err != nil || got != "2" {
+					t.Fatal("loaded native view cannot read its tables", err)
+				}
+				if _, err = query(ctx, "DROP VIEW `"+target.String()+"`.sample_view;"); err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 	}

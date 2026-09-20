@@ -442,8 +442,7 @@ func (reader *constrainedTransferSQLReader) nextStatement() ([]byte, error) {
 		character, err := reader.reader.ReadByte()
 		if err != nil {
 			if errors.Is(err, io.EOF) && len(bytes.TrimSpace(statement)) > 0 {
-				if validateTransferSQLStatement(statement) != nil { return nil, ErrTransferUnsafeSQL }
-				return statement, nil
+				return prepareTransferSQLStatement(statement)
 			}
 			return nil, err
 		}
@@ -471,8 +470,7 @@ func (reader *constrainedTransferSQLReader) nextStatement() ([]byte, error) {
 		if previous == '/' && character == '*' { blockComment = true }
 		if character == '\'' || character == '"' || character == '`' { quote = character }
 		if character == ';' {
-			if validateTransferSQLStatement(statement) != nil { return nil, ErrTransferUnsafeSQL }
-			return statement, nil
+			return prepareTransferSQLStatement(statement)
 		}
 		previous = character
 	}

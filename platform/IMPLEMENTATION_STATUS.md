@@ -11,6 +11,27 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## View import loading step — 2026-09-21 (INCOMPLETE, source only)
+
+Transfer reader now recognizes native CREATE VIEW dump envelopes, unwraps
+executable-comment clauses, removes supplied definers and forces SQL SECURITY
+INVOKER. SELECT bodies reuse workspace safety validation; view creation names
+must be unqualified. Native QEMU SQL/gzip tests load a root-definer dump under
+a scoped fixture account, confirm INVOKER and query exact view row count. File
+access, sleeps, external-schema creation and client escapes remain rejected.
+Full database/API/core/execd suites pass. Not end-to-end view-import support:
+production isolated loader grants, verification and destination recreation are
+still to implement. Do not advertise views or deploy this as a completed feature.
+
+Next implementation seam: use `USE <validated-isolated-schema>; SHOW CREATE VIEW`
+to obtain native definitions in their own schema context. QEMU confirmed the
+result uses unqualified table references, avoiding unsafe string substitution
+of schema names inside expressions/aliases/literals. Recreate sanitized INVOKER
+views in destination context after table promotion; capture definitions durably
+before native mutation and include canonical view definitions in verification.
+Handle dependencies and recovery explicitly. Both view probe schemas were removed.
+Installed63 unchanged.
+
 ## Native table-engine promotion — 2026-09-21 (source, not deployed)
 
 Empty-destination promotion now accepts InnoDB, MyISAM and Aria, rather than

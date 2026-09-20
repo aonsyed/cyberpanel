@@ -4968,3 +4968,18 @@ is sourced above, not claimed as newly reproduced crash evidence.
 Full database/apiserver/cyberpanel/panel-execd suites passed inside QEMU using
 TMPDIR=/root, CYBERPANEL_QEMU_LIVE_TRANSFER=1 and existing offline Go/cache paths.
 No vendor builds, downloads or installed release changes.
+# View-dump loading primitive — 2026-09-21 (not complete feature)
+
+QEMU native dump probe established CREATE VIEW placeholder and versioned clauses,
+including explicit root definer. Added transfer envelope rewrite strips that
+identity, forces SQL SECURITY INVOKER and validates SELECT body through existing
+workspace rules. Native SQL/gzip loader checks across InnoDB/MyISAM/Aria confirm
+INVOKER and two readable rows. Fixture loader has scoped CREATE VIEW; production
+loader authorization and destination verification/promotion are NOT yet changed.
+This remains an internal loading primitive, not successful product view import.
+
+Targeted `Test(TransferView|TransferSQL|QEMUTransferNativeRoundTrip)` and full
+database/apiserver/cyberpanel/panel-execd suites passed inside Ubuntu ARM64 QEMU
+with live transfer flag/offline Go/cache settings. Native probe also verified
+SHOW CREATE VIEW after USE emits same-schema table references without the schema
+prefix. Probe schemas dropped. No package changes/downloads/release installation.
