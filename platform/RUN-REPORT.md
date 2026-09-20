@@ -5,6 +5,30 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Real Joomla input and missing XML prerequisite — 2026-09-20
+
+Downloaded the [official Joomla 6.1.3 full tar package](https://downloads.joomla.org/cms/joomla6/6-1-3)
+inside Ubuntu ARM64 QEMU, 29,126,534 bytes. Its SHA-1 matches the publisher's
+`a82d1de02f1b826eacd3d990888f9f75bd49c707`; recorded SHA-256 is
+`184f8c582cde5981693de7c28547c6e834c48c50cb377c7b8421bbfd33bbdf6f`.
+SHA-1 is recorded as a publisher checksum, not claimed as a strong signature.
+The archive remains `/home/harness/joomla-6.1.3.tar.gz`.
+
+Running the real `installation/joomla.php` on PHP 8.3 failed with undefined
+`simplexml_load_file`. Added `simplexml` to the Joomla contract so recipe/runtime
+prerequisites explicitly include it. Installed the guest's native `php8.3-xml`
+package (123 kB download); the real installer then started and its help confirmed
+all options currently emitted by our Joomla bootstrap adapter. The opt-in QEMU
+CLI check and contract regression passed, as did the uncached apps suite; the
+application-release command compiled. This is not a Joomla installation or
+OLS/LSE runtime certification.
+
+Re-signed and verified the corrected recipe using the existing QEMU-only key:
+`7da747609e4c3d95ecd6a3b1fe7ebdd43df51997e9564658b8c327fe39f0c6be`, in guest
+`/home/harness/joomla-inputs-20260920-v2/`. The initial recipe in
+`joomla-inputs-20260920/` is superseded and must not be packaged. No private key
+was printed or host trust added. No OS image or Go toolchain download occurred.
+
 ### Real WordPress release input — 2026-09-20
 
 Prepared a version-2 WordPress 7.1 recipe from the existing QEMU archive

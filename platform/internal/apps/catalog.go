@@ -382,7 +382,7 @@ func CertifiedProductContracts() map[ApplicationKind]ProductContract {
 		},
 		ApplicationJoomla: {
 			Kind: ApplicationJoomla, DisplayName: "Joomla", DefaultStorage: StorageMutableTree,
-			PHPVersions: []string{"8.1", "8.2", "8.3"}, PHPExtensions: []string{"curl", "dom", "fileinfo", "gd", "intl", "mbstring", "mysqli", "openssl", "zip"}, DatabaseKinds: []string{"mariadb"},
+			PHPVersions: []string{"8.1", "8.2", "8.3"}, PHPExtensions: []string{"curl", "dom", "fileinfo", "gd", "intl", "mbstring", "mysqli", "openssl", "simplexml", "zip"}, DatabaseKinds: []string{"mariadb"},
 			MutableStores: []MutableStore{{Name: "images", Path: MustRelativePath("images"), Required: true, BackedUp: true}, {Name: "cache", Path: MustRelativePath("cache"), BackedUp: false}, {Name: "logs", Path: MustRelativePath("administrator/logs"), BackedUp: false}},
 			InstallProbes: web("/"), UpdateProbes: web("/administrator/"), BackupComponents: []string{"files", "database", "configuration"}, Lifecycle: full,
 		},
