@@ -16,6 +16,7 @@ import (
 // Root-only native building blocks. The transfer broker enforces a closed
 // command, source-artifact ownership and execution admission before dispatch.
 type isolatedTransferRecord struct {
+	Views           []transferNativeView     `json:"views,omitempty"`
 	PromotionCommit *transferPromotionCommit `json:"promotion_commit,omitempty"`
 	Process         *TransferProcessReceipt  `json:"process,omitempty"`
 	Promotion       *TransferPromotion       `json:"promotion,omitempty"`
@@ -186,7 +187,7 @@ func (configs isolatedImportConfigs) TransferClientConfig(ctx context.Context, j
 	if err = executor.writeResource("transfer-imports", record.Target.ID, record); err != nil {
 		return TransferClientConfigDescriptor{}, err
 	}
-	principal, password, err := executor.createMigrationLoader(bounded, record.Target)
+	principal, password, err := executor.createScopedMigrationLoader(bounded, record.Target, true)
 	defer wipeBytes(password)
 	if err != nil {
 		cleanup, stop := context.WithTimeout(context.Background(), 20*time.Second)

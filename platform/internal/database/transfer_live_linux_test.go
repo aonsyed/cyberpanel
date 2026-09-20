@@ -87,6 +87,9 @@ func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
 	if _, err := query(ctx, "CREATE DATABASE `"+source.String()+"`; CREATE DATABASE `"+target.String()+"`; CREATE TABLE `"+source.String()+"`.sample(id INT PRIMARY KEY, body TEXT, raw_bytes BLOB) ENGINE="+engine+"; INSERT INTO `"+source.String()+"`.sample VALUES(1,'transfer round trip',X'0001FF'),(2,NULL,NULL);"); err != nil {
 		t.Fatal("fixture setup failed", err)
 	}
+	if _, err := query(ctx, "CREATE SQL SECURITY INVOKER VIEW `"+source.String()+"`.z_view AS SELECT id,body FROM `"+source.String()+"`.sample; CREATE SQL SECURITY INVOKER VIEW `"+source.String()+"`.a_view AS SELECT id,body FROM `"+source.String()+"`.z_view;"); err != nil {
+		t.Fatal("dependent view fixture", err)
+	}
 	if err := ensureRootDirectory(strings.TrimSuffix(transferConfigDirectory, "/"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -532,6 +535,12 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 	if got, err := query(ctx, "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA='"+live.Name.String()+"' AND TABLE_NAME='sample';"); err != nil || got != engine {
 		t.Fatal("promotion changed the native storage engine", got, err)
 	}
+	if got, err := query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL')) FROM `"+live.Name.String()+"`.a_view ORDER BY id;"); err != nil || got != "1:transfer round trip\n2:NULL" {
+		t.Fatal("dependent promoted view contents", got, err)
+	}
+	if got, err := query(ctx, "SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA='"+live.Name.String()+"' AND SECURITY_TYPE='INVOKER';"); err != nil || got != "2" {
+		t.Fatal("promoted view security", got, err)
+	}
 	replayed, err := executor.promoteEmptyTransferImport(ctx, job, isolated)
 	if err != nil || replayed != promoted {
 		t.Fatal("promotion replay differs", err)
@@ -739,6 +748,17 @@ func verifyIsolatedNativeImport(t *testing.T, ctx context.Context, executor *Lin
 		t.Fatal(err)
 	}
 	quotedVerification, err := executor.verifyTransferImport(ctx, job, isolated)
+	if err == nil {
+		t.Fatal("broken view dependency verified")
+	}
+	stored, err = executor.loadTransferImport(job, isolated)
+	if err != nil || stored.State != "closed" || stored.Verification != nil {
+		t.Fatal("broken view retained verification", err)
+	}
+	if _, err = query(ctx, "CREATE OR REPLACE SQL SECURITY INVOKER VIEW `"+isolated.Name.String()+"`.z_view AS SELECT id,body FROM `"+isolated.Name.String()+"`.`qemu``quoted`;"); err != nil {
+		t.Fatal(err)
+	}
+	quotedVerification, err = executor.verifyTransferImport(ctx, job, isolated)
 	if err != nil || quotedVerification.RowCount != 2 || quotedVerification.SchemaDigest == verification.SchemaDigest {
 		t.Fatal("quoted table verification", err)
 	}

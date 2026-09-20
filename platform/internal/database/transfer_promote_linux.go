@@ -154,19 +154,38 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 		return result, err
 	}
 	var tables []string
+	record.Views = nil
+	var viewBytes uint64
 	if strings.TrimSpace(string(metadata)) != "" {
 		for _, line := range strings.Split(strings.TrimSpace(string(metadata)), "\n") {
 			fields := strings.Split(line, "\t")
-			if len(fields) != 4 || fields[1] != "BASE TABLE" || !atomicTransferRenameEngine(fields[2]) {
+			if len(fields) != 4 {
 				return result, ErrUnavailable
 			}
 			name, err := hex.DecodeString(fields[0])
 			if err != nil {
 				return result, ErrTransferInvalid
 			}
+			if fields[1] == "VIEW" {
+				view, err := executor.observeTransferView(ctx, connection, isolatedTransferTable{Database: record.Target, Table: string(name)})
+				if err != nil {
+					return result, err
+				}
+				if uint64(len(view.Definition)) > job.Limits.MaximumBytes-viewBytes {
+					return result, ErrTransferLimit
+				}
+				viewBytes += uint64(len(view.Definition))
+				record.Views = append(record.Views, view)
+				continue
+			}
+			if fields[1] != "BASE TABLE" || !atomicTransferRenameEngine(fields[2]) {
+				return result, ErrUnavailable
+			}
 			tables = append(tables, string(name))
 		}
 	}
+	// Persist the native view plan before moving any table. An interrupted
+	// promotion remains ambiguous; neither reloading SQL nor guessing is safe.
 	record.State = "promoting"
 	if err = executor.writeResource("transfer-imports", record.Target.ID, record); err != nil {
 		return result, err
@@ -179,12 +198,21 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 			return result, ErrAmbiguous
 		}
 	}
+	// Native views cannot be renamed across schemas. Matching-column placeholders
+	// let dependent views be recreated without relying on lexical dependency order.
+	for _, statement := range []mariaDBStatement{sqlCreateImportViewPlaceholder, sqlRecreateImportView} {
+		for _, view := range record.Views {
+			if _, err := connection.query(ctx, statement, transferViewMutation{Database: live, View: view}); err != nil {
+				return result, ErrAmbiguous
+			}
+		}
+	}
 	confirmed, err := executor.observeTransferDatabase(ctx, connection, job, isolated, live)
 	if err != nil || confirmed.SchemaDigest != verified.SchemaDigest {
 		return result, ErrAmbiguous
 	}
 	remaining, err := connection.query(ctx, sqlObserveImportTables, record.Target)
-	if err != nil || strings.TrimSpace(string(remaining)) != "" {
+	if err != nil || !onlyPlannedTransferViews(remaining, record.Views) {
 		return result, ErrAmbiguous
 	}
 	if _, err = connection.query(ctx, sqlDropDatabase, record.Target); err != nil {
@@ -196,7 +224,8 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 	proof, _ := json.Marshal(struct {
 		Before, After TransferVerification
 		Tables        []string
-	}{verified, confirmed, tables})
+		Views         []transferNativeView
+	}{verified, confirmed, tables, record.Views})
 	result.TargetGeneration, result.SourcePreserved, result.Promoted = live.Generation, true, true
 	result.ProofDigest, result.CompletedAt = transferDigest(proof), executor.now().UTC()
 	record.State, record.Promotion = "promotion-verified", &result
@@ -218,4 +247,27 @@ func atomicTransferRenameEngine(engine string) bool {
 	default:
 		return false
 	}
+}
+
+func onlyPlannedTransferViews(metadata []byte, views []transferNativeView) bool {
+	remaining := strings.TrimSpace(string(metadata))
+	if remaining == "" {
+		return len(views) == 0
+	}
+	lines := strings.Split(remaining, "\n")
+	if len(lines) != len(views) {
+		return false
+	}
+	expected := map[string]bool{}
+	for _, view := range views {
+		expected[hex.EncodeToString([]byte(view.Name))] = true
+	}
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 || fields[1] != "VIEW" || !expected[strings.ToLower(fields[0])] {
+			return false
+		}
+		delete(expected, strings.ToLower(fields[0]))
+	}
+	return len(expected) == 0
 }

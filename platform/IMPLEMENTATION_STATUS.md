@@ -11,7 +11,26 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
-## View native capture/verification — 2026-09-21 (INCOMPLETE, source only)
+## View import promotion — 2026-09-21 (source verified, not installed)
+
+Native empty-destination promotion now persists captured view definitions and
+columns before table movement, creates matching-column placeholders, and recreates
+INVOKER views in the destination using captured character set/collation. This
+supports dependent views independent of lexical order. Destination schema digest
+must match verified staging before staging removal; only the exact planned views
+may remain there. Scoped transfer loaders receive CREATE VIEW/SHOW VIEW on their
+isolated database only; separate migrator grants remain unchanged.
+
+QEMU Ubuntu ARM64: live-enabled database, apiserver, cyberpanel and panel-execd
+suites pass. Native round trips cover InnoDB/MyISAM/Aria × SQL/gzip with reverse
+lexical view dependencies, destination rows/INVOKER security, broker/coordinator
+promotion replay and metadata recovery. Broken dependencies invalidate stored
+verification; repairing the view permits fresh verification. Installed63 remains
+unchanged. Interrupted view recreation is still ambiguous, not automatically
+recoverable; broader charset variants, routines/triggers/events and replacement
+imports remain incomplete. No native dependency builds, pins or downloads.
+
+## View native capture/verification — 2026-09-21 (earlier partial checkpoint)
 
 Closed read-only SQL operations now capture SHOW CREATE VIEW in its own schema
 context plus ordered native column names. Definitions are sanitized to INVOKER;

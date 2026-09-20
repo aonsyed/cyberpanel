@@ -203,7 +203,8 @@ type migrationLoaderRecord struct {
 // The loader has no reusable plaintext secret: its password exists only in
 // memory and a root-only runtime client file. The journal records ownership,
 // not credentials, and makes failed cleanup visible on the next request.
-func(executor *LinuxMariaDBExecutor)createMigrationLoader(ctx context.Context,target Database)(DatabasePrincipal,[]byte,error){
+func(executor *LinuxMariaDBExecutor)createMigrationLoader(ctx context.Context,target Database)(DatabasePrincipal,[]byte,error){return executor.createScopedMigrationLoader(ctx,target,false)}
+func(executor *LinuxMariaDBExecutor)createScopedMigrationLoader(ctx context.Context,target Database,views bool)(DatabasePrincipal,[]byte,error){
 	if err:=executor.cleanupMigrationLoader(ctx,target.ID);err!=nil{return DatabasePrincipal{},nil,err}
 	seed:=make([]byte,32);if _,err:=io.ReadFull(rand.Reader,seed);err!=nil{return DatabasePrincipal{},nil,err};defer wipeBytes(seed)
 	token:=hex.EncodeToString(seed[:12]);password:=[]byte(hex.EncodeToString(seed))
@@ -221,6 +222,7 @@ func(executor *LinuxMariaDBExecutor)createMigrationLoader(ctx context.Context,ta
 	if err=executor.writeResource("migration-restores",recordID,record);err!=nil{wipeBytes(password);return DatabasePrincipal{},nil,err}
 	grantID,_:=NewResourceID("migloader-grants-"+token);meta.ID=grantID
 	grant:=GrantSet{Metadata:meta,InstanceID:target.InstanceID,DatabaseID:target.ID,PrincipalID:principal.ID,Grants:[]Grant{{Scope:GrantScopeDatabase,Privileges:[]Privilege{PrivilegeSelect,PrivilegeInsert,PrivilegeUpdate,PrivilegeDelete,PrivilegeCreate,PrivilegeAlter,PrivilegeIndex,PrivilegeDrop,PrivilegeCreateTemporary}}}}
+	if views{grant.Grants[0].Privileges=append(grant.Grants[0].Privileges,PrivilegeCreateView,PrivilegeShowView)}
 	if _,err=connection.query(ctx,sqlReplaceGrants,grantMutation{Database:target,Principal:principal,GrantSet:grant});err!=nil{wipeBytes(password);return DatabasePrincipal{},nil,ErrAmbiguous}
 	return principal,password,nil
 }

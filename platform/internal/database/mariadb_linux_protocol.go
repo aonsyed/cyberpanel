@@ -69,6 +69,8 @@ const (
 	sqlPromoteImportTables
 	sqlObserveImportView
 	sqlObserveImportViewColumns
+	sqlCreateImportViewPlaceholder
+	sqlRecreateImportView
 )
 
 type principalMutation struct {
@@ -260,6 +262,9 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 	case sqlPromoteImportTables:
 		rename,ok:=oneValue[isolatedTransferRename](values);if !ok{return "",ErrInvalidResource}
 		return transferRenameSQL(rename)
+	case sqlCreateImportViewPlaceholder, sqlRecreateImportView:
+		view,ok:=oneValue[transferViewMutation](values);if !ok{return "",ErrInvalidResource}
+		return transferViewMutationSQL(view, statement==sqlCreateImportViewPlaceholder)
 	case sqlObserveImportTables:
 		database,ok:=oneValue[Database](values)
 		if !ok || database.Validate()!=nil{return "",ErrInvalidResource}

@@ -5,6 +5,26 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Dependent view import promotion — source, 2026-09-21
+
+Ubuntu ARM64 QEMU, existing native MariaDB: root/offline invocation with
+`TMPDIR=/root CYBERPANEL_QEMU_LIVE_TRANSFER=1 GOPROXY=off GOTOOLCHAIN=local`
+and existing guest caches ran `go test -p 2 ./internal/database
+./internal/apiserver ./cmd/cyberpanel ./cmd/panel-execd -count=1` successfully.
+Package durations: 15.400s, 0.102s, 0.312s, 0.022s respectively.
+
+The native transfer fixture includes z_view over the table and a_view over z_view,
+so alphabetical recreation encounters the dependent view first. All three durable
+engines (InnoDB/MyISAM/Aria), plain SQL/gzip, scoped loading, promotion, destination
+row values, INVOKER security and existing coordinator recovery checks pass. Table
+rename deliberately breaks the source view dependency: verification rejects it
+and clears the old proof, then succeeds after explicit fixture repair. The prior
+failure was the fixture expecting healthy views after renaming their base table.
+
+No project execution on host, no downloads or native package modifications.
+Not an installed UI qualification or proof of safe automatic recovery from a
+crash during view recreation. Installed release63 is unchanged.
+
 ### Transfer history after promotion — source, 2026-09-21
 
 Real SQLite job/lease/completion test reproduced the transfer service denying
