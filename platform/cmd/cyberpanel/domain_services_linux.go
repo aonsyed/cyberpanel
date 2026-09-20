@@ -168,6 +168,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		return apiserver.DomainServices{}, fmt.Errorf("connect database executor: %w", err)
 	}
 	databaseCoordinator := database.NewCoordinator(repositories.Database, databaseExecutor, runtimeClock{})
+	databaseTransfers,err:=apiserver.NewDatabaseTransferOperations(ctx,repositories.ControlDB,repositories.Database,databaseCoordinator,repositories.Hosting,identityService,auditService.Writer)
+	if err!=nil{return apiserver.DomainServices{},fmt.Errorf("initialize database transfers: %w",err)}
 	secretEnrollment, err := newSecretEnrollmentClient()
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("connect secret management broker: %w", err)
@@ -839,6 +841,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		HostingPreviewEdge:          hostingPreviewConsoleEdge,
 		HostingAccessPolicyEdge:     hostingConsoleEdge,
 		Database:                    databaseCoordinator,
+		DatabaseTransfers:           databaseTransfers,
 		DatabaseEdge:                databaseConsoleEdge,
 		Operations:                  operationsCoordinator,
 		OperationsEdge:              operationsConsoleEdge,

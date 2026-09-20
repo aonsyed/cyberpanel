@@ -169,6 +169,7 @@ type DomainServices struct {
 	SitePreviews *sitepreview.Service
 	SiteScreenshots *sitepreview.ScreenshotService
 	Database DatabaseCommandService
+	DatabaseTransfers DatabaseTransferService
 	Operations OperationsCommandService
 	ProductUpdates ProductUpdateEdgeService
 	PackageMaintenance PackageMaintenanceEdgeService

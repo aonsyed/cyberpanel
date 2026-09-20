@@ -13,6 +13,25 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — 2026-09-21 (installed55 unchanged)
 
+Import API/runtime wiring (source only): database.import.prepare/run/inspect
+are registered and connected during domain-service assembly. Contracts require
+database:manage, MFA and site scope. Operations reauthorize the real identity
+ActorContext, load the active owned site and database, construct the bound
+TransferService, and append transfer audit events through the existing writer.
+Prepare derives actor/scope/instance/limits server-side; this synchronous path
+is export-backed, fail-if-not-empty, at most64MiB/1Mrows/90s. Existing completed
+jobs are inspected rather than automatically rerun. Upload/replacement and
+long-running jobs remain separate unfinished parity requirements.
+
+QEMU four-package suites and three command builds pass. Real HTTP inspection
+test verifies contract permissions/MFA/site scope, denied/anonymous/low-assurance
+requests and rejection of actor/tenant injection. Its auth/domain peers are
+fixtures; this is NOT installed identity→HTTP→native import proof. Next: build
+and install updated core/gateway/executor, qualify the authenticated API and
+audit records in the existing guest, then UI/upload integration. Guest2.8GiB
+free: maintain2GiB floor; reclaim only regenerable build cache if packaging
+needs headroom. No downloads/vendor changes/new workers.
+
 Transfer service/native execution joined (source only): BrokerImportExecution
 now supplies the existing TransferService catalog/backend for a bound import.
 Its native destination preview is fresh and read-only; nonempty fail-mode

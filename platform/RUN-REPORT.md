@@ -4414,3 +4414,38 @@ All nine changed Go files match host/guest SHA256. Guest free space3.0GiB.
 No downloads, vendor changes, new workers or committed binaries. Installed55
 unchanged. Remaining includes real edge authorization, HTTP/UI/upload wiring,
 streaming cancellation/long-job lease handling, replacement and general recovery.
+# Database import API and runtime assembly — 2026-09-21
+
+Added prepare/run/inspect API contracts requiring database:manage, MFA and site
+scope. Runtime assembly constructs DatabaseTransferOperations using the actual
+identity service, active-site store, control.db repositories, coordinator and
+audit writer. Transfer authorization rechecks the invocation ActorContext and
+owned site/database rather than trusting actor/tenant fields in payloads. Audit
+events carry bound actor, database/site/job identifiers, outcome and proof
+digests, not dump bytes or credentials.
+
+Preparation derives actor, site, database instance, bounded limits and job
+identity; the native destination preview still rejects nonempty databases.
+Run admits immutable jobs and uses the joined service/native pipeline. Existing
+nonqueued jobs are inspected, never silently rerun. This initial synchronous
+surface accepts same-site panel exports with fail-if-not-empty policy and
+64MiB/1Mrow/90s limits. Uploads, replacement and larger asynchronous jobs are
+still required for parity, not excluded from the goal.
+
+QEMU-only evidence, existing Ubuntu ARM64 guest:
+
+`sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/database ./internal/apiserver ./cmd/cyberpanel ./cmd/panel-execd -count=1`
+
+All four packages passed. The new test drives a real listening HTTP core for
+import inspection and checks handler registration, manage permission/MFA/site
+policy, server-derived invocation scope, unknown actor/tenant payload fields,
+missing site, anonymous callers, denied callers and insufficient assurance.
+Identity/signature/domain execution are explicit fixtures in that HTTP test.
+Existing native service SQL/gzip tests also passed; these separate tests do not
+establish installed end-to-end identity→HTTP→native import behavior.
+
+Three production command builds passed in QEMU with the same offline/root
+environment. All six changed Go files match host/guest SHA256. Guest2.8GiB free.
+Installed55 is unchanged; installed API/audit qualification and browser import
+UI remain pending. No vendor changes, downloads, extra workers or binaries
+committed.
