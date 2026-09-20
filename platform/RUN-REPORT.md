@@ -4853,3 +4853,39 @@ confirmed completion, no recovery button/overflow/browser errors. QEMU UI
 typecheck/build passed; existing chunk-size warning remains. Temporary guest
 Vite server and fixture files removed; ignored host harness retained. Installed62
 unchanged, no new bundle/download/vendor changes. Include in next grouped release.
+# Native WAF mapping preference handoff — 2026-09-21
+
+QEMU Ubuntu ARM64 only: `sudo env TMPDIR=/root
+GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off
+GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/operations
+./cmd/cyberpanel -count=1` passed both packages. Targeted WAF checks also passed.
+New regression verifies preservation of an exact bootstrap policy after a native
+mapping preference change and refusal of modified policy, missing old mapping,
+and symlink mapping. Existing installer tests preserve managed policy and reject
+unsafe files. These are source/package tests inside QEMU, not a live package
+upgrade or installed-release qualification. No downloads or third-party changes.
+# External workspace export — 2026-09-21 (QEMU source qualification)
+
+Ubuntu ARM64 QEMU: `sudo env TMPDIR=/root CYBERPANEL_QEMU_LIVE_MARIADB=1
+CYBERPANEL_QEMU_LIVE_TRANSFER=1 GOCACHE=/home/harness/.cache/go-build
+GOPATH=/home/harness/gopath GOPROXY=off GOTOOLCHAIN=local
+/home/harness/go/bin/go test -p 2 ./internal/database ./internal/apiserver
+./cmd/cyberpanel ./cmd/panel-execd -count=1` passed all four packages.
+
+The existing disposable native TLS server now exercises production workspace
+export credential resolution, dump execution, artifact publication and download:
+plain SQL/gzip contain the actual remote row; download bytes match the artifact;
+wrong CA/hostname fail the native dump and publish nothing; tenant mismatch denies
+export and download. Local SQL/gzip round trips pass as well. Native fixture and
+artifact cleanup remain scoped to test-created objects. This is not installed
+HTTP/browser external-export qualification; mutual TLS for workspace sessions is
+still unavailable. No dependencies downloaded/built/pinned and no release deployed.
+# External export coordinator/broker qualification — 2026-09-21
+
+QEMU Ubuntu ARM64 targeted `TestQEMULiveMariaDBExternalTLS` passes after moving
+successful SQL/gzip cases through production coordinator preparation (real remote
+metadata), framed Unix socket, SQL reboot admission, native dump and authorized
+download. Wrong actor cannot run the job; stale session cannot download. Existing
+negative native TLS and cross-tenant checks still pass. The broker fixture checks
+download bytes never enter the mutation journal. Repository reads and peer
+identity are fixtures; no installed HTTP/browser qualification is claimed.

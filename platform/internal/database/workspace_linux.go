@@ -213,34 +213,42 @@ func (executor *LinuxMariaDBExecutor) workspaceConnection(ctx context.Context, i
 	}
 	wipeBytes(credential)
 	arguments := []string{"--defaults-file=" + credentialFile, "--batch", "--binary-mode", "--xml", "--quick", "--binary-as-hex", "--connect-timeout=8", "--default-character-set=utf8mb4", "--database=" + database.Name.String()}
-	if instance.Placement == PlacementLocal {
-		arguments = append(arguments, "--protocol=socket", "--socket="+mariaDBSocket)
-		return &workspaceMariaDBConnection{arguments: arguments}, cleanup, nil
-	}
-	if instance.External == nil || !sameServerName(instance.External.Endpoint.Host, instance.External.ServerName) || instance.External.RequiredTLS == TLSMutual {
-		cleanup()
-		return nil, func() {}, ErrUnauthorized
-	}
-	external := *instance.External
-	ca, err := executor.secrets.PinnedCertificateAuthority(ctx, external.PinnedCASecretRef, external.CredentialAudience)
+	transport, err := executor.workspaceTransportArguments(ctx, instance, runtimeDirectory)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err
 	}
+	return &workspaceMariaDBConnection{arguments: append(arguments, transport...)}, cleanup, nil
+}
+
+// Only executor-owned instance records choose transport. Export and interactive
+// queries share CA and hostname verification; neither accepts client flags.
+func (executor *LinuxMariaDBExecutor) workspaceTransportArguments(ctx context.Context, instance DatabaseInstance, runtimeDirectory string) ([]string, error) {
+	if instance.Validate() != nil {
+		return nil, ErrInvalidResource
+	}
+	if instance.Placement == PlacementLocal {
+		return []string{"--protocol=socket", "--socket=" + mariaDBSocket}, nil
+	}
+	if instance.External == nil || !sameServerName(instance.External.Endpoint.Host, instance.External.ServerName) || instance.External.RequiredTLS == TLSMutual {
+		return nil, ErrUnauthorized
+	}
+	external := *instance.External
+	ca, err := executor.secrets.PinnedCertificateAuthority(ctx, external.PinnedCASecretRef, external.CredentialAudience)
+	if err != nil {
+		return nil, err
+	}
 	defer wipeBytes(ca)
 	pool := x509.NewCertPool()
 	if len(ca) == 0 || len(ca) > maximumSecretBytes || !pool.AppendCertsFromPEM(ca) {
-		cleanup()
-		return nil, func() {}, ErrInvalidResource
+		return nil, ErrInvalidResource
 	}
 	caFile := filepath.Join(runtimeDirectory, "ca.pem")
 	if err := atomicRootFile(caFile, ca, 0600); err != nil {
-		cleanup()
-		return nil, func() {}, err
+		return nil, err
 	}
-	arguments = append(arguments, "--protocol=tcp", "--host="+external.Endpoint.Host, "--port="+strconv.FormatUint(uint64(external.Endpoint.Port), 10),
-		"--ssl", "--ssl-ca="+caFile, "--ssl-verify-server-cert")
-	return &workspaceMariaDBConnection{arguments: arguments}, cleanup, nil
+	return []string{"--protocol=tcp", "--host=" + external.Endpoint.Host, "--port=" + strconv.FormatUint(uint64(external.Endpoint.Port), 10),
+		"--ssl", "--ssl-ca=" + caFile, "--ssl-verify-server-cert"}, nil
 }
 
 func (connection *workspaceMariaDBConnection) query(ctx context.Context, kind WorkspaceStatementKind, statement string, limits SessionLimits) (WorkspaceQueryResult, error) {

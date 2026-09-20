@@ -250,6 +250,7 @@ func TestQEMULiveMariaDBExternalTLS(t *testing.T) {
 	if _, err := query(instance); err != nil {
 		t.Fatalf("positive control after rejection: %v", err)
 	}
+	liveExternalWorkspaceExport(t, ctx, instance, source, rootQuery)
 	if _, err := rootQuery("ALTER USER 'qemu_tls'@'127.0.0.1' REQUIRE X509;"); err != nil {
 		t.Fatalf("require client certificate: %v", err)
 	}

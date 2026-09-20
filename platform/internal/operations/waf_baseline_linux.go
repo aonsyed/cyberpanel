@@ -83,6 +83,32 @@ func isInitialWAFConfiguration(content []byte) bool {
 	return false
 }
 
+// VerifyExistingInitialWAFConfiguration permits native package layout changes
+// without rewriting a live policy whose exact bootstrap template still works.
+func VerifyExistingInitialWAFConfiguration(content []byte) error {
+	return verifyExistingInitialWAFConfiguration("/", content)
+}
+
+func verifyExistingInitialWAFConfiguration(root string, content []byte) error {
+	if !isInitialWAFConfiguration(content) {
+		return ErrConflict
+	}
+	if _, err := installedWAFAssets(root); err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "SecUnicodeMapFile" {
+			mapping, err := readTrustedWAFAsset(filepath.Join(root, fields[1]), 2<<20)
+			if err != nil || len(mapping) == 0 {
+				return errors.Join(ErrConflict, err)
+			}
+			return nil
+		}
+	}
+	return ErrConflict
+}
+
 func allowedWAFMappingPath(path string) bool {
 	if filepath.Clean(path) != path || filepath.Base(path) != "unicode.mapping" || strings.ContainsAny(path, "\r\n\t \"'`\\") {
 		return false

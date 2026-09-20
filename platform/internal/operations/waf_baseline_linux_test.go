@@ -102,6 +102,46 @@ func TestInitialWAFRecognitionIsExact(t *testing.T) {
 	}
 }
 
+func TestExistingInitialWAFSurvivesNativeMappingPreferenceChange(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root QEMU ownership check")
+	}
+	root := t.TempDir()
+	oldMapping := baselineAssetsPath + "/unicode.mapping"
+	for _, path := range []string{baselineCRSEntry, oldMapping, "/etc/modsecurity/unicode.mapping"} {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("20127\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy := initialWAFConfiguration(oldMapping)
+	preferred, _, err := installedWAFUnicodeMapping(root)
+	if err != nil || preferred == oldMapping {
+		t.Fatal("fixture did not change the preferred native mapping", err)
+	}
+	if err := verifyExistingInitialWAFConfiguration(root, policy); err != nil {
+		t.Fatal("valid existing mapping rejected after preference change", err)
+	}
+	if err := verifyExistingInitialWAFConfiguration(root, append(append([]byte(nil), policy...), []byte("SecRuleEngine Off\n")...)); err == nil {
+		t.Fatal("modified bootstrap policy accepted")
+	}
+	if err := os.Remove(filepath.Join(root, oldMapping)); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyExistingInitialWAFConfiguration(root, policy); err == nil {
+		t.Fatal("missing referenced mapping accepted")
+	}
+	if err := os.Symlink(filepath.Join(root, "/etc/modsecurity/unicode.mapping"), filepath.Join(root, oldMapping)); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyExistingInitialWAFConfiguration(root, policy); err == nil {
+		t.Fatal("symlink mapping accepted")
+	}
+}
+
 func TestInstalledWAFRulesNeedNoCustomPackageManifest(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root QEMU ownership check")

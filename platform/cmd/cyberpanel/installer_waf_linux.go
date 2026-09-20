@@ -62,7 +62,9 @@ func provisionInitialWAFFile(path string, initialConfiguration func() ([]byte, e
 				return err
 			}
 			if !bytes.Equal(data, baseline) {
-				return errors.New("initial WAF policy differs from installed rules; activate an updated managed policy")
+				if err := operations.VerifyExistingInitialWAFConfiguration(data); err != nil {
+					return errors.Join(errors.New("initial WAF policy no longer matches usable installed assets; activate an updated managed policy"), err)
+				}
 			}
 		}
 		// Later managed generations belong to the executor, not installer replay.

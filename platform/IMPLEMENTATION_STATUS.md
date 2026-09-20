@@ -11,6 +11,26 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## External database export — 2026-09-21 (source, not deployed)
+
+Workspace exports no longer reject all external instances or force the local
+socket. Executor-owned connection arguments reuse interactive workspace CA and
+hostname validation; credentials remain session/principal scoped, private and
+released after the dump. QEMU real separate TLS MariaDB fixture verifies SQL and
+gzip dump contents, authorized artifact downloads, wrong CA/hostname native
+rejection without publication, and cross-tenant export/download refusal. Local
+SQL/gzip import/export regression and database/API/core/execd suites pass. Fixture
+initially lacked observed-generation metadata; authorization correctly rejected
+it until fixed. No native package changes, downloads or host project execution.
+Follow-up QEMU qualification now drives real metadata preparation, export and
+download through the coordinator and framed Unix-socket broker, including SQL
+reboot admission. Both plain SQL/gzip pass; mismatched actors and stale download
+sessions are refused. Repository/peer identity remain test fixtures, so this is
+not installed HTTP or browser evidence.
+Still pending: installed UI/API qualification for external exports, mutual-TLS
+workspace credentials (still rejected), large jobs and full SQL object parity.
+Installed62 unchanged. Prior WAF mapping source fix also remains undeployed.
+
 ## Recovery dialog error cleanup — 2026-09-21 (source, not deployed)
 
 Both import dialogs now clear the original request failure on confirmed completed
@@ -137,6 +157,17 @@ and API suites and native SQL/gzip round trips pass. Controlled-disconnect tests
 use catalog/backend fixtures with real SQLite, not an installed HTTP disconnect.
 Installed59 unchanged. Broader crash recovery, cancellation API and replacement
 remain unfinished.
+
+## Native mapping preference handoff — 2026-09-21 (source, not deployed)
+
+Installer replay now preserves an exact initial panel WAF policy when its trusted
+Unicode mapping remains available, even if a native package adds a different
+preferred mapping location. It does not rewrite live configuration. Missing or
+unsafe referenced mappings and modified bootstrap templates still require normal
+managed activation. QEMU Ubuntu ARM64 regression checks and complete operations
+and cyberpanel command package suites pass. No package downloads, dependency
+builds, pins, or installed release changes. Native distro CRS replacement remains
+pending; this check does not qualify that package or LiteSpeed Enterprise.
 
 ## Native CRS follow-up — 2026-09-21 (source verified, not deployed)
 

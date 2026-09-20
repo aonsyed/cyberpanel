@@ -55,6 +55,8 @@ type TransferClientConfigDescriptor struct {
 	// Context carries native writer-authority cancellation, never caller input.
 	Context context.Context
 	Release func() error
+	// Set only by the protected workspace credential resolver, never wire input.
+	transportArguments []string
 }
 
 type MariaDBTransferClientConfigs interface {
@@ -96,7 +98,7 @@ func (backend *LinuxTransferBackend) Export(ctx context.Context, job TransferJob
 	if err != nil { return TransferProcessReceipt{}, err }
 	committed := false
 	defer func() { if !committed { _ = writer.Abort(context.WithoutCancel(ctx)) } }()
-	arguments := transferDumpArguments(descriptor.Path, database, job.Selection)
+	arguments := transferDumpArguments(descriptor.Path, database, job.Selection, descriptor.transportArguments...)
 	processContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	command := exec.CommandContext(processContext, mariaDBDumpBinary, arguments...)
@@ -232,9 +234,11 @@ func (backend *LinuxTransferBackend) Import(ctx context.Context, job TransferJob
 	return receipt, nil
 }
 
-func transferDumpArguments(configPath string, database SQLIdentifier, selection TransferSelection) []string {
-	arguments := []string{"--defaults-file=" + configPath, "--protocol=socket", "--socket=" + mariaDBSocket, "--single-transaction", "--quick", "--skip-lock-tables",
-		"--skip-comments", "--skip-dump-date", "--hex-blob", "--skip-triggers", "--skip-events", "--skip-extended-insert", "--skip-add-locks", "--skip-disable-keys"}
+func transferDumpArguments(configPath string, database SQLIdentifier, selection TransferSelection, transport ...string) []string {
+	if len(transport) == 0 { transport = []string{"--protocol=socket", "--socket=" + mariaDBSocket} }
+	arguments := append([]string{"--defaults-file=" + configPath}, transport...)
+	arguments = append(arguments, "--single-transaction", "--quick", "--skip-lock-tables",
+		"--skip-comments", "--skip-dump-date", "--hex-blob", "--skip-triggers", "--skip-events", "--skip-extended-insert", "--skip-add-locks", "--skip-disable-keys")
 	if !selection.Schema { arguments = append(arguments, "--no-create-info") }
 	if !selection.Data { arguments = append(arguments, "--no-data") }
 	arguments = append(arguments, database.String())

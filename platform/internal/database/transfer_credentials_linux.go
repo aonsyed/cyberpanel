@@ -62,7 +62,7 @@ func (executor *LinuxMariaDBExecutor) authorizeWorkspaceExport(ctx context.Conte
 	if err != nil {
 		return session, database, principal, err
 	}
-	if database.InstanceID != job.InstanceID || instance.Placement != PlacementLocal || !workspaceExportExecutorRecord(session.Metadata) || !workspaceExportExecutorRecord(database.Metadata) || !workspaceExportExecutorRecord(principal.Metadata) || !workspaceReady(instance.Metadata) {
+	if database.InstanceID != job.InstanceID || !workspaceExportExecutorRecord(session.Metadata) || !workspaceExportExecutorRecord(database.Metadata) || !workspaceExportExecutorRecord(principal.Metadata) || !workspaceReady(instance.Metadata) {
 		return session, database, principal, ErrUnauthorized
 	}
 	return session, database, principal, nil
@@ -123,6 +123,18 @@ func (configs *LinuxWorkspaceExportConfigs) writeClientConfig(ctx context.Contex
 	if err != nil {
 		return TransferClientConfigDescriptor{}, err
 	}
+	executor.mu.Lock()
+	instance, err := executor.instance(job.InstanceID)
+	executor.mu.Unlock()
+	if err != nil || !workspaceReady(instance.Metadata) {
+		_ = os.RemoveAll(directory)
+		return TransferClientConfigDescriptor{}, ErrUnauthorized
+	}
+	transport, err := executor.workspaceTransportArguments(bounded, instance, directory)
+	if err != nil {
+		_ = os.RemoveAll(directory)
+		return TransferClientConfigDescriptor{}, err
+	}
 	credential := []byte("[client]\nuser=" + principal.Name.String() + "\npassword=\"" + value + "\"\n")
 	defer wipeBytes(credential)
 	path := filepath.Join(directory, "client.cnf")
@@ -141,7 +153,7 @@ func (configs *LinuxWorkspaceExportConfigs) writeClientConfig(ctx context.Contex
 	if access.ExpiresAt.Before(expires) {
 		expires = access.ExpiresAt
 	}
-	return TransferClientConfigDescriptor{Path: path, Token: session.ID, Database: name, Direction: TransferExport, ReadOnly: true, ExpiresAt: expires, Release: release}, nil
+	return TransferClientConfigDescriptor{Path: path, Token: session.ID, Database: name, Direction: TransferExport, ReadOnly: true, ExpiresAt: expires, Release: release, transportArguments: transport}, nil
 }
 
 var _ MariaDBTransferClientConfigs = (*LinuxWorkspaceExportConfigs)(nil)
