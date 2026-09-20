@@ -5,6 +5,23 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Transfer history after promotion — source, 2026-09-21
+
+Real SQLite job/lease/completion test reproduced the transfer service denying
+Inspect after a successful import advanced database generation1→2. Split history
+read generation checks from mutation checks: reads authorize the current matching
+owner/site/database/instance with generation at least the job's source generation;
+Run/Cancel/Create retain exact generation matching. Existing readiness/health and
+actor-policy checks remain intact.
+
+QEMU regression now reads the completed job and exact stored receipt, denies
+old-generation Run/Cancel, unauthorized actor, changed tenant/site/instance, invalid
+generation and unhealthy resource. SQLite persistence is real; catalog projection,
+actor policy and the completed native-effect receipt are explicit fixtures. This
+test does not claim HTTP or native service/catalog wiring. Final offline/root
+live-enabled database and panel-execd suites exit0, including native transfers.
+Installed55 unchanged; broker/catalog/worker/API/UI integration remains pending.
+
 ### Non-replacing native import promotion — source, 2026-09-21
 
 Added private fail-on-conflict promotion for verified InnoDB imports into an empty

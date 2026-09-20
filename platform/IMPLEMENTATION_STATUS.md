@@ -13,6 +13,14 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Transfer-service handoff correction (source only): completed jobs/receipts were
+unreadable after promotion advanced the database generation. QEMU real-SQLite
+regression reproduced denial, then verified historical reads permit later
+generations only for the same currently authorized tenant/site/database/instance.
+Exact-generation execution/cancellation checks remain; unauthorized/changed scope
+and unhealthy resources are denied. Full database/execd suites pass. This fixes a
+service prerequisite; native broker/catalog wiring is STILL pending, not completed.
+
 Non-replacing import promotion (source only): verified InnoDB tables can move into
 an empty existing destination using one native RENAME TABLE statement, preserving
 the destination name/grant namespace. The method freshly verifies staging and

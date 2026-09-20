@@ -243,7 +243,7 @@ func (service TransferService) Inspect(ctx context.Context, actor string, jobID 
 	if err != nil { return TransferJobState{}, err }
 	authorization := transferAuthorization(actor, state.Job, AuthorizeTransferRead)
 	if err = service.authorize(ctx, authorization); err != nil { return TransferJobState{}, err }
-	if _, err = service.reauthorizeDatabase(ctx, state.Job); err != nil { return TransferJobState{}, err }
+	if _, err = service.reauthorizeTransferHistory(ctx, state.Job); err != nil { return TransferJobState{}, err }
 	if err = service.recordAudit(ctx, authorization, "transfer_read", redactedTransferProjection(state.Job), state.Progress.Digest, state.Generation); err != nil { return TransferJobState{}, err }
 	return state, nil
 }
@@ -253,7 +253,7 @@ func (service TransferService) InspectReceipt(ctx context.Context, actor string,
 	if err != nil { return TransferReceipt{}, err }
 	authorization := transferAuthorization(actor, state.Job, AuthorizeTransferRead)
 	if err = service.authorize(ctx, authorization); err != nil { return TransferReceipt{}, err }
-	if _, err = service.reauthorizeDatabase(ctx, state.Job); err != nil { return TransferReceipt{}, err }
+	if _, err = service.reauthorizeTransferHistory(ctx, state.Job); err != nil { return TransferReceipt{}, err }
 	receipt, err := service.repository.LatestTransferReceipt(ctx, jobID)
 	if err != nil { return TransferReceipt{}, err }
 	if err = service.recordAudit(ctx, authorization, "receipt_read", state.Job.Digest, receipt.Digest, receipt.Generation); err != nil { return TransferReceipt{}, err }
@@ -372,9 +372,25 @@ func (service TransferService) finishTransfer(ctx context.Context, authorization
 }
 
 func (service TransferService) reauthorizeDatabase(ctx context.Context, job TransferJob) (Database, error) {
+	database,err:=service.ownedTransferDatabase(ctx,job)
+	if err!=nil{return Database{},err}
+	if database.Generation!=job.DatabaseGeneration{return Database{},ErrUnauthorized}
+	return database,nil
+}
+
+// Historical reads survive successful promotion and later same-owner updates.
+// This never authorizes execution, cancellation or mutation at an old generation.
+func (service TransferService) reauthorizeTransferHistory(ctx context.Context,job TransferJob)(Database,error){
+	database,err:=service.ownedTransferDatabase(ctx,job)
+	if err!=nil{return Database{},err}
+	if database.Generation<job.DatabaseGeneration{return Database{},ErrUnauthorized}
+	return database,nil
+}
+
+func (service TransferService) ownedTransferDatabase(ctx context.Context, job TransferJob) (Database,error) {
 	database, err := service.catalog.LoadTransferDatabase(ctx, job.TenantID, job.SiteID, job.DatabaseID)
 	if err != nil { return Database{}, err }
-	if database.Validate() != nil || database.ID != job.DatabaseID || database.Generation != job.DatabaseGeneration || database.TenantID != job.TenantID || database.SiteID != job.SiteID || database.InstanceID != job.InstanceID ||
+	if database.Validate() != nil || database.ID != job.DatabaseID || database.TenantID != job.TenantID || database.SiteID != job.SiteID || database.InstanceID != job.InstanceID ||
 		database.Status.Lifecycle != LifecycleReady || database.Status.Health != HealthHealthy { return Database{}, ErrUnauthorized }
 	return database, nil
 }
