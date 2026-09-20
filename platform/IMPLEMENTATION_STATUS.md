@@ -11,6 +11,21 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Native table-engine promotion — 2026-09-21 (source, not deployed)
+
+Empty-destination promotion now accepts InnoDB, MyISAM and Aria, rather than
+rejecting the latter two after successful isolated verification. Existing native
+MariaDB10.6.1+ capability check remains; no package pin/change. MEMORY and other
+unqualified engines remain rejected. Official atomic RENAME documentation:
+https://mariadb.com/docs/server/reference/sql-statements/data-definition/rename-table
+
+QEMU native suite passes all three engines × SQL/gzip, including actual broker
+load/verification/promotion, source-engine preservation, exact text/NULL/BLOB,
+receipt replay and protected-metadata recovery. Full database/API/core/execd
+suites pass. These runs did not kill MariaDB during RENAME; no new engine-specific
+power-loss claim. Installed63 unchanged; this and duplicate-key dump support await
+the next grouped release. Views/live-database replacement remain unfinished.
+
 ## Ordinary SQL duplicate-key forms — 2026-09-21 (source, not deployed)
 
 Constrained import now accepts INSERT IGNORE INTO and REPLACE INTO, retaining

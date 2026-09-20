@@ -157,7 +157,7 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 	if strings.TrimSpace(string(metadata)) != "" {
 		for _, line := range strings.Split(strings.TrimSpace(string(metadata)), "\n") {
 			fields := strings.Split(line, "\t")
-			if len(fields) != 4 || fields[1] != "BASE TABLE" || fields[2] != "InnoDB" {
+			if len(fields) != 4 || fields[1] != "BASE TABLE" || !atomicTransferRenameEngine(fields[2]) {
 				return result, ErrUnavailable
 			}
 			name, err := hex.DecodeString(fields[0])
@@ -206,4 +206,16 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 		return result, ErrAmbiguous
 	}
 	return executor.finishVerifiedTransferPromotion(record)
+}
+
+// MariaDB 10.6.1+ provides atomic RENAME TABLE for these native engines.
+// Keep this narrower than verification: MEMORY is not a durable restore source.
+// The server capability check above applies before any native move.
+func atomicTransferRenameEngine(engine string) bool {
+	switch engine {
+	case "InnoDB", "MyISAM", "Aria":
+		return true
+	default:
+		return false
+	}
 }

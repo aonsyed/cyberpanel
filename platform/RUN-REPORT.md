@@ -4950,3 +4950,21 @@ CYBERPANEL_QEMU_LIVE_TRANSFER=1, GOPROXY=off and GOTOOLCHAIN=local, full databas
 apiserver, cyberpanel and panel-execd package suites passed. No native package
 changes or downloads. Installed63 unchanged; view and live-database replacement
 support are not claimed by these tests.
+# MyISAM / Aria import promotion — 2026-09-21
+
+Native atomic RENAME support for InnoDB, MyISAM and Aria is documented by MariaDB:
+https://mariadb.com/docs/server/reference/sql-statements/data-definition/rename-table
+The existing >=10.6.1 server capability check is unchanged. Promotion now allows
+these three engines; MEMORY/CSV/FEDERATED/CONNECT/SPIDER/unknown remain refused.
+
+QEMU Ubuntu ARM64 `TestQEMUTransferNativeRoundTrip` passed InnoDB/MyISAM/Aria ×
+none/gzip. Each exercises actual native export, import, scoped isolated loader,
+broker promotion, exact contents, receipt/projection recovery. Added native
+information_schema assertion proves the promoted table retains its source engine.
+Ordinary/BOM/INSERT IGNORE/REPLACE subcases also pass for every engine/compression.
+No MariaDB process kill during rename was performed; native atomicity guarantee
+is sourced above, not claimed as newly reproduced crash evidence.
+
+Full database/apiserver/cyberpanel/panel-execd suites passed inside QEMU using
+TMPDIR=/root, CYBERPANEL_QEMU_LIVE_TRANSFER=1 and existing offline Go/cache paths.
+No vendor builds, downloads or installed release changes.

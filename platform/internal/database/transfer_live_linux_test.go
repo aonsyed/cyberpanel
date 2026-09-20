@@ -36,6 +36,19 @@ func (config liveTransferConfigs) TransferClientConfig(_ context.Context, job Tr
 	return TransferClientConfigDescriptor{Path: config.path, Token: config.token, Database: name, Direction: job.Direction, ReadOnly: job.Direction == TransferExport, Release: func() error { return nil }}, nil
 }
 
+func TestTransferAtomicRenameEngineBoundary(t *testing.T) {
+	for _, engine := range []string{"InnoDB", "MyISAM", "Aria"} {
+		if !atomicTransferRenameEngine(engine) {
+			t.Fatal("supported engine rejected", engine)
+		}
+	}
+	for _, engine := range []string{"", "MEMORY", "CSV", "FEDERATED", "CONNECT", "SPIDER", "unknown"} {
+		if atomicTransferRenameEngine(engine) {
+			t.Fatal("unqualified engine accepted", engine)
+		}
+	}
+}
+
 func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_LIVE_TRANSFER") != "1" {
 		t.Skip("requires disposable QEMU MariaDB")
@@ -43,6 +56,12 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Fatal("requires root inside QEMU")
 	}
+	for _, engine := range []string{"InnoDB", "MyISAM", "Aria"} {
+		t.Run(engine, func(t *testing.T) { testQEMUTransferNativeRoundTrip(t, engine) })
+	}
+}
+
+func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	random := make([]byte, 8)
@@ -65,7 +84,7 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			t.Error("fixture database cleanup failed")
 		}
 	}()
-	if _, err := query(ctx, "CREATE DATABASE `"+source.String()+"`; CREATE DATABASE `"+target.String()+"`; CREATE TABLE `"+source.String()+"`.sample(id INT PRIMARY KEY, body TEXT, raw_bytes BLOB); INSERT INTO `"+source.String()+"`.sample VALUES(1,'transfer round trip',X'0001FF'),(2,NULL,NULL);"); err != nil {
+	if _, err := query(ctx, "CREATE DATABASE `"+source.String()+"`; CREATE DATABASE `"+target.String()+"`; CREATE TABLE `"+source.String()+"`.sample(id INT PRIMARY KEY, body TEXT, raw_bytes BLOB) ENGINE="+engine+"; INSERT INTO `"+source.String()+"`.sample VALUES(1,'transfer round trip',X'0001FF'),(2,NULL,NULL);"); err != nil {
 		t.Fatal("fixture setup failed", err)
 	}
 	if err := ensureRootDirectory(strings.TrimSuffix(transferConfigDirectory, "/"), 0700); err != nil {
@@ -268,14 +287,14 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			}
 			verifyOrdinaryNativeImports(t, ctx, store, backend, job, target, query)
 			verifyIsolatedNativeImport(t, ctx, exportConfigs.executor, store, job, query)
-			verifyEmptyNativePromotion(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query)
+			verifyEmptyNativePromotion(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query, engine)
 			verifyServiceNativeImport(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query)
 			verifyServiceNativeImport(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query, true)
 		})
 	}
 }
 
-func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *LinuxMariaDBExecutor, client *BrokerClient, sourceExport TransferJob, job TransferJob, query func(context.Context, string) (string, error)) {
+func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *LinuxMariaDBExecutor, client *BrokerClient, sourceExport TransferJob, job TransferJob, query func(context.Context, string) (string, error), engine string) {
 	t.Helper()
 	live, err := executor.transferImportSource(job)
 	if err != nil {
@@ -509,6 +528,9 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 	value, err = query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+live.Name.String()+"`.sample ORDER BY id;")
 	if err != nil || value != "1:transfer round trip:0001FF\n2:NULL:NULL" {
 		t.Fatal("promoted data differs", err)
+	}
+	if got, err := query(ctx, "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA='"+live.Name.String()+"' AND TABLE_NAME='sample';"); err != nil || got != engine {
+		t.Fatal("promotion changed the native storage engine", got, err)
 	}
 	replayed, err := executor.promoteEmptyTransferImport(ctx, job, isolated)
 	if err != nil || replayed != promoted {
