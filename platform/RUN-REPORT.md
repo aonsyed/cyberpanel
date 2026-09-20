@@ -5,6 +5,43 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Offline WordPress archive path and real OCI metadata — 2026-09-20
+
+Release inspection found WordPress's install path still fetched its archive
+with curl despite shipping the same archive in the authenticated offline
+catalog. Replaced that duplicate downloader/extractor with the existing pinned
+catalog extractor used by the other PHP applications. This requires the
+protected catalog, exact digest/size and safe archive layout before extraction;
+missing/untrusted inputs cannot fall back to the network. Removed the now-unused
+curl field and executable prerequisite from this runtime.
+
+The root-QEMU `TestWordPressInstallRejectsUnpinnedArchiveWithoutNetwork` exercised
+the actual `Install` entry point: before the fix it attempted the download
+command; after the fix it rejected the missing catalog before commands or
+secret retrieval. This is a rejection-path regression, not proof of a complete
+offline WordPress lifecycle. Existing language/LSCache plugin operations still
+use WP-CLI and are not claimed offline by this change.
+The uncached apps suite passed (0.515 seconds), and `cmd/paneld` plus
+`cmd/application-release` builds passed in Ubuntu ARM64 QEMU. Other matrix
+guests have not yet checked this revision.
+
+Acquired actual registry index, ARM64 manifest and image configuration documents
+inside QEMU at `/home/harness/oci-inputs-20260920`. Manifest and configuration
+bytes were independently SHA-256 checked against their referenced OCI digests.
+No layers were pulled and no containers were started. These are candidate inputs,
+not signed application recipes or runtime qualification:
+
+| Official repository / observed tag | ARM64 manifest SHA-256 | Observed version |
+| --- | --- | --- |
+| `n8nio/n8n:stable` | `24b5c803a1465c524dbe65adb082f00740610d1077d3061063f47a6bb5fe5bba` | 2.39.8 image label |
+| `nousresearch/hermes-agent:latest` | `551f53c828267bb7a1c3925338df065114e680a1871eca030a11fc31eb33771f` | revision `f9524d3f119c672e4a4444f56d582e7475716ba3`; no version label |
+| `library/postgres:16-alpine` | `2c942175a1255a9abe0366e48c1b401d9f50f835b04dfea13f111609b5530df7` | 16.15 environment metadata |
+| `library/redis:7-alpine` | `1f09a89a207d794a8c61d9edfc26e7c58427de10ccef7c5d18d638df79a63b85` | 7.4.11 environment metadata |
+
+Hermes defaults to image user root; the panel's required unprivileged execution
+must be tested explicitly, not inferred from metadata. The guest has about
+5.1 GiB free: pulling/extracting all images together would risk its headroom.
+
 ### Magento supported runtime selection and signed search input — 2026-09-20
 
 Corrected the previous preparation checkpoint: Composer accepts Magento 2.4.9
