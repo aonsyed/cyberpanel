@@ -6,6 +6,18 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+DATABASE TRANSFER SOURCE PROGRESS (not deployed): added the missing Linux artifact
+store used by the native MariaDB transfer backend. Root-private bounded streaming,
+SHA256/size checks, atomic publication, immutable generations, abort cleanup,
+expiry checks and persisted retention/legal-hold metadata are implemented. QEMU
+Ubuntu ARM64 full database package tests pass, including actual mariadb-dump →
+artifact → mariadb round trips for plain SQL and gzip with NULL/binary data.
+The live test uses a root client-config fixture: least-privilege credential
+provisioning, transfer catalog/promotion, executor/API/UI wiring and retention
+collection are STILL PENDING. This is not a finished user-facing import/export
+feature. No vendor binaries/packages were changed or downloaded; fixtures clean
+up their databases/configs/artifacts. Installed signed51 remains unchanged.
+
 LATEST RECOVERY POINT (supersedes deployment statements below): installed signed51
 qemu-recovery-3.1.50, current51/rollback49. Manifest
 2d437a4005a10afd8fd085954919dd3da8e11156de38c857d0a54819b3fcfbbb;

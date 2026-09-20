@@ -3737,6 +3737,41 @@ After verification, the AlmaLinux ARM64 and both AMD64 guests were shut down.
 Their overlays and logs are retained. Ubuntu ARM64 remains running on loopback
 SSH port 22193 for the next installed-release work; its temporary Vite server
 is stopped. No base images or evidence were deleted.
+# Database transfer artifact storage and native round trip — 2026-09-20
+
+Implemented `LinuxTransferArtifactStore`: root-private ancestry and files,
+bounded streaming writes, streamed SHA256/byte-count verification, fsynced atomic
+publication, immutable generations, idempotent commit, abort cleanup, strict
+bounded descriptor parsing, expiry and persisted retention/legal-hold metadata.
+No tenant authorization is claimed by this storage layer; only the authorized
+executor may supply identities. Transfer API/executor/catalog wiring is pending.
+
+Verification ran only in the existing Ubuntu ARM64 QEMU guest. Guest gofmt ran on
+the three added files; formatted source was copied back to the worktree.
+`sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root
+GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off
+GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/database -count=1`
+exited 0. Focused verbose checks also passed before the final added metadata and
+directory validation cases. Storage tests cover publication/reopen/replay,
+competing writers, write caps, abort cleanup, wrong digests/generations, expiry,
+symlinks/hardlinks, file/directory permissions, mismatched payload size and
+oversized metadata.
+
+`TestQEMUTransferNativeRoundTrip` invokes actual native `/usr/bin/mariadb-dump`
+and `/usr/bin/mariadb`, exports schema/data through the real artifact store and
+imports into a separate fixture database. Plain SQL and gzip both preserve the
+expected two rows, NULL fields and binary bytes `0001FF`. Its root socket client
+configuration is explicitly a fixture, not production transfer authorization.
+Deferred cleanup removes fixture databases, client configs and artifact storage.
+No vendor installation, rebuild, pin, download or installed-panel change occurred.
+Disk before verification: host 223 GiB available, guest 3.1 GiB available.
+
+Remaining: production least-privilege configs, catalog/isolated promotion,
+job/executor/API/UI integration, uploaded SQL handling and retention collection;
+views/triggers/routines and the other distribution/architecture targets are not
+qualified by this table round trip. Installed signed51 remains the last deployed
+panel. Full database import/export parity is not complete.
+
 # Installed CRS evidence without a custom package — 2026-09-20
 
 Removed the custom CRS .deb builder. The operations executor no longer requires
