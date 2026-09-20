@@ -178,10 +178,8 @@ func renderServer(request native.RenderRequest, index renderIndex, bindings []we
 		output.WriteString("  vhRoot ")
 		output.WriteString(siteRoot(site))
 		output.WriteByte('\n')
-		output.WriteString("  configFile $SERVER_ROOT/conf/vhosts/.panel-generations/g")
-		output.WriteString(strconv.FormatUint(request.Snapshot.Generation, 10))
-		output.WriteByte('/')
-		output.WriteString(string(artifactKey(site, binding)))
+		output.WriteString("  configFile $SERVER_ROOT/conf/")
+		output.WriteString(native.VirtualHostDirectory(request.Snapshot.Generation, artifactKey(site, binding), renderVirtualHost(request, index, application, site, binding)))
 		output.WriteString("/vhost.conf\n")
 		output.WriteString("  allowSymbolLink 0\n")
 		if servesApplication(binding) {
@@ -315,11 +313,11 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 		output.WriteString("\n    maxCacheSize 1024\n    cacheTimeout 60\n  }\n}\n\n")
 	}
 	output.WriteString("context /.well-known/acme-challenge/ {\n")
-	output.WriteString("  type static\n  location /var/lib/cyberpanel/acme/http-01\n  allowBrowse 0\n  addDefaultCharset off\n  rewrite {\n    enable 0\n  }\n}\n\n")
+	output.WriteString("  type static\n  location /var/lib/cyberpanel/acme/http-01\n  allowBrowse 1\n  autoIndex 0\n  addDefaultCharset off\n  rewrite {\n    enable 0\n  }\n}\n\n")
 	output.WriteString("context /.well-known/panel-health/ {\n")
 	output.WriteString("  type static\n  location ")
 	output.WriteString(native.HealthDocumentRoot(site))
-	output.WriteString("\n  allowBrowse 0\n  addDefaultCharset off\n  rewrite {\n    enable 0\n  }\n}\n\n")
+	output.WriteString("\n  allowBrowse 1\n  autoIndex 0\n  addDefaultCharset off\n  rewrite {\n    enable 0\n  }\n}\n\n")
 
 	switch {
 	case binding.RoutingState == webengine.RoutingMaintenance || binding.RoutingState == webengine.RoutingSuspended:

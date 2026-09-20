@@ -37,7 +37,7 @@ func TestStageWritesPrivateGenerationForEachEdition(t *testing.T) {
 			}
 			base := filepath.Join(root, ".panel-generations", "g42", generation.ContentDigest)
 			assertPrivateFile(t, filepath.Join(base, master), "master")
-			vhostBase := filepath.Join(root, "vhosts", ".panel-generations", "g42", "site-a")
+			vhostBase := filepath.Join(root, native.VirtualHostDirectory(42, "site-a", []byte("vhost")))
 			assertPrivateFile(t, filepath.Join(vhostBase, vhost), "vhost")
 			assertPrivateDir(t, vhostBase)
 		})

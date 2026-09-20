@@ -126,6 +126,6 @@ func TestQEMURenderedInitialWebParser(t *testing.T) {
 				t.Errorf("HTTP fixture left a running native server: %v", err)
 			}
 		}()
-		runQEMUWAFHTTP(t, master)
+		runQEMUWAFHTTP(t, master, candidate.Digest)
 	}
 }

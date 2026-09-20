@@ -131,9 +131,9 @@ func TestRenderDerivesUniqueVHostLSAPIAndTLSIdentityPerSite(t *testing.T) {
 		"address [::1]:443",
 		"secure 1",
 		"virtualHost vh_site_a_binding_a",
-		"configFile $SERVER_ROOT/conf/vhosts/.panel-generations/g42/site-a--binding-a/vhost.conf",
+		"configFile $SERVER_ROOT/conf/"+native.VirtualHostDirectory(42, "site-a--binding-a", []byte(siteA))+"/vhost.conf",
 		"virtualHost vh_site_b_binding_b",
-		"configFile $SERVER_ROOT/conf/vhosts/.panel-generations/g42/site-b--binding-b/vhost.conf",
+		"configFile $SERVER_ROOT/conf/"+native.VirtualHostDirectory(42, "site-b--binding-b", []byte(siteB))+"/vhost.conf",
 		"map vh_site_a_binding_a site-a.example.test, www.site-a.example.test",
 		"map vh_site_b_binding_b site-b.example.test",
 	)

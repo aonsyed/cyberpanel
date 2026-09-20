@@ -11,6 +11,7 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/native"
 )
 
 func TestCurrentRejectsDriftFromTheSealedGeneration(t *testing.T) {
@@ -29,7 +30,7 @@ func TestCurrentRejectsDriftFromTheSealedGeneration(t *testing.T) {
 			name: "missing staged vhost",
 			mutate: func(t *testing.T, root, _ string) {
 				t.Helper()
-				if err := os.Remove(filepath.Join(root, "vhosts", ".panel-generations", "g42", "site-a", "vhost.conf")); err != nil {
+				if err := os.Remove(filepath.Join(root, native.VirtualHostDirectory(42, "site-a", []byte("vhost")), "vhost.conf")); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -38,7 +39,7 @@ func TestCurrentRejectsDriftFromTheSealedGeneration(t *testing.T) {
 			name: "tampered staged vhost",
 			mutate: func(t *testing.T, root, _ string) {
 				t.Helper()
-				writePrivateFile(t, filepath.Join(root, "vhosts", ".panel-generations", "g42", "site-a", "vhost.conf"), "tampered-vhost")
+				writePrivateFile(t, filepath.Join(root, native.VirtualHostDirectory(42, "site-a", []byte("vhost")), "vhost.conf"), "tampered-vhost")
 			},
 		},
 	}

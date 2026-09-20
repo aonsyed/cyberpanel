@@ -31,19 +31,20 @@ const (
 )
 
 type Store struct {
-	root    *os.Root
+	root     *os.Root
 	rootPath string
-	edition webengine.Edition
-	master  string
-	vhost   string
+	edition  webengine.Edition
+	master   string
+	vhost    string
 }
 
 type manifest struct {
-	Edition       webengine.Edition `json:"edition"`
-	Digest        string            `json:"digest"`
-	DesiredDigest string            `json:"desired_digest"`
-	Snapshot      uint64            `json:"snapshot"`
-	Artifacts     []manifestArtifact `json:"artifacts"`
+	ContentAddressedVHosts bool               `json:"content_addressed_vhosts,omitempty"`
+	Edition                webengine.Edition  `json:"edition"`
+	Digest                 string             `json:"digest"`
+	DesiredDigest          string             `json:"desired_digest"`
+	Snapshot               uint64             `json:"snapshot"`
+	Artifacts              []manifestArtifact `json:"artifacts"`
 }
 
 type manifestArtifact struct {
@@ -115,17 +116,27 @@ func New(root string, edition webengine.Edition) (*Store, error) {
 // GenerationPath returns only a fully reverified, sealed master. Callers must
 // not accept a filesystem destination from an unprivileged request.
 func (s *Store) GenerationPath(ctx context.Context, receipt activation.Receipt) (string, error) {
-	if ctx == nil { return "", errors.New("context is required") }
-	if err := ctx.Err(); err != nil { return "", err }
+	if ctx == nil {
+		return "", errors.New("context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	sealed, _, err := s.resolve(receipt, true)
-	if err != nil { return "", err }
-	name, err := s.artifactPath(sealed, native.ArtifactServer, "engine")
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
+	name, err := s.artifactPath(sealed, native.ArtifactServer, "engine", "")
+	if err != nil {
+		return "", err
+	}
 	return filepath.Join(s.rootPath, name), nil
 }
 
 func (s *Store) Close() error {
-	if s == nil || s.root == nil { return nil }
+	if s == nil || s.root == nil {
+		return nil
+	}
 	return s.root.Close()
 }
 
@@ -150,11 +161,12 @@ func (s *Store) Stage(ctx context.Context, generation native.ConfigGeneration) (
 	}
 
 	sealed := manifest{
-		Edition:       rebuilt.Edition,
-		Digest:        rebuilt.ContentDigest,
-		DesiredDigest: rebuilt.DesiredDigest,
-		Snapshot:      rebuilt.SnapshotGeneration,
-		Artifacts:     make([]manifestArtifact, 0, len(rebuilt.Artifacts)),
+		ContentAddressedVHosts: true,
+		Edition:                rebuilt.Edition,
+		Digest:                 rebuilt.ContentDigest,
+		DesiredDigest:          rebuilt.DesiredDigest,
+		Snapshot:               rebuilt.SnapshotGeneration,
+		Artifacts:              make([]manifestArtifact, 0, len(rebuilt.Artifacts)),
 	}
 	var total int64
 	for _, artifact := range rebuilt.Artifacts {
@@ -166,14 +178,14 @@ func (s *Store) Stage(ctx context.Context, generation native.ConfigGeneration) (
 		if size <= 0 || size > maxArtifactBytes || total > maxGenerationBytes {
 			return activation.Receipt{}, errors.New("generation artifact bytes are outside policy")
 		}
-		name, err := s.artifactPath(sealed, artifact.Role, artifact.Key)
+		digest := sha256.Sum256(artifact.Content)
+		name, err := s.artifactPath(sealed, artifact.Role, artifact.Key, hex.EncodeToString(digest[:]))
 		if err != nil {
 			return activation.Receipt{}, err
 		}
 		if err := s.writeExact(name, artifact.Content); err != nil {
 			return activation.Receipt{}, err
 		}
-		digest := sha256.Sum256(artifact.Content)
 		sealed.Artifacts = append(sealed.Artifacts, manifestArtifact{
 			Role:   artifact.Role,
 			Key:    artifact.Key,
@@ -308,7 +320,7 @@ func (s *Store) verifyManifest(sealed manifest) ([]byte, error) {
 		if total > maxGenerationBytes {
 			return nil, errors.New("generation exceeds total byte policy")
 		}
-		expectedPath, err := s.artifactPath(sealed, entry.Role, entry.Key)
+		expectedPath, err := s.artifactPath(sealed, entry.Role, entry.Key, entry.SHA256)
 		if err != nil || entry.Path != expectedPath {
 			return nil, errors.New("generation manifest contains an unsafe artifact path")
 		}
@@ -353,7 +365,7 @@ func (s *Store) verifyManifest(sealed manifest) ([]byte, error) {
 	return master, nil
 }
 
-func (s *Store) artifactPath(sealed manifest, role native.ArtifactRole, key native.ArtifactKey) (string, error) {
+func (s *Store) artifactPath(sealed manifest, role native.ArtifactRole, key native.ArtifactKey, contentDigest string) (string, error) {
 	if !safeArtifactKey(key) || sealed.Snapshot == 0 || !validDigest(sealed.Digest) {
 		return "", errors.New("unsafe generation artifact identity")
 	}
@@ -364,6 +376,12 @@ func (s *Store) artifactPath(sealed manifest, role native.ArtifactRole, key nati
 		}
 		return path.Join(".panel-generations", fmt.Sprintf("g%d", sealed.Snapshot), sealed.Digest, s.master), nil
 	case native.ArtifactVirtualHost:
+		if sealed.ContentAddressedVHosts {
+			if !validDigest(contentDigest) {
+				return "", errors.New("invalid vhost content digest")
+			}
+			return path.Join("vhosts", ".panel-generations", fmt.Sprintf("g%d", sealed.Snapshot), string(key), contentDigest, s.vhost), nil
+		}
 		return path.Join("vhosts", ".panel-generations", fmt.Sprintf("g%d", sealed.Snapshot), string(key), s.vhost), nil
 	case native.ArtifactCredentialVerifier:
 		return path.Join("vhosts", ".panel-generations", fmt.Sprintf("g%d", sealed.Snapshot), "access", string(key)+".users"), nil

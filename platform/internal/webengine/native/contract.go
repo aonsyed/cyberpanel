@@ -43,10 +43,10 @@ type RenderRequest struct {
 // RuntimeSnapshot is the renderer's closed projection of registry-owned
 // identities. Generations make every derived path immutable and replay-safe.
 type RuntimeSnapshot struct {
-	Generation   uint64
-	Sites        []SiteRuntime
-	LSAPIPools   []LSAPIPool
-	TLSMaterials []TLSMaterial
+	Generation      uint64
+	Sites           []SiteRuntime
+	LSAPIPools      []LSAPIPool
+	TLSMaterials    []TLSMaterial
 	AccessVerifiers []AccessVerifier
 }
 
@@ -118,6 +118,13 @@ const (
 )
 
 type ArtifactKey string
+
+// VirtualHostDirectory keeps renderer revisions of a snapshot independently
+// immutable. The digest is of vhost bytes, avoiding a master-digest cycle.
+func VirtualHostDirectory(snapshot uint64, key ArtifactKey, content []byte) string {
+	sum := sha256.Sum256(content)
+	return path.Join("vhosts", ".panel-generations", "g"+strconv.FormatUint(snapshot, 10), string(key), hex.EncodeToString(sum[:]))
+}
 
 // Artifact is a destination-independent native file. Stage owns the mapping
 // from role/key to an edition- and release-qualified filesystem location.
@@ -401,7 +408,7 @@ func validateSnapshot(request RenderRequest) error {
 		if !exists {
 			return fmt.Errorf("binding %d does not resolve to an application", index)
 		}
-		if binding.RoutingState == webengine.RoutingServe && binding.Relationship != webengine.BindingRedirect && application.ReverseProxy==nil {
+		if binding.RoutingState == webengine.RoutingServe && binding.Relationship != webengine.BindingRedirect && application.ReverseProxy == nil {
 			if _, exists := pools[poolLookup(application.SiteRef, application.PHPProfileRef)]; !exists {
 				return fmt.Errorf("binding %d has no LSAPI pool", index)
 			}

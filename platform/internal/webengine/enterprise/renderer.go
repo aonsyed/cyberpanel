@@ -178,7 +178,7 @@ func renderServer(request native.RenderRequest, index renderIndex, bindings []we
 		output.WriteString("    <virtualHost>\n")
 		writeElement(&output, 3, "name", vhostName(site, binding))
 		writeElement(&output, 3, "vhRoot", siteRoot(site))
-		writeElement(&output, 3, "configFile", "$SERVER_ROOT/conf/vhosts/.panel-generations/g"+strconv.FormatUint(request.Snapshot.Generation, 10)+"/"+string(artifactKey(site, binding))+"/vhconf.xml")
+		writeElement(&output, 3, "configFile", "$SERVER_ROOT/conf/"+native.VirtualHostDirectory(request.Snapshot.Generation, artifactKey(site, binding), renderVirtualHost(request, index, application, site, binding))+"/vhconf.xml")
 		writeElement(&output, 3, "allowSymbolLink", "0")
 		if servesApplication(binding) {
 			writeElement(&output, 3, "enableScript", "1")
@@ -310,12 +310,14 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 	writeElement(&output, 3, "type", "static")
 	writeElement(&output, 3, "uri", "/.well-known/acme-challenge/")
 	writeElement(&output, 3, "location", "/var/lib/cyberpanel/acme/http-01")
-	writeElement(&output, 3, "allowBrowse", "0")
+	writeElement(&output, 3, "allowBrowse", "1")
+	writeElement(&output, 3, "autoIndex", "0")
 	output.WriteString("    </context>\n    <context>\n")
 	writeElement(&output, 3, "type", "static")
 	writeElement(&output, 3, "uri", "/.well-known/panel-health/")
 	writeElement(&output, 3, "location", native.HealthDocumentRoot(site))
-	writeElement(&output, 3, "allowBrowse", "0")
+	writeElement(&output, 3, "allowBrowse", "1")
+	writeElement(&output, 3, "autoIndex", "0")
 	output.WriteString("    </context>\n")
 	switch {
 	case binding.RoutingState == webengine.RoutingMaintenance || binding.RoutingState == webengine.RoutingSuspended:

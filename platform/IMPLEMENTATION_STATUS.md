@@ -6,6 +6,15 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest routing/storage checkpoint: fixed allowBrowse0 denying health and ACME
+files; both renderers now allow files with autoIndex0. Vendor QEMU serves exact
+test proof bytes; directory requests404. New vhosts use content-hashed paths so
+same-snapshot renderer updates do not collide with earlier sealed vhosts; old
+manifests remain readable for recovery. Five affected suites pass. Vendor parser
+accepts e8650d...; HTTP18/21 pass (only the known three size cases fail).
+Fixture proof files are temporary private binds, NOT production health
+provisioning. Next: real generation-safe health writer, signed deploy/activation.
+
 Latest progress: installed rules evidence no longer hardcodes a manifest digest
 or release label. Root-owned installed manifests remain recursively verified;
 empty/tampered/unsafe assets fail. Custom CRS package/layout replacement remains.

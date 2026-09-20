@@ -117,9 +117,12 @@ func TestBootstrapUpdatedCandidateRequiresRestoredOriginal(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			second, err := s.Stage(ctx, testGeneration(t, edition, 1, "updated", "vhost"))
+			second, err := s.Stage(ctx, testGeneration(t, edition, 1, "updated", "updated-vhost"))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if _, err := s.GenerationPath(ctx, first); err != nil {
+				t.Fatalf("new vhost damaged previous sealed generation: %v", err)
 			}
 			if err := s.PrepareBootstrap(ctx, first); err != nil {
 				t.Fatal(err)

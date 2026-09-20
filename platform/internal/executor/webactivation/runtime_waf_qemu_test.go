@@ -16,8 +16,17 @@ import (
 	"time"
 )
 
-func runQEMUWAFHTTP(t *testing.T, master string) {
+func runQEMUWAFHTTP(t *testing.T, master, digest string) {
 	t.Helper()
+	// Bind test-only attestation/challenge material into the private unit.
+	// Do not write the live health tree or claim this provisions activation.
+	fixtureRoot := t.TempDir()
+	if err := os.Chmod(fixtureRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixtureRoot, "activation"), []byte("panel-health-v1 "+digest+"\n"), 0444); err != nil {
+		t.Fatal(err)
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +40,10 @@ func runQEMUWAFHTTP(t *testing.T, master string) {
 		"--property=CapabilityBoundingSet=~CAP_SYS_ADMIN", "--property=KillMode=control-group",
 		"--property=RuntimeMaxSec=30s", "--property=TimeoutStopSec=5s",
 		"--property=BindReadOnlyPaths="+master+":/usr/local/lsws/conf/httpd_config.conf",
+		"--property=BindReadOnlyPaths="+fixtureRoot+":/var/lib/cyberpanel/site-health/system-default/g1",
+		"--property=BindReadOnlyPaths="+fixtureRoot+":/var/lib/cyberpanel/acme/http-01",
 		"--setenv=CYBERPANEL_QEMU_WAF_HTTP_CHILD=1",
+		"--setenv=CYBERPANEL_QEMU_HEALTH_DIGEST="+digest,
 		executable, "-test.run=^TestQEMUWebWAFHTTPChild$", "-test.v").CombinedOutput()
 	if err != nil {
 		t.Fatalf("isolated native WAF HTTP fixture: %v\n%s", err, output)
@@ -128,6 +140,10 @@ func TestQEMUWebWAFHTTPChild(t *testing.T) {
 	}{
 		{"benign-repeat", "GET", "/", "", "", 200},
 		{"benign-direct-file", "GET", "/index.html", "", "", 200},
+		{"activation-health", "GET", "/.well-known/panel-health/activation", "", "", 200},
+		{"acme-challenge", "GET", "/.well-known/acme-challenge/activation", "", "", 200},
+		{"health-listing-denied", "GET", "/.well-known/panel-health/", "", "", 404},
+		{"acme-listing-denied", "GET", "/.well-known/acme-challenge/", "", "", 404},
 		{"benign-query", "GET", "/?q=hello", "", "", 200},
 		{"xss-query", "GET", "/?q=" + url.QueryEscape("<script>alert(1)</script>"), "", "", 403},
 		{"sqli-query", "GET", "/?q=" + url.QueryEscape("1' OR '1'='1"), "", "", 403},
@@ -151,6 +167,11 @@ func TestQEMUWebWAFHTTPChild(t *testing.T) {
 			status, body, err := request(fixture.method, fixture.target, fixture.contentType, fixture.body, strings.Contains(fixture.name, "chunked"), strings.Contains(fixture.name, "bounded"))
 			if err != nil || status != fixture.want {
 				t.Fatalf("status=%d want=%d error=%v body=%q", status, fixture.want, err, body)
+			}
+			if fixture.name == "activation-health" || fixture.name == "acme-challenge" {
+				if body != "panel-health-v1 "+os.Getenv("CYBERPANEL_QEMU_HEALTH_DIGEST")+"\n" {
+					t.Fatal("native context served incorrect proof bytes")
+				}
 			}
 		})
 	}

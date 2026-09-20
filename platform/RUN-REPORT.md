@@ -5,6 +5,33 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Health/ACME contexts and immutable vhost revisions — 2026-09-20
+
+Live vendor QEMU requests reproduced403 for existing health and ACME challenge
+files: our static contexts emitted allowBrowse0, which denies file serving, not
+merely directory listings. OLS/LSE renderers now use allowBrowse1 with explicit
+autoIndex0. Native OLS serves exact proof bytes with200; directory requests
+return404 without listings. The fixture binds temporary read-only files into
+the private service namespace, leaving live health/challenge trees untouched.
+This verifies routing, NOT production attestation provisioning or ACME issuance.
+
+Staging the changed vhost exposed a real same-snapshot renderer-update collision.
+New vhost paths include SHA256 of vhost content. Both renderers and fsstore use
+that path; earlier manifest layouts remain readable so recovery does not erase
+sealed checkpoints. Regression stages two distinct vhosts at snapshot1, verifies
+the old sealed generation remains valid, rejects switching while its master is
+live, and restores the original vendor master after the updated candidate.
+
+QEMU native/OLS/LSE renderer, fsstore and webactivation suites pass. Vendor OLS
+parser accepts digest
+`e8650d08836fb242ff7a3a1959ec69e83d91171077f3b3e68560cedb962b8576`.
+Live fixture21 cases:18 pass; only the same three oversized-body cases remain
+red. Logs `vendor-context-red.log` and `vendor-context-fixed.log` are under
+`/home/harness/waf-prerequisites-20260920` in QEMU. No native binary changes,
+downloads or release bundles. Production health writer, safe generation-scoped
+attestation, updated signed deploy and complete activation remain outstanding.
+Enterprise native parsing/HTTP remain unqualified.
+
 ### Installed rules evidence and bootstrap checkpoint recovery — 2026-09-20
 
 Removed the compiled-in CRS manifest digest and fixed release label from WAF
