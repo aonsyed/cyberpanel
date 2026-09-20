@@ -5,6 +5,34 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Remaining service binaries and native package inputs prepared — 2026-09-20
+
+Built the current executor and gateway in Ubuntu ARM64 QEMU from the same
+`d14f9440b` code used by the installed panel:
+
+- `/home/harness/bin/panel-execd-d14f9440b`: SHA-256
+  `73d2f0abe567959960ddbc0eaf9d4f665869b72a80b7786e8c2de30912a335be`.
+- `/home/harness/bin/paneld-d14f9440b`: SHA-256
+  `86dd676e2cfe3fce271f94c97f944abba6e353fb380a79a50eddf3dacb74f90b`.
+
+Startup inspection confirmed the guest lacks the native mail/DNS packages and
+service groups required by the executor. Ubuntu apt downloaded (download-only,
+no recommended packages) 45 authenticated native package inputs, 23.8 MB, into
+`/var/tmp/panel-native-packages`. These include Postfix/SQLite, Dovecot
+core/IMAP/LMTP/SQLite, Rspamd, PowerDNS/SQLite, OpenDKIM, Redis and ClamAV daemon
+dependencies. Their actual package/version/architecture metadata was inspected;
+no Apache package was downloaded and no new service was installed or activated.
+These are inputs for the next signed node bundle, not proof of service operation.
+Native package installation ordering, engine edition/configuration and remaining
+executor startup prerequisites still need to be connected before activation.
+
+The 801,461,518-byte OpenSearch input archive was offloaded to the host run
+directory as `opensearch-3.8.0-verified.tar.gz`; host and guest SHA-256 both matched
+`1ed8b6e9e3be799fe08688ea73791cc03d98269d6831646df2905f42c318e05e`
+before deleting only its guest duplicate. The extracted OpenSearch installation,
+signature evidence and running node release were preserved. Guest free space is
+approximately 1.6 GB. No OS image or Go toolchain was downloaded.
+
 ### Signed panel/catalog installation and bootstrap verified — 2026-09-20
 
 The existing node-release assembler signed a 29-artifact bundle containing the
