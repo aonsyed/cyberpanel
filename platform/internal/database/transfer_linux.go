@@ -51,6 +51,7 @@ type TransferClientConfigDescriptor struct {
 	Database SQLIdentifier
 	Direction TransferDirection
 	ReadOnly bool
+	ExpiresAt time.Time
 	Release func() error
 }
 
@@ -84,6 +85,11 @@ func (backend *LinuxTransferBackend) Export(ctx context.Context, job TransferJob
 	if err != nil { return TransferProcessReceipt{}, err }
 	if err = validateTransferClientConfig(descriptor, job, database); err != nil { releaseTransferConfig(descriptor); return TransferProcessReceipt{}, err }
 	defer releaseTransferConfig(descriptor)
+	if !descriptor.ExpiresAt.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, descriptor.ExpiresAt)
+		defer cancel()
+	}
 	writer, err := backend.artifacts.BeginTransferArtifact(ctx, *job.Destination, job.Format, job.Compression, job.Retention)
 	if err != nil { return TransferProcessReceipt{}, err }
 	committed := false
@@ -147,6 +153,11 @@ func (backend *LinuxTransferBackend) Import(ctx context.Context, job TransferJob
 	if err != nil { return TransferProcessReceipt{}, err }
 	if err = validateTransferClientConfig(descriptor, job, database); err != nil { releaseTransferConfig(descriptor); return TransferProcessReceipt{}, err }
 	defer releaseTransferConfig(descriptor)
+	if !descriptor.ExpiresAt.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, descriptor.ExpiresAt)
+		defer cancel()
+	}
 	verifiedInput := newTransferDigestReader(artifactReader, job.Source.Bytes, job.Source.Digest, job.Limits.MaximumBytes, func(bytes uint64) error {
 		return checkpoint(TransferStreamProgress{Bytes: bytes, Rows: 0, SafePoint: false})
 	})

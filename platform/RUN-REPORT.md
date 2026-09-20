@@ -3737,6 +3737,37 @@ After verification, the AlmaLinux ARM64 and both AMD64 guests were shut down.
 Their overlays and logs are retained. Ubuntu ARM64 remains running on loopback
 SSH port 22193 for the next installed-release work; its temporary Vite server
 is stopped. No base images or evidence were deleted.
+# Session-bound native export credentials — 2026-09-20
+
+Added `LinuxWorkspaceExportConfigs` for the existing native transfer backend.
+It loads root-protected session/database/principal/instance resources, matches
+tenant/site/database/name and generations, rejects non-ready/disabled/expired
+access, respects session resource and connection limits, and resolves only the
+session's credential via the existing purpose-bound secret source. Credentials
+stay in transient root0600 client configs, never argv or environment; release
+removes their private directory and returns the session slot. Backend subprocess
+contexts now honor the optional credential expiry, bounded by job duration.
+This provider authorizes local export only: import requires separate isolated
+target authority, and remote-instance transport remains to be integrated.
+
+The live plain/gzip SQL round-trip test now exports through this actual provider
+using a native database-scoped SELECT/SHOW VIEW account. Only secret delivery
+is an in-memory fixture. Native mysql.user reads and source CREATE TABLE are
+denied. Different database names, tenant mismatch, stale database/principal
+generations, expired sessions, disabled principals, oversized requests and a
+second concurrent connection are rejected; credential file deletion and release
+replay are checked. Import still explicitly uses a root client fixture.
+
+QEMU Ubuntu ARM64 only: guest gofmt, then
+`sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root
+GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off
+GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/database
+./cmd/cyberpanel ./cmd/panel-execd -count=1` passed all three packages (exit 0).
+Temporary native users, protected fixture resources, databases and credentials
+are cleaned. No downloads, native package changes, host tests or installed-panel
+updates occurred. Transfer-service/broker/API/UI wiring is still pending; no
+complete or deployed import/export claim is made.
+
 # Database transfer artifact storage and native round trip — 2026-09-20
 
 Implemented `LinuxTransferArtifactStore`: root-private ancestry and files,

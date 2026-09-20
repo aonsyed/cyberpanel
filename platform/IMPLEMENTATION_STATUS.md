@@ -6,6 +6,20 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+DATABASE EXPORT CREDENTIAL FOLLOW-UP: added LinuxWorkspaceExportConfigs, which
+revalidates protected session/database/principal/instance state and resolves the
+session credential through the existing purpose-bound secret source. It enforces
+tenant/site/generation/name, readiness, session resource/connection bounds and
+expiry; native transfer processes inherit credential expiry. Actual QEMU plain
+and gzip exports now use a SELECT/SHOW VIEW-only native account. Cross-database
+and write denial, stale/disabled/expired/mismatched access and credential-file
+cleanup pass. Database, cyberpanel and panel-execd package tests pass in QEMU.
+Only secret delivery is mocked for export; import still uses a root fixture.
+This is source integration with the native transfer backend, NOT a deployed or
+UI/broker-wired feature. External-instance exports, production isolated-import
+credentials/catalog/promotion, transfer service wiring and retention cleanup
+remain pending. Preserve the full parity scope; do not call this feature done.
+
 DATABASE TRANSFER SOURCE PROGRESS (not deployed): added the missing Linux artifact
 store used by the native MariaDB transfer backend. Root-private bounded streaming,
 SHA256/size checks, atomic publication, immutable generations, abort cleanup,
