@@ -4,6 +4,12 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Latest source checkpoint (2026-09-20): fixed web artifact validation rejecting
+the actual native OLS `1.9.2-1+noble` package version. Regression reproduced and
+full management suite passed in QEMU; signatures and identifier rules unchanged.
+Not deployed yet. Next: signed engine catalog and initial verified web activation.
+Verified duplicate staging sequences 21–24 removed, installed releases retained.
+
 Latest installed checkpoint (2026-09-20): signed sequence 35 / `6ba18450a` now
 passes actual installed SMTPS 465 and STARTTLS 25/587, including AUTH visibility
 before/after TLS. All six mail services and their milter startup hooks are healthy.

@@ -295,7 +295,22 @@ func localPlatformTuple() (string, string, string, error) {
 func validLifecycleTuple(osName, version, architecture string) bool { return (osName == "ubuntu" && version == "24.04" || osName == "almalinux" && version == "9") && (architecture == "amd64" || architecture == "arm64") }
 func validChannel(value Channel) bool { return value == ChannelStable || value == ChannelPinned || value == ChannelLTS }
 func safeLifecycleToken(value string) bool { if value == "" || len(value) > 128 { return false }; for index := range value { character:=value[index]; if character>127 || !(character>='a'&&character<='z'||character>='A'&&character<='Z'||character>='0'&&character<='9'||character=='-'||character=='_'||character=='.') { return false } }; return true }
-func safeLifecycleVersion(value string) bool { return safeLifecycleToken(value) && !strings.Contains(value, "..") }
+func safeLifecycleVersion(value string) bool {
+	if value == "" || len(value) > 128 || strings.Contains(value, "..") {
+		return false
+	}
+	// Native package versions include distribution suffixes, epochs and
+	// prereleases. Keep this grammar separate from identifiers and paths.
+	for index := range value {
+		character := value[index]
+		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' ||
+			character == '.' || character == '+' || character == ':' || character == '~') {
+			return false
+		}
+	}
+	return true
+}
 
 // rootOwnedFile is overridden by the Linux host's metadata check. Keeping the
 // catalog reader portable lets API-side resolution fail closed on non-Linux.

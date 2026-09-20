@@ -5,6 +5,24 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native web package version validation — 2026-09-20
+
+QEMU reproduced rejection of the installed OLS version `1.9.2-1+noble`
+at `validateArtifactPlan`; epoch and prerelease variants also failed. The
+version-only grammar now permits native `+`, `:` and `~` syntax while retaining
+the 128-byte bound and rejecting paths, traversal, whitespace, shell delimiters,
+NUL and non-ASCII input. Identifier/key/repository token rules and all catalog
+signature checks are unchanged. The regression changed from FAIL to PASS in
+Ubuntu ARM64 QEMU; the entire management package suite also passed. This is a
+source-level prerequisite fix, not an installed web-engine readiness claim.
+The signed engine catalog and initial verified configuration activation remain
+pending; the installed release is still sequence 35.
+
+Removed only duplicate committed staging sequences 21–24 after checking every
+artifact against its manifest and retained installed release under the installer
+lock. Installed release trees, journals and archives remain intact. Guest free
+space after cleanup was 5.5 GiB; discard reclaimed host blocks. No OS/Go download.
+
 ### Signed SMTP protocol qualification and installer-owned bindings — 2026-09-20
 
 Signed sequence 35 (`qemu-mail-smtp-3.1.34`, source `6ba18450a`) committed;
