@@ -5,6 +5,37 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Signed panel/catalog installation and bootstrap verified — 2026-09-20
+
+The existing node-release assembler signed a 29-artifact bundle containing the
+current panel component, all five PHP archive/recipe pairs, both container
+recipes, and the existing four authority services/UI. The real node installer
+committed sequence 15, release `qemu-apps-d14f9440b` (version 3.1.14):
+
+- Bundle SHA-256: `bf43e24ed7fcece988782fd652a9280eff21bf4ab126e98bf4094b2b00beb41b`.
+- Manifest: `e44820d671ebcaa3b58d73bc5c2f9dfc505b3abfe5441f2a274858253096d58a`.
+- Install receipt: `8d03d1b810b870300c3ac58ca535d4e986653e387ff29859f3b798f02805c163`.
+- Payload bytes: 418,157,598. Bundle retained at `/var/tmp/panel-node-d14f9440b.tar`.
+
+The installed panel resolves into that exact immutable generation and its hash
+matches the QEMU-built binary. The previously used recipe authority's public key
+was separately provisioned as root-owned installer trust (not promoted from an
+arbitrary release asset). Running the installed binary's root installer ceremony
+completed `initialize-authority`, repeated initialization with receipt/catalog
+validation, and `bootstrap-secrets`. This exercised packaged recipe signature
+validation, actual catalog publication, persistent AppArmor policy provisioning
+and local authority creation, rather than only a helper/test copy. All four
+authority services remained active and the exact AppArmor generation enforcing.
+
+The node bundle does not yet contain core/gateway/execd units. No full panel API,
+browser, OLS/LSPHP managed application or container lifecycle claim follows from
+this checkpoint. Those remain required. Guest space fell to 233 MB during
+catalog publication. Both component `.tar.gz` archives were copied to the host
+run directory, SHA-256 verified on both ends, then only their duplicate guest
+files were removed. They remain recoverable from the host; guest free space is
+now approximately 912 MB. Preserve installed generations/receipts and recover
+more scratch space before the next large signed bundle.
+
 ### Current-code application component rebuilt — 2026-09-20
 
 Rebuilt both panel and assembler from `d14f9440b` inside Ubuntu ARM64 QEMU,

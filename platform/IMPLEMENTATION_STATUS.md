@@ -40,8 +40,10 @@ into fewer files does not bypass the line limits.
 
 Latest release checkpoint (2026-09-20): the real ARM64 panel component is
 assembled from all five signed PHP inputs and signed n8n/Hermes candidate
-recipes. Outer node-release installation and full API/browser qualification
-remain pending. Native Ubuntu rootless Podman rejects AppArmor profiles despite
+recipes. Signed outer node release sequence 15 now installs that component;
+the installed binary completed authority/catalog initialization, receipt replay
+and secret bootstrap. Core/gateway/execd installation and full API/browser
+qualification remain pending. Native Ubuntu rootless Podman rejects AppArmor profiles despite
 kernel AppArmor being active; preserve the MAC requirement and resolve that
 runtime limitation before declaring container integration operational. Exact
 artifact hashes, evidence and remaining limits are in `RUN-REPORT.md`.
@@ -51,8 +53,10 @@ allowed/denied reads and rejected unconfined transitions. Installer policy
 provisioning is implemented; persistent publication, kernel-state replay and a
 real Ubuntu ARM64 reboot passed. Native AppArmor boot loading retained the exact
 enforcing generation and post-reboot container admission/confinement passed.
-Outer signed installer invocation, safe retirement and complete sandbox
-qualification remain pending. No unconfined MAC fallback was enabled.
+The signed installed panel's initialization hook also passed. Safe retirement
+and complete sandbox qualification remain pending. No unconfined MAC fallback
+was enabled. Both component archives were offloaded to checksum-verified host
+copies; the guest retains signed node payloads, catalog and source inputs.
 
 Latest executable verification is recorded in `RUN-REPORT.md`: the current
 application database/TLS changes passed the full uncached Go suite in Ubuntu
