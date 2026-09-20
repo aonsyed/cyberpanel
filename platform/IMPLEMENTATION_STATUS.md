@@ -4,6 +4,14 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Disk blocker corrected (2026-09-20): automatic Git checkpoint trees had captured
+QEMU overlays through the main checkout, growing shared `.git` to ~241 GiB.
+Unused temporary packs and obsolete runtime checkpoint objects were reclaimed;
+`.git` is now 506 MiB, host free space ~247 GiB. Source branches/reflogs/working
+changes are preserved. Shared ignores + forced-add pre-commit artifact rejection
+prevent recurrence; QEMU guards now require 10 GiB host free and Git objects
+below 5 GiB. Candidate 36 is ready for the previously blocked installation.
+
 Latest candidate checkpoint (2026-09-20): `5b432d144` supports strict managed
 release links for signed web catalogs/keys/repositories; all four affected Go
 package suites and both binary builds pass in QEMU. Signed sequence 36 is built

@@ -5,6 +5,35 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Disk exhaustion root cause corrected — 2026-09-20
+
+The earlier attribution to insufficient user-provided space was wrong. The
+repository's shared `.git` had grown to roughly 241 GiB: 128.86 GiB of abandoned
+temporary Git files and 110.58 GiB of packs, largely repeated QEMU overlay blobs.
+The main checkout lacked runtime ignores even though the development worktree
+had them. A Codex turn-diff checkpoint tree included `.work/.../overlay.qcow2`.
+
+Removed 52 confirmed unused Git temporary files. Used `git rm --cached` against
+an isolated index of that checkpoint to remove its 117 `.work` runtime entries,
+then atomically updated only the checkpoint tree ref. Source branches, reflogs,
+the real indexes, working-tree changes and the checkpoint's non-runtime source
+entries were preserved. With no Git writers active, garbage collection removed
+the now-unreachable old snapshots. Connectivity checks passed before and after;
+`.git` is now 506 MiB and host free space is approximately 247 GiB.
+
+Also removed 15 obsolete host-side release bundle archives (3.1.15 through
+3.1.29). These obsolete archive files are deleted, not in Trash; current QEMU
+state, supplied base images, native package sources, the verified retained
+33–35 archive and candidate 36 remain available. No source history was rewritten.
+
+Prevention is structural: shared `.git/info/exclude` covers every worktree,
+both main/development ignores exclude `.work`, `.worktrees` and VM image formats,
+and the common pre-commit hook rejects runtime paths/images and staged files over
+20 MiB even after force-adding. Isolated-index Git-hook checks rejected a runtime
+image path and accepted a test-source path. Test source is NOT excluded. The QEMU
+build/install preflight now requires 10 GiB host headroom and stops if shared Git
+objects exceed 5 GiB. The disk blocker is resolved; release 36 is still uninstalled.
+
 ### Signed web catalog candidate; host-space install guard — 2026-09-20
 
 Source `5b432d144` accepts only installer-managed immutable-release links for

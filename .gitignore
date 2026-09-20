@@ -124,5 +124,13 @@ CHANGES_SUMMARY.md
 RESOURCE_LIMITS_IMPLEMENTATION.md
 
 # Greenfield QEMU development state
-.worktrees/
-.work/qemu/
+/.worktrees/
+/.work/
+*.qcow2
+*.qcow
+*.vmdk
+*.vdi
+*.img
+*.iso
+*.vhd
+*.vhdx
