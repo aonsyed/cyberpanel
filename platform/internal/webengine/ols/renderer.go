@@ -185,6 +185,9 @@ func renderServer(request native.RenderRequest, index renderIndex, bindings []we
 			output.WriteString("  enableScript 1\n")
 		} else {
 			output.WriteString("  enableScript 0\n")
+			// Product-owned static pages stay root-owned. Explicit execution
+			// identity avoids deriving a privileged UID from their document root.
+			output.WriteString("  user cyberpanel-web\n  group cyberpanel-web\n")
 		}
 		output.WriteString("  restrained 1\n")
 		output.WriteString("}\n\n")

@@ -493,15 +493,7 @@ func (executor *LinuxOperationsExecutor) applyWAF(ctx context.Context, request E
 	if err != nil {
 		return linuxEffectResult{}, err
 	}
-	if len(currentIndex.Policies) == 0 {
-		if previousGeneration != nil || snapshot.Existed {
-			return linuxEffectResult{}, ErrConflict
-		}
-	} else {
-		if previousGeneration == nil || !snapshot.Existed || digestBytes(snapshot.Content) != previousGeneration.Digest || !wafPolicyPointersEqual(previousGeneration.Policies, currentIndex.Policies) {
-			return linuxEffectResult{}, ErrConflict
-		}
-	}
+	if err := validateWAFPreviousGeneration(currentIndex, previousGeneration, snapshot); err != nil { return linuxEffectResult{}, err }
 	policyDigest, _ := activationDigest(policy)
 	scope, _ := wafPolicyScope(policy)
 	lease, err := executor.armWAFLease(request, policyDigest, scope, currentIndex, candidateIndex, previousGeneration, candidateGeneration, snapshot)
@@ -560,6 +552,9 @@ func (executor *LinuxOperationsExecutor) renderWAFGeneration(policies []WAFPolic
 	if node == nil {
 		return nil, nil, nil, ErrConflict
 	}
+	if err := VerifyInitialWAFAssets(); err != nil {
+		return nil, nil, nil, err
+	}
 	var buffer bytes.Buffer
 	mode := map[WAFMode]string{WAFDisabled: "Off", WAFDetectionOnly: "DetectionOnly", WAFBlocking: "On"}[node.Mode]
 	auditMode := "Off"
@@ -567,11 +562,16 @@ func (executor *LinuxOperationsExecutor) renderWAFGeneration(policies []WAFPolic
 		auditMode = "RelevantOnly"
 	}
 	fmt.Fprintf(&buffer, "# CyberPanel complete WAF policy generation\n# Node policy %s generation %d\nSecRuleEngine %s\nSecRequestBodyAccess On\nSecRequestBodyLimit %d\nSecAuditEngine %s\n", node.ID.String(), node.Generation, mode, node.RequestBodyLimitBytes, auditMode)
+	buffer.WriteString(wafParserConfiguration)
 	packs := append([]WAFPack(nil), node.ProviderPacks...)
 	if node.CRS != nil {
 		packs = append([]WAFPack{*node.CRS}, packs...)
 	}
 	sources := make([]wafSourceEvidence, 0, len(packs))
+	sources = append(sources, wafSourceEvidence{Provider: ResourceID{value: "cyberpanel"}, Name: ResourceID{value: "waf-runtime"}, Version: "3.0.16-crs4.29.0", Digest: baselineManifestDigest, Path: "/usr/share/doc/cyberpanel-waf-crs/runtime.sha256"})
+	if node.CRS == nil {
+		fmt.Fprintf(&buffer, "Include %s\n", baselineCRSEntry)
+	}
 	for _, pack := range packs {
 		if !pack.SecretRef.IsZero() {
 			return nil, nil, nil, ErrInvalidEffect
@@ -589,7 +589,7 @@ func (executor *LinuxOperationsExecutor) renderWAFGeneration(policies []WAFPolic
 	}
 	usedRuleIDs := make(map[uint32]struct{}, len(node.CustomRules)+len(policies)*8)
 	for _, rule := range node.CustomRules {
-		if validateWAFRule(rule) != nil {
+		if validateWAFRule(rule) != nil || (rule.ID >= 200000 && rule.ID <= 200007) {
 			return nil, nil, nil, ErrInvalidEffect
 		}
 		usedRuleIDs[rule.ID] = struct{}{}
@@ -605,6 +605,9 @@ func (executor *LinuxOperationsExecutor) renderWAFGeneration(policies []WAFPolic
 	for _, scopedPolicy := range policies {
 		scope, _ := wafPolicyScope(scopedPolicy)
 		for exclusionIndex, exclusion := range scopedPolicy.Exclusions {
+			for _, ruleID := range exclusion.RuleIDs {
+				if ruleID >= 200000 && ruleID <= 200007 { return nil, nil, nil, ErrInvalidEffect }
+			}
 			if !exclusion.ExpiresAt.After(now) {
 				continue
 			}

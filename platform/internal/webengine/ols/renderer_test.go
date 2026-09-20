@@ -178,6 +178,8 @@ func TestRenderUsesProductOwnedMaintenanceAndSuspendedRoutesWithoutTenantPHP(t *
 	}
 
 	maintenance := artifactContent(t, generation, native.ArtifactVirtualHost, "site-a--binding-a")
+	server := artifactContent(t, generation, native.ArtifactServer, "engine")
+	assertContainsAll(t, server, "  enableScript 0\n  user cyberpanel-web\n  group cyberpanel-web\n")
 	suspended := artifactContent(t, generation, native.ArtifactVirtualHost, "site-b--binding-b")
 	assertContainsAll(t, maintenance, "context /", "location $SERVER_ROOT/panel/system/maintenance")
 	assertContainsAll(t, suspended, "context /", "location $SERVER_ROOT/panel/system/suspended")

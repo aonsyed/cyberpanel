@@ -5,6 +5,64 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Initial WAF policy and live native fixtures — 2026-09-20
+
+Root installer now creates a blocking initial policy only after checking the
+entire pinned CRS runtime manifest, every referenced file's bytes/ownership and
+permissions, and absence of additional wildcard-loaded files. Existing managed
+policies are preserved. Added private worker temp/data directories, JSON and
+XML body processors, malformed-body/argument/multipart guards, response-body
+inspection and metadata-only audit output. The same parser settings apply to
+later WAF generations; omitted CRS selects the baseline. Initial executor
+handoff accepts only the exact root:root 0600 baseline with an empty journal,
+retaining its snapshot for rollback; foreign/ambiguous state remains rejected.
+
+QEMU found and fixed two native prerequisite defects:
+
+- CRS manifest had inherited group-write permission. Package recipe now fixes
+  umask/mode. Installed `cyberpanel-waf-crs` **4.29.0-2**, SHA256
+  `3f69c012ae977bbfe3cd6a40dff05deb92eddfce5831539dbfbd05e403e058e7`.
+- Live OLS startup mixed the server-exported old C++ random-device initializer
+  with the module's system C++ getter and aborted. The module now statically
+  links its private C++ runtime and exports only its LSI entrypoint. Native
+  startup no longer aborts. Installed `ols-modsecurity`
+  **1.9.2-1+noble+cpmodsec3.0.16.1**, SHA256
+  `308702d46926988633c36f160d960ed6edb874acc24a3319cbecde41b0152c58`.
+
+Static OLS maintenance/suspended vhosts now explicitly select the unprivileged
+worker without changing root-owned content. This removes native parser UID/GID
+warnings. The actual pending bootstrap generation now **passes OLS -t**:
+`0416df09c69c729f8246aa9abd0c82ba83e8b9eeae413c4421e2f9ac80789145`.
+Its initial WAF policy loads 847 rules (840 CRS plus seven parser guards).
+QEMU operations, webactivation, OLS renderer, installer/CLI and architecture
+suites pass, including recursive-tamper, extra-file, symlink/hardlink, ownership,
+first-handoff and installer replay checks.
+
+New opt-in native HTTP fixtures start the real installed OLS against that exact
+rendered master in a bounded private network, /tmp and /run namespace. Live
+master/journals/receipts are untouched. Passing: initial plain/direct-file GET,
+query XSS and SQLi blocking, JSON and +json XSS blocking, malformed JSON 400,
+and XML-attribute XSS blocking. **Still RED:** repeated plain GET is intermittent
+and benign query/JSON/XML get 403;
+diagnostic OLS logs identify static-file required/restricted permission checks,
+not a CRS intervention. Oversized-body fixture also gets 403 instead of 413;
+the connector's request-body-size bypass needs qualification/fixing. Do not
+relax file-permission checks or weaken WAF to turn these green. Temporary verbose
+diagnostic policy/master overrides were removed from test source.
+
+Test cleanup checks both sealed generation integrity and stopped native process
+identity even on failure. OLS remains held inactive afterward. Current fixture
+log: `/home/harness/waf-prerequisites-20260920/http-final.log` in the guest.
+No full activation, live panel/API/UI, signed-release inclusion or LSE/matrix
+qualification is claimed. Next: fix native benign-static/body-limit failures,
+then health attestation and safe old-bootstrap-marker transition. Installed panel
+release remains 37; old bootstrap marker still binds 8ad3d376..., not the new
+rendered digest. No journals were reset.
+Final fixture cleanup took 2.43 seconds and confirmed no server remained;
+superseded package files and all temporary native build trees were removed.
+Guest free space 6.1 GiB after filesystem trim. Initial live baseline file SHA256
+is `48bced536ba267183280d79d0afe70b0cc236fd1cf9c82fec15d8ee42106a186`.
+
 ### Native WAF dependency repair — 2026-09-20
 
 Added offline QEMU-only native package recipes under `packaging/native/`.

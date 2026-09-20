@@ -117,4 +117,15 @@ func TestQEMURenderedInitialWebParser(t *testing.T) {
 		t.Fatalf("native parser: %v\n%s", parseErr, output)
 	}
 	t.Logf("native parser accepted %s", candidate.Digest)
+	if os.Getenv("CYBERPANEL_QEMU_WAF_HTTP") == "1" {
+		defer func() {
+			if _, err := store.GenerationPath(context.Background(), candidate); err != nil {
+				t.Errorf("HTTP fixture changed immutable generation: %v", err)
+			}
+			if err := (FixedRunner{}).CheckStopped(context.Background()); err != nil {
+				t.Errorf("HTTP fixture left a running native server: %v", err)
+			}
+		}()
+		runQEMUWAFHTTP(t, master)
+	}
 }

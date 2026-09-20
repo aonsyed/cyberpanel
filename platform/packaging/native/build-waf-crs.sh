@@ -1,12 +1,13 @@
 #!/bin/sh
 # Offline CRS runtime package. No downloads, activation or maintainer scripts.
 set -eu
+umask 022
 test "$(uname -s)" = Linux
 test "${CYBERPANEL_QEMU_NATIVE_BUILD:-}" = 1
 test "$#" = 2 || { echo "usage: $0 INPUT_DIRECTORY OUTPUT_DIRECTORY" >&2; exit 2; }
 inputs=$(realpath "$1")
 output=$(realpath "$2")
-package="$output/cyberpanel-waf-crs_4.29.0-1_all.deb"
+package="$output/cyberpanel-waf-crs_4.29.0-2_all.deb"
 test ! -e "$package"
 cd "$inputs"
 printf '%s\n' \
@@ -47,7 +48,7 @@ printf '%s\n' \
   'Include /usr/share/modsecurity-crs/4.29.0/plugins/*-after.conf' \
   > "$share/owasp-crs.load"
 printf '%s\n' \
-  'Package: cyberpanel-waf-crs' 'Version: 4.29.0-1' 'Architecture: all' \
+  'Package: cyberpanel-waf-crs' 'Version: 4.29.0-2' 'Architecture: all' \
   'Maintainer: CyberPanel <security@cyberpanel.net>' \
   'Section: httpd' 'Priority: optional' \
   'Conflicts: modsecurity-crs' 'Replaces: modsecurity-crs' \
@@ -60,6 +61,7 @@ find "$stage/usr" -type f -exec chmod 0644 {} +
 # Commit the complete recursive runtime bytes, not merely its Include entrypoint.
 (cd "$stage" && find usr/share/modsecurity-crs -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
   > "$stage/usr/share/doc/cyberpanel-waf-crs/runtime.sha256"
+chmod 0644 "$stage/usr/share/doc/cyberpanel-waf-crs/runtime.sha256"
 install -m 0644 "$work/signature.status" "$stage/usr/share/doc/cyberpanel-waf-crs/CRS-signature.status"
 export SOURCE_DATE_EPOCH=1787011200
 find "$stage" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +

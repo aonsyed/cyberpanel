@@ -2,6 +2,7 @@
 # Offline Ubuntu 24.04 package build. Run only inside a QEMU build guest.
 # Inputs are the official release archives, never a checkout with unknown changes.
 set -eu
+umask 022
 test "$(uname -s)" = Linux
 test "${CYBERPANEL_QEMU_NATIVE_BUILD:-}" = 1
 test "$#" = 2 || { echo "usage: $0 INPUT_DIRECTORY OUTPUT_DIRECTORY" >&2; exit 2; }
@@ -12,7 +13,7 @@ test "$ID:$VERSION_ID" = ubuntu:24.04
 test "$(df -Pk /var/tmp | awk 'NR==2 {print $4}')" -ge 2097152
 arch=$(dpkg --print-architecture)
 case "$arch" in arm64|amd64) ;; *) exit 2 ;; esac
-version=1.9.2-1+noble+cpmodsec3.0.16
+version=1.9.2-1+noble+cpmodsec3.0.16.1
 package="$output/ols-modsecurity_${version}_${arch}.deb"
 test ! -e "$package"
 cd "$inputs"
@@ -47,8 +48,14 @@ CFLAGS='-O2 -g0' CXXFLAGS='-O2 -g0 -D_GLIBCXX_USE_CXX11_ABI=0' \
   --without-curl --with-yajl --with-libxml --with-pcre2 \
   > "$work/configure.log" 2>&1
 make -j2 > "$work/make.log" 2>&1
+# OLS itself exports selected functions from its bundled old libstdc++. A
+# partly interposed random_device (vendor initializer + system getter) crashes
+# at live startup. Keep the module's C++ runtime private; export only the LSI
+# entrypoint. Undefined LSI host callbacks still resolve from the server.
+printf '%s\n' '{ global: mod_security; local: *; };' > "$work/exports.map"
 g++ -std=gnu++17 -O2 -g0 -fPIC -fvisibility=hidden \
-  -D_REENTRANT -D_GLIBCXX_USE_CXX11_ABI=0 -shared \
+	-D_REENTRANT -D_GLIBCXX_USE_CXX11_ABI=0 -shared \
+	-static-libstdc++ -static-libgcc -Wl,--version-script="$work/exports.map" \
   -I"$ols/include" -I"$ols/src" -I"$modsec/headers" \
   "$ols/src/modules/modsecurity-ls/mod_security.cpp" \
   "$modsec/src/.libs/libmodsecurity.a" \

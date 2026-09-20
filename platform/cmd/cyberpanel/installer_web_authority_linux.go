@@ -88,5 +88,8 @@ func reconcileWebEngineAuthority() error {
 	if err = syscall.Fsync(fd); err != nil {
 		return err
 	}
-	return syscall.Fsync(dir)
+	if err = syscall.Fsync(dir); err != nil {
+		return err
+	}
+	return reconcileInitialWAF()
 }

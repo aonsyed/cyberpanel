@@ -4,6 +4,20 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Latest source/native checkpoint (2026-09-20): initial blocking WAF policy and
+recursive pinned-asset verification implemented; installer replay preserves later
+policies; exact baseline can hand off to the executor's first journaled change.
+Fixed CRS package manifest mode (4.29.0-2) and OLS/ModSecurity C++ symbol collision
+(module 1.9.2-1+noble+cpmodsec3.0.16.1). Native OLS -t now PASSES for pending
+rendered digest 0416df09...; five affected QEMU suites pass.
+Live isolated HTTP fixtures reach OLS and block XSS/SQLi/JSON/XML-attribute
+attacks, but remain RED: repeated plain GET is intermittent; benign query/JSON/XML receive native static-file
+permission-check 403; oversized body returns403 rather than413. Do not suppress
+these failures or weaken security masks/WAF. Next: native static-cache/permission
+path and connector body-limit behavior, then attestation/bootstrap transition.
+OLS held inactive; signed panel release still37; old marker8ad3d376... unchanged.
+Detailed evidence and package hashes: newest RUN-REPORT section.
+
 Newest native prerequisite checkpoint (2026-09-20): QEMU Ubuntu ARM64 now has
 OLS connector rebuilt against fixed ModSecurity 3.0.16 and complete signed-
 upstream CRS 4.29.0. Offline package recipes added; native rule checker loads
