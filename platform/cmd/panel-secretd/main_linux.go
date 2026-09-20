@@ -34,8 +34,8 @@ func run()error{
 	ownerUID:=os.Geteuid();controlUID,controlGID,err:=lookupIdentity("cyberpanel");if err!=nil{return err}
 	database,err:=openSecretDatabase(secretDatabasePath,ownerUID);if err!=nil{return err};defer database.Close()
 	store,err:=secrets.NewStore(database);if err!=nil{return err};ctx,cancel:=signal.NotifyContext(context.Background(),syscall.SIGINT,syscall.SIGTERM);defer cancel();if err=store.Bootstrap(ctx);err!=nil{return err}
-	epoch,err:=readKeyEpoch(secretEpochPath,ownerUID);if err!=nil{return err};key,err:=secrets.NewSystemdCredentialKEK(secretKeyPath,epoch);if err!=nil{return err};broker,err:=secrets.NewBroker(store,key,secrets.LinuxConsumerRegistry{});if err!=nil{return err}
-	materialPolicy,err:=secrets.NewLinuxMaterialPeerAuthorizer(0,uint32(controlUID));if err!=nil{return err}
+	epoch,err:=readKeyEpoch(secretEpochPath,ownerUID);if err!=nil{return err};key,err:=secrets.NewSystemdCredentialKEK(secretKeyPath,epoch);if err!=nil{return err};broker,err:=secrets.NewBroker(store,key,secrets.SocketConsumerRegistry{});if err!=nil{return err}
+	materialPolicy,err:=secrets.NewInspectedMaterialPeerAuthorizer(0,uint32(controlUID));if err!=nil{return err}
 	managementPolicy,err:=secrets.NewLinuxManagementPeerAuthorizer(0,uint32(controlUID));if err!=nil{return err}
 	materialListener,err:=secrets.ListenMaterialBroker(ownerUID,controlGID);if err!=nil{return err};defer materialListener.Close()
 	managementListener,err:=secrets.ListenManagementBroker(ownerUID,controlGID);if err!=nil{return err};defer managementListener.Close()

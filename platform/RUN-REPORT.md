@@ -5,6 +5,45 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Approved privileged peer inspector — 2026-09-20
+
+The user approved the separate inspection helper while keeping the broker on its
+dedicated account. `panel-peer-inspectd` accepts exactly one connected AF_UNIX
+stream descriptor through SCM_RIGHTS from the broker UID. It does not accept a
+PID, pathname or executable command. Kernel socket credentials select the peer;
+process-start and effective-UID checks bracket executable inspection. Executable
+hashing checks the current executable inode, size and modification time after
+reading. The broker uses the original connection again at grant and delivery,
+preserving process/executable/release-audience binding rather than caching an
+inspection as authorization.
+
+The helper service runs as root with only `CAP_SYS_PTRACE`, a read-only system,
+and inaccessible secret/auth/control stores. The broker remains
+`cyberpanel-secrets`, `NoNewPrivileges=yes`, with an empty capability set.
+Descriptor tests reject missing/multiple descriptors, regular files and callers
+outside the configured broker UID. A real UID-65534 socket process was inspected
+successfully in QEMU.
+
+Signed fixture sequence 12 installed the helper but the first end-to-end check
+found grant verification still using the old registry. Sequence 13 corrected
+that wiring through a normal signed upgrade; no frontier or journal was edited.
+Installed sequence 13 (`qemu-inspector-3.1.12`) then passed actual material
+delivery for root and unprivileged `cyberpanel` test consumers and rejected
+mismatched executable digests. Fixture secrets were revoked on test exit. These
+tests pin disposable test executables, not production provider identities.
+
+- Manifest: `5f499b2e9eca772b905237ae8ec6589d8592bf11d252620d1e45380c4deebb16`.
+- Bundle: `cf673855b8ecadc613157a4b58eb59ff07c21e4dbc9c04c200d8b744c790b7c2`.
+- Helper and broker were active/running with zero restarts after installation.
+- Secret and signed-packaging suites passed in Ubuntu ARM64 QEMU.
+- The full uncached Go suite also passed; retained log:
+  `current-ubuntu-arm64-20260919-smoke/inspector-integrated-20260920.log`.
+
+No new signing authority, base-image download or broker capability was added.
+This closes the observed cross-user inspection blocker; it is not full panel
+installation. Complete product installer/catalog integration, production
+consumer journeys, and other-platform qualification remain.
+
 - Go fixes committed as `961889a1b`; frontend build fixes as `b7bd245d1`,
   with browser-verified navigation and bundle reduction in `6eb51776a`.
 - Runs also include the existing uncommitted application database-placement

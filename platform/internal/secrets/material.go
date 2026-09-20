@@ -162,6 +162,8 @@ func (server *MaterialServer) Serve(listener net.Listener) error {
 	}
 }
 
+type materialConnectionKey struct{}
+
 func (server *MaterialServer) serve(connection net.Conn) {
 	peer, err := server.Authorizer.Authorize(connection)
 	if err != nil { return }
@@ -174,6 +176,7 @@ func (server *MaterialServer) serve(connection net.Conn) {
 	}
 	_ = connection.SetDeadline(request.Deadline)
 	ctx, cancel := context.WithDeadline(context.Background(), request.Deadline); defer cancel()
+	ctx = context.WithValue(ctx, materialConnectionKey{}, connection)
 	response := MaterialResponse{Version:MaterialProtocolVersion,RequestID:request.RequestID,SecretID:request.SecretID}
 	head, err := server.Broker.store.Head(ctx, request.SecretID)
 	if err == nil && (head.OwnerTenantID != request.OwnerTenantID || head.Purpose != request.Purpose || head.Audience.ResourceID != request.ResourceID || head.Audience.AdapterID != request.AdapterID || head.Audience.AdapterVersion != request.AdapterVersion) { err = ErrForbidden }

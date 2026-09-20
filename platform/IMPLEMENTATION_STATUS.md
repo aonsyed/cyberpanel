@@ -56,8 +56,7 @@ support remains incomplete. Install/clone identity enrollment and private drawer
 inputs are wired. Purge cleanup errors and partial clone failures retain recovery
 states; staging failure journals survive cancellation and SQLite reopen.
 
-Next gates remain the installed material-delivery privilege decision below,
-full signed panel installation and live API/service journeys, partial-clone
+Next gates remain full signed panel installation and live API/service journeys, partial-clone
 recovery, and live service qualification across the supported OS/architecture
 combinations. Component tests do not establish full product parity.
 
@@ -72,18 +71,21 @@ fixture reset, and the precise remaining qualification limits.
 The signed component fixture now also runs the secret broker. Its live management
 enroll/replay/rotate/revoke checks and unauthorized-peer rejection pass; a failed
 signed upgrade now restores the previous auth-only release. Both current
-services have zero restarts. Material delivery is still unresolved: its retained
-executable-identity check cannot inspect another UID's `/proc/PID/exe` from the
-isolated secret account. Do not weaken that boundary or mistake management
-qualification for delivery qualification. Full panel/service testing remains.
+services have zero restarts. The approved peer inspector now resolves cross-user
+executable identity while the broker retains its dedicated UID and empty
+capability set. Installed material delivery and rejection of a mismatched digest
+passed with disposable root and control-account consumers in Ubuntu ARM64.
+Production provider/service journeys and full panel testing remain unqualified.
 
 The installed QEMU fixture also runs the provider worker. Its socket boundary
 and mount-namespace denial of control.db's directory are verified; external
 provider operations are not. The node installer now preserves shared-parent
-traversal while retaining private child permissions. A user decision is pending
-on constrained root broker versus a separate privileged inspection helper for
-material-consumer verification. Do not infer approval from the preselected
-answer in the asynchronous question; continue independent work meanwhile.
+traversal while retaining private child permissions. The user approved the
+recommended separate privileged inspection helper on 2026-09-20. Keep the broker
+on its dedicated account; implement socket-descriptor-based inspection and
+reverification without arbitrary PID/path input. This decision is settled; do
+not ask again. The signed sequence-13 fixture installs and runs this helper;
+complete product installer/catalog integration and broader qualification remain.
 
 ### Verified checkpoint, 2026-09-19
 
