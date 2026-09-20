@@ -79,14 +79,20 @@ func TestQEMUWebWAFHTTPChild(t *testing.T) {
 			t.Log(string(data))
 		}
 	}()
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 2 * time.Second}
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 5 * time.Second}
 	defer client.CloseIdleConnections()
-	request := func(method, target, contentType, body string) (int, string, error) {
+	request := func(method, target, contentType, body string, chunked, boundedChunks bool) (int, string, error) {
 		req, err := http.NewRequestWithContext(ctx, method, "http://127.0.0.1"+target, strings.NewReader(body))
 		if err != nil {
 			return 0, "", err
 		}
 		req.Host = "default.invalid"
+		if chunked {
+			req.ContentLength = -1
+			if boundedChunks {
+				req.Body = io.NopCloser(struct{ io.Reader }{strings.NewReader(body)})
+			}
+		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 CyberPanel-QEMU-qualification")
 		if contentType != "" {
 			req.Header.Set("Content-Type", contentType)
@@ -106,7 +112,7 @@ func TestQEMUWebWAFHTTPChild(t *testing.T) {
 			t.Fatalf("native server exited before readiness: %v", exitErr)
 		default:
 		}
-		status, body, err := request("GET", "/", "", "")
+		status, body, err := request("GET", "/", "", "", false, false)
 		if err == nil && status == 200 && strings.Contains(body, "maintenance") {
 			break
 		}
@@ -115,6 +121,7 @@ func TestQEMUWebWAFHTTPChild(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	oversizedJSON := `{"message":"` + strings.Repeat("a", 13107200) + `"}`
 	for _, fixture := range []struct {
 		name, method, target, contentType, body string
 		want                                    int
@@ -126,14 +133,22 @@ func TestQEMUWebWAFHTTPChild(t *testing.T) {
 		{"sqli-query", "GET", "/?q=" + url.QueryEscape("1' OR '1'='1"), "", "", 403},
 		{"benign-json", "POST", "/", "application/json", `{"message":"hello"}`, 200},
 		{"xss-json", "POST", "/", "application/json", `{"message":"<script>alert(1)</script>"}`, 403},
+		{"xss-chunked-json", "POST", "/", "application/json", `{"message":"<script>alert(1)</script>"}`, 403},
+		{"late-xss-bounded-chunked-json", "POST", "/", "application/json", `{"padding":"` + strings.Repeat("a", 65536) + `","message":"<script>alert(1)</script>"}`, 403},
 		{"xss-json-subtype", "POST", "/", "application/problem+json", `{"message":"<script>alert(1)</script>"}`, 403},
 		{"malformed-json", "POST", "/", "application/json", `{"message":`, 400},
 		{"benign-xml", "POST", "/", "application/xml", `<message>hello</message>`, 200},
 		{"xss-xml-attribute", "POST", "/", "application/xml", `<message value="&lt;script&gt;alert(1)&lt;/script&gt;"/>`, 403},
-		{"oversized-body", "POST", "/", "application/json", `{"message":"` + strings.Repeat("a", 13107200) + `"}`, 413},
+		{"oversized-body", "POST", "/", "application/json", oversizedJSON, 413},
+		{"oversized-chunked-body", "POST", "/", "application/json", oversizedJSON, 413},
+		{"oversized-bounded-chunked-body", "POST", "/", "application/json", oversizedJSON, 413},
+		{"benign-after-cache-expiry", "GET", "/?q=hello", "", "", 200},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
-			status, body, err := request(fixture.method, fixture.target, fixture.contentType, fixture.body)
+			if fixture.name == "benign-after-cache-expiry" {
+				time.Sleep(1100 * time.Millisecond)
+			}
+			status, body, err := request(fixture.method, fixture.target, fixture.contentType, fixture.body, strings.Contains(fixture.name, "chunked"), strings.Contains(fixture.name, "bounded"))
 			if err != nil || status != fixture.want {
 				t.Fatalf("status=%d want=%d error=%v body=%q", status, fixture.want, err, body)
 			}

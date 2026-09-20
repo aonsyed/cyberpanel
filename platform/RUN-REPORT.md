@@ -5,6 +5,43 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Known-length body rejection and chunked diagnosis — 2026-09-20
+
+Pinned OLS connector previously disabled request-body inspection when declared
+Content-Length exceeded the configured limit. The package source patch now
+returns413 for positive oversized lengths with engine On and limit action
+Reject, preserving inspection for other modes/unknown lengths. Offline QEMU
+build installed `ols-modsecurity` **1.9.2-1+noble+cpmodsec3.0.16.2**, SHA256
+`ddd1822f899db80d7676397a7f51269af16442cd0e9872b23d70844ebd990c45`.
+The source patch is included in the package's documentation.
+
+Final QEMU invocation: `go test -p 2 -count=1 -run
+TestQEMURenderedInitialWebParser -v ./internal/executor/webactivation`, with
+`CYBERPANEL_QEMU_RENDER_WEB=1`, `CYBERPANEL_QEMU_WAF_HTTP=1`, offline Go settings
+and root execution in the existing Ubuntu ARM64 guest. Native parser passes;
+HTTP suite deliberately remains RED. Log:
+`/home/harness/waf-prerequisites-20260920/http-body-limit-final.log`.
+17 HTTP subcases: 12 pass, 5 fail. Known-length oversized413, small chunked XSS,
+64 KiB late-body chunked XSS and cache-expired benign query pass. Repeated plain
+GET, benign query and benign XML return403 in this run; benign JSON passed,
+confirming the static-cache failure is intermittent. Single large chunk times
+out after5s; bounded chunks return200 instead of413.
+
+Temporary module builds .3/.4 tested an explicit decoded-buffer size guard.
+The guard did not fix the response and is not retained in source. Narrow trace
+showed decoded body13107214, limit13107200, engine1 (On), action1 (Reject).
+This rules out missing/truncated buffer and incorrect effective limit for the
+bounded-chunk case. Pinned native `HttpSession::reqBodyDone` calls
+`handlerProcess` before the completed-body hook when waiting for the full body
+after URI mapping; this is the next server-side ordering investigation, not a
+verified server fix. Large-chunk read scheduling also remains unresolved.
+All temporary diagnostic policy/master changes and log instrumentation were
+removed. Installed module restored to .2. Build workspaces clean automatically;
+diagnostic .3/.4 packages removed, retaining .1 rollback and .2 candidate.
+Final cleanup confirmed OLS inactive and guest6.1GiB free. No generated runtime
+artifacts are committed. Signed panel release remains37; no full activation or
+API/UI qualification claim.
+
 ### Initial WAF policy and live native fixtures — 2026-09-20
 
 Root installer now creates a blocking initial policy only after checking the

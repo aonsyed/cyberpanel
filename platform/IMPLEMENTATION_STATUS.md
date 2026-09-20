@@ -4,6 +4,20 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Latest native body-limit checkpoint (2026-09-20): connector package
+1.9.2-1+noble+cpmodsec3.0.16.2 now rejects known-length oversized bodies with
+413 instead of disabling inspection. Real QEMU HTTP regression passes this
+case. Chunked large bodies remain RED: one large chunk stalls; bounded chunks
+receive 200 instead of rejection. Diagnostic decoded-buffer guard did NOT fix
+this and was removed, along with instrumentation; packages .3/.4 are not release
+candidates. Trace established decoded=13107214, limit=13107200, engine=On,
+action=Reject. Investigate native reqBodyDone handler-before-body-hook ordering
+and large-chunk read scheduling; do not assume a limit configuration error.
+64 KiB late-body chunked XSS is blocked. Static cached requests remain
+intermittently403; the same benign query after cache expiry succeeds.
+Final 17-case run has 12 passes/5 failures, not product certification. OLS held
+inactive; signed release remains37. See RUN-REPORT for evidence and cleanup.
+
 Latest source/native checkpoint (2026-09-20): initial blocking WAF policy and
 recursive pinned-asset verification implemented; installer replay preserves later
 policies; exact baseline can hand off to the executor's first journaled change.

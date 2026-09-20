@@ -6,6 +6,7 @@ umask 022
 test "$(uname -s)" = Linux
 test "${CYBERPANEL_QEMU_NATIVE_BUILD:-}" = 1
 test "$#" = 2 || { echo "usage: $0 INPUT_DIRECTORY OUTPUT_DIRECTORY" >&2; exit 2; }
+recipe=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 inputs=$(realpath "$1")
 output=$(realpath "$2")
 . /etc/os-release
@@ -13,7 +14,7 @@ test "$ID:$VERSION_ID" = ubuntu:24.04
 test "$(df -Pk /var/tmp | awk 'NR==2 {print $4}')" -ge 2097152
 arch=$(dpkg --print-architecture)
 case "$arch" in arm64|amd64) ;; *) exit 2 ;; esac
-version=1.9.2-1+noble+cpmodsec3.0.16.1
+version=1.9.2-1+noble+cpmodsec3.0.16.2
 package="$output/ols-modsecurity_${version}_${arch}.deb"
 test ! -e "$package"
 cd "$inputs"
@@ -39,6 +40,7 @@ tar --no-same-owner -xzf modsecurity-v3.0.16.tar.gz -C "$work"
 tar --no-same-owner -xzf openlitespeed-1.9.2.tar.gz -C "$work"
 modsec="$work/modsecurity-v3.0.16"
 ols="$work/openlitespeed-bcd05f4048226cbd0adc75ce6b825527ffe4b6e5"
+patch --batch --fuzz=0 -d "$ols" -p1 < "$recipe/ols-modsecurity-body-limit.patch"
 cd "$modsec"
 # Match the connector's documented C++ ABI; no automatic fetch/build scripts.
 # Lua execution, remote rules and persistent IP collections are not panel APIs.
@@ -69,6 +71,7 @@ install -m 0644 "$work/mod_security.so" "$stage/usr/local/lsws/modules/mod_secur
 install -m 0644 "$ols/LICENSE" "$stage/usr/share/doc/ols-modsecurity/OLS-LICENSE"
 install -m 0644 "$ols/GPL.txt" "$stage/usr/share/doc/ols-modsecurity/OLS-GPL"
 install -m 0644 "$modsec/LICENSE" "$stage/usr/share/doc/ols-modsecurity/ModSecurity-LICENSE"
+install -m 0644 "$recipe/ols-modsecurity-body-limit.patch" "$stage/usr/share/doc/ols-modsecurity/body-limit.patch"
 printf '%s\n' \
   'Package: ols-modsecurity' "Version: $version" "Architecture: $arch" \
   'Maintainer: CyberPanel <security@cyberpanel.net>' \
