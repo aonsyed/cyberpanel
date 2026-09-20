@@ -85,8 +85,8 @@ func loadTrustDocument(path string) (TrustDocument, error) {
 func readSecretFile(path string, maximum int64) ([]byte, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || maximum <= 0 { return nil, errors.New("unsafe secret key path") }
 	info, err := os.Lstat(path); if err != nil { return nil, err }
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 || info.Size() <= 0 || info.Size() > maximum { return nil, errors.New("unsafe secret key file") }
-	file,err:=os.Open(path);if err!=nil{return nil,err};defer file.Close();opened,err:=file.Stat();if err!=nil||!os.SameFile(info,opened){return nil,errors.New("secret key file changed while opening")};content,err:=io.ReadAll(io.LimitReader(file,maximum+1));if err!=nil||int64(len(content))>maximum{return nil,errors.New("secret key file exceeds configured bound")};return content,nil
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maximum { return nil, errors.New("unsafe secret key file") }
+	file,err:=os.Open(path);if err!=nil{return nil,err};defer file.Close();opened,err:=file.Stat();if err!=nil||!os.SameFile(info,opened){return nil,errors.New("secret key file changed while opening")};if opened.Mode().Perm()&0077 != 0 && !privateGatewayCredential(file) { return nil, errors.New("unsafe secret key file") };content,err:=io.ReadAll(io.LimitReader(file,maximum+1));if err!=nil||int64(len(content))>maximum{return nil,errors.New("secret key file exceeds configured bound")};return content,nil
 }
 
 type TrustPaths struct { SignerPath string; TrustPath string }

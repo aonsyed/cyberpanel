@@ -5,6 +5,54 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Registry consolidation and live panel entry — 2026-09-20
+
+QEMU regression first reproduced `duplicate operation identity.tenant.list`.
+Removed the console's three duplicate tenant registrations AND its handler
+overrides. Managed identity owns list/create/suspend, preserving tenant:create,
+MFA, manager/ownership contacts, delegated authority and revision concurrency.
+Tests prove complete registry assembly, canonical payloads, missing-owner
+rejection, duplicate detection and preservation of managed tenant handlers during
+console binding. UI creation fields and suspension revision now match that API;
+authenticated tenant form interaction is still unqualified.
+
+QEMU apiserver, cyberpanel and paneld suites pass; UI typecheck/build pass.
+Signed sequence40 committed registry/core/UI changes (manifest
+9911c41bbefebb3e02ef6976a53de34b1996f6ee66c570c9b7a331180546a54f,
+receipt8327bbc6ad67174b53e18246bf8f7035d1190748118f4efaafd270a390e40ceb).
+Gateway also embeds the registry and required its own rebuild. Signed sequence41
+qemu-gateway-registry-3.1.40 committed with bundle
+f34c268938ab5d11d19bf81a0552cbba50910c4bd3d74757ae3158cf6c5fec03,
+manifest2de4d84479ccafea7b7b1236ff8b9d13c091a3225c368a31df0155adb4f5d74e,
+receipt585d6e1cb2e2404b7f0cd748e655217879b5514b76c9857129ee56e4dd9619a9.
+QEMU-only trust maximum extended40→41, preserving key/minimum/expiry. Usual
+documented mail restore/WAF-owner/reconciliation prerequisites still required.
+
+Core remains active. Actual health over its Unix socket as the gateway UID with
+service group returns ready and658 operations; root and a user without the service
+group were denied. Gateway then rejected systemd's0440 credential, whose apparent
+group bit represents its named-user ACL rather than owning-group permission.
+Reused the existing credential validator ONLY for the fixed gateway signer path:
+root owner/group, one link, read-only tmpfs, exact caller-only ACL and private
+parent ACL. Ordinary group-readable files still fail. No secret bytes printed.
+Actual gateway systemd sandbox loaded the signer successfully with the test
+binary; temporary test override/binary removed afterward. A separately built
+candidate gateway is running via99-qemu-candidate-test.conf with Restart=no,
+using the existing sandbox and LoadCredential. This fix awaits signed packaging.
+
+Live candidate gateway /health/ready returns200/ready; /api/v1/catalog returns658
+operations. QEMU Playwright drives the installed UI at1366x900 and390x844: login
+inputs render, no page errors/horizontal overflow. Submitting a nonexistent user
+through the actual form returns401 and displays an error. Screenshots:
+/home/harness/installed-ui-41-desktop.png and installed-ui-41-mobile.png.
+This proves entry/negative-login, NOT successful authentication or tenant CRUD.
+
+Disk guard stopped a build below2GiB as intended. Removed redundant sequence38,
+39 and40 tar bundles plus about600MiB obsolete candidate binaries and temporary
+test executables, retaining installed current/rollback releases and journals.
+Guest now approximately2.1GiB free. No additional full bundle until safe storage
+reclamation. No downloads or native dependency compilation.
+
 ### Installed site-preview helpers — 2026-09-20
 
 Reproduced startup failure: route/chromium helper executables absent, while the

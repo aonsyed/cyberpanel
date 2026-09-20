@@ -6,6 +6,25 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest live checkpoint: sequence41 qemu-gateway-registry-3.1.40 installed.
+Consolidated duplicate tenant list/create/suspend contracts onto managed identity;
+registry and handler-preservation regressions pass. Core is ACTIVE and its live
+health endpoint reports ready/658 operations. UI form now carries manager,
+ownership and delegation fields; suspension uses revision. UI typecheck/build pass.
+Gateway's systemd credential ACL was rejected by the ordinary secret-file loader.
+Source now accepts ONLY the fixed gateway credential path through the existing
+read-only tmpfs/exact named-user ACL validator. Native service-sandbox test PASS.
+Gateway is currently ACTIVE via TEMPORARY QEMU override:
+/run/systemd/system/panel-gateway.service.d/99-qemu-candidate-test.conf
+executes /usr/local/libexec/cyberpanel/qemu-paneld-credential. This last credential
+fix is NOT yet in signed release41. Gateway /health/ready returns ready; catalog
+has658 operations; actual QEMU browser desktop/mobile login renders and nonexistent
+login is rejected401. Authenticated tenant workflows remain unqualified.
+Next: reclaim obsolete release storage safely, package the credential fix, remove
+the candidate override, then authenticated installed-product journeys. Guest
+approximately2.1GiB free; storage guard remains enforced. QEMU signing trust ends
+at sequence41 (extended from40 only for that release). No downloads/native builds.
+
 Latest checkpoint: sequence39 qemu-preview-3.1.38 installed. Both missing preview
 helpers are now in the signed release at /usr/local/libexec/cyberpanel, matching
 the installer's existing binary boundary. Helper resolution pins the managed

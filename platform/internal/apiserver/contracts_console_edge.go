@@ -1313,9 +1313,6 @@ type MigrationEdgeCapabilityProvider interface {
 }
 
 type IdentityEdgeService interface {
-	ListTenants(context.Context, EdgeCall, EdgePagePayload) (EdgePage[IdentityTenantProjection], error)
-	CreateTenant(context.Context, EdgeCall, IdentityTenantCreatePayload) (EdgeMutation[IdentityTenantProjection], error)
-	SuspendTenant(context.Context, EdgeCall) (EdgeMutation[IdentityTenantProjection], error)
 	ListMemberships(context.Context, EdgeCall, EdgePagePayload) (EdgePage[IdentityMembershipProjection], error)
 	ListRoleBindings(context.Context, EdgeCall, EdgePagePayload) (EdgePage[IdentityRoleBindingProjection], error)
 	ConfigureEntitlement(context.Context, EdgeCall, IdentityEntitlementPayload) (EdgeMutation[IdentityTenantProjection], error)
@@ -1466,9 +1463,6 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("migration.sync", "migration:manage", mfa, true, func() any { return &MigrationSyncPayload{} }, validateMigrationSync, edgeTenantExistingMutationScope),
 		consoleOperation("migration.cutover", "migration:manage", phishingResistant, true, func() any { return &MigrationCutoverPayload{} }, validateMigrationCutover, edgeTenantExistingMutationScope),
 
-		consoleOperation("identity.tenant.list", "identity:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
-		consoleOperation("identity.tenant.create", "identity:manage", mfa, true, func() any { return &IdentityTenantCreatePayload{} }, validateIdentityTenantCreate, edgeTenantCreateScope),
-		consoleOperation("identity.tenant.suspend", "identity:manage", mfa, true, func() any { return &EmptyPayload{} }, nil, edgeTenantExistingMutationScope),
 		consoleOperation("identity.membership.list", "identity:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantResourceReadScope),
 		consoleOperation("identity.role_binding.list", "identity:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantResourceReadScope),
 		consoleOperation("identity.entitlement.configure", "identity:manage", mfa, true, func() any { return &IdentityEntitlementPayload{} }, validateIdentityEntitlement, edgeTenantExistingMutationScope),
@@ -2935,18 +2929,6 @@ func bindConsoleEdgeContractsThree(registry *Registry, services DomainServices) 
 
 func bindConsoleEdgeContractsFour(registry *Registry, services DomainServices) error {
 	if services.IdentityEdge != nil {
-		if err := registry.Bind("identity.tenant.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
-			result, err := services.IdentityEdge.ListTenants(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
-			return OperationResult{Status:http.StatusOK, Value:result}, nil
-		}); err != nil { return err }
-		if err := registry.Bind("identity.tenant.create", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
-			result, err := services.IdentityEdge.CreateTenant(ctx, edgeCall(inv), *value.(*IdentityTenantCreatePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
-			return edgeOperationResult(http.StatusCreated, result), nil
-		}); err != nil { return err }
-		if err := registry.Bind("identity.tenant.suspend", func(ctx context.Context, inv Invocation, _ any) (OperationResult, error) {
-			result, err := services.IdentityEdge.SuspendTenant(ctx, edgeCall(inv)); if err != nil { return OperationResult{}, mapDomainError(err) }
-			return edgeOperationResult(http.StatusOK, result), nil
-		}); err != nil { return err }
 		if err := registry.Bind("identity.membership.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.IdentityEdge.ListMemberships(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }
 			return OperationResult{Status:http.StatusOK, Value:result}, nil
