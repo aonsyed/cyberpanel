@@ -5,15 +5,15 @@ package operations
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 )
 
-const baselineManifestPath = "/usr/share/doc/cyberpanel-waf-crs/runtime.sha256"
+const baselineAssetsPath = "/usr/share/modsecurity-crs"
 const baselineCRSEntry = "/usr/share/modsecurity-crs/owasp-crs.load"
 
 // Shared by first installation and subsequent policy generations. These parser
@@ -72,56 +72,60 @@ func validateWAFPreviousGeneration(index wafActiveIndex, previous *wafNativeGene
 	return nil
 }
 
-// Validate the installed rules manifest rather than a compile-time release pin.
-// The root-owned installer/package manager owns this trust boundary. Each
-// activation records its digest, so later rule changes remain detectable.
+// Inventory installed rules without requiring a panel-built package or release
+// manifest. The root-owned installer/package manager owns this trust boundary.
+// Each activation records the inventory digest as evidence, not a version lock.
 func VerifyInitialWAFAssets() error {
 	_, err := installedWAFAssets("/")
 	return err
 }
 
 func installedWAFAssets(root string) (wafSourceEvidence, error) {
-	content, err := readTrustedWAFAsset(filepath.Join(root, baselineManifestPath), 64<<10)
-	if err != nil {
-		return wafSourceEvidence{}, err
+	if content, err := readTrustedWAFAsset(filepath.Join(root, baselineCRSEntry), 2<<20); err != nil || len(content) == 0 {
+		return wafSourceEvidence{}, errors.Join(errors.New("missing or unsafe installed CRS entrypoint"), err)
 	}
-	digest := digestBytes(content)
-	if err := verifyWAFAssets(root, baselineManifestPath, digest); err != nil {
-		return wafSourceEvidence{}, err
-	}
-	return wafSourceEvidence{Provider: ResourceID{value: "cyberpanel"}, Name: ResourceID{value: "waf-runtime"}, Version: "installed", Digest: digest, Path: baselineManifestPath}, nil
-}
-
-func verifyWAFAssets(root, manifest, expected string) error {
-	content, err := readTrustedWAFAsset(filepath.Join(root, manifest), 64<<10)
-	if err != nil || len(content) == 0 || digestBytes(content) != expected {
-		return errors.Join(errors.New("WAF runtime manifest is empty or changed during verification"), err)
-	}
-	listed := make(map[string]bool)
-	for _, line := range strings.Split(strings.TrimSuffix(string(content), "\n"), "\n") {
-		fields := strings.Split(line, "  ")
-		if len(fields) != 2 || !validSHA256(fields[0]) || !strings.HasPrefix(fields[1], "usr/share/modsecurity-crs/") || filepath.Clean(fields[1]) != fields[1] || listed[fields[1]] {
-			return errors.New("invalid WAF runtime manifest entry")
-		}
-		data, err := readTrustedWAFAsset(filepath.Join(root, fields[1]), 2<<20)
-		if err != nil || digestBytes(data) != fields[0] {
-			return errors.New("WAF runtime asset differs from pinned release: " + fields[1])
-		}
-		listed[fields[1]] = true
-	}
-	return filepath.WalkDir(filepath.Join(root, "usr/share/modsecurity-crs"), func(path string, entry fs.DirEntry, err error) error {
+	var inventory bytes.Buffer
+	var total int64
+	var count int
+	err := filepath.WalkDir(filepath.Join(root, baselineAssetsPath), func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if entry.IsDir() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || stat.Uid != 0 || info.Mode().Perm()&0022 != 0 {
+				return ErrConflict
+			}
 			return nil
 		}
 		relative, err := filepath.Rel(root, path)
-		if err != nil || !entry.Type().IsRegular() || !listed[relative] {
-			return errors.New("unlisted or unsafe WAF runtime asset")
+		if err != nil || !entry.Type().IsRegular() {
+			return errors.New("unsafe WAF runtime asset")
 		}
+		count++
+		if count > 10000 {
+			return errors.New("WAF runtime inventory exceeds file limit")
+		}
+		data, err := readTrustedWAFAsset(path, 2<<20)
+		if err != nil {
+			return err
+		}
+		total += int64(len(data))
+		if total > 64<<20 {
+			return errors.New("WAF runtime inventory exceeds size limit")
+		}
+		// WalkDir is lexical; quoted paths make inventory records unambiguous.
+		fmt.Fprintf(&inventory, "%s  %q\n", digestBytes(data), relative)
 		return nil
 	})
+	if err != nil {
+		return wafSourceEvidence{}, err
+	}
+	return wafSourceEvidence{Provider: ResourceID{value: "cyberpanel"}, Name: ResourceID{value: "waf-runtime"}, Version: "installed", Digest: digestBytes(inventory.Bytes()), Path: baselineAssetsPath}, nil
 }
 
 func readTrustedWAFAsset(path string, limit int64) ([]byte, error) {

@@ -12,7 +12,7 @@ func TestWAFBaselineRecursiveIntegrity(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root QEMU asset ownership check")
 	}
-	for _, change := range []string{"none", "rule-bytes", "extra-rule", "symlink", "hardlink", "writable", "manifest"} {
+	for _, change := range []string{"none", "rule-bytes", "extra-rule", "symlink", "hardlink", "writable", "directory-writable", "owner", "empty-entry", "missing-entry"} {
 		t.Run(change, func(t *testing.T) {
 			root := t.TempDir()
 			relative := "usr/share/modsecurity-crs/rules/rule.conf"
@@ -24,8 +24,12 @@ func TestWAFBaselineRecursiveIntegrity(t *testing.T) {
 			if err := os.WriteFile(path, content, 0644); err != nil {
 				t.Fatal(err)
 			}
-			manifest := []byte(digestBytes(content) + "  " + relative + "\n")
-			if err := os.WriteFile(filepath.Join(root, "manifest"), manifest, 0644); err != nil {
+			entryPath := filepath.Join(root, baselineCRSEntry)
+			if err := os.WriteFile(entryPath, []byte("Include rules/*.conf\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			before, err := installedWAFAssets(root)
+			if err != nil {
 				t.Fatal(err)
 			}
 			switch change {
@@ -52,14 +56,30 @@ func TestWAFBaselineRecursiveIntegrity(t *testing.T) {
 				if err := os.Chmod(path, 0666); err != nil {
 					t.Fatal(err)
 				}
-			case "manifest":
-				if err := os.WriteFile(filepath.Join(root, "manifest"), []byte("altered"), 0644); err != nil {
+			case "directory-writable":
+				if err := os.Chmod(filepath.Dir(path), 0777); err != nil {
+					t.Fatal(err)
+				}
+			case "owner":
+				if err := os.Chown(path, 200000, 200000); err != nil {
+					t.Fatal(err)
+				}
+			case "empty-entry":
+				if err := os.WriteFile(entryPath, nil, 0644); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-entry":
+				if err := os.Remove(entryPath); err != nil {
 					t.Fatal(err)
 				}
 			}
-			err := verifyWAFAssets(root, "manifest", digestBytes(manifest))
-			if (err == nil) != (change == "none") {
+			after, err := installedWAFAssets(root)
+			allowed := change == "none" || change == "rule-bytes" || change == "extra-rule"
+			if (err == nil) != allowed {
 				t.Fatalf("integrity result: %v", err)
+			}
+			if allowed && (after.Digest == before.Digest) != (change == "none") {
+				t.Fatal("installed asset change not reflected in evidence")
 			}
 		})
 	}
@@ -74,48 +94,32 @@ func TestInitialWAFRecognitionIsExact(t *testing.T) {
 	}
 }
 
-func TestInstalledWAFManifestCanAdvanceWithoutPanelRebuild(t *testing.T) {
+func TestInstalledWAFRulesNeedNoCustomPackageManifest(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root QEMU ownership check")
 	}
 	root := t.TempDir()
 	relative := "usr/share/modsecurity-crs/rules/rule.conf"
 	path := filepath.Join(root, relative)
-	manifestPath := filepath.Join(root, baselineManifestPath)
-	for _, directory := range []string{filepath.Dir(path), filepath.Dir(manifestPath)} {
-		if err := os.MkdirAll(directory, 0755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, baselineCRSEntry), []byte("Include rules/*.conf\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
 	var previous string
 	for _, content := range []string{"# installed rules release one\n", "# installed rules release two\n"} {
 		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 			t.Fatal(err)
 		}
-		manifest := []byte(digestBytes([]byte(content)) + "  " + relative + "\n")
-		if err := os.WriteFile(manifestPath, manifest, 0644); err != nil {
-			t.Fatal(err)
-		}
 		evidence, err := installedWAFAssets(root)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if evidence.Digest != digestBytes(manifest) || evidence.Digest == previous || evidence.Version != "installed" {
+		if !validSHA256(evidence.Digest) || evidence.Digest == previous || evidence.Version != "installed" || evidence.Path != baselineAssetsPath {
 			t.Fatal("installed release evidence not updated")
 		}
 		previous = evidence.Digest
-	}
-	if err := os.WriteFile(path, []byte("unmanifested change"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := installedWAFAssets(root); err == nil {
-		t.Fatal("unmanifested rule change accepted")
-	}
-	if err := os.WriteFile(manifestPath, nil, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := installedWAFAssets(root); err == nil {
-		t.Fatal("empty manifest accepted")
 	}
 }
 

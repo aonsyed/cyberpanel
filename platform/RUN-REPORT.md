@@ -3493,3 +3493,26 @@ After verification, the AlmaLinux ARM64 and both AMD64 guests were shut down.
 Their overlays and logs are retained. Ubuntu ARM64 remains running on loopback
 SSH port 22193 for the next installed-release work; its temporary Vite server
 is stopped. No base images or evidence were deleted.
+# Installed CRS evidence without a custom package — 2026-09-20
+
+Removed the custom CRS .deb builder. The operations executor no longer requires
+`/usr/share/doc/cyberpanel-waf-crs/runtime.sha256`: it records a deterministic,
+bounded inventory of the installed `/usr/share/modsecurity-crs` tree. This is
+evidence of installed bytes, not a hard version pin. Regular/root-owned assets,
+non-writable ancestors, no symlinks/hardlinks, and a nonempty trusted entrypoint
+are still required. Root-owned package updates are accepted with new evidence.
+
+Verification ran only in the existing Ubuntu ARM64 QEMU guest, as root with
+`TMPDIR=/root`, cached Go dependencies, `GOPROXY=off`, `GOTOOLCHAIN=local`:
+`go test -p 2 ./internal/operations -run 'Test(WAFBaseline|InstalledWAF|InitialWAF|QEMUInitialWAF)' -count=1 -v`
+with `CYBERPANEL_QEMU_WAF=1` passed, including inspection of actual installed assets.
+Fixtures prove no custom manifest is needed, updates/additions change evidence,
+and unsafe files/directories, empty/missing entrypoints, symlinks and hardlinks
+are rejected. No vendor builds/downloads or live policy changes occurred.
+The full `go test -p 2 ./internal/operations ./cmd/cyberpanel -count=1` also
+passed in that guest (both packages exit 0).
+
+Limits: this is a source change, not a deployed release. Existing guest CRS is
+still the old custom package. The Unicode mapping path remains version-specific;
+normal vendor/distribution rules layouts and package replacement remain pending.
+The deleted recipe is recoverable from Git history; live installed assets remain.

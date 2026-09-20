@@ -6,6 +6,17 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+CURRENT SOURCE CHANGE (not deployed): removed packaging/native/build-waf-crs.sh.
+WAF asset evidence now inventories installed root-owned CRS files directly;
+it no longer requires the cyberpanel-waf-crs package's runtime.sha256. Root-owned
+rules updates change the recorded digest without a panel rebuild/version lock.
+Ownership/mode/symlink/hardlink checks and bounded file/byte counts remain.
+QEMU targeted tests and installed asset check pass. Live services remain signed46;
+the guest's existing custom CRS package has NOT yet been replaced. Remaining:
+remove version-specific unicode.mapping reference, support/qualify normal native
+rules configuration paths, and replace the guest package without losing policy.
+Do not resume third-party builds or claim native rules installation complete.
+
 LATEST INSTALLED: signed46 qemu-site-3.1.45, current46/rollback45. Contains core
 startup retry/PHP journal fix, UI layout, strict executor sandbox, identity/web
 recovery, vendor-service reload, permanent health probe, public/socket ACLs.
