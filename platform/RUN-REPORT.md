@@ -4758,3 +4758,24 @@ Temporary guest Vite server stopped and its two fixture files removed; ignored
 host QA harness retained. Guest5.7GiB free. No vendor builds/downloads/new workers.
 Source export-backed cancellation wiring is shared but that installed workflow
 was not separately driven. Broader recovery and full panel parity remain pending.
+
+## 2026-09-21 — verified native promotion metadata recovery
+
+Added protected promotion-verified checkpoint containing successful promotion
+proof and exact before/after native resource records, written after native SQL
+move/verification/isolated cleanup but before native resource metadata update.
+Re-entry finishes only the matching metadata transition and terminal promotion
+record under the existing writer fence. It accepts exactly before/after metadata,
+rejects drift/missing proof, and leaves unverified promoting outcomes ambiguous.
+
+QEMU Ubuntu ARM64 real MariaDB SQL/gzip round trips passed. After actual native
+promotion and isolated-schema removal, tests inject protected checkpoint states
+before/after metadata persistence then call ExecuteTransferImport. Both recover
+the identical proof and actual final resource/receipt records; native row count
+remains2. Changed metadata, absent proof, and unverified-move states reject with
+ErrAmbiguous without overwriting metadata. This simulates durable interruption
+states, not a killed-daemon/reboot test. Database/API/panel-execd suites passed
+with CYBERPANEL_QEMU_LIVE_TRANSFER=1; targeted real-native test passed after final
+assertion tightening. No downloads/dependency changes/new release or workers.
+Installed61 unchanged. Job-level reconciliation/operator recovery and earlier
+native-move crash windows remain unfinished; this does not claim full recovery.

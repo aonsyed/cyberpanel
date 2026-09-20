@@ -526,6 +526,66 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 	if err != nil || value != "0" {
 		t.Fatal("empty isolated schema retained", err)
 	}
+	// Simulate interruption on either side of native metadata persistence. The
+	// isolated schema is already gone, so a repeated RENAME would fail here.
+	committed, err := executor.loadTransferImport(job, isolated)
+	if err != nil || committed.PromotionCommit == nil {
+		t.Fatal("missing durable native commit", err)
+	}
+	for _, phase := range []string{"before-metadata", "after-metadata", "metadata-drift", "missing-proof", "unverified-move"} {
+		recovering := committed
+		recovering.State = "promotion-verified"
+		current := committed.PromotionCommit.After
+		if phase == "before-metadata" {
+			current = committed.PromotionCommit.Before
+		}
+		if phase == "metadata-drift" {
+			current.QuotaBytes++
+		}
+		if phase == "missing-proof" {
+			recovering.Promotion = nil
+		}
+		if phase == "unverified-move" {
+			recovering.State = "promoting"
+		}
+		if err = executor.writeResource("databases", live.ID, current); err != nil {
+			t.Fatal(err)
+		}
+		if err = executor.writeResource("transfer-imports", isolated.Token, recovering); err != nil {
+			t.Fatal(err)
+		}
+		recovered, recoverErr := executor.ExecuteTransferImport(ctx, request)
+		if phase == "metadata-drift" || phase == "missing-proof" || phase == "unverified-move" {
+			if !errors.Is(recoverErr, ErrAmbiguous) {
+				t.Fatal("unproven recovery accepted", phase, recoverErr)
+			}
+			var unchanged Database
+			if err = executor.readResource("databases", live.ID, &unchanged); err != nil || unchanged != current {
+				t.Fatal("recovery overwrote drift", err)
+			}
+		} else if recoverErr != nil || recovered.Promotion == nil || *recovered.Promotion != promoted {
+			t.Fatal("verified promotion recovery failed", phase, recoverErr)
+		} else {
+			var finalized Database
+			if err = executor.readResource("databases", live.ID, &finalized); err != nil || finalized != committed.PromotionCommit.After {
+				t.Fatal("promotion metadata not finalized", phase, err)
+			}
+			finalRecord, err := executor.loadTransferImport(job, isolated)
+			if err != nil || finalRecord.State != "promoted" || finalRecord.Promotion == nil || *finalRecord.Promotion != promoted {
+				t.Fatal("promotion receipt not finalized", phase, err)
+			}
+		}
+	}
+	if err = executor.writeResource("databases", live.ID, committed.PromotionCommit.After); err != nil {
+		t.Fatal(err)
+	}
+	if err = executor.writeResource("transfer-imports", isolated.Token, committed); err != nil {
+		t.Fatal(err)
+	}
+	value, err = query(ctx, "SELECT COUNT(*) FROM `"+live.Name.String()+"`.sample;")
+	if err != nil || value != "2" {
+		t.Fatal("recovery changed native rows", err)
+	}
 }
 
 type noTransferReplayExecutor struct{ MariaDBExecutor }

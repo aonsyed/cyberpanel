@@ -11,6 +11,21 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Verified native promotion recovery — 2026-09-21 (source, not deployed)
+
+Native import promotion now persists verified success and exact before/after
+database metadata before advancing the native resource generation. Re-entry at
+promotion-verified finishes only that metadata transition and durable receipt;
+it never repeats RENAME/DROP/import SQL. Exact metadata drift, missing proof, or
+an unverified promoting phase remains ambiguous and is not cleaned/retried.
+QEMU live SQL/gzip tests simulate interruption before/after metadata persistence
+after the real isolated schema was removed; native dispatcher replay returns the
+same proof, finalizes both protected records, and preserves imported rows. Full
+database/API/execd suites pass. This is a native recovery primitive, not complete
+job-level/operator crash recovery; crashes before verified-success persistence
+remain unresolved. Installed61 is unchanged. Next integration still needs job
+receipt reconciliation and installed recovery qualification.
+
 ## Current recovery point — 2026-09-21 (installed61 committed)
 
 Import status/cancellation controls are wired into upload and export-backed import

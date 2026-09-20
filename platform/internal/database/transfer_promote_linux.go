@@ -14,6 +14,44 @@ type isolatedTransferRename struct {
 	Tables   []string
 }
 
+// Written only after the native move, verification and isolated-schema cleanup
+// succeeded. Recovery can finish this exact metadata transition without SQL.
+type transferPromotionCommit struct {
+	Before Database `json:"before"`
+	After  Database `json:"after"`
+}
+
+func (executor *LinuxMariaDBExecutor) finishVerifiedTransferPromotion(record isolatedTransferRecord) (TransferPromotion, error) {
+	job, isolated := record.Job, record.Isolated
+	ambiguous := TransferPromotion{JobID: job.ID, IsolatedToken: isolated.Token, SourceDatabaseID: job.DatabaseID, SourceGeneration: job.DatabaseGeneration}
+	commit := record.PromotionCommit
+	if record.State != "promotion-verified" || commit == nil || record.Promotion == nil || record.Promotion.Validate(job, isolated) != nil || commit.Before.Validate() != nil || commit.Before.ID != job.DatabaseID || commit.Before.Generation != job.DatabaseGeneration || commit.Before.Generation == ^uint64(0) || commit.Before.TenantID != job.TenantID || commit.Before.SiteID != job.SiteID || commit.Before.InstanceID != job.InstanceID {
+		return ambiguous, ErrAmbiguous
+	}
+	expected := commit.Before
+	expected.Generation++
+	expected.Status = pendingStatus(LifecycleUpdating)
+	if commit.After != expected || record.Promotion.TargetGeneration != expected.Generation {
+		return ambiguous, ErrAmbiguous
+	}
+	var current Database
+	if err := executor.readResource("databases", job.DatabaseID, &current); err != nil {
+		return ambiguous, ErrAmbiguous
+	}
+	if current == commit.Before {
+		if err := executor.writeResource("databases", job.DatabaseID, commit.After); err != nil {
+			return ambiguous, ErrAmbiguous
+		}
+	} else if current != commit.After {
+		return ambiguous, ErrAmbiguous
+	}
+	record.State = "promoted"
+	if err := executor.writeResource("transfer-imports", record.Target.ID, record); err != nil {
+		return ambiguous, ErrAmbiguous
+	}
+	return *record.Promotion, nil
+}
+
 func transferRenameSQL(rename isolatedTransferRename) (string, error) {
 	if rename.From.Validate() != nil || rename.To.Validate() != nil || rename.From.Name == rename.To.Name || rename.From.InstanceID != rename.To.InstanceID || len(rename.Tables) == 0 || len(rename.Tables) > MaximumTransferTables {
 		return "", ErrInvalidResource
@@ -48,6 +86,15 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 	}
 	if record.State == "promoted" && record.Promotion != nil && record.Promotion.Validate(job, isolated) == nil {
 		return *record.Promotion, nil
+	}
+	if record.State == "promotion-verified" {
+		_, release, err := executor.beginWriterMutation(ctx)
+		if err != nil {
+			result.SourcePreserved = false
+			return result, ErrAmbiguous
+		}
+		defer release()
+		return executor.finishVerifiedTransferPromotion(record)
 	}
 	if record.State == "promoting" {
 		result.SourcePreserved = false
@@ -143,21 +190,20 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 	if _, err = connection.query(ctx, sqlDropDatabase, record.Target); err != nil {
 		return result, ErrAmbiguous
 	}
+	before := live
 	live.Generation++
 	live.Status = pendingStatus(LifecycleUpdating)
-	if err = executor.writeResource("databases", live.ID, live); err != nil {
-		return result, ErrAmbiguous
-	}
 	proof, _ := json.Marshal(struct {
 		Before, After TransferVerification
 		Tables        []string
 	}{verified, confirmed, tables})
 	result.TargetGeneration, result.SourcePreserved, result.Promoted = live.Generation, true, true
 	result.ProofDigest, result.CompletedAt = transferDigest(proof), executor.now().UTC()
-	record.State, record.Promotion = "promoted", &result
+	record.State, record.Promotion = "promotion-verified", &result
+	record.PromotionCommit = &transferPromotionCommit{Before: before, After: live}
 	if err = executor.writeResource("transfer-imports", record.Target.ID, record); err != nil {
 		result.SourcePreserved = false
 		return result, ErrAmbiguous
 	}
-	return result, nil
+	return executor.finishVerifiedTransferPromotion(record)
 }

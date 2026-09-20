@@ -16,13 +16,14 @@ import (
 // Root-only native building blocks. The transfer broker enforces a closed
 // command, source-artifact ownership and execution admission before dispatch.
 type isolatedTransferRecord struct {
-	Process      *TransferProcessReceipt  `json:"process,omitempty"`
-	Promotion    *TransferPromotion       `json:"promotion,omitempty"`
-	Verification *TransferVerification    `json:"verification,omitempty"`
-	Job          TransferJob              `json:"job"`
-	Target       Database                 `json:"target"`
-	Isolated     IsolatedTransferDatabase `json:"isolated"`
-	State        string                   `json:"state"`
+	PromotionCommit *transferPromotionCommit `json:"promotion_commit,omitempty"`
+	Process         *TransferProcessReceipt  `json:"process,omitempty"`
+	Promotion       *TransferPromotion       `json:"promotion,omitempty"`
+	Verification    *TransferVerification    `json:"verification,omitempty"`
+	Job             TransferJob              `json:"job"`
+	Target          Database                 `json:"target"`
+	Isolated        IsolatedTransferDatabase `json:"isolated"`
+	State           string                   `json:"state"`
 }
 
 func (executor *LinuxMariaDBExecutor) transferImportSource(job TransferJob) (Database, error) {
