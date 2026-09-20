@@ -5,6 +5,50 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Panel component assembled; rootless container isolation finding — 2026-09-20
+
+Prepared and verified signed ARM64 candidate container recipes using the existing
+test authority and the real manifest digests recorded below. n8n 2.39.8 has five
+workloads (web, worker, webhook, PostgreSQL 16.15, Redis 7.4.11), three backed-up
+volumes, private networking and secret references. Recipe digest:
+`abfa08abdaa020fb672b0e79b5f9e6686e9ee488f4dc98341b3b8efa851519ed`.
+The owner slot maps to `N8N_INSTANCE_OWNER_PASSWORD_HASH`: enrollment must provide
+bcrypt, not plaintext, per the [vendor startup contract](https://raw.githubusercontent.com/n8n-io/n8n-docs/main/docs/deploy/host-n8n/configure-n8n/user-management.md).
+The QEMU owner email/name are fixture values, not production account defaults.
+
+Hermes pins image revision `f9524d3f119c672e4a4444f56d582e7475716ba3`, rather
+than inventing a product version absent from its metadata. Recipe digest:
+`0558fa92fd5d5768fc543541cef8e8da500384cc481b506d93a1f20e6b1f4454`.
+Its UID/GID 1000 override and read-only-root startup remain untested. Both
+recipes passed the existing signature and integration-contract verifiers;
+this is not proof that their containers start or their applications work.
+
+The real assembler now completed successfully:
+`/home/harness/panel-component-2c9dfc833.tar.gz`, 355,896,982 bytes, SHA-256
+`a1b2bbf50731db717fefea757f7a28a4457c1e575da787ff9b71584993bc215b`.
+The resulting gzip integrity check passed. Inspected its complete member list
+and actual manifest: five PHP recipes, five archives, the public key, both
+container recipes and the panel executable. Catalog content digest:
+`2ee04905c3c66b0bfa3256351cdc0aef7603e6834d6fbf7a6ec17b00310bce0c`.
+The outer node-release signature/install integration is still pending; this
+component is not an installed full panel.
+
+Installed native Podman 4.9.3/Skopeo/uidmap/network helpers inside QEMU (25.3 MB
+download, 112 MB installed). Pulled only the pinned n8n ARM64 image into harness's
+rootless store and inspected its exact digest/architecture; unpacked size is
+1,216,505,242 bytes. No n8n/Hermes containers were started. Guest free space is
+now about 2.7 GiB, so the remaining image layers must not all be pulled at once.
+
+The guest kernel has AppArmor enabled with enforced profiles. Rootful Podman
+reports AppArmor true; rootless Podman reports false. A bounded `podman create`
+probe requesting a named AppArmor profile was rejected before creating the
+container. The [shipped containers/common implementation](https://raw.githubusercontent.com/containers/common/v0.57.4/pkg/apparmor/apparmor_linux.go)
+explicitly rejects named profiles in rootless mode. This is a real runtime
+limitation, not merely a missing kernel switch/profile. The panel's MAC admission
+check remains unchanged and correctly prevents claiming this tuple qualified.
+Resolving rootless mandatory-access-control enforcement is the next container
+integration step; do not replace the requirement with rootful/unconfined execution.
+
 ### Complete PHP recipe input set — 2026-09-20
 
 Prepared the four remaining signed version-2 recipes inside Ubuntu ARM64 QEMU

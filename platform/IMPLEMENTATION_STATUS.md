@@ -38,6 +38,14 @@ into fewer files does not bypass the line limits.
 
 ## Current position
 
+Latest release checkpoint (2026-09-20): the real ARM64 panel component is
+assembled from all five signed PHP inputs and signed n8n/Hermes candidate
+recipes. Outer node-release installation and full API/browser qualification
+remain pending. Native Ubuntu rootless Podman rejects AppArmor profiles despite
+kernel AppArmor being active; preserve the MAC requirement and resolve that
+runtime limitation before declaring container integration operational. Exact
+artifact hashes, evidence and remaining limits are in `RUN-REPORT.md`.
+
 Latest executable verification is recorded in `RUN-REPORT.md`: the current
 application database/TLS changes passed the full uncached Go suite in Ubuntu
 ARM64 QEMU. Revision `458fd7876` then passed offline module verification,
