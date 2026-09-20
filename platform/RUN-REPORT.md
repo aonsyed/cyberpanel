@@ -5,6 +5,55 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native WAF dependency repair — 2026-09-20
+
+Added offline QEMU-only native package recipes under `packaging/native/`.
+They accept pinned source archives, refuse existing output packages, and remove
+temporary extracted sources/objects on exit. Module build retains diagnostic
+logs only; CRS package embeds recursive runtime SHA256 evidence and verified
+upstream signature status. No generated packages or test artifacts enter Git.
+
+Ubuntu ARM64 QEMU built and installed (native prerequisites, not a signed panel
+release):
+
+- `ols-modsecurity` `1.9.2-1+noble+cpmodsec3.0.16`, package SHA256
+  `0fcf2dc59e83de826f40ba566d8379a8a420abbf2e1990f1e0c8b6ba889fa9e1`.
+  OLS connector from upstream v1.9.2 commit
+  `bcd05f4048226cbd0adc75ce6b825527ffe4b6e5`; ModSecurity 3.0.16 source SHA256
+  `739be3c71b1939f14e91afe1eeae654acbd440da11bd29790458840bc315b4c0`.
+  The old vendor C++11 recipe fails against 3.0.16 headers; C++17 with the same
+  old libstdc++ ABI builds successfully. XML, JSON/YAJL and PCRE2 enabled;
+  remote rule loading, Lua, GeoIP, ssdeep and LMDB not compiled in.
+- `cyberpanel-waf-crs` `4.29.0-1`, package SHA256
+  `9c4132cc1ba5ddcc53bc68d49da0d51310fc05059bb9ebff9c1a5bc091bc9748`.
+  Full upstream minimal-runtime archive SHA256
+  `1aa1c5c8fc29e532d35293bcea36bf72de61db8f6ed4716a0f91ab14552b7fed`;
+  detached signature verified against pinned fingerprint
+  `36006F0E0BA167832158821138EEACA1AB8A6E72` in an isolated keyring.
+  All rule/data files retained, not an empty or reduced ruleset.
+
+Actual native `modsec-rules-check` 3.0.16 loads **840 rules** from installed
+`/usr/share/modsecurity-crs/owasp-crs.load` successfully. Installed recursive
+runtime manifest verification and `dpkg --audit` pass. Native OLS parser loads
+the rebuilt module, then remains RED for the genuinely absent managed WAF policy
+`/usr/local/lsws/conf/modsec/cyberpanel.conf`. No live WAF/HTTP protection claim:
+body-processing policy provisioning, positive/negative request fixtures, signed
+release/catalog inclusion, and remaining platform matrix still required.
+OLS stays held inactive; no bootstrap journal or live master was reset.
+
+Upstream security rationale: [ModSecurity 3.0.16](https://github.com/owasp-modsecurity/ModSecurity/releases/tag/v3.0.16)
+fixes request-parser issues present in the vendor module's embedded 3.0.15;
+[CRS July security release](https://coreruleset.org/20260702/crs-versions-4.28.0-4.25.1-lts-and-3.3.10-released/)
+supersedes Ubuntu's older CRS. Downloads were native prerequisites only, no OS
+or Go images. Guest inputs/packages/logs live in
+`/home/harness/waf-prerequisites-20260920`; parser utility retained at
+`/home/harness/bin/modsec-rules-check-3.0.16`.
+Both final recipes completed from fresh temporary directories in QEMU; those
+directories were absent afterward. Removed the initial 176 MiB debugging
+workspaces and duplicate package outputs, keeping the archives, final packages
+and logs. Guest free space 6.4 GiB. CRS rebuild is byte-identical; module builds
+are not claimed bit-reproducible (the final recipe's package hash is above).
+
 ### Native worker identity and config authority candidate — 2026-09-20
 
 Both edition renderers now emit dedicated `cyberpanel-web` user/group,

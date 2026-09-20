@@ -4,6 +4,17 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Newest native prerequisite checkpoint (2026-09-20): QEMU Ubuntu ARM64 now has
+OLS connector rebuilt against fixed ModSecurity 3.0.16 and complete signed-
+upstream CRS 4.29.0. Offline package recipes added; native rule checker loads
+840 rules and installed recursive hash checks pass. OLS parser loads the new
+module but still fails absent initial managed WAF policy. These prerequisites
+are NOT yet included in signed release/catalog (installed panel remains 37).
+Next: real WAF body-processing/bootstrap policy, native benign/attack fixtures,
+then signed prerequisite inclusion alongside the earlier bootstrap work below.
+Keep fixed source archives and small packages outside Git; recipes automatically
+clean extracted sources/objects. No new OS/Go image downloads.
+
 Newest source candidate (2026-09-20): dedicated web worker identity, required
 MIME/error/access logging in both renderers, root-owned system static roots,
 read-only native config mounts and isolated stopped-process observer implemented.
