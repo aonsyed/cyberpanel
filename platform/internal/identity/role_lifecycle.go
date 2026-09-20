@@ -548,6 +548,9 @@ func invalidateRoleSubjectsTx(ctx context.Context, tx *sql.Tx, roleID ID, now ti
 
 func invalidateRoleSubjectTx(ctx context.Context, tx *sql.Tx, subjectID ID, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE identity_principals SET authz_epoch=authz_epoch+1,generation=generation+1,updated_at=? WHERE id=?`, now, subjectID); err != nil { return err }
+	// Reusable human credentials authenticate a fresh session under the new
+	// authority. Existing sessions and scoped API keys retain the stale epoch.
+	if _, err := tx.ExecContext(ctx, `UPDATE identity_credentials SET authz_epoch=(SELECT authz_epoch FROM identity_principals WHERE id=?) WHERE principal_id=? AND kind<>'api_key' AND state='active'`, subjectID, subjectID); err != nil { return err }
 	if _, err := tx.ExecContext(ctx, `UPDATE identity_service_principals SET authz_epoch=authz_epoch+1,generation=generation+1,updated_at=? WHERE principal_id=? AND state<>'deleted'`, now, subjectID); err != nil { return err }
 	_, err := tx.ExecContext(ctx, `UPDATE identity_human_users SET authz_epoch=(SELECT authz_epoch FROM identity_principals WHERE id=?),revision=revision+1,updated_at=? WHERE identity_id=? AND state IN ('active','suspended')`, subjectID, now, subjectID)
 	return err

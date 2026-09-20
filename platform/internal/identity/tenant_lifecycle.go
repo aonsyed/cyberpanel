@@ -499,6 +499,12 @@ func (s *Service) CreateManagedTenant(ctx context.Context, command CreateManaged
 	now := s.clock().UTC()
 	policy := TenantDelegationPolicy{DelegationID:command.DelegationID,Permissions:permissions,Selectors:selectors,Quota:command.Quota,MaximumChildDepth:command.MaximumChildDepth,MaximumChildCount:command.MaximumChildCount,AllowServicePrincipals:command.AllowServicePrincipals,AllowRoleBindings:command.AllowRoleBindings,ValidUntil:command.ValidUntil,PlanCeilingID:command.PlanReferenceID,Provenance:appendTenantProvenance(actorProvenance, command.DelegationID)}
 	digestValue := tenantDigest(struct{ Command CreateManagedTenantCommand; Policy TenantDelegationPolicy }{command,policy})
+	// Persist the intent before taking the control database's write lock: the
+	// authoritative audit index shares that database. An intent is not an applied
+	// change; all admission checks and tenant writes still occur atomically below.
+	// Each attempt has its own event ID so retries do not collide on timestamps.
+	auditID := tenantDigest(struct{ Digest string; At time.Time }{digestValue, now})
+	if err = s.audit.Record(ctx, AuditEvent{ID:auditID, ActorID:command.Actor.PrincipalID, TenantID:command.TenantID, Action:"tenant.create", TargetKind:"tenant", TargetID:command.TenantID, Outcome:"prepared", RequestHash:digestValue, At:now}); err != nil { return ManagedTenant{}, err }
 	tx, err := s.store.db.BeginTx(ctx, &sql.TxOptions{Isolation:sql.LevelSerializable}); if err != nil { return ManagedTenant{}, err }; defer tx.Rollback()
 	if replayID, replay, reserveErr := tenantCommandTx(ctx, tx, command.CommandID, digestValue, command.Actor.PrincipalID, command.ParentTenantID); reserveErr != nil { return ManagedTenant{}, reserveErr } else if replay { tx.Rollback(); return s.store.ManagedTenant(ctx, replayID) }
 	parent, err := tenantTx(ctx, tx, command.ParentTenantID); if err != nil { return ManagedTenant{}, err }; if parent.State != TenantActive { return ManagedTenant{}, ErrSuspended }
@@ -525,7 +531,6 @@ func (s *Service) CreateManagedTenant(ctx context.Context, command CreateManaged
 	if err = insertManagedBindingTx(ctx, tx, managerBinding); err == nil { err = invalidateRoleSubjectTx(ctx, tx, managerBinding.SubjectID, now) }; if err == nil { err = insertTenantLifecycleTx(ctx, tx, value) }; if err == nil { err = recordDelegationRevisionTx(ctx, tx, value, command.Actor.PrincipalID, now) }; if err != nil { return ManagedTenant{}, err }
 	// Subject invalidation may have advanced the manager's principal epoch; the
 	// tenant epoch is independent and remains the value admitted above.
-	if err = s.auditTenantMutation(ctx, command.Actor.PrincipalID, "tenant.create", value, command.CommandID, nil, value); err != nil { return ManagedTenant{}, err }
 	if err = completeTenantCommandTx(ctx, tx, command.CommandID, value.ID, now); err != nil { return ManagedTenant{}, err }
 	if err = tx.Commit(); err != nil { return ManagedTenant{}, err }
 	return value, nil

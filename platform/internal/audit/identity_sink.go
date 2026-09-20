@@ -22,6 +22,8 @@ func (sink IdentitySink) Record(ctx context.Context, source identity.AuditEvent)
 	}
 	outcome := OutcomeFailed
 	switch strings.ToLower(source.Outcome) {
+	case "prepared":
+		outcome = OutcomePrepared
 	case "applied", "allowed", "success":
 		outcome = OutcomeApplied
 	case "denied", "forbidden":

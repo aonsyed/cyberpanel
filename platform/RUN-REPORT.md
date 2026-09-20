@@ -5,6 +5,45 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Managed customer creation and reauthentication — 2026-09-20
+
+Tenant creation503 traced to the real audit boundary. A small identity-only test
+passed; adding a SQL-writing audit sink on the same single-connection database
+reproduced a deadline. The real audit adapter separately rejected `prepared`.
+Prepared is now an explicit audit outcome, not an applied event. Creation writes
+its durable intent before opening the control transaction, retaining transactional
+quota, ownership, delegation, membership and tenant writes. Unique attempt event
+IDs avoid timestamp conflicts between retry intents. Audit failure prevents any
+tenant mutation; quota failure leaves no tenant. Other lifecycle audit placements
+are not qualified by this fix.
+
+Regression additionally caught manager role assignment leaving reusable credentials
+on the old authz epoch. Active non-API credentials now follow the new principal
+epoch; old sessions and API credentials remain stale. Tests verify this distinction.
+Offline QEMU identity/audit/apiserver/authn suites passed uncached, and core rebuilt.
+
+Signed45 qemu-tenant-3.1.44 contains these changes AND the previous client-data fix:
+bundle `a0026d61bc6e05d3bdcb408749244013e598704fe1a1b7c4911f029381b5ee8c`,
+manifest `dfa1fd84c73162386b1fe7791055cb743a7c1e034b87b91f4a4cc93f4763d6dc`,
+receipt `1750a69b49a3b34a9d64e34cd7d88e61c073c803497e51164d8b07fe675580a8`.
+Existing manual install reconciliation remains necessary. Removed temporary authd
+override; native authd/core now run installed45. Gateway keeps only the local HTTPS
+test fixture. Actual Chromium passkey assertion including its extra member returned
+200/assurance3. Actual UI tenant create returned201; subsequent401 reflected the
+expected authority-change session invalidation. Fresh password and passkey login
+both returned200, and the created customer was visible in Users & tenants. Read-only
+SQLite inspection confirmed active customer and `tenant.create` prepared audit row.
+
+Next site-create browser attempt was blocked before submission: fixed sidebar
+intercepts the button because shell-main auto-occupies the sidebar grid column.
+No site-create API request was sent and no site creation success is claimed.
+
+Archived obsolete41/42 outside Git, validated gzip and both release manifests,
+then removed exact directories under installer lock after active/rollback and
+process-map checks. Recoverable archive `.work/qemu/obsolete-releases-41-42.tar.gz`.
+Removed redundant44 bundle and candidate executables after45 installed; retained
+installed45/rollback44. Guest2.2GiB free, host229GiB. No downloads/vendor source builds.
+
 ### HTTPS passkeys and first real tenant-create attempt — 2026-09-20
 
 QEMU reproduced rejection of HTTPS8090 and configured localhost by `webAuthnRP`.

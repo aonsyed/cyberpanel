@@ -6,6 +6,31 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest: signed45 qemu-tenant-3.1.44 installed; current45/rollback44. Tenant create
+503 reproduced as unsupported audit `prepared` outcome and audit SQL write while
+holding the same DB transaction. Creation now durably records a PREPARED intent
+before opening its mutation transaction; quota/ownership checks and changes remain
+atomic. Intents are not reported applied. Other lifecycle precommit audit calls
+still require qualification; do not claim all identity mutations repaired.
+Role assignment also left reusable credentials on stale authz epochs; now advances
+active non-API credentials while leaving old sessions/API keys invalidated.
+QEMU tests cover shared single-connection DB, failed audit, quota rejection,
+persisted tenant, reusable credential epoch, stale session and unchanged API epoch.
+ACTUAL browser tenant create201, fresh password/passkey login200 (including
+Chromium extension), customer visible afterward. DB confirms active customer and
+prepared audit projection. Guest fixture /home/harness/qemu-created-tenant.json.
+DO NOT repeat --tenant: use qemu-passkey.cjs --verify-tenant for read-only verification.
+Verifier is now installed45; temporary authd override/candidate REMOVED. Only gateway
+localhost HTTPS fixture override remains; core/authd/OLS use installed paths.
+Next: site creation blocked BEFORE submission by desktop UI layout. Fixed-position
+Sidebar occupies no grid cell, so AppShell .shell-main auto-places in column1 and
+sidebar intercepts Create site. Fix grid-column placement, test actual QEMU browser
+desktop/collapsed/mobile, then continue qemu-passkey.cjs --site. No site created.
+Obsolete41/42 archived to ignored .work/qemu/obsolete-releases-41-42.tar.gz, gzip and
+both manifests verified, then removed under installer lock with process-map checks.
+Redundant44 tar and candidate executables removed. Guest2.2GiB free, host229GiB;
+reclaim obsolete artifacts before next full bundle. QEMU signing maximum45.
+
 Latest authentication checkpoint: signed44 qemu-passkey-3.1.43 installed, previous43
 retained. HTTPS port/RP fix deployed in core. Actual Chromium WebAuthn enrollment
 returned201/200. Repeated login exposed strict client-data parsing: Chromium's
