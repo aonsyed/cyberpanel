@@ -850,6 +850,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		MaintenanceWindows:          maintenanceWindows,
 		RebootControl:               rebootControlEdge,
 		MailControl:                 mailCoordinator,
+		MailboxPasswords: &mailboxPasswordEnrollment{store:mailCoordinator.Store,broker:secretEnrollment.client,release:databaseConsumerDigest,slots:make(chan struct{},2)},
 		MailQueue:                   mailClient,
 		MailEdge:                    mailConsoleEdge,
 		Webmail:                     webmailService,

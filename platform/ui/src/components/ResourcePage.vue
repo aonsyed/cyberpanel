@@ -6,6 +6,7 @@ import type { ActionDefinition, PageDefinition } from "../domain";
 import { sessionStore } from "../store";
 import ActionDrawer from "./ActionDrawer.vue";
 import MailDomainCreate from "./MailDomainCreate.vue";
+import MailboxCreate from "./MailboxCreate.vue";
 import DatabaseConsole from "./DatabaseConsole.vue";
 import DatabaseUploadImport from "./DatabaseUploadImport.vue";
 import DataTable from "./DataTable.vue";
@@ -131,6 +132,7 @@ function isRecord(value: unknown): value is Record<string, unknown> { return Boo
     <DatabaseConsole v-if="activeAction?.operation === 'database.console.issue' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null"/>
     <DatabaseUploadImport v-else-if="activeAction?.operation === 'database.upload.begin' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null" @complete="complete"/>
     <MailDomainCreate v-else-if="activeAction?.operation === 'mail.domain.create'" :tenant-id="activeTenantID" @close="activeAction=null;activeResource=null" @complete="complete"/>
+    <MailboxCreate v-else-if="activeAction?.operation === 'mail.mailbox.create' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null" @complete="complete"/>
     <ActionDrawer v-else-if="activeAction" :action="activeAction" :tenant-id="activeTenantID" :resource="activeResource" :expected-generation="Number(activeResource?.generation || 0)" @close="activeAction=null;activeResource=null" @complete="complete"/>
   </main>
 </template>

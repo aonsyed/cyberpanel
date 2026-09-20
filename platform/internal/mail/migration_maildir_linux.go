@@ -349,30 +349,27 @@ func (host *LinuxMailHost) mailboxArtifacts(ctx context.Context, snapshot Config
 			if err != nil {
 				return nil, err
 			}
-			// Ordinary generations require the already-published tenant Maildir.
+			hash, err := resolver.ResolveMailboxHash(ctx, projection.Domain.Tenant, projection.Domain.ID, mailbox.ID, mailbox.CredentialRef)
+			if err != nil {
+				return nil, err
+			}
+			// Ordinary generations provision an empty site-owned Maildir after
+			// credential validation. Existing data is checked, never overwritten.
 			// A reserved migration generation is rendered while its exact Maildir
 			// is still dark; its publisher verifies and moves that owned tree before
 			// this candidate can become current.
 			if !projection.Domain.StaticRoutes {
 				root, err := openMailProductRoot()
 				if err != nil {
+					wipeMailBytes(hash)
 					return nil, err
 				}
-				fd, err := mailOpenAt(root, "mailboxes/"+projection.Domain.Name+"/"+mailbox.Local+"/Maildir", syscall.O_RDONLY|syscall.O_DIRECTORY, 0, false)
+				err = ensureOrdinaryMaildir(root, projection.Domain.Name, mailbox.Local, identity)
 				syscall.Close(root)
 				if err != nil {
+					wipeMailBytes(hash)
 					return nil, err
 				}
-				var stat syscall.Stat_t
-				statErr := syscall.Fstat(fd, &stat)
-				syscall.Close(fd)
-				if statErr != nil || stat.Uid != identity.UID || stat.Gid != identity.GID || stat.Mode&0077 != 0 {
-					return nil, ErrUnauthorized
-				}
-			}
-			hash, err := resolver.ResolveMailboxHash(ctx, projection.Domain.Tenant, projection.Domain.ID, mailbox.ID, mailbox.CredentialRef)
-			if err != nil {
-				return nil, err
 			}
 			fmt.Fprintf(&users, "%s:%s:%d:%d::/var/lib/cyberpanel/mailboxes/%s/%s::userdb_quota_rule=*:storage=%dB\n", address, hash, identity.UID, identity.GID, projection.Domain.Name, mailbox.Local, mailbox.QuotaBytes)
 			wipeMailBytes(hash)

@@ -189,6 +189,7 @@ type DomainServices struct {
 	Mail *mail.Service
 	MailDelivery *maildelivery.Service
 	MailControl *mail.Coordinator
+	MailboxPasswords MailboxPasswordEnrollment
 	MailQueue mail.QueueRuntime
 	Webmail *mail.WebmailService
 	MailSessions *mail.MailSessionAuthority

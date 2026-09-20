@@ -311,6 +311,7 @@ type WebmailSendResult struct {
 func registerMailContracts(registry *Registry) error {
 	manage := identity.MustPermission("mail:manage")
 	definitions := []Operation{
+		{Name:"mail.mailbox.password.enroll",Permission:manage,Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,MaximumBodyBytes:4096,NewPayload:func()any{return &MailboxPasswordPayload{}},ValidatePayload:validateMailboxPassword,ResolveScope:mailExistingScope},
 		{Name: "mail.domain.list", Permission: manage, Assurance: identity.AssurancePassword, Auth: AuthRequired, NewPayload: func() any { return &MailPagePayload{} }, ValidatePayload: validateMailPage, ResolveScope: mailListScope},
 		{Name: "mail.domain.get", Permission: manage, Assurance: identity.AssurancePassword, Auth: AuthRequired, NewPayload: func() any { return &EmptyPayload{} }, ResolveScope: mailGetScope},
 		{Name: "mail.domain.create", Permission: manage, Assurance: identity.AssuranceMFA, Auth: AuthRequired, Mutating: true, NewPayload: func() any { return &MailDomainPayload{} }, ValidatePayload: validateMailDomain, ResolveScope: mailCreateScope},
@@ -860,6 +861,7 @@ func safeCompose(message mail.ComposeMessage) bool {
 }
 
 func bindMail(registry *Registry, services DomainServices) error {
+	if err:=bindMailboxPassword(registry,services.MailboxPasswords);err!=nil{return err}
 	if services.MailControl != nil && services.MailControl.Store != nil {
 		for name, kind := range map[string]mail.ResourceKind{"mail.domain.list": mail.ResourceDomain, "mail.mailbox.list": mail.ResourceMailbox, "mail.alias.list": mail.ResourceAlias, "mail.policy.list": mail.ResourcePolicy} {
 			name, kind := name, kind

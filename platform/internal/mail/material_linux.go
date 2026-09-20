@@ -271,7 +271,7 @@ func (resolver *LocalMailMaterialResolver) ResolveMailboxHash(ctx context.Contex
 	response, err := resolver.client.Read(ctx, secrets.MaterialRequest{SecretID: identifier, OwnerTenantID: mailMaterialID("mailtenant", tenant),
 		Purpose: secrets.PurposeAuthentication, Operation: secrets.OperationAuthenticate, AdapterID: MailboxCredentialAdapterID, AdapterVersion: MailboxCredentialAdapterVersion,
 		ResourceID: mailMaterialID("mailboxaudience", tenant, string(domain), string(mailbox))})
-	if err != nil || ValidateMailboxCredentialHash(response.Material) != nil {
+	if err != nil || ValidateMailboxCredentialHash(response.Material) != nil && ValidateMailboxPasswordHash(response.Material) != nil {
 		wipeMailBytes(response.Material)
 		return nil, ErrUnauthorized
 	}
