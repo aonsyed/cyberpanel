@@ -13,6 +13,16 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Ordinary SQL import format follow-up (source, not installed): native backend no
+longer requires our private export comment. All SQL still passes the constrained
+reader; optional initial UTF-8 BOM is consumed without bypassing byte/digest
+accounting. Actual QEMU SQL/gzip native dumps without the custom header, with and
+without BOM, reconstruct expected NULL/text/binary rows through the target-only
+account. Those four cases failed before the change and now pass, alongside the
+full database/execd suites. This is format support only: upload/API/UI, production
+isolated import credentials/catalog/verification/promotion and unrestricted dump
+object coverage remain unfinished. Separate migrator preamble rules unchanged.
+
 Import safety follow-up (source, not installed): SQL stream validation now checks
 MariaDB `/*M! ... */` executable comments as well as MySQL comments and rejects
 unquoted client escapes. Import subprocess disables client commands and local

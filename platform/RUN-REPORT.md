@@ -5,6 +5,29 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Ordinary single-database SQL import format — source, 2026-09-20
+
+Removed mandatory CyberPanel export-comment check from the transfer import
+backend. SQL is validated statement by statement regardless of provenance;
+optional leading UTF-8 BOM is consumed after digest/decompression accounting.
+Byte/time bounds, source descriptor/hash checks, constrained reader and native
+client safety flags remain intact. Separate migrator canonical-preamble parsing
+is unchanged; this does not authorize cross-database or unsupported object SQL.
+
+Extended actual QEMU MariaDB round-trip fixture: remove only the private comment
+from a genuine native dump, publish a correctly described private artifact, then
+import plain and gzip versions both with and without a BOM through the target-only
+account. All four variants failed `invalid database transfer` before the change.
+Afterward all pass, verify complete input digest, and query back the exact two
+rows with expected text/NULL/binary values. Generated variant artifacts are removed
+by exact paths; original fixture cleanup removes its SQL account/config/databases.
+QEMU offline/root `go test -p 2 ./internal/database ./cmd/panel-execd -count=1`
+with live native transfer enabled exits0 for both packages.
+
+Installed54 remains unchanged. This closes the private-header format restriction,
+not production upload/API/UI delivery, isolated import credentials/catalog,
+promotion or full object support (views/routines/triggers/events remain limited).
+
 ### Import SQL/client boundary hardening — source, 2026-09-20
 
 QEMU regression first reproduced acceptance of a MariaDB executable-comment

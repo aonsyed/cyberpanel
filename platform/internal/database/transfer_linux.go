@@ -174,8 +174,12 @@ func (backend *LinuxTransferBackend) Import(ctx context.Context, job TransferJob
 	}
 	decompressed := newTransferBoundedReader(sqlStream, job.Limits.MaximumBytes)
 	sqlBuffered := bufio.NewReaderSize(decompressed, 64<<10)
-	header, headerErr := sqlBuffered.ReadSlice('\n')
-	if headerErr != nil || string(header) != transferSQLMagic { return transferInputFailure(job, backend.now, verifiedInput, nil), ErrTransferInvalid }
+	// Ordinary single-database SQL dumps do not carry our export comment. It
+	// is not an authorization boundary: validate every statement regardless
+	// of provenance. A UTF-8 BOM is an encoding marker, not SQL or identity.
+	if prefix, _ := sqlBuffered.Peek(3); bytes.Equal(prefix, []byte{0xef, 0xbb, 0xbf}) {
+		_, _ = sqlBuffered.Discard(3)
+	}
 	lastSafeBytes := uint64(0)
 	constrained := newConstrainedTransferSQLReader(sqlBuffered, func() error {
 		if verifiedInput.count-lastSafeBytes < transferCheckpointBytes { return nil }

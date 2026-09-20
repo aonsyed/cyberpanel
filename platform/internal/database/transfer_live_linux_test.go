@@ -3,10 +3,13 @@
 package database
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -232,6 +235,96 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			got, err := query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+target.String()+"`.sample ORDER BY id;")
 			if err != nil || got != "1:transfer round trip:0001FF\n2:NULL:NULL" {
 				t.Fatalf("round trip contents differ: %q %v", got, err)
+			}
+			verifyOrdinaryNativeImports(t, ctx, store, backend, job, target, query)
+		})
+	}
+}
+
+func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *LinuxTransferArtifactStore, backend *LinuxTransferBackend, job TransferJob, target SQLIdentifier, query func(context.Context, string) (string, error)) {
+	t.Helper()
+	reader, err := store.OpenTransferArtifact(ctx, job.Source.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input io.Reader = reader
+	if job.Compression == TransferCompressionGzip {
+		compressed, err := gzip.NewReader(reader)
+		if err != nil {
+			reader.Close()
+			t.Fatal(err)
+		}
+		defer compressed.Close()
+		input = compressed
+	}
+	raw, err := io.ReadAll(io.LimitReader(input, 1<<20))
+	reader.Close()
+	if err != nil || !bytes.HasPrefix(raw, []byte(transferSQLMagic)) {
+		t.Fatal("invalid native dump fixture", err)
+	}
+	raw = bytes.TrimPrefix(raw, []byte(transferSQLMagic))
+	for _, bom := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ordinary", true: "utf8-bom"}[bom], func(t *testing.T) {
+			plain := append([]byte(nil), raw...)
+			if bom {
+				plain = append([]byte{0xef, 0xbb, 0xbf}, plain...)
+			}
+			data := plain
+			if job.Compression == TransferCompressionGzip {
+				var buffer bytes.Buffer
+				compressed := gzip.NewWriter(&buffer)
+				if _, err := compressed.Write(plain); err != nil {
+					t.Fatal(err)
+				}
+				if err := compressed.Close(); err != nil {
+					t.Fatal(err)
+				}
+				data = buffer.Bytes()
+			}
+			identity := job.Source.Identity
+			identity.Generation += 10
+			if bom {
+				identity.Generation++
+			}
+			writer, err := store.BeginTransferArtifact(ctx, identity, job.Format, job.Compression, job.Retention)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Abort(context.Background())
+			path, _ := store.artifactPath(identity)
+			t.Cleanup(func() {
+				for _, name := range []string{"payload", "descriptor.json"} {
+					if err := os.Remove(filepath.Join(path, name)); err != nil && !os.IsNotExist(err) {
+						t.Error(err)
+					}
+				}
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					t.Error(err)
+				}
+			})
+			if _, err = writer.Write(data); err != nil {
+				t.Fatal(err)
+			}
+			descriptor, err := writer.Commit(ctx, transferDigest(data), uint64(len(data)), job.Source.Rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			variant := job
+			variant.Source = &descriptor
+			variant, err = SealTransferJob(variant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = query(ctx, "DROP TABLE IF EXISTS `"+target.String()+"`.sample;"); err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := backend.Import(ctx, variant, target, func(TransferStreamProgress) error { return nil })
+			if err != nil || receipt.Partial || !receipt.InputVerified {
+				t.Fatalf("ordinary native import: %v", err)
+			}
+			got, err := query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+target.String()+"`.sample ORDER BY id;")
+			if err != nil || got != "1:transfer round trip:0001FF\n2:NULL:NULL" {
+				t.Fatal("ordinary import contents differ", err)
 			}
 		})
 	}
