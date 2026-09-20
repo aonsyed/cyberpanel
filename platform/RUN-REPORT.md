@@ -5,6 +5,29 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Container privilege-drop group leak fixed — 2026-09-20
+
+While integrating the inherited-confinement path, found that the native
+container runner set `NoSetGroups: true` when changing UID/GID. A real root-QEMU
+child-process regression confirmed that this preserved the supervisor's root
+group: assigned groups 1000 and 1001 produced `1000 0` and `1001 0` respectively.
+The runner now clears supplementary groups before changing UID/GID.
+
+The same real-process tests now return only the assigned group in both cases.
+Process construction is factored into one private helper used by the native
+runner; its public executable allowlist still accepts only Podman/Skopeo, and
+a negative regression confirms that the test's `/usr/bin/id` probe was not
+added to that allowlist. No new broker operation or arbitrary command entry
+point was added.
+
+`TestQEMUContainerRunnerUsesRootlessPodman` also ran the actual installed Podman
+through the corrected native runner and verified its rootless result (0.18 s).
+The uncached containers/integrations suites and `cmd/cyberpanel` build passed
+inside Ubuntu ARM64 QEMU. This proves credential dropping and native startup,
+not production MAC policy integration or complete container lifecycle behavior.
+The already assembled `panel-component-2c9dfc833.tar.gz` predates this fix and
+must be rebuilt before it is promoted as a current release.
+
 ### Rootless AppArmor inheritance mechanism verified — 2026-09-20
 
 Checked current upstream containers/common as well as the shipped version:

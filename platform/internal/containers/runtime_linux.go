@@ -52,7 +52,22 @@ func DefaultLinuxContainerConfig(material *secrets.MaterialClient)(LinuxContaine
 type LinuxContainerInvocation struct{Path string;Arguments []string;Environment []string;Input []byte;Directory string;UID,GID uint32;OutputLimit int}
 type LinuxContainerCommandRunner interface{Run(context.Context,LinuxContainerInvocation)([]byte,int,error)}
 type NativeLinuxContainerCommandRunner struct{}
-func(NativeLinuxContainerCommandRunner)Run(ctx context.Context,invocation LinuxContainerInvocation)([]byte,int,error){if ctx==nil||(invocation.Path!="/usr/bin/podman"&&invocation.Path!="/usr/bin/skopeo")||invocation.OutputLimit<=0||invocation.OutputLimit>16<<20{return nil,-1,ErrInvalid};command:=exec.CommandContext(ctx,invocation.Path,invocation.Arguments...);command.Env=append([]string{"PATH=/usr/bin:/bin","LANG=C.UTF-8","LC_ALL=C.UTF-8"},invocation.Environment...);command.Dir=invocation.Directory;if command.Dir==""{command.Dir="/"};if invocation.UID!=0{command.SysProcAttr=&syscall.SysProcAttr{Credential:&syscall.Credential{Uid:invocation.UID,Gid:invocation.GID,NoSetGroups:true}}};if invocation.Input!=nil{command.Stdin=bytes.NewReader(invocation.Input)};output:=&limitedContainerOutput{limit:invocation.OutputLimit};command.Stdout=output;command.Stderr=output;err:=command.Run();exitCode:=0;if err!=nil{exitCode=-1;if value,ok:=err.(*exec.ExitError);ok{exitCode=value.ExitCode()}};if output.overflow{return output.Bytes(),exitCode,errors.Join(ErrAmbiguous,err)};if err!=nil{return output.Bytes(),exitCode,fmt.Errorf("container runtime operation failed: %w",err)};return output.Bytes(),exitCode,nil}
+func(NativeLinuxContainerCommandRunner)Run(ctx context.Context,invocation LinuxContainerInvocation)([]byte,int,error){if ctx==nil||(invocation.Path!="/usr/bin/podman"&&invocation.Path!="/usr/bin/skopeo")||invocation.OutputLimit<=0||invocation.OutputLimit>16<<20{return nil,-1,ErrInvalid};command:=nativeLinuxContainerCommand(ctx,invocation);output:=&limitedContainerOutput{limit:invocation.OutputLimit};command.Stdout=output;command.Stderr=output;err:=command.Run();exitCode:=0;if err!=nil{exitCode=-1;if value,ok:=err.(*exec.ExitError);ok{exitCode=value.ExitCode()}};if output.overflow{return output.Bytes(),exitCode,errors.Join(ErrAmbiguous,err)};if err!=nil{return output.Bytes(),exitCode,fmt.Errorf("container runtime operation failed: %w",err)};return output.Bytes(),exitCode,nil}
+
+// The caller admits the executable before constructing its process boundary.
+func nativeLinuxContainerCommand(ctx context.Context, invocation LinuxContainerInvocation) *exec.Cmd {
+	command := exec.CommandContext(ctx, invocation.Path, invocation.Arguments...)
+	command.Env = append([]string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}, invocation.Environment...)
+	command.Dir = invocation.Directory
+	if command.Dir == "" { command.Dir = "/" }
+	if invocation.UID != 0 {
+		// Clear supplementary groups before dropping UID/GID; retaining the
+		// supervisor's groups would preserve unrelated host access.
+		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: invocation.UID, Gid: invocation.GID}}
+	}
+	if invocation.Input != nil { command.Stdin = bytes.NewReader(invocation.Input) }
+	return command
+}
 
 type limitedContainerOutput struct{buffer bytes.Buffer;limit int;overflow bool}
 func(output *limitedContainerOutput)Write(content []byte)(int,error){original:=len(content);remaining:=output.limit-output.buffer.Len();if remaining>0{if len(content)>remaining{content=content[:remaining]};_,_=output.buffer.Write(content)};if original>remaining{output.overflow=true};return original,nil}
