@@ -6,6 +6,49 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+LATEST INSTALLED: signed46 qemu-site-3.1.45, current46/rollback45. Contains core
+startup retry/PHP journal fix, UI layout, strict executor sandbox, identity/web
+recovery, vendor-service reload, permanent health probe, public/socket ACLs.
+Manifest86dd65bef7da361ea0b379448f5db58561d2118d59668069492801a25d9b86f0;
+receipt84022b6ceb4a30a215df9a93034cb5f22f4c27f218a8496a9b549541b5073cf5.
+Core/executor use installed binaries; executor candidate/strict/diagnostic overrides
+removed and three unused candidate binaries deleted after process-map checks.
+Gateway localhost HTTPS fixture remains. Existing g2 pool retains runtime drop-in
+99-qemu-web-access.conf, now invoking INSTALLED panel-execd helper. Fresh provision
+must prove generated unit needs no drop-in. Installed UI real browser login/passkey,
+site list,1280/1920/1024/collapsed/390 mobile checks PASS. No candidate static routing.
+Unattended upgrade still NOT qualified: needed byte-identical WAF ownership repair,
+mail service start and exact ClamAV config metadata repair. I invoked the existing
+non-executable mail-restore script without sh; it did not run, while installer
+continued and committed. Package installation changed only sealed clamd.conf mode
+0440->0644/GID112->0; content hash unchanged. Restored manifest metadata under hash
+guard; all mail artifact metadata/hash checks clean, core readiness restored.
+Temporary mail diagnostic logging removed from source and guest. Next automate
+upgrade conffile protection/reconciliation and test fresh site create/upload/restore.
+Obsolete31/32/33/43 archived to ignored host obsolete-releases-31-33-43.tar.gz;
+gzip and manifests verified, exact guest roots removed under lock/map checks.
+Current/rollback retained. Guest2.7GiB free after bundle install; bundle46 retained.
+
+Latest PHP SERVING checkpoint: actual tenant PHP returns200/expected output, also
+after native LSAPI pool restart. Application-created static file returns200 too.
+Fixed public-tree access using named cyberpanel-web ACLs: traverse generation/
+releases/current/shared; read/traverse plus default inheritance only public/uploads.
+Private/session/config trees untouched; QEMU subprocess tests prove web cannot
+read private data and unrelated tenant UID cannot read public/private data.
+LSAPI socket helper runs as owning site account (NOT root), checks fixed identity/
+path/owner/socket, grants only web worker traversal/connect; generated unit invokes
+it after every start. O_PATH root traversal is required for0711 runtime root.
+Source changes not yet packaged. Candidate helper binary qemu-execd-public-access
+is referenced by g2 pool runtime drop-in99-qemu-web-access.conf; installed45 helper
+does not support it yet. Main executor still previous qemu-execd-site-recovery.
+Existing g2 public ACLs repaired through bounded guest diagnostic --host-public;
+future provisions use EnsureDirectories integration. GNU install stripped a static
+fixture ACL and it returned403; app-created/inherited ACL file passes. Existing
+uploads/restores/imports must preserve/restore ACLs; not broadly qualified yet.
+Removed all three temporary public fixtures after checks; ignored host sources
+remain reproducible. Next package accumulated panel changes, verify fresh create
+without fixture repairs, upload/restore ACL behavior and cross-tenant socket denial.
+
 Latest SITE PERSISTED checkpoint: guarded restored-generation activation recovery
 implemented and QEMU candidate executor deployed. Requires exact completed ambiguous
 replacement with rollback restored, matching confirmed master/current and live

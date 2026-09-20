@@ -102,6 +102,10 @@ type writerAuthorityRecovery interface {
 }
 
 func main() {
+	if len(os.Args) == 4 && os.Args[1] == "--lsapi-web-access" {
+		if err := siteops.GrantLSAPIWebAccess(context.Background(), os.Args[2], os.Args[3]); err != nil { log.Fatal(err) }
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == webactivation.StoppedProofMode {
 		if err := webactivation.RunStoppedProof(); err != nil {
 			log.Fatalf("native web stopped proof failed: %v", err)

@@ -94,6 +94,7 @@ func LinuxUIDAvailable(uid uint32) (bool, error) {
 func (host *LinuxHost) EnsureDirectories(ctx context.Context, identity UnixIdentity, layout DirectoryLayout) error {
 	if err := ctx.Err(); err != nil { return err }; if err := validateUnixIdentity(identity); err != nil { return err }; if err := layout.Validate(); err != nil { return err }; if layout.SiteKey != identity.SiteKey { return ErrRegistryConflict }
 	for _, definition := range layout.Definitions { if err := ctx.Err(); err != nil { return err }; if err := ensureDirectoryPath(host.sitesFD, definition, identity.UID, identity.GID); err != nil { return err } }
+	if err := host.grantPublicDirectoryAccess(ctx, identity, layout); err != nil { return err }
 	return syscall.Fsync(host.sitesFD)
 }
 

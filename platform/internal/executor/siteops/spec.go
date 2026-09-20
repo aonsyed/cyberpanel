@@ -166,6 +166,7 @@ func (spec LSAPISpec) RenderSystemdUnit() ([]byte, error) {
 	unit.WriteString("Environment=PANEL_ENGINE_EDITION="); unit.WriteString(string(spec.Edition)); unit.WriteByte('\n')
 	unit.WriteString("ExecStartPre=/usr/bin/rm -f "); unit.WriteString(spec.SocketPath()); unit.WriteByte('\n')
 	unit.WriteString("ExecStart="); unit.WriteString(spec.PHPBinary); unit.WriteString(" -b "); unit.WriteString(spec.SocketPath()); unit.WriteByte('\n')
+	unit.WriteString("ExecStartPost=/usr/local/libexec/cyberpanel/panel-execd --lsapi-web-access "); unit.WriteString(spec.SiteKey); unit.WriteByte(' '); unit.WriteString(strconv.FormatUint(spec.Generation,10)); unit.WriteByte('\n')
 	unit.WriteString("Restart=on-failure\nRestartSec=2s\nTimeoutStartSec=60s\nTimeoutStopSec=30s\nKillMode=mixed\n")
 	unit.WriteString("NoNewPrivileges=true\nPrivateTmp=true\nPrivateDevices=true\nProtectSystem=strict\nProtectHome=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectControlGroups=true\nProtectClock=true\nLockPersonality=true\nRestrictSUIDSGID=true\nRestrictRealtime=true\nRestrictNamespaces=true\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n")
 	unit.WriteString("ReadWritePaths="); unit.WriteString(SitesRootPath + "/" + spec.SiteKey); unit.WriteByte(' '); unit.WriteString(RuntimeRootPath + "/" + spec.SiteKey); unit.WriteByte('\n')

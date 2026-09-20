@@ -5,6 +5,81 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Signed46 installed; native UI verification and upgrade limits — 2026-09-20
+
+QEMU socket regression additionally proves web-worker write permission, unrelated
+tenant denial, wrong-owner rejection and symlink rejection on a real Unix socket.
+Source socket test formatted in QEMU. Archived obsolete31/32/33/43 to ignored host
+obsolete-releases-31-33-43.tar.gz; gzip integrity and all four manifest sequences
+verified, then exact roots removed under installer lock and process-map guards.
+Free guest space increased2.3->4.2GiB before packaging; current45/rollback44 untouched.
+
+Assembled and installed signed46 qemu-site-3.1.45:
+bundle2ef10d084a6191115725055c64a2412bc37bbde61759608f582670c8cc5e3fde,
+manifest86dd65bef7da361ea0b379448f5db58561d2118d59668069492801a25d9b86f0,
+receipt84022b6ceb4a30a215df9a93034cb5f22f4c27f218a8496a9b549541b5073cf5.
+105 artifacts,532456746 artifact bytes. Current46/rollback45. Rebuilt core/executor
+in QEMU, included current built UI and strict native executor unit. No downloads.
+
+Upgrade qualification exposed manual requirements. The existing mail-restore
+script was non-executable; my direct invocation failed and should have used sh.
+Installer nevertheless committed. WAF policy remained byte-identical but package
+ownership reverted to lsadm; restored root ownership under exact hash guard and
+ran service reconciliation. Core then rejected mail generation integrity. Initial
+mail daemon start alone was insufficient. Bounded diagnostic identified sealed
+clamav/clamd.conf metadata drift:0440/GID112 became0644/GID0, content and size
+unchanged. Restored ONLY its manifest-expected metadata after validating hash;
+all mail artifact hashes/metadata then matched and core startup succeeded.
+This is NOT proof of unattended upgrade; automate protection/reconciliation.
+
+Removed temporary diagnostic instrumentation from source and guest. Removed
+executor candidate/strict/diagnostic unit overrides and three unused candidate
+binaries after process-map checks. Executor/core use installed46 paths, strict
+sandbox from installed unit. Existing g2 PHP pool's temporary post-start drop-in
+now invokes installed panel-execd; fresh generated-unit qualification remains.
+Gateway retains only localhost HTTPS fixture; browser ignores only its test cert.
+
+Actual installed UI (NO candidate asset routing): password200, WebAuthn200,
+authenticated overview, site-list200 and existing hostname visible; layout checks
+pass1280/1920/1024, collapsed navigation and390 mobile. Gateway readiness is ready.
+Guest2.7GiB free, release46 bundle retained. Fresh site-create API, ACL-preserving
+uploads/restores and unattended upgrades remain outstanding.
+
+### Real tenant PHP/static serving with scoped ACLs — 2026-09-20
+
+Confirmed cyberpanel-web could not read/traverse the public tree; pool socket was
+also inaccessible. Added descriptor-relative named-user ACL installation during
+EnsureDirectories. Only public/uploads receive read/traverse and inheritable ACLs;
+generation/release/shared ancestors receive traversal. No world-readable trees,
+shared tenant group, or private/session/config grants. Root-QEMU tests create real
+directories/files then run /usr/bin/test under web-worker and unrelated tenant
+credentials: public allowed for web only, private denied for both; repeat ensure
+preserves expected access.
+
+Added --lsapi-web-access helper to panel-execd, dispatched before daemon startup.
+It runs as the site UID, checks UID range/name against the closed site key and
+canonical generation, opens fixed runtime directories without following symlinks,
+validates socket ownership/type/link count, and grants only cyberpanel-web access.
+Generated LSAPI unit invokes it after every start without privilege elevation.
+The initial native test exposed O_RDONLY opening a0711 runtime root; switched that
+root descriptor to O_PATH, preserving no-follow traversal and no directory listing.
+
+Bounded guest diagnostic repaired only this registered active g2 public layout.
+The candidate helper as the actual site user enabled its socket; real native PHP
+request returned200 and qemu-site-php-ok. A temporary native pool drop-in invoked
+the candidate helper inside the service sandbox; restart succeeded and PHP still
+returned200. PHP-created static content inherited its ACL and returned200 with
+qemu-site-static-ok. Web account cannot traverse the private directory.
+
+GNU install stripped ACLs from a separately copied static fixture (403); this
+does not qualify arbitrary import/upload/restore paths. They must preserve or
+restore the public access policy. Existing non-inheriting files are not recursively
+rewritten by this change. All three public test files removed as their owning site
+account after checks; reproducible fixture sources remain ignored outside Git.
+Changes are source/candidate-tested, not yet in signed45. Runtime pool drop-in
+99-qemu-web-access.conf uses qemu-execd-public-access; main candidate executor is
+still qemu-execd-site-recovery. Fresh signed-install/site-create remains pending.
+
 ### Replacement recovery and first persisted active site — 2026-09-20
 
 Added restored-generation recovery for exact ambiguous replacement attempts.
