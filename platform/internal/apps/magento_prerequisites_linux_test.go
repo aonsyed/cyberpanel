@@ -10,9 +10,19 @@ import (
 
 func TestQEMUMagentoExtensionContract(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_MAGENTO_INPUTS") != "1" {
-		t.Skip("requires official Magento 2.4.9 source in QEMU")
+		t.Skip("requires official Magento sources in QEMU")
 	}
-	payload, err := os.ReadFile("/home/harness/magento-2.4.9-release-source/composer.json")
+	for _, version := range []string{"2.4.7-p10", "2.4.9"} {
+		t.Run(version, func(t *testing.T) {
+			checkMagentoExtensionManifest(t, "/home/harness/magento-"+version+"-release-source/composer.json")
+		})
+	}
+}
+
+// Composer extension checks do not establish the vendor-supported PHP/DB matrix.
+func checkMagentoExtensionManifest(t *testing.T, path string) {
+	t.Helper()
+	payload, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

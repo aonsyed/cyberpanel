@@ -113,6 +113,13 @@ that slot's recipe; prior immutable database recipe versions remain available.
 
 ## Inputs still required for QEMU verification
 
+Select each recipe's runtime subset from the vendor matrix for that exact
+application version, not merely Composer's accepted platform constraints.
+For example, Magento 2.4.9 accepts PHP 8.3 in its manifest but does not support
+that runtime in its vendor matrix. The PHP 8.3/MariaDB 10.11 QEMU guest therefore
+uses 2.4.7-p10 for installation qualification; this does not certify 2.4.9.
+See the [Magento system requirements](https://experienceleague.adobe.com/en/docs/commerce-operations/installation-guide/system-requirements).
+
 Provide real signed version-2 envelopes and actual upstream/prepared archives
 for all five PHP products, their trusted public keys/epochs, signed queue-mode
 n8n and Hermes recipes with real image digests and trusted host keys, the target

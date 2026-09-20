@@ -5,6 +5,51 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Magento supported runtime selection and signed search input — 2026-09-20
+
+Corrected the previous preparation checkpoint: Composer accepts Magento 2.4.9
+on PHP 8.3, but the [vendor matrix](https://experienceleague.adobe.com/en/docs/commerce-operations/installation-guide/system-requirements)
+does not support that combination. The existing PHP 8.3/MariaDB 10.11 guest uses
+2.4.7-p10, which supports those versions and OpenSearch 3. The 2.4.9 candidate
+remains unqualified; no shared PHP/database stack was upgraded to accommodate it.
+
+Downloaded Magento 2.4.7-p10 inside QEMU, source SHA-256
+`13440995a41fd82ae3f0e95749905438fe972b9931a7c5a7d7b0e992c47a9d8d`.
+Composer 2.10.3 passed its published SHA-256 check. Preserved the upstream lock
+at `/home/harness/magento-2.4.7-p10-upstream.lock`, SHA-256
+`799cfe23a0a6035fbb43313985327d7155c6922a667b544bc07b975e01ce62eb`.
+That lock also contained security advisories. Updated within unchanged upstream
+constraints without bypassing audit checks. The candidate lock SHA-256 is
+`74ffe442a924640e572b7dbe4575806ef66961afda9e2d5f35503d9b8e1ea78b`;
+its advisory list is empty, but ten abandoned production Laminas packages remain.
+Platform requirements and Magento CLI version checks passed. This is a
+dependency-updated candidate, not an unchanged upstream distribution.
+
+Downloaded OpenSearch 3.8.0 ARM64 (801,461,518 bytes) inside QEMU. The detached
+signature validates under the [official release key](https://opensearch.org/verify-signatures/)
+`A8B2D9E04CD51FEF6AA2DB53BA81D99981191457` in an isolated keyring.
+Archive SHA-256: `1ed8b6e9e3be799fe08688ea73791cc03d98269d6831646df2905f42c318e05e`.
+A temporary unprivileged service answers its real loopback HTTP endpoint with
+version 3.8.0. It has a 512 MiB heap, 1,400 MiB memory ceiling and 30-minute
+runtime limit. Authentication is disabled only for this guest-loopback fixture;
+this is not production search configuration or a production qualification.
+
+Prepared Magento archive `/home/harness/magento-2.4.7-p10-rooted.tar.gz`, SHA-256
+`a08e75ea5b7c0534194328106ee46d4d2dbdbd83ec1e333594d670a99cfa69fd`, uses
+one root and explicit preparation timestamp `2026-09-20T03:00:00Z`.
+The extension contract now checks both actual Magento source manifests in QEMU;
+both passed. `TestQEMURealMagentoInstallation` passed in 13.08 seconds with
+native PHP 8.3, MariaDB and real OpenSearch. It uses the production protected
+argument bootstrap, checks generated `app/etc/env.php`, consumed argument input
+and the active administrator database record, then removes its isolated
+database/principal/files. The temporary search service was stopped afterward.
+The search journal confirms creation of Magento's product index. Shutdown logged
+`stopped` and `closed`; systemd reports exit 143 from the requested SIGTERM, not
+an installation failure. No listener remains on 9200. Cleanup queries found no
+fixture database/user/tree, and the uncached apps suite passed (0.420 seconds).
+This does not certify installed LSPHP/OLS, broker/control API, browser or full
+application lifecycle integration; signed recipe/release integration remains.
+
 ### Magento source and dependency preparation — 2026-09-20
 
 Fetched [Magento Open Source 2.4.9](https://github.com/magento/magento2/releases/tag/2.4.9)
