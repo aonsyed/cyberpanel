@@ -4889,3 +4889,18 @@ download. Wrong actor cannot run the job; stale session cannot download. Existin
 negative native TLS and cross-tenant checks still pass. The broker fixture checks
 download bytes never enter the mutation journal. Repository reads and peer
 identity are fixtures; no installed HTTP/browser qualification is claimed.
+# Abandoned incoming transfer retention — 2026-09-21
+
+Ubuntu ARM64 QEMU: targeted `TestTransfer(Incoming|Retention|Artifact)` passed,
+including actual child-process SIGKILL and subsequent byte reclamation. Clock
+advancement simulates expiry; process liveness is real, not simulated. Live and
+closed-but-uncommitted writers retain a directory flock and are not collected.
+Legal holds, unexpired data, unknown contents, bad/missing metadata and unsafe
+links survive; interrupted tombstone cleanup completes.
+
+With `TMPDIR=/root CYBERPANEL_QEMU_LIVE_MARIADB=1
+CYBERPANEL_QEMU_LIVE_TRANSFER=1 GOPROXY=off GOTOOLCHAIN=local` and the existing
+guest Go/cache paths, `go test -p 2 ./internal/database ./internal/apiserver
+./cmd/cyberpanel ./cmd/panel-execd -count=1` passed all four packages. No installed
+daemon upgrade is claimed. Fixtures clean their own temporary data; no user
+artifacts or old unidentifiable staging directories were removed.

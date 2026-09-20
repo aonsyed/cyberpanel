@@ -108,13 +108,34 @@ func (store *LinuxTransferArtifactStore) BeginTransferArtifact(ctx context.Conte
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(filepath.Join(staging, "payload"), os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+	lease, err := os.OpenFile(staging, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err == nil {
+		err = syscall.Flock(int(lease.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	}
 	if err != nil {
+		if lease != nil {
+			_ = lease.Close()
+		}
 		_ = os.RemoveAll(staging)
 		return nil, err
 	}
 	metadata := transferArtifactMetadata{Schema: 1, Descriptor: TransferArtifactDescriptor{Identity: identity, Format: format, Compression: compression, CreatedAt: now, ExpiresAt: retention.RetainUntil.UTC()}, Retention: retention}
-	return &transferArtifactFileWriter{store: store, ctx: ctx, file: file, staging: staging, target: target, hash: sha256.New(), metadata: metadata}, nil
+	raw, err := json.Marshal(metadata)
+	if err == nil {
+		err = atomicRootFile(filepath.Join(staging, "descriptor.json"), raw, 0600)
+	}
+	if err != nil {
+		_ = lease.Close()
+		_ = os.RemoveAll(staging)
+		return nil, err
+	}
+	file, err := os.OpenFile(filepath.Join(staging, "payload"), os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		_ = lease.Close()
+		_ = os.RemoveAll(staging)
+		return nil, err
+	}
+	return &transferArtifactFileWriter{store: store, ctx: ctx, file: file, lease: lease, staging: staging, target: target, hash: sha256.New(), metadata: metadata}, nil
 }
 
 func (store *LinuxTransferArtifactStore) OpenTransferArtifact(ctx context.Context, identity TransferArtifactIdentity) (TransferArtifactReader, error) {
@@ -207,6 +228,7 @@ type transferArtifactFileWriter struct {
 	store                      *LinuxTransferArtifactStore
 	ctx                        context.Context
 	file                       *os.File
+	lease                      *os.File // retained across Close until Commit/Abort; process exit releases it
 	staging, target            string
 	hash                       hash.Hash
 	bytes                      uint64
@@ -287,6 +309,7 @@ func (writer *transferArtifactFileWriter) Commit(ctx context.Context, digest str
 		return TransferArtifactDescriptor{}, errors.Join(ErrConflict, err)
 	}
 	writer.published = true
+	_ = writer.lease.Close()
 	if err = syncTransferDirectory(writer.store.root); err != nil {
 		return TransferArtifactDescriptor{}, err
 	}
@@ -301,7 +324,8 @@ func (writer *transferArtifactFileWriter) Abort(ctx context.Context) error {
 	}
 	writer.aborted = true
 	closeErr := writer.closeLocked()
-	return errors.Join(closeErr, os.RemoveAll(writer.staging), syncTransferDirectory(writer.store.root))
+	removeErr := os.RemoveAll(writer.staging)
+	return errors.Join(closeErr, removeErr, writer.lease.Close(), syncTransferDirectory(writer.store.root))
 }
 
 func syncTransferDirectory(path string) error {

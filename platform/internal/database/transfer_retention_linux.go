@@ -12,8 +12,9 @@ import (
 	"strings"
 )
 
-// CollectExpired removes only validated, root-owned expired published artifacts.
-// Incoming writers, unknown files, invalid records and legal holds are preserved.
+// CollectExpired removes validated, root-owned expired published artifacts and
+// abandoned incoming artifacts. Live writers, unknown files, invalid records
+// and legal holds are preserved.
 // Renaming first makes interrupted removal distinguishable from corrupt storage.
 func (store *LinuxTransferArtifactStore) CollectExpired(ctx context.Context, maximum int) (int, error) {
 	if store == nil || ctx == nil || maximum < 1 || maximum > 1024 {
@@ -42,11 +43,17 @@ func (store *LinuxTransferArtifactStore) CollectExpired(ctx context.Context, max
 				return collected, errors.Join(failures, err)
 			}
 			name := entry.Name()
-			digest := strings.TrimPrefix(name, ".expired-")
-			if !validSHA256(digest) {
-				continue
+			var removed bool
+			var collectErr error
+			if strings.HasPrefix(name, ".incoming-") || strings.HasPrefix(name, ".abandoned-") {
+				removed, collectErr = store.collectAbandonedIncoming(name)
+			} else {
+				digest := strings.TrimPrefix(name, ".expired-")
+				if !validSHA256(digest) {
+					continue
+				}
+				removed, collectErr = store.collectExpiredArtifact(name, digest)
 			}
-			removed, collectErr := store.collectExpiredArtifact(name, digest)
 			// Preserve the first failure without accumulating an unbounded error
 			// tree when many damaged records require administrator attention.
 			if failures == nil {

@@ -11,6 +11,20 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Abandoned transfer cleanup — 2026-09-21 (source, not deployed)
+
+Transfer writers now persist retention metadata before payload bytes and hold a
+directory flock through publication/abort (including the Close-to-Commit window).
+Existing daemon retention collects expired `.incoming-*` only after acquiring
+that lock, validating protected metadata/files and checking legal hold. Removal
+uses a recoverable `.abandoned-*` name and explicit filenames, not recursive GC.
+QEMU actually kills a child writer: live expired data survives; after SIGKILL,
+the collector removes its bytes. Active/closed-active, unexpired, hold, unknown,
+symlink/hardlink, invalid/missing metadata and interrupted cleanup cases pass.
+Full database/API/core/execd suites, including real local SQL/gzip transfers and
+external TLS exports, pass. Pre-change abandoned directories without retention
+metadata remain preserved for inspection. Installed62 unchanged; no downloads.
+
 ## External database export — 2026-09-21 (source, not deployed)
 
 Workspace exports no longer reject all external instances or force the local
