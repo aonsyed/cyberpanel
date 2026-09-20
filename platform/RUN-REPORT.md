@@ -5,6 +5,43 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Signed47 and credential release-binding regression — 2026-09-20
+
+Installed qemu-console-3.1.46, current47/rollback46. Manifest
+`ca9b077af51054c2c147ed1f1930771e07707bbe12bd99bf34df7074c3f018ee`, receipt
+`0ad2a5aac192b58452cf6bb7a179f25491bfefd28107427415250422dcedf099`.
+Core/gateway/execd executable paths verified in installed47; services and OLS
+active. Mail manifest and WAF ownership unchanged. Stale QEMU-only Restart=no
+override interfered with core socket startup recovery; removed it and started
+core normally. This is not proof of an unattended upgrade.
+
+Installed browser login/passkey/list succeeded; console session creation201,
+metadata/query500. Native DB login and allowed/denied grant checks still passed.
+Read-only broker metadata probe proves principal bound executable
+`12dd0aadbf1b8ed413bd04c4a210150f5427fef5abd2c5272fc75e01b78b1b21`
+differs from installed executor
+`0cbfaac22858b090d62790b3db24593bccccf24b79a606a7998365e91c77acd5`.
+No passwords/ciphertexts exported. Earlier candidate tests used the old executor,
+so their success does not qualify installed47 console access.
+
+Implemented source-only root management consumer rebinding. New envelope version
+preserves external credential material and all audience fields except explicitly
+authorized executable digest. Prior binding/version checked, replay bounded,
+revocation serialized with rebinding. Normal non-root management cannot invoke it.
+QEMU Ubuntu ARM64: `go test -p 2 ./internal/secrets -count=1` PASS.
+`TestConsumerRebindPreservesMaterialAndRejectsOldConsumer` exercises management
+frames, SQLite envelopes, denied new-executable delivery before authorization,
+unchanged password delivered after authorization, replay, old-consumer denial
+for current version, forward-version rollback and stale replay rejection.
+`TestConsumerRebindRejectsAuthorityChanges` passes14 negative variants.
+These are broker regressions, NOT installed endpoint verification of the fix.
+Signed installer integration, generation-coupled consumers, deployment and real
+browser upgrade/recovery qualification remain pending. No third-party changes.
+
+Obsolete release44 archive and duplicate bundles46/47 were hash-verified on host
+before guest removal; rollback46/current47 remain. Guest2.2GiB free. Archives
+are ignored under .work/qemu and recoverable, never added to Git.
+
 ### Panel-only upgrade no longer reinstalls unchanged native packages — 2026-09-20
 
 Identified a concrete cause of repeated package-maintainer configuration changes:

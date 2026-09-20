@@ -27,6 +27,7 @@ const (
 	ManagementEnrollExact ManagementAction = "enroll_exact"
 	ManagementProvisionPasswordPair ManagementAction = "provision_password_pair"
 	ManagementRotate ManagementAction = "rotate"
+	ManagementRebindConsumer ManagementAction = "rebind_consumer"
 	ManagementRevoke ManagementAction = "revoke"
 	ManagementProvisionMalwareApproval ManagementAction = "provision_malware_approval"
 )
@@ -63,6 +64,10 @@ func (request ManagementRequest) Validate(now time.Time) error {
 		}
 	case ManagementRotate:
 		if len(request.Material) == 0 || request.ExpectedVersion == 0 || len(request.ExpectedBindingDigest) != 64 {
+			return ErrInvalid
+		}
+	case ManagementRebindConsumer:
+		if len(request.Material) != 0 || request.ExpectedVersion == 0 || request.ExpectedVersion == ^uint64(0) || len(request.ExpectedBindingDigest) != 64 || !validConsumerDigest(request.Audience.ConsumerReleaseDigest) {
 			return ErrInvalid
 		}
 	case ManagementRevoke:
@@ -102,6 +107,9 @@ func (response ManagementResponse) Validate(request ManagementRequest) error {
 		return validateMalwareApprovalProvisionResponse(request, response)
 	}
 	if len(response.PublicKey) != 0 {
+		return ErrInvalid
+	}
+	if request.Action == ManagementRebindConsumer && digestJSON(response.Metadata.Audience) != digestJSON(request.Audience) {
 		return ErrInvalid
 	}
 	expectedVersion := request.ExpectedVersion + 1
@@ -342,6 +350,12 @@ func (server *ManagementServer) serve(connection net.Conn) {
 	var metadata Metadata
 	if request.Purpose == PurposeMalwareApproval && peer.UID != 0 {
 		err = ErrForbidden
+	} else if request.Action == ManagementRebindConsumer {
+		if peer.UID != 0 {
+			err = ErrForbidden
+		} else {
+			metadata, err = server.Broker.rebindConsumer(ctx, request)
+		}
 	} else if request.Action == ManagementProvisionMalwareApproval {
 		if peer.UID != 0 {
 			err = ErrForbidden
