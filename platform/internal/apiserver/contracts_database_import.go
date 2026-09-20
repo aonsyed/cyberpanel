@@ -52,6 +52,12 @@ func registerDatabaseImportContracts(registry *Registry) error {
 			}
 			return nil
 		}},
+		{Name: "database.import.recover", Mutating: true, NewPayload: func() any { return &DatabaseImportInspectPayload{} }, ValidatePayload: func(v any) error {
+			if v.(*DatabaseImportInspectPayload).JobID.IsZero() {
+				return ErrInvalidRequest
+			}
+			return nil
+		}},
 	} {
 		op.Auth = AuthRequired
 		op.Permission = identity.MustPermission("database:manage")
@@ -98,6 +104,15 @@ func bindDatabaseImportContracts(registry *Registry, services DomainServices) er
 			return OperationResult{}, databaseExportError(err)
 		}
 		return OperationResult{Status: http.StatusOK, Value: state, Generation: state.Generation}, nil
+	}); err != nil {
+		return err
+	}
+	if err := registry.Bind("database.import.recover", func(ctx context.Context, inv Invocation, v any) (OperationResult, error) {
+		receipt, err := service.RecoverDatabaseImport(ctx, inv, v.(*DatabaseImportInspectPayload).JobID)
+		if err != nil {
+			return OperationResult{}, databaseExportError(err)
+		}
+		return OperationResult{Status: http.StatusOK, Value: receipt, Generation: receipt.Generation}, nil
 	}); err != nil {
 		return err
 	}

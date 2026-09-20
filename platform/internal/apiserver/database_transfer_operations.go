@@ -24,6 +24,7 @@ type DatabaseTransferService interface {
 	RunDatabaseImport(context.Context, Invocation, database.TransferJob) (database.TransferReceipt, error)
 	InspectDatabaseImport(context.Context, Invocation, database.ResourceID) (database.TransferJobState, error)
 	CancelDatabaseImport(context.Context, Invocation, database.ResourceID) (database.TransferJobState, error)
+	RecoverDatabaseImport(context.Context, Invocation, database.ResourceID) (database.TransferReceipt, error)
 }
 
 type DatabaseTransferOperations struct {
@@ -192,6 +193,18 @@ func (operations *DatabaseTransferOperations) CancelDatabaseImport(ctx context.C
 		return database.TransferJobState{}, err
 	}
 	return service.Inspect(ctx, inv.Actor.PrincipalID.String(), id)
+}
+
+func (operations *DatabaseTransferOperations) RecoverDatabaseImport(ctx context.Context, inv Invocation, id database.ResourceID) (database.TransferReceipt, error) {
+	state, err := operations.jobs.LoadTransfer(ctx, id)
+	if err != nil {
+		return database.TransferReceipt{}, err
+	}
+	service, err := operations.service(inv, state.Job)
+	if err != nil {
+		return database.TransferReceipt{}, err
+	}
+	return service.Recover(ctx, inv.Actor.PrincipalID.String(), id, inv.Request.ExpectedGeneration)
 }
 
 type databaseTransferAuthority struct {

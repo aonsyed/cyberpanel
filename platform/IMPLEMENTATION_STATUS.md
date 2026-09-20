@@ -11,6 +11,28 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Job promotion recovery — 2026-09-21 (source, not deployed)
+
+Added closed native recover command returning executor-owned process/verification/
+promotion proofs, metadata-only completion of promotion-verified, core projection
+reconciliation, and atomic append-only job completion. Recovery refuses a live
+lease, stale generation, wrong actor, and non-promoting/non-ambiguous unfinished
+states. Existing completed receipts replay unchanged. Native SQL is never rerun.
+New database.import.recover API uses manage/MFA/site authorization and a stored
+job ID, not client proofs. Shared import UI offers Recover verified result after
+inspection of ambiguous/promoting state, explaining the lease/proof restriction.
+
+QEMU live SQL/gzip uploaded imports inject completed-receipt insertion failure
+after real native promotion; recover through socket broker after simulated lease
+expiry, with prior ambiguous history preserved for gzip. Recovery receipt failure
+rolls back job state, retry succeeds, exact completed receipt replays, native rows
+and core generation remain correct. Database/API/core/execd suites passed; UI
+typecheck/build and real Chromium component checks at1440/390px passed (fixture
+API for component QA). Installed61 unchanged. Next: installed recovery flow and
+actual daemon interruption/restart; earlier native-move uncertainty remains
+unresolved without verified proof. Guest5.4GiB free; temporary Vite process/files
+removed. No downloads/vendor changes/new workers or release bundles this turn.
+
 ## Verified native promotion recovery — 2026-09-21 (source, not deployed)
 
 Native import promotion now persists verified success and exact before/after

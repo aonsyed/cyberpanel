@@ -21,6 +21,8 @@ func (executor *LinuxMariaDBExecutor) ExecuteTransferImport(ctx context.Context,
 	}
 	var err error
 	switch request.Action {
+	case "recover":
+		return executor.recoverVerifiedTransferImport(ctx, request)
 	case "preview":
 		var impact TransferImpactPreview
 		impact, err = executor.previewTransferImport(ctx, request.Job)

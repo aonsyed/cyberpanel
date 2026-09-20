@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -219,7 +220,65 @@ func verifyServiceNativeImport(t *testing.T, ctx context.Context, executor *Linu
 	if _, err = service.Run(ctx, "intruder", "worker", job.ID, state.Generation, time.Minute); err == nil {
 		t.Fatal("unauthorized import executed")
 	}
+	if job.UploadSource != nil {
+		if _, err = control.ExecContext(ctx, `CREATE TRIGGER fail_recovery_receipt BEFORE INSERT ON database_transfer_receipts_v1 WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT, 'fixture completed receipt failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+	}
 	receipt, err := service.Run(ctx, "owner", "worker", job.ID, state.Generation, time.Minute)
+	if job.UploadSource != nil {
+		if err == nil || receipt.Status != TransferCompleted {
+			t.Fatal("receipt failure not injected", err)
+		}
+		var interrupted TransferJobState
+		interrupted, err = transfers.LoadTransfer(ctx, job.ID)
+		if err != nil || interrupted.Status != TransferPromoting {
+			t.Fatal("interrupted state not preserved", err)
+		}
+		if _, err = service.Recover(ctx, "owner", job.ID, interrupted.Generation); !errors.Is(err, ErrTransferStale) {
+			t.Fatal("live lease recovered", err)
+		}
+		if _, err = service.Recover(ctx, "intruder", job.ID, interrupted.Generation); !errors.Is(err, ErrUnauthorized) {
+			t.Fatal("unauthorized recovery accepted", err)
+		}
+		recoveryTime := time.Now().UTC().Add(2 * time.Minute)
+		service.now = func() time.Time { return recoveryTime }
+		if job.Compression == TransferCompressionGzip {
+			if _, err = transfers.ClaimTransfer(ctx, job.ID, "recovery-fixture", interrupted.Generation, recoveryTime, time.Minute); !errors.Is(err, ErrAmbiguous) {
+				t.Fatal("expired promotion did not become ambiguous", err)
+			}
+		}
+		if _, err = service.Recover(ctx, "owner", job.ID, interrupted.Generation); err == nil {
+			t.Fatal("recovery receipt failure ignored")
+		}
+		var afterFailure TransferJobState
+		afterFailure, err = transfers.LoadTransfer(ctx, job.ID)
+		if err != nil || afterFailure.Generation != interrupted.Generation || afterFailure.Status == TransferCompleted {
+			t.Fatal("partial recovery persisted", err)
+		}
+		if _, err = control.ExecContext(ctx, `DROP TRIGGER fail_recovery_receipt`); err != nil {
+			t.Fatal(err)
+		}
+		receipt, err = service.Recover(ctx, "owner", job.ID, interrupted.Generation)
+		if err != nil {
+			t.Fatal("native proof recovery", err)
+		}
+		if _, err = service.Recover(ctx, "owner", job.ID, interrupted.Generation); !errors.Is(err, ErrTransferStale) {
+			t.Fatal("stale recovery accepted", err)
+		}
+		var replayed TransferReceipt
+		replayed, err = service.Recover(ctx, "owner", job.ID, receipt.Generation)
+		if err != nil || replayed.Digest != receipt.Digest {
+			t.Fatal("recovery replay differs", err)
+		}
+		var history int
+		if err = control.QueryRowContext(ctx, `SELECT COUNT(*) FROM database_transfer_receipts_v1 WHERE job_id=?`, job.ID.String()).Scan(&history); err != nil {
+			t.Fatal(err)
+		}
+		if job.Compression == TransferCompressionGzip && history != 2 {
+			t.Fatal("ambiguous history not retained")
+		}
+	}
 	if err != nil || receipt.Status != TransferCompleted || receipt.Validate(job) != nil {
 		t.Fatal("service native import", receipt.Status, err)
 	}

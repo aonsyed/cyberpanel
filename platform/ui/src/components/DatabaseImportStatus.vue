@@ -13,7 +13,7 @@ const controller = new AbortController();
 const terminal = (value: string) => ["completed", "cancelled", "failed", "ambiguous"].includes(value);
 const finished = computed(() => terminal(props.status) || terminal(state.value?.status || ""));
 const message = computed(() => {
-  const status = terminal(props.status) ? props.status : state.value?.status || props.status;
+  const status = state.value?.status === "completed" ? "completed" : terminal(props.status) ? props.status : state.value?.status || props.status;
   if (status === "completed") return "Import completed and verified.";
   if (status === "cancelled") return "Import cancelled. The destination was preserved.";
   if (status === "ambiguous") return "Import outcome is uncertain. Do not retry the import; recovery is required.";
@@ -32,17 +32,24 @@ async function refresh(): Promise<JobState> {
   accept(response.result);
   return response.result;
 }
-async function check(cancel = false): Promise<void> {
+async function check(action: "inspect" | "cancel" | "recover" = "inspect"): Promise<void> {
   if (pending.value) return;
   pending.value = true; emit("busy", true); failure.value = "";
   try {
     const current = await refresh();
-    if (cancel && !terminal(current.status) && !current.cancellation_requested) {
+    if (action === "cancel" && !terminal(current.status) && !current.cancellation_requested) {
       const response = await api.invoke<JobState>("database.import.cancel", {
         ...scope(), expectedGeneration: current.generation,
         idempotencyKey: crypto.randomUUID(), requestId: `req_${crypto.randomUUID().replaceAll("-", "")}`
       });
       accept(response.result);
+    }
+    if (action === "recover" && ["ambiguous", "promoting"].includes(current.status)) {
+      const response = await api.invoke<Pick<JobState, "status" | "generation">>("database.import.recover", {
+        ...scope(), expectedGeneration: current.generation,
+        idempotencyKey: crypto.randomUUID(), requestId: `req_${crypto.randomUUID().replaceAll("-", "")}`
+      });
+      accept({ ...response.result, cancellation_requested: current.cancellation_requested });
     }
   } catch (error) {
     failure.value = `${error instanceof Error ? error.message : "Job request failed."} Check status before retrying.`;
@@ -57,8 +64,10 @@ onBeforeUnmount(() => { controller.abort(); emit("busy", false); });
     <p v-if="message" role="status">{{ message }}</p>
     <div class="import-controls">
       <button type="button" class="button" :disabled="pending" @click="check()">Check import status</button>
-      <button v-if="!finished && api.available('database.import.cancel')" type="button" class="button" :disabled="pending || !!state?.cancellation_requested" @click="check(true)">Request cancellation</button>
+      <button v-if="!finished && api.available('database.import.cancel')" type="button" class="button" :disabled="pending || !!state?.cancellation_requested" @click="check('cancel')">Request cancellation</button>
+      <button v-if="state && ['ambiguous', 'promoting'].includes(state.status) && api.available('database.import.recover')" type="button" class="button" :disabled="pending" @click="check('recover')">Recover verified result</button>
     </div>
+    <p v-if="state && ['ambiguous', 'promoting'].includes(state.status)">Recovery only reconciles an already-verified native result after the worker lease expires. It never reruns the import.</p>
     <p v-if="failure" role="alert" class="import-error">{{ failure }}</p>
   </section>
 </template>

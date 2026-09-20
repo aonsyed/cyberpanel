@@ -16,6 +16,7 @@ const (
 	AuthorizeTransferCreate  TransferAuthorizationAction = "transfer.create"
 	AuthorizeTransferRead    TransferAuthorizationAction = "transfer.read"
 	AuthorizeTransferCancel  TransferAuthorizationAction = "transfer.cancel"
+	AuthorizeTransferRecover TransferAuthorizationAction = "transfer.recover"
 	AuthorizeTransferExecute TransferAuthorizationAction = "transfer.execute"
 )
 
@@ -31,7 +32,7 @@ type TransferAuthorizationRequest struct {
 func (request TransferAuthorizationRequest) Validate() error {
 	if !validTransferIdentifier(request.Actor) || request.TenantID.String() == "" || request.SiteID.String() == "" || request.DatabaseID.IsZero() || request.JobID.IsZero() { return ErrTransferInvalid }
 	switch request.Action {
-	case AuthorizeTransferCreate, AuthorizeTransferRead, AuthorizeTransferCancel, AuthorizeTransferExecute:
+	case AuthorizeTransferCreate, AuthorizeTransferRead, AuthorizeTransferCancel, AuthorizeTransferExecute, AuthorizeTransferRecover:
 		return nil
 	default:
 		return ErrTransferInvalid

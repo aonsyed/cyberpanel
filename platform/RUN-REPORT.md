@@ -4779,3 +4779,32 @@ with CYBERPANEL_QEMU_LIVE_TRANSFER=1; targeted real-native test passed after fin
 assertion tightening. No downloads/dependency changes/new release or workers.
 Installed61 unchanged. Job-level reconciliation/operator recovery and earlier
 native-move crash windows remain unfinished; this does not claim full recovery.
+
+## 2026-09-21 — job reconciliation from executor-owned promotion proof
+
+Added native recover action (no allocation/load/RENAME/DROP), complete proof tuple,
+core projection reconciliation and transactional terminal job receipt/progress.
+Original ambiguous receipt remains immutable. Service authorizes stored job and
+database ownership, checks generation/expired lease before native recovery, and
+rechecks state/lease inside the receipt transaction. Completed replay is exact;
+final persistence/audit has bounded detached context. API database.import.recover
+requires manage/MFA/site scope and accepts job ID only. Shared UI distinguishes
+recovery from rerunning import and refreshes the generation before invoking it.
+
+QEMU real SQLite/socket/native MariaDB SQL+gzip uploaded import tests inject
+terminal receipt failure after successful promotion. Live lease/intruder refused;
+test clock advances past lease expiry. Gzip first persists ambiguous lease-expiry
+receipt, then recovery adds completed receipt without deletion. A second injected
+receipt failure leaves job state unchanged; retry after removing fixture trigger
+succeeds, stale generation refuses, completed replay digest unchanged, native rows
+and core generation verified. Database/API/core/execd suites passed. A test-local
+shadowed error initially retained the deliberately injected error; corrected and
+reran all affected suites. HTTP server tests cover recovery contract auth/body
+refusals with fixture identity/domain. UI typecheck/build and Chromium1440/390px
+component checks passed recovery completion and generation binding alongside
+prior cancellation checks (fixture API, not installed qualification).
+
+Installed61 unchanged; no bundle/download/vendor change/new workers. Temporary
+guest Vite process and fixture files removed; guest5.4GiB free. Still pending:
+installed recovery UI/API, killed-daemon/restart proof, and uncertain native move
+without durable verified-success evidence. Full panel parity remains incomplete.

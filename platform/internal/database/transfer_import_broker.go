@@ -43,7 +43,7 @@ func (request TransferImportRequest) validate() error {
 		return ErrUnauthorized
 	}
 	switch request.Action {
-	case "allocate", "preview":
+	case "allocate", "preview", "recover":
 		if request.Isolated != nil {
 			return ErrInvalidCommand
 		}
@@ -80,6 +80,8 @@ func (result TransferImportResult) matches(request TransferImportRequest) bool {
 		return result.Process == nil && result.Verification != nil && result.Verification.Validate(request.Job, result.Isolated) == nil && result.Promotion == nil
 	case "promote":
 		return result.Process == nil && result.Verification == nil && result.Promotion != nil && result.Promotion.Validate(request.Job, result.Isolated) == nil
+	case "recover":
+		return result.Process != nil && successfulTransferImport(*result.Process, request.Job) && result.Verification != nil && result.Verification.Validate(request.Job, result.Isolated) == nil && result.Promotion != nil && result.Promotion.Validate(request.Job, result.Isolated) == nil
 	}
 	return false
 }
