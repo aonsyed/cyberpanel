@@ -4,6 +4,31 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+## Native dependency ownership boundary — user correction 2026-09-20
+
+Consume vendor/distribution OLS, LiteSpeed Enterprise and ModSecurity packages.
+Do not fork, patch, compile or hard-pin these native dependencies (including
+LSQUIC). Our responsibility is panel installation/configuration/integration,
+using the current CyberPanel reference behavior. Record observed package
+versions for test evidence; that is not a product version lock. A native failure
+requires checking our integration and reporting the upstream limitation, not
+starting a dependency-maintenance project. Removed our ModSecurity compiler
+recipe and connector patch. Earlier custom-build checkpoints below are
+historical evidence, not the delivery plan. CRS's custom package/manifest pin
+still needs replacement with the normal managed rules installation path; do not
+silently drop asset-safety checks while correcting it. No OLS/LSQUIC build was
+started. Return qualification to vendor packages in the existing QEMU guest.
+
+Restoration done: vendor ols-modsecurity1.9.2-1+noble installed and dpkg-verified.
+Compared reference config: explicit required/restrictedPermissionMask000 was
+missing from our renderers. Added in OLS/LSE, preserving OS permissions and vhost
+isolation. Three QEMU suites pass. Vendor OLS parser accepts f80079fd...; live
+HTTP14/17 pass, including every benign request and existing attack fixture.
+Three body-size cases still return200 rather than413: retained as evidence,
+not justification for another native fork. Native LSE remains unqualified.
+Removed obsolete custom native packages/parser/source archive. Next: finish
+normal rules-installation integration and bootstrap/health transition.
+
 Latest native body-limit checkpoint (2026-09-20): connector package
 1.9.2-1+noble+cpmodsec3.0.16.2 now rejects known-length oversized bodies with
 413 instead of disabling inspection. Real QEMU HTTP regression passes this

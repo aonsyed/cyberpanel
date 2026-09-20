@@ -57,10 +57,14 @@ func TestRenderEmitsDeterministicCompleteNativeXMLGeneration(t *testing.T) {
 
 func TestRenderIsolatesNativeWorkerFromPanelAndVendorAdmin(t *testing.T) {
 	generation, err := New().Render(context.Background(), renderRequest(t, webengine.EditionLiteSpeedEnterprise))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := artifactContent(t, generation, native.ArtifactServer, "engine")
-	for _, directive := range []string{"<user>cyberpanel-web</user>", "<group>cyberpanel-web</group>", "<disableWebAdmin>1</disableWebAdmin>"} {
-		if !strings.Contains(server, directive) { t.Fatalf("missing worker isolation directive %q", directive) }
+	for _, directive := range []string{"<user>cyberpanel-web</user>", "<group>cyberpanel-web</group>", "<disableWebAdmin>1</disableWebAdmin>", "<requiredPermissionMask>000</requiredPermissionMask>", "<restrictedPermissionMask>000</restrictedPermissionMask>"} {
+		if !strings.Contains(server, directive) {
+			t.Fatalf("missing worker isolation directive %q", directive)
+		}
 	}
 }
 

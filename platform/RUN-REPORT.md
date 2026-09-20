@@ -5,6 +5,44 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Vendor dependency restoration and reference configuration — 2026-09-20
+
+User corrected the dependency ownership boundary: no local native server/module
+forks, patches, compilation or product hard-pins. Removed the custom ModSecurity
+compiler recipe and connector patch. Restored the retained vendor
+`ols-modsecurity` **1.9.2-1+noble** package, SHA256
+`7b99e9ff8806a104021cec860c900cf470ccd8e23696ed6f3d2a6b7f6786ad1f`;
+`dpkg -V ols-modsecurity` reports no differences. OLS remains the unchanged
+vendor1.9.2-1+noble. These versions identify the test environment, not product
+version locks. No OLS/LSQUIC compilation or new dependency installation occurred.
+
+Compared our renderer with `install/litespeed/conf/httpd_config.conf` and
+`install/litespeed/httpd_config.xml`: the reference explicitly sets native
+required/restricted file permission masks to000; our omission inherited vendor
+defaults. Both renderers now emit the reference masks. Unix ownership/mode
+enforcement, worker identity, vhost restrictions and symlink policy are unchanged.
+This fixes panel-generated configuration instead of modifying the native server.
+
+QEMU OLS/enterprise renderer and webactivation package suites pass. Actual vendor
+OLS parser accepts generated digest
+`f80079fd4f9e32d8123ed69d51f68391690e4a4c3e63edd54e983e6adf77ce11`.
+Live vendor HTTP run now passes all benign and attack fixtures apart from the
+three oversized-body expectations: **14/17 pass**, size cases return200 rather
+than413. No native patch will be introduced to force those green. Preserve the
+failure evidence and assess the panel's advertised capability against reference
+behavior. Log: `/home/harness/waf-prerequisites-20260920/vendor-file-access.log`.
+The pre-change vendor run (`vendor-integration.log`) still had benign XML403;
+post-change all benign cases pass. Enterprise native execution remains untested.
+
+Removed obsolete custom module packages .1/.2, standalone custom parser utility,
+OLS source archive and guest copies of the deleted build recipe/patch. These are
+rebuildable/downloadable artifacts; source deletion remains recoverable in Git.
+Retained vendor package, small evidence logs and active CRS assets. Custom CRS
+packaging and hardcoded manifest/version integration remain to be replaced with
+normal managed rules installation; asset safety must be preserved. OLS remains
+inactive after fixtures. Signed panel release37 is unchanged; no full bootstrap
+or installed API/UI completion claim.
+
 ### Known-length body rejection and chunked diagnosis — 2026-09-20
 
 Pinned OLS connector previously disabled request-body inspection when declared

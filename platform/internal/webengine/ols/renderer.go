@@ -130,6 +130,9 @@ func renderServer(request native.RenderRequest, index renderIndex, bindings []we
 	output.WriteString("serverName cyberpanel-managed\n")
 	output.WriteString("user cyberpanel-web\ngroup cyberpanel-web\ndisableWebAdmin 1\n")
 	output.WriteString("mime $SERVER_ROOT/conf/mime.properties\n")
+	// Match CyberPanel's native file-access policy. Unix ownership/modes and
+	// per-vhost isolation remain authoritative; do not inherit vendor masks.
+	output.WriteString("fileAccessControl {\n  requiredPermissionMask 000\n  restrictedPermissionMask 000\n}\n")
 	output.WriteString("errorlog $SERVER_ROOT/logs/error.log {\n  logLevel WARN\n  rollingSize 10M\n  enableStderrLog 1\n}\n")
 	output.WriteString("accesslog $SERVER_ROOT/logs/access.log {\n  rollingSize 10M\n  keepDays 30\n  compressArchive 1\n}\n")
 	output.WriteString("showVersionNumber 0\n")
@@ -335,14 +338,28 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 		output.WriteString("\n}\n")
 	case application.ReverseProxy != nil:
 		proxyName := proxyProcessorName(application.Ref)
-		output.WriteString("extprocessor "); output.WriteString(proxyName); output.WriteString(" {\n  type proxy\n  address "); output.WriteString(netip.AddrPortFrom(application.ReverseProxy.Address, application.ReverseProxy.Port).String()); output.WriteString("\n  maxConns 256\n  initTimeout 30\n  retryTimeout 0\n  respBuffer 0\n}\n\ncontext / {\n  type proxy\n  handler "); output.WriteString(proxyName); output.WriteString("\n  addDefaultCharset off\n")
+		output.WriteString("extprocessor ")
+		output.WriteString(proxyName)
+		output.WriteString(" {\n  type proxy\n  address ")
+		output.WriteString(netip.AddrPortFrom(application.ReverseProxy.Address, application.ReverseProxy.Port).String())
+		output.WriteString("\n  maxConns 256\n  initTimeout 30\n  retryTimeout 0\n  respBuffer 0\n}\n\ncontext / {\n  type proxy\n  handler ")
+		output.WriteString(proxyName)
+		output.WriteString("\n  addDefaultCharset off\n")
 		if policy, exists := accessPolicyAt(policies, "/"); exists {
 			writeAccessDirectives(&output, policy, index.verifiers[policy.Ref])
 		}
 		output.WriteString("}\n")
 		for _, policy := range policies {
-			if policy.Route == "/" { continue }
-			output.WriteString("\ncontext "); output.WriteString(policy.Route); output.WriteString(" {\n  type proxy\n  handler "); output.WriteString(proxyName); output.WriteByte('\n'); writeAccessDirectives(&output, policy, index.verifiers[policy.Ref]); output.WriteString("}\n")
+			if policy.Route == "/" {
+				continue
+			}
+			output.WriteString("\ncontext ")
+			output.WriteString(policy.Route)
+			output.WriteString(" {\n  type proxy\n  handler ")
+			output.WriteString(proxyName)
+			output.WriteByte('\n')
+			writeAccessDirectives(&output, policy, index.verifiers[policy.Ref])
+			output.WriteString("}\n")
 		}
 	default:
 		pool := index.pools[poolLookup(application.SiteRef, application.PHPProfileRef)]
@@ -365,8 +382,10 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 			output.WriteString("\ncontext ")
 			output.WriteString(policy.Route)
 			output.WriteString(" {\n  type null\n  location ")
-			output.WriteString(siteRoot(site)+"/"+application.DocumentRoot)
-			if policy.Route != "/" { output.WriteString(policy.Route) }
+			output.WriteString(siteRoot(site) + "/" + application.DocumentRoot)
+			if policy.Route != "/" {
+				output.WriteString(policy.Route)
+			}
 			output.WriteString("\n  allowBrowse 1\n")
 			writeAccessDirectives(&output, policy, index.verifiers[policy.Ref])
 			output.WriteString("}\n")
@@ -379,14 +398,42 @@ func renderAccessVerifier(verifier native.AccessVerifier) []byte {
 	principals := append([]native.PasswordVerifier(nil), verifier.Principals...)
 	sort.Slice(principals, func(i, j int) bool { return principals[i].Username < principals[j].Username })
 	var output strings.Builder
-	for _, principal := range principals { output.WriteString(principal.Username); output.WriteByte(':'); output.WriteString(principal.Digest); output.WriteByte('\n') }
+	for _, principal := range principals {
+		output.WriteString(principal.Username)
+		output.WriteByte(':')
+		output.WriteString(principal.Digest)
+		output.WriteByte('\n')
+	}
 	return []byte(output.String())
 }
 
-func accessRealmName(ref webengine.ResourceRef) string { sum := sha256.Sum256([]byte(ref)); return "panel_" + fmt.Sprintf("%x", sum[:10]) }
-func accessVerifierPath(generation uint64, verifier native.AccessVerifier) string { return "$SERVER_ROOT/conf/vhosts/.panel-generations/g"+strconv.FormatUint(generation,10)+"/access/"+string(verifier.VerifierKey)+".users" }
-func accessPolicyAt(policies []webengine.WebAccessPolicy, route string) (webengine.WebAccessPolicy, bool) { for _, policy := range policies { if policy.Route==route{return policy,true} };return webengine.WebAccessPolicy{},false }
-func writeAccessDirectives(output *strings.Builder, policy webengine.WebAccessPolicy, verifier native.AccessVerifier) { output.WriteString("  realm ");output.WriteString(accessRealmName(policy.Ref));output.WriteString("\n  authName ");output.WriteString(policy.Realm);output.WriteString("\n  required user");for _,principal:=range verifier.Principals{output.WriteByte(' ');output.WriteString(principal.Username)};output.WriteByte('\n') }
+func accessRealmName(ref webengine.ResourceRef) string {
+	sum := sha256.Sum256([]byte(ref))
+	return "panel_" + fmt.Sprintf("%x", sum[:10])
+}
+func accessVerifierPath(generation uint64, verifier native.AccessVerifier) string {
+	return "$SERVER_ROOT/conf/vhosts/.panel-generations/g" + strconv.FormatUint(generation, 10) + "/access/" + string(verifier.VerifierKey) + ".users"
+}
+func accessPolicyAt(policies []webengine.WebAccessPolicy, route string) (webengine.WebAccessPolicy, bool) {
+	for _, policy := range policies {
+		if policy.Route == route {
+			return policy, true
+		}
+	}
+	return webengine.WebAccessPolicy{}, false
+}
+func writeAccessDirectives(output *strings.Builder, policy webengine.WebAccessPolicy, verifier native.AccessVerifier) {
+	output.WriteString("  realm ")
+	output.WriteString(accessRealmName(policy.Ref))
+	output.WriteString("\n  authName ")
+	output.WriteString(policy.Realm)
+	output.WriteString("\n  required user")
+	for _, principal := range verifier.Principals {
+		output.WriteByte(' ')
+		output.WriteString(principal.Username)
+	}
+	output.WriteByte('\n')
+}
 
 func validateDerivedIdentities(bindings []webengine.WebBindingSpec, index renderIndex) error {
 	artifacts := make(map[native.ArtifactKey]struct{}, len(bindings))

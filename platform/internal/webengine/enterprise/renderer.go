@@ -132,6 +132,10 @@ func renderServer(request native.RenderRequest, index renderIndex, bindings []we
 	writeElement(&output, 1, "group", "cyberpanel-web")
 	writeElement(&output, 1, "disableWebAdmin", "1")
 	writeElement(&output, 1, "mime", "$SERVER_ROOT/conf/mime.properties")
+	output.WriteString("  <fileAccessControl>\n")
+	writeElement(&output, 2, "requiredPermissionMask", "000")
+	writeElement(&output, 2, "restrictedPermissionMask", "000")
+	output.WriteString("  </fileAccessControl>\n")
 	output.WriteString("  <logging>\n    <log>\n")
 	writeElement(&output, 3, "fileName", "$SERVER_ROOT/logs/error.log")
 	writeElement(&output, 3, "logLevel", "WARN")
@@ -261,12 +265,12 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 	writeElement(&output, 1, "enableGzip", nativeBool(compression))
 	if binding.Relationship == webengine.BindingPreview {
 		output.WriteString("  <rewrite>\n")
-		writeElement(&output,2,"enable","1")
+		writeElement(&output, 2, "enable", "1")
 		rules := "RewriteCond %{HTTPS} !=on\nRewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=308,L,NE]"
 		if application.ReverseProxy != nil && application.ReverseProxy.HostHeader.String() != "" {
 			rules += "\nRewriteRule ^ - [E=Proxy-Host:" + application.ReverseProxy.HostHeader.String() + "]"
 		}
-		writeElement(&output,2,"rules",rules)
+		writeElement(&output, 2, "rules", rules)
 		output.WriteString("  </rewrite>\n")
 	}
 	output.WriteString("  <index>\n")
@@ -331,15 +335,34 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 		output.WriteString("    </context>\n")
 	case application.ReverseProxy != nil:
 		proxyName := proxyProcessorName(application.Ref)
-		output.WriteString("    <context>\n"); writeElement(&output, 3, "type", "proxy"); writeElement(&output, 3, "uri", "/"); writeElement(&output, 3, "handler", proxyName); if policy,exists:=accessPolicyAt(policies,"/");exists{writeAccessElements(&output,3,policy,index.verifiers[policy.Ref])}; output.WriteString("    </context>\n")
-		for _, policy := range policies { if policy.Route=="/"{continue};output.WriteString("    <context>\n");writeElement(&output,3,"type","proxy");writeElement(&output,3,"uri",policy.Route);writeElement(&output,3,"handler",proxyName);writeAccessElements(&output,3,policy,index.verifiers[policy.Ref]);output.WriteString("    </context>\n") }
+		output.WriteString("    <context>\n")
+		writeElement(&output, 3, "type", "proxy")
+		writeElement(&output, 3, "uri", "/")
+		writeElement(&output, 3, "handler", proxyName)
+		if policy, exists := accessPolicyAt(policies, "/"); exists {
+			writeAccessElements(&output, 3, policy, index.verifiers[policy.Ref])
+		}
+		output.WriteString("    </context>\n")
+		for _, policy := range policies {
+			if policy.Route == "/" {
+				continue
+			}
+			output.WriteString("    <context>\n")
+			writeElement(&output, 3, "type", "proxy")
+			writeElement(&output, 3, "uri", policy.Route)
+			writeElement(&output, 3, "handler", proxyName)
+			writeAccessElements(&output, 3, policy, index.verifiers[policy.Ref])
+			output.WriteString("    </context>\n")
+		}
 	default:
 		for _, policy := range policies {
 			output.WriteString("    <context>\n")
 			writeElement(&output, 3, "type", "null")
 			writeElement(&output, 3, "uri", policy.Route)
-			location := siteRoot(site)+"/"+application.DocumentRoot
-			if policy.Route != "/" { location += policy.Route }
+			location := siteRoot(site) + "/" + application.DocumentRoot
+			if policy.Route != "/" {
+				location += policy.Route
+			}
 			writeElement(&output, 3, "location", location)
 			writeElement(&output, 3, "allowBrowse", "1")
 			writeAccessElements(&output, 3, policy, index.verifiers[policy.Ref])
@@ -367,7 +390,16 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 		writeElement(&output, 3, "autoStart", "0")
 		output.WriteString("    </extProcessor>\n  </extProcessorList>\n")
 	} else if servesApplication(binding) && application.ReverseProxy != nil {
-		proxyName := proxyProcessorName(application.Ref); output.WriteString("  <extProcessorList>\n    <extProcessor>\n"); writeElement(&output, 3, "type", "proxy"); writeElement(&output, 3, "name", proxyName); writeElement(&output, 3, "address", netip.AddrPortFrom(application.ReverseProxy.Address, application.ReverseProxy.Port).String()); writeElement(&output, 3, "maxConns", "256"); writeElement(&output, 3, "initTimeout", "30"); writeElement(&output, 3, "retryTimeout", "0"); writeElement(&output, 3, "respBuffer", "0"); output.WriteString("    </extProcessor>\n  </extProcessorList>\n")
+		proxyName := proxyProcessorName(application.Ref)
+		output.WriteString("  <extProcessorList>\n    <extProcessor>\n")
+		writeElement(&output, 3, "type", "proxy")
+		writeElement(&output, 3, "name", proxyName)
+		writeElement(&output, 3, "address", netip.AddrPortFrom(application.ReverseProxy.Address, application.ReverseProxy.Port).String())
+		writeElement(&output, 3, "maxConns", "256")
+		writeElement(&output, 3, "initTimeout", "30")
+		writeElement(&output, 3, "retryTimeout", "0")
+		writeElement(&output, 3, "respBuffer", "0")
+		output.WriteString("    </extProcessor>\n  </extProcessorList>\n")
 	}
 	output.WriteString("</virtualHostConfig>\n")
 	return []byte(output.String())
@@ -377,14 +409,40 @@ func renderAccessVerifier(verifier native.AccessVerifier) []byte {
 	principals := append([]native.PasswordVerifier(nil), verifier.Principals...)
 	sort.Slice(principals, func(i, j int) bool { return principals[i].Username < principals[j].Username })
 	var output strings.Builder
-	for _, principal := range principals { output.WriteString(principal.Username); output.WriteByte(':'); output.WriteString(principal.Digest); output.WriteByte('\n') }
+	for _, principal := range principals {
+		output.WriteString(principal.Username)
+		output.WriteByte(':')
+		output.WriteString(principal.Digest)
+		output.WriteByte('\n')
+	}
 	return []byte(output.String())
 }
 
-func accessRealmName(ref webengine.ResourceRef) string { sum := sha256.Sum256([]byte(ref)); return "panel_" + fmt.Sprintf("%x", sum[:10]) }
-func accessVerifierPath(generation uint64, verifier native.AccessVerifier) string { return "$SERVER_ROOT/conf/vhosts/.panel-generations/g"+strconv.FormatUint(generation,10)+"/access/"+string(verifier.VerifierKey)+".users" }
-func accessPolicyAt(policies []webengine.WebAccessPolicy, route string) (webengine.WebAccessPolicy, bool) { for _, policy := range policies { if policy.Route==route{return policy,true} };return webengine.WebAccessPolicy{},false }
-func writeAccessElements(output *strings.Builder, depth int, policy webengine.WebAccessPolicy, verifier native.AccessVerifier) { writeElement(output,depth,"realm",accessRealmName(policy.Ref));writeElement(output,depth,"authName",policy.Realm);users:=make([]string,0,len(verifier.Principals));for _,principal:=range verifier.Principals{users=append(users,principal.Username)};sort.Strings(users);writeElement(output,depth,"required","user "+strings.Join(users," ")) }
+func accessRealmName(ref webengine.ResourceRef) string {
+	sum := sha256.Sum256([]byte(ref))
+	return "panel_" + fmt.Sprintf("%x", sum[:10])
+}
+func accessVerifierPath(generation uint64, verifier native.AccessVerifier) string {
+	return "$SERVER_ROOT/conf/vhosts/.panel-generations/g" + strconv.FormatUint(generation, 10) + "/access/" + string(verifier.VerifierKey) + ".users"
+}
+func accessPolicyAt(policies []webengine.WebAccessPolicy, route string) (webengine.WebAccessPolicy, bool) {
+	for _, policy := range policies {
+		if policy.Route == route {
+			return policy, true
+		}
+	}
+	return webengine.WebAccessPolicy{}, false
+}
+func writeAccessElements(output *strings.Builder, depth int, policy webengine.WebAccessPolicy, verifier native.AccessVerifier) {
+	writeElement(output, depth, "realm", accessRealmName(policy.Ref))
+	writeElement(output, depth, "authName", policy.Realm)
+	users := make([]string, 0, len(verifier.Principals))
+	for _, principal := range verifier.Principals {
+		users = append(users, principal.Username)
+	}
+	sort.Strings(users)
+	writeElement(output, depth, "required", "user "+strings.Join(users, " "))
+}
 
 func validateDerivedIdentities(bindings []webengine.WebBindingSpec, index renderIndex) error {
 	artifacts := make(map[native.ArtifactKey]struct{}, len(bindings))
