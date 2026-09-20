@@ -150,6 +150,9 @@ func SealTransferImpactPreview(preview TransferImpactPreview) TransferImpactPrev
 }
 
 type TransferJob struct {
+	// Panel-export imports retain their source authority in the immutable job
+	// document so a worker can reconstruct execution after process restart.
+	ExportSource *TransferJob `json:"export_source,omitempty"`
 	ID                  ResourceID                  `json:"id"`
 	IdempotencyKey      string                      `json:"idempotency_key"`
 	TenantID            site.TenantID               `json:"tenant_id"`
@@ -176,6 +179,7 @@ type TransferJob struct {
 }
 
 func (job TransferJob) Validate() error {
+	if job.ExportSource!=nil && (job.Direction!=TransferImport || job.ExportSource.Direction!=TransferExport || job.ExportSource.ExportSource!=nil) { return ErrTransferInvalid }
 	if job.ID.IsZero() || !validTransferIdentifier(job.IdempotencyKey) || job.TenantID.String() == "" || job.SiteID.String() == "" || job.DatabaseID.IsZero() || job.DatabaseGeneration == 0 ||
 		job.InstanceID.IsZero() || job.Format != TransferFormatSQL || !validTransferCompression(job.Compression) || job.Selection.Validate() != nil || job.Limits.Validate() != nil ||
 		job.Impact.Validate() != nil || job.Impact.DatabaseID != job.DatabaseID || job.Impact.DatabaseGeneration != job.DatabaseGeneration || job.Retention.Validate(job.CreatedAt) != nil ||
@@ -189,6 +193,7 @@ func (job TransferJob) Validate() error {
 		if job.ConflictPolicy != TransferConflictFail && job.ConflictPolicy != TransferConflictReplace { return ErrTransferInvalid }
 		if job.ConflictPolicy == TransferConflictReplace && (job.RestorePointRef.IsZero() || !validSHA256(job.RestorePointDigest) || job.RestorePointCreatedAt.IsZero()) ||
 			job.ConflictPolicy == TransferConflictFail && (!job.RestorePointRef.IsZero() || job.RestorePointDigest != "" || !job.RestorePointCreatedAt.IsZero()) { return ErrTransferInvalid }
+		if job.ExportSource!=nil && !validTransferExportSource(job,*job.ExportSource) { return ErrTransferInvalid }
 	default:
 		return ErrTransferInvalid
 	}

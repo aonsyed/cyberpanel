@@ -223,7 +223,7 @@ func (service TransferService) Create(ctx context.Context, actor string, job Tra
 		return existing, nil
 	} else if !errors.Is(loadErr, ErrNotFound) { return TransferJobState{}, loadErr }
 	preview, err := service.catalog.PreviewDatabaseTransfer(ctx, database, job.Direction, job.Selection, job.Source)
-	if err != nil || preview.Validate() != nil || preview.Digest != job.Impact.Digest || preview.DatabaseID != job.DatabaseID || preview.DatabaseGeneration != job.DatabaseGeneration ||
+	if err != nil || !sameTransferImpact(preview,job.Impact,now) || preview.DatabaseID != job.DatabaseID || preview.DatabaseGeneration != job.DatabaseGeneration ||
 		preview.Rows > job.Limits.MaximumRows || preview.Bytes > job.Limits.MaximumBytes { return TransferJobState{}, ErrTransferStale }
 	if job.Direction == TransferImport && job.ConflictPolicy == TransferConflictReplace {
 		if stepUp == nil || stepUp.Validate() != nil || stepUp.Actor != actor || stepUp.TenantID != job.TenantID || stepUp.DatabaseID != job.DatabaseID || stepUp.JobID != job.ID { return TransferJobState{}, ErrUnauthorized }
@@ -236,6 +236,14 @@ func (service TransferService) Create(ctx context.Context, actor string, job Tra
 	if err != nil { return TransferJobState{}, err }
 	if err = service.recordAudit(ctx, authorization, "transfer_created", redactedTransferProjection(job), preview.Digest, state.Generation); err != nil { return TransferJobState{}, err }
 	return state, nil
+}
+
+// A fresh observation has a new capture time. Compare its measured contents,
+// while validating both sealed documents and bounding observation freshness.
+func sameTransferImpact(current,expected TransferImpactPreview,now time.Time)bool{
+	if current.Validate()!=nil || expected.Validate()!=nil || current.CapturedAt.After(now.Add(time.Minute)) || now.Sub(current.CapturedAt)>15*time.Minute { return false }
+	current.CapturedAt=expected.CapturedAt
+	return SealTransferImpactPreview(current).Digest==expected.Digest
 }
 
 func (service TransferService) Inspect(ctx context.Context, actor string, jobID ResourceID) (TransferJobState, error) {

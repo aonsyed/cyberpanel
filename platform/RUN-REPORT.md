@@ -4378,3 +4378,39 @@ QEMU environment; the temporary `/home/harness/platform/cyberpanel` binary was
 removed immediately afterward. Both changed Go files have matching host/guest
 SHA256 values. Installed55 remains unchanged. Production service wiring,
 transfer-job recovery, uploads/API/UI and broader parity remain incomplete.
+# TransferService native import execution — 2026-09-21
+
+Added BrokerImportExecution, a job-bound implementation of the existing transfer
+catalog/backend. It loads tenant/site-owned core state, obtains a fresh native
+destination preview, allocates/loads/verifies/discards through the broker and
+promotes through the coordinator's atomic core projection. The import adapter
+requires the source export embedded in the immutable job document, so execution
+can be reconstructed from a persisted job. Generic uploaded-source jobs remain
+representable but are not accepted by this export-backed adapter. No new native
+transport or vendor component was introduced.
+
+Added a closed, read-only import-preview broker action. Native table counts,
+row counts and allocation metadata describe the destination. Fail-mode rejects
+nonempty destinations before job admission and native promotion rechecks them.
+Fixed Create's preview comparison to accept a fresh capture timestamp with
+identical sealed contents; changed contents, stale/future captures still deny.
+
+Extended existing QEMU native SQL/gzip round trips through TransferService
+Create/Run/Inspect/InspectReceipt with real SQLite jobs, broker, native MariaDB,
+scoped loader cleanup and core-state projection. Verified authorization denial
+at the injected policy seam, nonempty destination preservation, create replay,
+source binding reconstruction from persisted job JSON, exact text/NULL/BLOB
+data, completed receipts after generation advance and refusal to rerun a
+completed import. Missing, nested and altered source-export bindings deny.
+Authorization/audit and broker peer policy remain fixtures, not HTTP proof.
+
+QEMU-only command, existing Ubuntu ARM64 guest:
+
+`sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/database ./cmd/cyberpanel ./cmd/panel-execd ./internal/apiserver -count=1`
+
+All four passed. Three production command builds passed in QEMU using the same
+offline/root environment: `go build -p 2 ./cmd/cyberpanel ./cmd/panel-execd ./cmd/paneld`.
+All nine changed Go files match host/guest SHA256. Guest free space3.0GiB.
+No downloads, vendor changes, new workers or committed binaries. Installed55
+unchanged. Remaining includes real edge authorization, HTTP/UI/upload wiring,
+streaming cancellation/long-job lease handling, replacement and general recovery.

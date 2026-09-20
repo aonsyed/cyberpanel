@@ -21,6 +21,12 @@ func (executor *LinuxMariaDBExecutor) ExecuteTransferImport(ctx context.Context,
 	}
 	var err error
 	switch request.Action {
+	case "preview":
+		var impact TransferImpactPreview
+		impact, err = executor.previewTransferImport(ctx, request.Job)
+		if err == nil {
+			result.Impact = &impact
+		}
 	case "allocate":
 		// Validate the stored descriptor before reserving any native resources.
 		if _, err = executor.importArtifactStore(ctx, request.Job); err == nil {

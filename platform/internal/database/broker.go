@@ -646,7 +646,7 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 	// Verification only observes native data and stores its proof. Promotion
 	// rechecks that proof under writer admission; observation must not cache a
 	// stale proof or poison the mutation journal on a premature request.
-	if request.Operation==BrokerTransferImport && request.TransferImport.Action=="verify" { mutation=false }
+	if request.Operation==BrokerTransferImport && (request.TransferImport.Action=="verify" || request.TransferImport.Action=="preview") { mutation=false }
 	if request.Operation==BrokerMariaDBHA && request.MariaDBHA.Action==MariaDBHAObserve { mutation=false }
 	var lease rebootcontrol.ExecutionLease
 	if mutation {

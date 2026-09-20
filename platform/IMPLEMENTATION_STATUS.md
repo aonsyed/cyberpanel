@@ -11,7 +11,27 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
-## Current recovery point — installed export fix, 2026-09-20
+## Current recovery point — 2026-09-21 (installed55 unchanged)
+
+Transfer service/native execution joined (source only): BrokerImportExecution
+now supplies the existing TransferService catalog/backend for a bound import.
+Its native destination preview is fresh and read-only; nonempty fail-mode
+destinations are refused. Create compares preview content rather than requiring
+identical capture timestamps. Allocate/load/verify/discard use the existing
+broker; promotion uses Coordinator's atomic core projection. ExportSource is
+optional sealed source authority in immutable job JSON; the import adapter
+requires it and can reconstruct from the persisted job without an in-memory
+source map. Nested or altered source bindings are rejected.
+
+Real QEMU SQL/gzip service Create → Run → Inspect/InspectReceipt passed with
+SQLite jobs, broker/native MariaDB and core projection, including fresh preview,
+nonempty destination preservation, denied fixture actor, exact text/BLOB rows,
+generation advancement and refusal to run a completed import again. Auth/audit
+remain test fixtures. All four affected suites and three command builds pass;
+guest3.0GiB free. Next: authenticated production edge/HTTP/UI for export-backed
+imports, then upload ingestion and replacement. Worker cancellation during the
+broker load (currently checkpoints before/after it), long-running leases/jobs,
+and general crash/job recovery remain incomplete. No installed import claim.
 
 Transfer promotion failure handling (2026-09-21, source only): fixed Run so a
 reported native promotion or ErrAmbiguous is preserved as ambiguous even when

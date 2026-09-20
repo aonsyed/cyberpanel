@@ -17,6 +17,7 @@ type TransferImportRequest struct {
 }
 
 type TransferImportResult struct {
+	Impact       *TransferImpactPreview   `json:"impact,omitempty"`
 	Action       string                   `json:"action"`
 	JobDigest    string                   `json:"job_digest"`
 	Isolated     IsolatedTransferDatabase `json:"isolated"`
@@ -31,11 +32,11 @@ type TransferImportExecutor interface {
 
 func (request TransferImportRequest) validate() error {
 	j, source := request.Job, request.SourceExport
-	if j.Validate() != nil || j.Direction != TransferImport || j.ConflictPolicy != TransferConflictFail || j.Source == nil || source.Validate() != nil || source.Direction != TransferExport || source.Destination == nil || *source.Destination != WorkspaceExportArtifact(source) || j.Source.Identity != *source.Destination || j.TenantID != source.TenantID || j.SiteID != source.SiteID || j.Format != source.Format || j.Compression != source.Compression || !j.Source.ExpiresAt.Equal(source.Retention.RetainUntil) {
+	if j.Validate() != nil || j.Direction != TransferImport || j.ConflictPolicy != TransferConflictFail || !validTransferExportSource(j, source) || j.ExportSource != nil && j.ExportSource.Digest != source.Digest {
 		return ErrUnauthorized
 	}
 	switch request.Action {
-	case "allocate":
+	case "allocate", "preview":
 		if request.Isolated != nil {
 			return ErrInvalidCommand
 		}
@@ -49,7 +50,17 @@ func (request TransferImportRequest) validate() error {
 	return nil
 }
 
+func validTransferExportSource(job, source TransferJob) bool {
+	return job.Source != nil && source.ExportSource == nil && source.Direction == TransferExport && source.Validate() == nil && source.Destination != nil && *source.Destination == WorkspaceExportArtifact(source) && job.Source.Identity == *source.Destination && job.TenantID == source.TenantID && job.SiteID == source.SiteID && job.Format == source.Format && job.Compression == source.Compression && job.Source.ExpiresAt.Equal(source.Retention.RetainUntil)
+}
+
 func (result TransferImportResult) matches(request TransferImportRequest) bool {
+	if request.Action == "preview" {
+		return result.Action == request.Action && result.JobDigest == request.Job.Digest && result.Isolated == (IsolatedTransferDatabase{}) && result.Process == nil && result.Verification == nil && result.Promotion == nil && result.Impact != nil && result.Impact.Validate() == nil && result.Impact.DatabaseID == request.Job.DatabaseID && result.Impact.DatabaseGeneration == request.Job.DatabaseGeneration
+	}
+	if result.Impact != nil {
+		return false
+	}
 	if result.Action != request.Action || result.JobDigest != request.Job.Digest || result.Isolated.Validate(request.Job) != nil || request.Isolated != nil && result.Isolated != *request.Isolated {
 		return false
 	}
