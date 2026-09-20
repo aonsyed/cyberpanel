@@ -4661,3 +4661,23 @@ unchanged; approved and installed executor digest9cdeef3c792e89f60f1ba3ad2961fb9
 match. No vendor changes, downloads, new workers, host tests or Git binaries.
 Remaining import parity: replacement/restorepoints, SQL objects, long-running
 jobs and recovery; broader panel journeys/matrix are also unfinished.
+
+## 2026-09-21 — native CRS configuration evidence
+
+Added optional `/etc/modsecurity/crs` and `/etc/modsecurity.d/owasp-crs`
+directories to installed WAF asset inventory. No version/package pin introduced.
+QEMU Ubuntu ARM64, root with TMPDIR=/root, offline Go toolchain:
+
+- Focused `TestNativeWAFConfigurationInventory`, recursive integrity and
+  no-custom-manifest tests passed. Actual filesystem edits change the digest;
+  writable configuration and symlinked configuration directories are rejected.
+- `CYBERPANEL_QEMU_WAF=1` `TestQEMUInitialWAFAssets` passed, invoking installed
+  vendor OLS parser in private systemd mount namespaces for installed/unversioned
+  Unicode mapping policies.
+- `go test -p 2 ./internal/operations -count=1` passed; formatting was in QEMU.
+
+Native package query confirms ols-modsecurity 1.9.2-1+noble but still custom
+cyberpanel-waf-crs 4.29.0-2. No replacement package was found in inspected local
+apt archive/harness paths. This is source qualification, not deployment or proof
+of distro CRS installation. Installed59 unchanged; no downloads, custom builds,
+new workers or binary artifacts. Guest free space remains 7.1GiB.

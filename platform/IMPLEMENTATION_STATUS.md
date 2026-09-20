@@ -11,6 +11,19 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Native CRS follow-up — 2026-09-21 (source verified, not deployed)
+
+Source already has no custom CRS manifest/package requirement. Extended installed
+asset inventory to optional native configuration directories `/etc/modsecurity/crs`
+and `/etc/modsecurity.d/owasp-crs`; edits now change activation evidence without
+pinning a release. Existing root ownership, mode, link and aggregate size limits
+remain. QEMU targeted tests and operations suite pass; actual vendor OLS parser
+accepts both installed and unversioned mapping policies. Guest still contains
+`cyberpanel-waf-crs` 4.29.0-2, not a native distro CRS package. No cached replacement
+was found in the inspected apt archive/harness paths. Normal-package replacement
+and native layout qualification remain pending; no downloads or third-party builds
+were performed. Installed59 is unchanged.
+
 ## Current recovery point — 2026-09-21 (installed59 committed)
 
 SQL/gzip file upload UI is installed and qualified end-to-end. Database row

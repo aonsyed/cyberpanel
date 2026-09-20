@@ -163,43 +163,54 @@ func installedWAFAssets(root string) (wafSourceEvidence, error) {
 	var inventory bytes.Buffer
 	var total int64
 	var count int
-	err := filepath.WalkDir(filepath.Join(root, baselineAssetsPath), func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	// Native packages keep local CRS setup/exclusions outside /usr/share. Include
+	// those bytes in activation evidence too; neither location pins a release.
+	assetRoots := []string{baselineAssetsPath, "/etc/modsecurity/crs", "/etc/modsecurity.d/owasp-crs"}
+	for index, assetRoot := range assetRoots {
+		fullRoot := filepath.Join(root, assetRoot)
+		if _, err := os.Lstat(fullRoot); index > 0 && errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return wafSourceEvidence{}, err
 		}
-		if entry.IsDir() {
-			info, err := entry.Info()
+		err := filepath.WalkDir(fullRoot, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			stat, ok := info.Sys().(*syscall.Stat_t)
-			if !ok || stat.Uid != 0 || info.Mode().Perm()&0022 != 0 {
-				return ErrConflict
+			if entry.IsDir() {
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				stat, ok := info.Sys().(*syscall.Stat_t)
+				if !ok || stat.Uid != 0 || info.Mode().Perm()&0022 != 0 {
+					return ErrConflict
+				}
+				return nil
 			}
+			relative, err := filepath.Rel(root, path)
+			if err != nil || !entry.Type().IsRegular() {
+				return errors.New("unsafe WAF runtime asset")
+			}
+			count++
+			if count > 10000 {
+				return errors.New("WAF runtime inventory exceeds file limit")
+			}
+			data, err := readTrustedWAFAsset(path, 2<<20)
+			if err != nil {
+				return err
+			}
+			total += int64(len(data))
+			if total > 64<<20 {
+				return errors.New("WAF runtime inventory exceeds size limit")
+			}
+			// WalkDir is lexical; quoted paths make inventory records unambiguous.
+			fmt.Fprintf(&inventory, "%s  %q\n", digestBytes(data), relative)
 			return nil
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil || !entry.Type().IsRegular() {
-			return errors.New("unsafe WAF runtime asset")
-		}
-		count++
-		if count > 10000 {
-			return errors.New("WAF runtime inventory exceeds file limit")
-		}
-		data, err := readTrustedWAFAsset(path, 2<<20)
+		})
 		if err != nil {
-			return err
+			return wafSourceEvidence{}, err
 		}
-		total += int64(len(data))
-		if total > 64<<20 {
-			return errors.New("WAF runtime inventory exceeds size limit")
-		}
-		// WalkDir is lexical; quoted paths make inventory records unambiguous.
-		fmt.Fprintf(&inventory, "%s  %q\n", digestBytes(data), relative)
-		return nil
-	})
-	if err != nil {
-		return wafSourceEvidence{}, err
 	}
 	mappingPath, mapping, err := installedWAFUnicodeMapping(root)
 	if err != nil {

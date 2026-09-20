@@ -134,6 +134,67 @@ func TestInstalledWAFRulesNeedNoCustomPackageManifest(t *testing.T) {
 	}
 }
 
+func TestNativeWAFConfigurationInventory(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root QEMU ownership check")
+	}
+	for _, configRoot := range []string{"/etc/modsecurity/crs", "/etc/modsecurity.d/owasp-crs"} {
+		t.Run(configRoot, func(t *testing.T) {
+			root := t.TempDir()
+			assets := filepath.Join(root, baselineAssetsPath)
+			if err := os.MkdirAll(assets, 0755); err != nil {
+				t.Fatal(err)
+			}
+			for name, data := range map[string]string{"owasp-crs.load": "Include " + configRoot + "/*.conf\n", "unicode.mapping": "20127\n"} {
+				if err := os.WriteFile(filepath.Join(assets, name), []byte(data), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := installedWAFAssets(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory := filepath.Join(root, configRoot)
+			if err := os.MkdirAll(directory, 0755); err != nil {
+				t.Fatal(err)
+			}
+			config := filepath.Join(directory, "crs-setup.conf")
+			if err := os.WriteFile(config, []byte("# native setup\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			after, err := installedWAFAssets(root)
+			if err != nil || after.Digest == before.Digest {
+				t.Fatalf("native setup not inventoried: %v", err)
+			}
+			if err := os.WriteFile(config, []byte("# updated native setup\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			updated, err := installedWAFAssets(root)
+			if err != nil || updated.Digest == after.Digest {
+				t.Fatalf("native update not inventoried: %v", err)
+			}
+			if err := os.Chmod(config, 0666); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := installedWAFAssets(root); err == nil {
+				t.Fatal("writable native setup accepted")
+			}
+			if err := os.Chmod(config, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(directory, directory+"-target"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(directory+"-target", directory); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := installedWAFAssets(root); err == nil {
+				t.Fatal("symlinked native configuration accepted")
+			}
+		})
+	}
+}
+
 func TestInitialWAFJournalHandoff(t *testing.T) {
 	baseline := operationsFileSnapshot{Existed: true, Mode: 0600, Content: initialWAFConfiguration("/etc/modsecurity/unicode.mapping")}
 	if err := validateWAFPreviousGeneration(wafActiveIndex{}, nil, baseline); err != nil {
