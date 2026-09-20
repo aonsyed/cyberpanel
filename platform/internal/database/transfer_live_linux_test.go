@@ -268,7 +268,99 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			}
 			verifyOrdinaryNativeImports(t, ctx, store, backend, job, target, query)
 			verifyIsolatedNativeImport(t, ctx, exportConfigs.executor, store, job, query)
+			verifyEmptyNativePromotion(t, ctx, exportConfigs.executor, store, job, query)
 		})
+	}
+}
+
+func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *LinuxMariaDBExecutor, store *LinuxTransferArtifactStore, job TransferJob, query func(context.Context, string) (string, error)) {
+	t.Helper()
+	live, err := executor.transferImportSource(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.ID, _ = NewResourceID("promotion-" + job.ID.String())
+	live.Name, _ = ParseSQLIdentifier("cpprom" + job.Digest[:24])
+	job.ID, _ = NewResourceID("promotion-job-" + job.ID.String())
+	job.DatabaseID = live.ID
+	job.Impact.DatabaseID = live.ID
+	job.Impact = SealTransferImpactPreview(job.Impact)
+	job, err = SealTransferJob(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = query(ctx, "CREATE DATABASE `"+live.Name.String()+"` CHARACTER SET "+live.Charset.String()+" COLLATE "+live.Collation.String()+";"); err != nil {
+		t.Fatal(err)
+	}
+	if err = executor.writeResource("databases", live.ID, live); err != nil {
+		t.Fatal(err)
+	}
+	var isolated IsolatedTransferDatabase
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if !isolated.Token.IsZero() {
+			if _, err := query(cleanup, "DROP DATABASE IF EXISTS `"+isolated.Name.String()+"`;"); err != nil {
+				t.Error(err)
+			}
+			if err := executor.removeResource("transfer-imports", isolated.Token); err != nil {
+				t.Error(err)
+			}
+		}
+		if _, err := query(cleanup, "DROP DATABASE `"+live.Name.String()+"`;"); err != nil {
+			t.Error(err)
+		}
+		if err := executor.removeResource("databases", live.ID); err != nil {
+			t.Error(err)
+		}
+	})
+	isolated, err = executor.allocateTransferImport(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := NewLinuxTransferBackend(store, isolatedImportConfigs{executor: executor, isolated: isolated}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = backend.Import(ctx, job, isolated.Name, func(TransferStreamProgress) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = executor.verifyTransferImport(ctx, job, isolated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = query(ctx, "CREATE TABLE `"+live.Name.String()+"`.existing(id INT); INSERT INTO `"+live.Name.String()+"`.existing VALUES(77);"); err != nil {
+		t.Fatal(err)
+	}
+	denied, err := executor.promoteEmptyTransferImport(ctx, job, isolated)
+	if !errors.Is(err, ErrConflict) || !denied.SourcePreserved || denied.Promoted {
+		t.Fatal("nonempty destination accepted", err)
+	}
+	value, err := query(ctx, "SELECT id FROM `"+live.Name.String()+"`.existing;")
+	if err != nil || value != "77" {
+		t.Fatal("existing data changed", err)
+	}
+	if _, err = query(ctx, "DROP TABLE `"+live.Name.String()+"`.existing;"); err != nil {
+		t.Fatal(err)
+	}
+	promoted, err := executor.promoteEmptyTransferImport(ctx, job, isolated)
+	if err != nil || promoted.Validate(job, isolated) != nil {
+		t.Fatal("native promotion", err)
+	}
+	value, err = query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+live.Name.String()+"`.sample ORDER BY id;")
+	if err != nil || value != "1:transfer round trip:0001FF\n2:NULL:NULL" {
+		t.Fatal("promoted data differs", err)
+	}
+	replayed, err := executor.promoteEmptyTransferImport(ctx, job, isolated)
+	if err != nil || replayed != promoted {
+		t.Fatal("promotion replay differs", err)
+	}
+	var updated Database
+	if err = executor.readResource("databases", live.ID, &updated); err != nil || updated.Generation != 2 || updated.Name != live.Name {
+		t.Fatal("promotion generation/name", err)
+	}
+	value, err = query(ctx, "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='"+isolated.Name.String()+"';")
+	if err != nil || value != "0" {
+		t.Fatal("empty isolated schema retained", err)
 	}
 }
 

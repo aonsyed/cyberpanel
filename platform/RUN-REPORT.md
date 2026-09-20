@@ -5,6 +5,35 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Non-replacing native import promotion — source, 2026-09-21
+
+Added private fail-on-conflict promotion for verified InnoDB imports into an empty
+destination. It uses the existing writer gate, source generation checks and closed
+native SQL commands. Fresh isolated verification is required; one RENAME TABLE
+statement moves the tables without changing the destination schema name or grant
+namespace. Native destination verification runs afterward, the now-empty staging
+schema is removed, and the root source generation advances once with pending
+effect metadata. Durable promoting/promoted records prevent blind replay after
+uncertain SQL/persistence results; committed promotion returns its original proof.
+
+The native atomic-rename capability check follows MariaDB's documented10.6.1
+boundary: [RENAME TABLE reference](https://mariadb.com/docs/server/reference/sql-statements/data-definition/rename-table).
+This is a runtime capability check, not a package pin, build or vendor modification.
+
+QEMU live SQL and gzip fixtures each allocate, import and verify into isolation,
+then assert a nonempty destination is rejected and its sentinel row77 preserved.
+After removing only that synthetic sentinel table, promotion succeeds and native
+queries recover the exact text/NULL/binary rows in the destination. Its name stays
+unchanged, protected generation becomes2, replay returns the identical promotion,
+and the temporary schema is absent. Fixture destination/records are cleaned.
+Final QEMU offline/root live-enabled database and panel-execd suites exit0.
+
+Not installed or broker/API/UI exposed; installed55 unchanged. This does not yet
+implement replacement imports/restore points, crash recovery, all engines/objects,
+core SQL projection synchronization or end-user upload/worker admission. No power
+loss or concurrent external DDL qualification is claimed. Ambiguous outcomes remain
+fenced pending recovery implementation, not automatically retried or cleaned.
+
 ### Streamed native export row accounting — 2026-09-21 local date
 
 Export now counts complete INSERT statements from native mariadb-dump output,

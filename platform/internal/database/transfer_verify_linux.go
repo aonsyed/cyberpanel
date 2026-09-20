@@ -57,14 +57,26 @@ func (executor *LinuxMariaDBExecutor) verifyTransferImport(ctx context.Context, 
 		return TransferVerification{}, err
 	}
 	defer closeConnection()
-	observed, err := connection.query(bounded, sqlObserveDatabase, record.Target)
+	verification, err := executor.observeTransferDatabase(bounded, connection, job, isolated, record.Target)
+	if err != nil {
+		return TransferVerification{}, err
+	}
+	record.State, record.Verification = "verified", &verification
+	if err = executor.writeResource("transfer-imports", record.Target.ID, record); err != nil {
+		return TransferVerification{}, err
+	}
+	return verification, nil
+}
+
+func (executor *LinuxMariaDBExecutor) observeTransferDatabase(bounded context.Context, connection *mariaDBConnection, job TransferJob, isolated IsolatedTransferDatabase, target Database) (TransferVerification, error) {
+	observed, err := connection.query(bounded, sqlObserveDatabase, target)
 	if err != nil {
 		return TransferVerification{}, err
 	}
 	if len(strings.TrimSpace(string(observed))) == 0 {
 		return TransferVerification{}, ErrNotFound
 	}
-	metadata, err := connection.query(bounded, sqlObserveImportTables, record.Target)
+	metadata, err := connection.query(bounded, sqlObserveImportTables, target)
 	if err != nil {
 		return TransferVerification{}, err
 	}
@@ -96,7 +108,7 @@ func (executor *LinuxMariaDBExecutor) verifyTransferImport(ctx context.Context, 
 			return TransferVerification{}, ErrTransferLimit
 		}
 		verification.Bytes += size
-		table := isolatedTransferTable{Database: record.Target, Table: string(name)}
+		table := isolatedTransferTable{Database: target, Table: string(name)}
 		definition, err := connection.query(bounded, sqlObserveImportSchema, table)
 		if err != nil {
 			return TransferVerification{}, err
@@ -135,10 +147,6 @@ func (executor *LinuxMariaDBExecutor) verifyTransferImport(ctx context.Context, 
 	verification.VerifiedAt = executor.now().UTC()
 	verification.Digest = transferVerificationDigest(verification)
 	if err = verification.Validate(job, isolated); err != nil {
-		return TransferVerification{}, err
-	}
-	record.State, record.Verification = "verified", &verification
-	if err = executor.writeResource("transfer-imports", record.Target.ID, record); err != nil {
 		return TransferVerification{}, err
 	}
 	return verification, nil

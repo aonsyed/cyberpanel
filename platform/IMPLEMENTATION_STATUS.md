@@ -13,6 +13,18 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Non-replacing import promotion (source only): verified InnoDB tables can move into
+an empty existing destination using one native RENAME TABLE statement, preserving
+the destination name/grant namespace. The method freshly verifies staging and
+destination data, journals promoting before SQL, increments the protected source
+generation once, removes the empty staging database and persists replayable proof.
+Nonempty destination is rejected untouched; ambiguous native/persistence outcomes
+are not automatically replayed or discarded. QEMU plain/gzip end-to-end native
+allocation→import→verify→promotion and exact replay pass. This private operation
+is NOT service/API/UI wired; core projection update and authorized worker admission
+are still required. Replace/restore-point mode, crash recovery and wider object/
+engine coverage remain open. Installed55 unchanged; full parity remains active.
+
 Streamed export row accounting (source, not installed): native dump output now
 counts complete INSERT statements under the fixed --skip-extended-insert format,
 ignoring quoted strings/identifiers and comments across arbitrary chunk boundaries.

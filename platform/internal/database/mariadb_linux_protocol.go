@@ -66,6 +66,7 @@ const (
 	sqlObserveImportSchema
 	sqlCountImportRows
 	sqlCheckImportTable
+	sqlPromoteImportTables
 )
 
 type principalMutation struct {
@@ -254,6 +255,9 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 	case sqlObserveDataDirectory:
 		if len(values) != 0 { return "", ErrInvalidCommand }
 		return "SELECT @@datadir;\n", nil
+	case sqlPromoteImportTables:
+		rename,ok:=oneValue[isolatedTransferRename](values);if !ok{return "",ErrInvalidResource}
+		return transferRenameSQL(rename)
 	case sqlObserveImportTables:
 		database,ok:=oneValue[Database](values)
 		if !ok || database.Validate()!=nil{return "",ErrInvalidResource}

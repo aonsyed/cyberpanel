@@ -16,6 +16,7 @@ import (
 // Root-only native building blocks for the transfer catalog. No broker operation
 // exposes these yet; callers must enforce transfer authorization and admission.
 type isolatedTransferRecord struct {
+	Promotion    *TransferPromotion       `json:"promotion,omitempty"`
 	Verification *TransferVerification    `json:"verification,omitempty"`
 	Job          TransferJob              `json:"job"`
 	Target       Database                 `json:"target"`
