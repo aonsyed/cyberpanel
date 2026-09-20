@@ -5,6 +5,46 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Fixed-profile native container confinement implemented — 2026-09-20
+
+The native rootless launcher now enters a fixed AppArmor profile through the
+trusted root-owned `aa-exec` binary before Podman/Skopeo starts. Its name derives
+from the embedded policy template; this generation is
+`cyberpanel-containers-483cce58be6c2384eb99facad419f8c0`. The caller cannot choose
+the profile or an alternative executable. Missing, complain-mode, wrong-generation
+or unavailable enforcement fails closed. When AppArmor is unavailable, the
+existing Alma path requires SELinux's enforcing flag; disabled/missing MAC is
+not an unconfined execution fallback.
+
+The policy forces inherited executable confinement, denies control-plane paths,
+selected kernel interfaces and writes to process profile-transition attributes.
+The host-side rootless runtime still needs mount/user-namespace operations;
+workload capability, seccomp, filesystem, user mapping and network restrictions
+remain separately mandatory. This policy is not claimed to replace those layers.
+Profile generations may coexist; old generations must not be unloaded while
+their workloads remain active.
+
+Runtime inspection recognizes this confinement only for the native runner after
+its fixed-profile launch and enforcing-generation check. It does not turn the
+kernel-enabled flag alone into a positive MAC verdict. The existing native
+executable allowlist and supplementary-group clearing remain enforced.
+
+QEMU verification exercised a real pinned n8n-image process through the native
+launcher: confirmed the exact enforced profile inside the container, read an
+allowed file, rejected reading an equivalently readable fixture mounted under
+`/etc/cyberpanel`, and rejected a transition to `unconfined`. Missing-profile
+launch rejection, wrong/complain-generation parsing, rootless Podman inspection
+and full runtime capability admission also passed. Tests unloaded only the
+profiles they loaded; the container list was empty afterward. Final focused
+run: 0.524 seconds. Uncached containers/integrations suites and the panel build
+also passed in Ubuntu ARM64 QEMU.
+
+Still pending: signed installer policy publication/loading, boot/reboot and
+generation-retirement integration, complete workload/exec/lifecycle checks and
+other OS/architecture qualification. The QEMU tests loaded the policy directly;
+no installed node release was changed. The old assembled component must be
+rebuilt before deployment. These checks do not certify the full sandbox or panel.
+
 ### Container privilege-drop group leak fixed — 2026-09-20
 
 While integrating the inherited-confinement path, found that the native

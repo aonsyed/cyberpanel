@@ -45,10 +45,11 @@ remain pending. Native Ubuntu rootless Podman rejects AppArmor profiles despite
 kernel AppArmor being active; preserve the MAC requirement and resolve that
 runtime limitation before declaring container integration operational. Exact
 artifact hashes, evidence and remaining limits are in `RUN-REPORT.md`.
-An enforced-profile inheritance probe has now passed inside a real rootless
-container, including allowed/denied reads. The diagnostic profile was unloaded;
-production policy packaging, launcher integration and enforcement attestation
-remain unimplemented. No weaker MAC fallback was enabled.
+Fixed-generation inherited AppArmor confinement is now implemented in the
+native launcher and admission path. Real QEMU container checks cover identity,
+allowed/denied reads and rejected unconfined transitions. Signed installer
+policy loading, boot/retirement integration and complete sandbox qualification
+remain pending. No unconfined MAC fallback was enabled.
 
 Latest executable verification is recorded in `RUN-REPORT.md`: the current
 application database/TLS changes passed the full uncached Go suite in Ubuntu

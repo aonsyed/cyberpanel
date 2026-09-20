@@ -54,6 +54,7 @@ func TestQEMUContainerRunnerUsesRootlessPodman(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Fatal("run as root in QEMU")
 	}
+	loadQEMUContainerPolicy(t)
 	account, err := user.Lookup("harness")
 	if err != nil {
 		t.Fatal(err)
@@ -87,5 +88,10 @@ func TestQEMUContainerRunnerUsesRootlessPodman(t *testing.T) {
 	}
 	if !info.Host.Security.Rootless {
 		t.Fatal("native invocation did not run rootlessly")
+	}
+	runtime := &LinuxContainerRuntime{config: LinuxContainerConfig{PodmanPath: "/usr/bin/podman", RootlessUser: "harness", RootlessUID: uint32(uid), RootlessGID: uint32(gid), RootlessHome: account.HomeDir, Runner: NativeLinuxContainerCommandRunner{}}}
+	capability, err := runtime.InspectRuntime(ctx)
+	if err != nil || !capability.Rootless || !capability.MAC || !capability.Seccomp || !capability.CgroupV2 || !capability.UserNamespaces {
+		t.Fatalf("confined runtime admission: %+v: %v", capability, err)
 	}
 }
