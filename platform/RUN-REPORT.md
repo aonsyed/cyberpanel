@@ -4271,3 +4271,53 @@ Limits: this is a source change, not a deployed release. Existing guest CRS is
 still the old custom package. The Unicode mapping path remains version-specific;
 normal vendor/distribution rules layouts and package replacement remain pending.
 The deleted recipe is recoverable from Git history; live installed assets remain.
+# Database import broker integration — 2026-09-21
+
+Added closed core-to-executor allocate/load/verify/promote/discard operations
+using the existing authenticated database broker. No SQL commands, filesystem
+paths, executable names or credentials are accepted in the command. An import
+must reference the full sealed source export, whose derived artifact identity
+binds its tenant/site; the stored descriptor is checked before native allocation
+and loading. This currently admits same-site panel exports, not arbitrary
+uploads. Core-side user authorization and UI integration are still pending.
+
+Native successful stream receipts are persisted in protected isolated-import
+records. Broker verification/promotion reject records without that proof.
+Load replay returns the persisted receipt without issuing another loader;
+promotion/discard also replay through the existing execution journal.
+
+QEMU-only verification, existing Ubuntu ARM64 guest, real MariaDB and Unix
+socket broker with real SQLite execution journal (peer authorizer and secret
+delivery remain test fixtures):
+
+`sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/database ./cmd/panel-execd ./cmd/cyberpanel ./internal/apiserver -count=1`
+
+All four packages passed. Native SQL and gzip cases prove allocation, verified
+load, exact load replay through both broker and executor, verification,
+promotion into an empty native destination, native row/text/BLOB contents,
+generation advancement, promotion replay, discarded schema/record removal,
+and no unsettled import execution-journal entries. Existing-data refusal and
+preservation remain exercised against the native promotion function. Forged
+source tenant/site/job bindings, modified stored descriptor claims, mixed
+operation payloads and mismatched response payloads are rejected.
+
+The initial protocol test used an invalid request ID; corrected to the existing
+closed request-ID format. The next run exposed verification being journaled as
+a mutation: premature verification left an ambiguous entry which blocked a
+later valid verification. Verification now remains a fresh read-only native
+observation; its proof persistence does not change native data. Promotion still
+revalidates under writer admission. The same premature-verify → successful-load
+→ successful-verify regression now passes without an unsettled journal entry.
+
+Not yet installed or user-facing. Existing installed55 is unchanged. Pending:
+transfer-service/catalog wiring, core projection after promotion, uploads/API/UI,
+replacement/restore points, crash/journal recovery, long-running jobs beyond the
+two-minute broker invocation limit, broader SQL objects and OS/architecture
+qualification. No vendor builds, pins, patches, downloads or new workers.
+
+QEMU `go build -p 2 ./cmd/cyberpanel ./cmd/panel-execd ./cmd/paneld` also passed
+with the same offline environment and root identity as the native tests. An
+initial unprivileged invocation could not read root-owned cache entries; no
+source change or permission broadening was needed. SHA256 values for all five
+changed Go source/test files match between the worktree and the guest. Guest
+free space is 3.4 GiB; host 222 GiB. Git objects remain approximately 494 MiB.

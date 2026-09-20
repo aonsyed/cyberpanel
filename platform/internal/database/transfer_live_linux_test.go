@@ -268,12 +268,12 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			}
 			verifyOrdinaryNativeImports(t, ctx, store, backend, job, target, query)
 			verifyIsolatedNativeImport(t, ctx, exportConfigs.executor, store, job, query)
-			verifyEmptyNativePromotion(t, ctx, exportConfigs.executor, store, job, query)
+			verifyEmptyNativePromotion(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query)
 		})
 	}
 }
 
-func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *LinuxMariaDBExecutor, store *LinuxTransferArtifactStore, job TransferJob, query func(context.Context, string) (string, error)) {
+func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *LinuxMariaDBExecutor, client *BrokerClient, sourceExport TransferJob, job TransferJob, query func(context.Context, string) (string, error)) {
 	t.Helper()
 	live, err := executor.transferImportSource(job)
 	if err != nil {
@@ -314,19 +314,101 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 			t.Error(err)
 		}
 	})
-	isolated, err = executor.allocateTransferImport(ctx, job)
+	request := TransferImportRequest{Action: "allocate", Job: job, SourceExport: sourceExport}
+	checkTransferImportProtocol(t, request)
+	// A descriptor is not trusted merely because it names an owned export.
+	wrong := request
+	changedSource := *job.Source
+	changedSource.Digest = transferDigest([]byte("not-the-stored-export"))
+	wrong.Job.Source = &changedSource
+	wrong.Job, err = SealTransferJob(wrong.Job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend, err := NewLinuxTransferBackend(store, isolatedImportConfigs{executor: executor, isolated: isolated}, time.Now)
+	if _, err = executor.ExecuteTransferImport(ctx, wrong); !errors.Is(err, ErrTransferStale) {
+		t.Fatal("altered source descriptor accepted", err)
+	}
+	wrongID, _ := isolatedTransferIdentity(wrong.Job)
+	var absent isolatedTransferRecord
+	if err = executor.readResource("transfer-imports", wrongID, &absent); !errors.Is(err, ErrNotFound) {
+		t.Fatal("invalid source allocated native resources", err)
+	}
+
+	discardRequest := request
+	discardRequest.Job.ID, _ = NewResourceID("discard-" + job.ID.String())
+	discardRequest.Job, err = SealTransferJob(discardRequest.Job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = backend.Import(ctx, job, isolated.Name, func(TransferStreamProgress) error { return nil }); err != nil {
+	discardTarget, err := client.ExecuteTransferImport(ctx, discardRequest)
+	if err != nil {
+		t.Fatal("discard fixture allocation", err)
+	}
+	discardRequest.Action, discardRequest.Isolated = "discard", &discardTarget.Isolated
+	if _, err = client.ExecuteTransferImport(ctx, discardRequest); err != nil {
+		t.Fatal("broker discard", err)
+	}
+	if _, err = client.ExecuteTransferImport(ctx, discardRequest); err != nil {
+		t.Fatal("broker discard replay", err)
+	}
+	if err = executor.readResource("transfer-imports", discardTarget.Isolated.Token, &absent); !errors.Is(err, ErrNotFound) {
+		t.Fatal("discard retained protected record", err)
+	}
+	if value, err := query(ctx, "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='"+discardTarget.Isolated.Name.String()+"';"); err != nil || value != "0" {
+		t.Fatal("discard retained native schema", err)
+	}
+
+	allocated, err := client.ExecuteTransferImport(ctx, request)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = executor.verifyTransferImport(ctx, job, isolated); err != nil {
-		t.Fatal(err)
+	isolated = allocated.Isolated
+	responseRequest := BrokerRequest{Version: DatabaseBrokerProtocolVersion, RequestID: "req-0123456789abcdef0123456789abcdef", Operation: BrokerTransferImport, TransferImport: &request}
+	response := BrokerResponse{Version: responseRequest.Version, RequestID: responseRequest.RequestID, Operation: responseRequest.Operation, TransferImport: &allocated}
+	if err = response.validate(responseRequest); err != nil {
+		t.Fatal("valid allocation response", err)
+	}
+	for _, change := range []func(*BrokerResponse){
+		func(r *BrokerResponse) { r.FailureCode = "conflict" },
+		func(r *BrokerResponse) { r.Export = &TransferProcessReceipt{} },
+		func(r *BrokerResponse) {
+			result := *r.TransferImport
+			result.JobDigest = transferDigest([]byte("other-job"))
+			r.TransferImport = &result
+		},
+		func(r *BrokerResponse) {
+			result := *r.TransferImport
+			result.Process = &TransferProcessReceipt{}
+			r.TransferImport = &result
+		},
+	} {
+		invalid := response
+		change(&invalid)
+		if invalid.validate(responseRequest) == nil {
+			t.Fatal("mismatched import response accepted")
+		}
+	}
+	request.Isolated = &isolated
+	request.Action = "verify"
+	if _, err = client.ExecuteTransferImport(ctx, request); err == nil {
+		t.Fatal("unloaded import verified")
+	}
+	request.Action = "load"
+	loaded, err := client.ExecuteTransferImport(ctx, request)
+	if err != nil {
+		t.Fatal("broker import load", err)
+	}
+	reloaded, err := client.ExecuteTransferImport(ctx, request)
+	if err != nil || loaded.Process.Digest != reloaded.Process.Digest {
+		t.Fatal("journal import replay", err)
+	}
+	direct, err := executor.ExecuteTransferImport(ctx, request)
+	if err != nil || direct.Process.Digest != loaded.Process.Digest {
+		t.Fatal("durable import replay", err)
+	}
+	request.Action = "verify"
+	if _, err = client.ExecuteTransferImport(ctx, request); err != nil {
+		t.Fatal("broker import verify", err)
 	}
 	if _, err = query(ctx, "CREATE TABLE `"+live.Name.String()+"`.existing(id INT); INSERT INTO `"+live.Name.String()+"`.existing VALUES(77);"); err != nil {
 		t.Fatal(err)
@@ -342,10 +424,12 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 	if _, err = query(ctx, "DROP TABLE `"+live.Name.String()+"`.existing;"); err != nil {
 		t.Fatal(err)
 	}
-	promoted, err := executor.promoteEmptyTransferImport(ctx, job, isolated)
-	if err != nil || promoted.Validate(job, isolated) != nil {
+	request.Action = "promote"
+	promotionResult, err := client.ExecuteTransferImport(ctx, request)
+	if err != nil || promotionResult.Promotion == nil || promotionResult.Promotion.Validate(job, isolated) != nil {
 		t.Fatal("native promotion", err)
 	}
+	promoted := *promotionResult.Promotion
 	value, err = query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+live.Name.String()+"`.sample ORDER BY id;")
 	if err != nil || value != "1:transfer round trip:0001FF\n2:NULL:NULL" {
 		t.Fatal("promoted data differs", err)
@@ -354,6 +438,10 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 	if err != nil || replayed != promoted {
 		t.Fatal("promotion replay differs", err)
 	}
+	brokerReplay, err := client.ExecuteTransferImport(ctx, request)
+	if err != nil || brokerReplay.Promotion == nil || *brokerReplay.Promotion != promoted {
+		t.Fatal("broker promotion replay differs", err)
+	}
 	var updated Database
 	if err = executor.readResource("databases", live.ID, &updated); err != nil || updated.Generation != 2 || updated.Name != live.Name {
 		t.Fatal("promotion generation/name", err)
@@ -361,6 +449,50 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 	value, err = query(ctx, "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='"+isolated.Name.String()+"';")
 	if err != nil || value != "0" {
 		t.Fatal("empty isolated schema retained", err)
+	}
+}
+
+func checkTransferImportProtocol(t *testing.T, request TransferImportRequest) {
+	t.Helper()
+	if err := request.validate(); err != nil {
+		t.Fatal("valid import rejected", err)
+	}
+	otherTenant, _ := site.NewTenantID("other-import-tenant")
+	otherSite, _ := site.NewSiteID("other-import-site")
+	for _, change := range []func(*TransferImportRequest){
+		func(r *TransferImportRequest) {
+			r.SourceExport.TenantID = otherTenant
+			r.SourceExport, _ = SealTransferJob(r.SourceExport)
+		},
+		func(r *TransferImportRequest) {
+			r.SourceExport.SiteID = otherSite
+			r.SourceExport, _ = SealTransferJob(r.SourceExport)
+		},
+		func(r *TransferImportRequest) {
+			r.SourceExport.CreatedBy = "different-owner"
+			r.SourceExport, _ = SealTransferJob(r.SourceExport)
+		},
+		func(r *TransferImportRequest) { r.Action = "sql" },
+		func(r *TransferImportRequest) { r.Action = "load" },
+	} {
+		wrong := request
+		change(&wrong)
+		if wrong.validate() == nil {
+			t.Fatal("forged import authority accepted")
+		}
+	}
+	frame := BrokerRequest{Version: DatabaseBrokerProtocolVersion, RequestID: "req-0123456789abcdef0123456789abcdef", Operation: BrokerTransferImport, Deadline: time.Now().Add(time.Minute), TransferImport: &request}
+	if err := frame.validate(time.Now()); err != nil {
+		t.Fatal("import broker frame", err)
+	}
+	frame.WorkspaceExport = &WorkspaceExportRequest{}
+	if frame.validate(time.Now()) == nil {
+		t.Fatal("mixed import/export frame accepted")
+	}
+	frame.WorkspaceExport = nil
+	frame.Operation = BrokerWorkspaceExport
+	if frame.validate(time.Now()) == nil {
+		t.Fatal("import payload on export accepted")
 	}
 }
 
@@ -640,6 +772,9 @@ func liveExportBroker(t *testing.T, ctx context.Context, executor *LinuxMariaDBE
 		var count int
 		if err := db.QueryRow("SELECT count(*) FROM reboot_execution_effects WHERE method='workspace_export_read'").Scan(&count); err != nil || count != 0 {
 			t.Error("download bytes must not enter mutation journal", count, err)
+		}
+		if err := db.QueryRow("SELECT count(*) FROM reboot_execution_effects WHERE method='transfer_import' AND status!='completed'").Scan(&count); err != nil || count != 0 {
+			t.Error("import execution left unsettled journal entries", count, err)
 		}
 	})
 	return client

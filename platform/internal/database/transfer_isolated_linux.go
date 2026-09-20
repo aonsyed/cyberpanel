@@ -13,9 +13,10 @@ import (
 	"time"
 )
 
-// Root-only native building blocks for the transfer catalog. No broker operation
-// exposes these yet; callers must enforce transfer authorization and admission.
+// Root-only native building blocks. The transfer broker enforces a closed
+// command, source-artifact ownership and execution admission before dispatch.
 type isolatedTransferRecord struct {
+	Process      *TransferProcessReceipt  `json:"process,omitempty"`
 	Promotion    *TransferPromotion       `json:"promotion,omitempty"`
 	Verification *TransferVerification    `json:"verification,omitempty"`
 	Job          TransferJob              `json:"job"`

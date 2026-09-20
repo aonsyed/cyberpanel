@@ -13,6 +13,20 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Import broker integration (2026-09-21, source only): authenticated core now has
+closed allocate/load/verify/promote/discard commands over the existing database
+broker. Source exports are bound by their complete job-derived identity to the
+destination tenant/site; stored descriptors must match before allocation/load.
+Successful native stream receipts persist with isolated records; verification
+and promotion require that receipt. Mutation phases use the existing execution
+journal; verify is a fresh native observation (promotion revalidates), not a
+cached mutation. QEMU SQL/gzip native tests drive the real Unix socket, SQLite
+journal and MariaDB, including exact replay and discard. Four affected package
+suites pass. Installed55 is unchanged. Next: connect the existing transfer
+service/catalog and authoritative core database projection, then upload/API/UI.
+Replacement, crash/journal recovery and jobs beyond the broker's two-minute
+invocation ceiling remain incomplete; do not call import parity complete.
+
 Transfer-service handoff correction (source only): completed jobs/receipts were
 unreadable after promotion advanced the database generation. QEMU real-SQLite
 regression reproduced denial, then verified historical reads permit later
