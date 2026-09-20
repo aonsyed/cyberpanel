@@ -4,6 +4,43 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+## Current recovery point — 2026-09-21 (installed64 committed)
+
+Release qemu-mail-integration-3.1.63 sequence64 contains source24528b64d:
+recent import/view/encoding changes, real mail-domain creation UI, and ordinary
+mail resources published through native Postfix texthash maps. The missing socket
+was an unimplemented configuration target, not a vendor bug. Removed those socket
+references; existing immutable maps now include both ordinary and migrated
+domains, enabled mailboxes and aliases. Suspended/deleted domain/mailbox/alias
+resources are excluded by the projector; map-record whitespace is rejected.
+
+QEMU native postmap regression failed before fix on an ordinary domain; after fix
+both modes, enabled/disabled mailbox and alias/not-found lookups pass. Mail/API/
+core/executor suites pass. Offline guest builds refreshed core/gateway/execd/UI.
+Installer committed manifest00df96ae2be0756dfa40b4b784f97471f9955bc02d55361dad5ea705cef9171e,
+receipt e40b706306342fc788a63999bab2e6c5d89704f0d1d5d7b2e739c116d17910c4.
+Actual /proc executable hashes match all three assembled binaries; active/running,
+zero restarts at qualification. Installed API update of the retained mail fixture
+returned200; subsequent read proves generation2 active. Native installed postmap
+query returns OK with texthash-only config. Real installed mail projection/390px
+dialog, passkey login, database console/query/rejected mutation recovery and
+SQL/gzip downloads with exact contents/SHA256 all pass. No mail was sent.
+
+QA mail-activation response formatter failed after HTTP200 (Fetch status is a
+property, not a method); did not repeat the mutation. Fixed harness and verified
+state read-only. Temporary export table removed. Disposable3.1GiB Go build cache
+cleared before installation, modules retained. Duplicate guest bundle removed
+only after retained host SHA verification and committed receipt/running hashes;
+installer staging pruned. Guest5.5GiB free; Git objects about489MiB. No downloads,
+new workers or native dependency builds/patches/version pins.
+
+NEXT: mailbox credential enrollment and native Maildir provisioning, then local
+SMTP submission→IMAP retrieval. Existing mailbox UI still has no usable fields;
+ordinary mailboxArtifacts requires already-published Maildir and credential ref.
+Advanced routing/policy-helper wiring, DNS automation and DKIM journeys remain
+unqualified. Do not call domain lookup a working mailbox or full mail parity.
+All broader database/replacement/federation/apps/LSE/matrix gaps remain active.
+
 ## Mail domain workflow — 2026-09-21 (candidate UI, delivery NOT qualified)
 
 Real installed Chromium/passkey session reproduced Add mail domain HTTP400:

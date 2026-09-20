@@ -5,6 +5,39 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed64 native mail maps and browser regression — 2026-09-21
+
+Source24528b64d. Before fix, TestQEMUPostfixOrdinaryMaps failed ordinary-domain
+lookup with postmap exit1. Native texthash rendering now publishes ordinary and
+migrated records; no reference to nonexistent socketmap listener. Regression
+covers domains, enabled/disabled mailbox, aliases and real native NOTFOUND;
+projector tests cover suspended/deleted resources and unsafe record whitespace.
+QEMU root/offline with CYBERPANEL_QEMU_MAIL_MAPS=1 ran affected mail/apiserver/
+cyberpanel/panel-execd suites successfully (3.671s/0.087s/0.331s/0.028s).
+
+Offline QEMU rebuilt core, gateway, executor and UI. Signed release
+qemu-mail-integration-3.1.63 sequence64 committed. Manifest
+00df96ae2be0756dfa40b4b784f97471f9955bc02d55361dad5ea705cef9171e; receipt
+e40b706306342fc788a63999bab2e6c5d89704f0d1d5d7b2e739c116d17910c4; retained
+bundle SHA25664ba36737ef14810ce4c271478444d4d1616256dc288dcaa40dcf2d7a158d270.
+Actual running binaries match assembly:
+core2d4f49189d76197ee1160b42fc62f298c45a44d508129923f707b0dc92fc637c;
+gateway1acc57346fa427393dcc9bd0f50dc64d6b8664a68e525eca05444fcb3509339d;
+execd786bfcbb3d3e3ed82aed88ed43cf901af6174c289b2757b5e9727645bdf8fee5.
+All active/running with zero restarts at check.
+
+Installed authenticated mail.domain.update returned200 for the known fixture;
+harness then mishandled Fetch Response.status. No replay mutation: subsequent
+API read proves generation2 active, and native postmap returns OK from installed
+texthash-only domain configuration. Installed browser projection and390px form
+pass. Actual installed passkey/console issue/query/rejected mutation recovery and
+SQL/gzip exports/downloads with text/NULL/BLOB and SHA256 pass. Export table cleaned.
+
+No message-delivery or mailbox-authentication claim. New source does not finish
+advanced routing or the missing mail policy helper. Disposable Go build cache
+cleared (module cache retained), duplicate bundle removed after host digest+
+committed receipt+running binary verification, staging pruned; guest5.5GiB free.
+
 ### Mail domain browser/API integration — 2026-09-21
 
 QEMU installed browser with real password/passkey authentication: old generic
