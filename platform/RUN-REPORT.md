@@ -5,6 +5,22 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native latin1 view import — source, 2026-09-21
+
+New real MariaDB dump fixture failed before loading with unsafe-SQL rejection:
+the view SELECT validator required UTF-8 despite the dump setting latin1. Fixed
+validation of legacy single-quoted literal bytes without changing the emitted
+literal, definer stripping, read-only SELECT checks or isolated loader grants.
+Safety regressions cover LOAD_FILE, grant injection, multi-statement view input,
+non-UTF-8 identifiers and exact preservation of quotes/semicolons/literal bytes.
+
+QEMU Ubuntu ARM64 offline/root command, CYBERPANEL_QEMU_LIVE_TRANSFER=1:
+`go test -p 2 ./internal/database ./internal/apiserver ./cmd/cyberpanel
+./cmd/panel-execd -count=1` passed (18.767s/0.189s/0.395s/0.026s).
+All three engine × SQL/gzip native round trips verify promoted literal hex
+636166E9, latin1 character set, latin1_swedish_ci collation, matching creation
+encoding metadata and three INVOKER views. Installed63 remains unchanged.
+
 ### Dependent view import promotion — source, 2026-09-21
 
 Ubuntu ARM64 QEMU, existing native MariaDB: root/offline invocation with

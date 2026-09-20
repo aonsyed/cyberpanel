@@ -16,6 +16,7 @@ func TestTransferViewDumpEnvelope(t *testing.T) {
 		"/*!50001 CREATE ALGORITHM=UNDEFINED */\n/*!50013 DEFINER=`root`@`localhost` SQL SECURITY DEFINER */\n/*!50001 VIEW `v` AS select `sample`.`id` AS `id` from `sample` */;",
 		"CREATE VIEW `v` (`id`) AS SELECT 1;",
 		"CREATE VIEW `v` AS SELECT 'DEFINER=root; /* not a comment */' AS literal;",
+		"CREATE VIEW `v` AS SELECT 'caf\xe9' AS literal;",
 	} {
 		reader := newConstrainedTransferSQLReader(bufio.NewReader(strings.NewReader(statement)), nil)
 		output, err := io.ReadAll(reader)
@@ -31,10 +32,24 @@ func TestTransferViewDumpEnvelope(t *testing.T) {
 		"CREATE VIEW v AS SELECT 1; GRANT ALL ON *.* TO somebody;",
 		"CREATE VIEW v AS SELECT 1 /*!50001 INTO OUTFILE '/tmp/leak' */;",
 		"CREATE VIEW v AS SELECT 1 \\! forbidden;",
+		"CREATE VIEW v AS SELECT 'caf\xe9', LOAD_FILE('/etc/passwd');",
+		"CREATE VIEW v AS SELECT 'caf\xe9'; GRANT ALL ON *.* TO somebody;",
+		"CREATE VIEW v AS SELECT `caf\xe9`;",
 	} {
 		reader := newConstrainedTransferSQLReader(bufio.NewReader(strings.NewReader(statement)), nil)
 		if _, err := io.ReadAll(reader); err == nil {
 			t.Fatal("unsafe view accepted", statement)
 		}
+	}
+}
+
+func TestTransferViewPreservesLegacyLiteralBytes(t *testing.T) {
+	if _, err := prepareTransferSQLStatement([]byte("CREATE VIEW v AS SELECT 'caf\xe9'; DROP TABLE sample;")); err == nil {
+		t.Fatal("multiple statements accepted as one view")
+	}
+	input := "CREATE DEFINER=`root`@`localhost` VIEW v AS SELECT 'caf\xe9; it''s literal' AS label;"
+	output, err := prepareTransferSQLStatement([]byte(input))
+	if err != nil || string(output) != "CREATE SQL SECURITY INVOKER VIEW v AS SELECT 'caf\xe9; it''s literal' AS label;\n" {
+		t.Fatalf("legacy literal changed: %q, %v", output, err)
 	}
 }

@@ -13,6 +13,15 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## View import promotion — 2026-09-21 (source verified, not installed)
 
+Follow-up: native latin1 dump/import/promotion now passes all three engines ×
+SQL/gzip. The new fixture reproduced UTF-8-only SELECT validation rejecting the
+native dump's latin1 literal. Validation now projects non-UTF-8 single-quoted
+literal contents for syntax checking while emitting original bytes unchanged;
+non-UTF-8 identifiers remain rejected. Destination checks prove café bytes
+636166E9, latin1/latin1_swedish_ci and preserved view creation charset/collation.
+Full affected database/API/core/executor package checks pass in QEMU. This does
+not qualify every legacy encoding or interrupted view recreation.
+
 Native empty-destination promotion now persists captured view definitions and
 columns before table movement, creates matching-column placeholders, and recreates
 INVOKER views in the destination using captured character set/collation. This

@@ -90,6 +90,9 @@ func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
 	if _, err := query(ctx, "CREATE SQL SECURITY INVOKER VIEW `"+source.String()+"`.z_view AS SELECT id,body FROM `"+source.String()+"`.sample; CREATE SQL SECURITY INVOKER VIEW `"+source.String()+"`.a_view AS SELECT id,body FROM `"+source.String()+"`.z_view;"); err != nil {
 		t.Fatal("dependent view fixture", err)
 	}
+	if _, err := query(ctx, "SET NAMES latin1 COLLATE latin1_swedish_ci; CREATE SQL SECURITY INVOKER VIEW `"+source.String()+"`.latin_view AS SELECT 'caf\xe9' AS label;"); err != nil {
+		t.Fatal("latin1 view fixture", err)
+	}
 	if err := ensureRootDirectory(strings.TrimSuffix(transferConfigDirectory, "/"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +541,13 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 	if got, err := query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL')) FROM `"+live.Name.String()+"`.a_view ORDER BY id;"); err != nil || got != "1:transfer round trip\n2:NULL" {
 		t.Fatal("dependent promoted view contents", got, err)
 	}
-	if got, err := query(ctx, "SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA='"+live.Name.String()+"' AND SECURITY_TYPE='INVOKER';"); err != nil || got != "2" {
+	if got, err := query(ctx, "SELECT HEX(label),CHARSET(label),COLLATION(label) FROM `"+live.Name.String()+"`.latin_view;"); err != nil || got != "636166E9\tlatin1\tlatin1_swedish_ci" {
+		t.Fatal("promoted view literal encoding", got, err)
+	}
+	if got, err := query(ctx, "SELECT CHARACTER_SET_CLIENT,COLLATION_CONNECTION FROM information_schema.VIEWS WHERE TABLE_SCHEMA='"+live.Name.String()+"' AND TABLE_NAME='latin_view';"); err != nil || got != "latin1\tlatin1_swedish_ci" {
+		t.Fatal("promoted view creation encoding", got, err)
+	}
+	if got, err := query(ctx, "SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA='"+live.Name.String()+"' AND SECURITY_TYPE='INVOKER';"); err != nil || got != "3" {
 		t.Fatal("promoted view security", got, err)
 	}
 	replayed, err := executor.promoteEmptyTransferImport(ctx, job, isolated)

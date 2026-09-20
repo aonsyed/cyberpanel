@@ -5,6 +5,7 @@ package database
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 const transferViewIdentifier = "(?:`(?:``|[^`\\x00])+`|[A-Za-z_][A-Za-z0-9_$]*)"
@@ -30,10 +31,18 @@ func prepareTransferSQLStatement(statement []byte) ([]byte, error) {
 	if match == nil {
 		return nil, ErrTransferUnsafeSQL
 	}
-	query, kind, err := ParseWorkspaceStatement(match[4])
+	validation := match[4]
+	if !utf8.ValidString(validation) {
+		validation, err = transferViewLiteralValidation(validation)
+		if err != nil {
+			return nil, err
+		}
+	}
+	_, kind, err := ParseWorkspaceStatement(validation)
 	if err != nil || kind != WorkspaceStatementSelect {
 		return nil, ErrTransferUnsafeSQL
 	}
+	query := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(match[4]), ";"))
 	algorithm := ""
 	if match[1] != "" {
 		algorithm = "ALGORITHM=" + strings.ToUpper(match[1]) + " "
@@ -41,6 +50,46 @@ func prepareTransferSQLStatement(statement []byte) ([]byte, error) {
 	// Never preserve a dump's definer, including root/current administrator.
 	// An unqualified view name also prevents CREATE in a different schema.
 	return []byte("CREATE " + algorithm + "SQL SECURITY INVOKER VIEW " + match[2] + match[3] + " AS " + query + ";\n"), nil
+}
+
+// Legacy dumps may carry non-UTF-8 literal bytes under SET character_set_client.
+// Validate an ASCII projection of those literal contents only; emit the original
+// bytes unchanged. Non-UTF-8 identifiers are not silently reinterpreted.
+func transferViewLiteralValidation(query string) (string, error) {
+	projection := []byte(query)
+	var quote byte
+	for i := 0; i < len(projection); i++ {
+		b := projection[i]
+		if b >= 128 {
+			if quote != '\'' {
+				return "", ErrTransferUnsafeSQL
+			}
+			projection[i] = 'x'
+			continue
+		}
+		if quote != 0 {
+			if b == '\\' && i+1 < len(projection) {
+				i++
+				if projection[i] >= 128 {
+					if quote != '\'' {
+						return "", ErrTransferUnsafeSQL
+					}
+					projection[i] = 'x'
+				}
+				continue
+			}
+			if b == quote {
+				if i+1 < len(projection) && projection[i+1] == quote {
+					i++
+					continue
+				}
+				quote = 0
+			}
+		} else if b == '\'' || b == '"' || b == '`' {
+			quote = b
+		}
+	}
+	return string(projection), nil
 }
 
 // Native dumps wrap view clauses in versioned executable comments. Preserve
