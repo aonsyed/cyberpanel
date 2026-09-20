@@ -6,6 +6,25 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest installed checkpoint: sequence42 qemu-gateway-credential-3.1.41. Temporary
+gateway candidate override/binary REMOVED. Core, gateway and OLS active on normal
+installed paths; gateway health ready and QEMU desktop/mobile entry/invalid-login
+checks pass. Guest releases37–39 archived outside Git to
+.work/qemu/obsolete-releases-37-39.tar.gz (verified), then removed under installer
+lock after current/rollback and process-map checks. Journals retained. Redundant
+sequence41 tar removed after42 committed. Guest approximately2.5GiB free.
+
+Pending source fix BEFORE claiming the real test installation: reproduced initial
+claim failure from NULL public credential metadata, then reproduced a second
+owner claim being accepted. Normalize absent public metadata to an empty blob;
+reserve a singleton installation claim in the SAME transaction as owner state,
+reject any existing principal/tenant authority, revoke rejected enrolled refs.
+QEMU SQLite regression covers first claim, distinct/repeated-ID second claims,
+pre-marker installations, rollback/retry and duplicate reservations. Identity,
+apiserver and cyberpanel suites pass uncached. This bootstrap fix is NOT in42;
+real one-time claim/authenticated journeys remain pending. Claim token remains
+unconsumed in guest. Signing trust currently ends at42.
+
 Latest live checkpoint: sequence41 qemu-gateway-registry-3.1.40 installed.
 Consolidated duplicate tenant list/create/suspend contracts onto managed identity;
 registry and handler-preservation regressions pass. Core is ACTIVE and its live

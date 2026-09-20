@@ -5,6 +5,43 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Signed gateway completion and one-time bootstrap guard — 2026-09-20
+
+Archived obsolete guest releases37–39 to the ignored host artifact
+`.work/qemu/obsolete-releases-37-39.tar.gz` (1.3GiB). Gzip validation and all three
+manifest entries verified. Current41/rollback40, terminal journals and absence
+from process maps checked; under installer lock removed only those three exact
+guest release directories. Reclaimed about1.4GiB; archives remain recoverable.
+
+Signed sequence42 qemu-gateway-credential-3.1.41 committed:
+bundle0a83e48931f4be1e572ec5f6ead5d920fcdc85cb034be0d7892466f8e99a05a5,
+manifest2cd210e30717bd3b830c1eba9021bbd02ea2c41f066c2b49f446c43bbd44dd7c,
+receiptf21a9bed5913c49292f753f9d3d4eb82cd46d19812059e4a56fdbfcb2009fb96.
+Core and gateway were built in QEMU; fixed source destinations checked before
+assembly. QEMU-only signing trust maximum extended41→42 without changing its
+key/minimum/expiry. Existing manual mail/WAF/reconciliation prerequisites remain.
+Removed99-qemu-candidate-test.conf and qemu-paneld-credential. Actual systemd
+ExecStart now uses /usr/lib/cyberpanel/bin/paneld. Core/gateway/OLS all active;
+HTTP gateway readiness returns ready. Desktop/mobile Playwright checks repeated
+against the normal installed gateway: entry renders, no JS errors/overflow,
+nonexistent-account submission returns401 with visible error. Redundant41 tar
+removed after confirming installed42 and rollback41; guest approximately2.5GiB free.
+
+Before using the actual claim token, a SQLite-backed QEMU regression exposed
+two product defects: initial password credential storage passed nil public_data
+to a NOT NULL blob column; after correcting that, a second distinct installation
+owner claim succeeded. Fixed persistence to represent absent public metadata as
+an empty blob. Added a singleton claim reservation in the same transaction as
+initial authority creation, plus a guard for existing principals/tenants (including
+pre-marker installations). Rejected claims revoke their newly enrolled verifier.
+Tests cover successful first claim, distinct/reused-ID rejection, existing state
+without a marker, empty-blob storage, rollback allowing retry and committed
+reservation denying another claim. Identity/apiserver/cyberpanel suites PASS
+uncached in QEMU. Protected authentication is stubbed in this database regression;
+it does NOT qualify real credential enrollment or authenticated browser journeys.
+The bootstrap correction is source-only pending the next signed deployment;
+the actual guest claim token was not consumed and no real owner was created.
+
 ### Registry consolidation and live panel entry — 2026-09-20
 
 QEMU regression first reproduced `duplicate operation identity.tenant.list`.

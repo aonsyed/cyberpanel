@@ -109,8 +109,8 @@ type InstallationClaim struct {
 }
 
 // ClaimInstallation creates the sole initial owner through a local, one-time
-// installer ceremony. Callers must ensure the database is empty and consume
-// the installation claim token before invoking it.
+// installer ceremony. The database enforces a single claim atomically; callers
+// must also verify and consume their local installation claim token.
 func (s *Service) ClaimInstallation(ctx context.Context, claim InstallationClaim) (Principal,error) {
 	now:=s.clock().UTC(); if len(claim.Password)<12{return Principal{},fmt.Errorf("%w: password length",ErrInvalid)}
 	principal:=Principal{ID:claim.PrincipalID,Kind:PrincipalHuman,Username:normalizeUsername(claim.Username),Email:strings.ToLower(strings.TrimSpace(claim.Email)),DisplayName:strings.TrimSpace(claim.DisplayName),State:PrincipalActive,Locale:defaultLocale(claim.Locale),Theme:ThemeSystem,AuthzEpoch:1,CredentialEpoch:1,Generation:1,CreatedAt:now,UpdatedAt:now}
@@ -123,9 +123,22 @@ func (s *Service) ClaimInstallation(ctx context.Context, claim InstallationClaim
 	ref,err:=s.verifier.EnrollPassword(ctx,principal.ID,claim.Password);clearBytes(claim.Password);if err!=nil{return Principal{},err}
 	credentialID,err:=derivedID("cred",principal.ID.String()+"\x00password");if err!=nil{return Principal{},err}
 	credential:=Credential{ID:credentialID,PrincipalID:principal.ID,Kind:CredentialPassword,State:CredentialActive,Label:"Password",VerifierRef:ref,AuthzEpoch:principal.AuthzEpoch,CreatedAt:now}
-	tx,err:=s.store.db.BeginTx(ctx,nil);if err!=nil{return Principal{},err};defer tx.Rollback()
+	tx,err:=s.store.db.BeginTx(ctx,nil);if err!=nil{s.verifier.Revoke(ctx,ref);return Principal{},err};defer tx.Rollback()
+	if err=reserveInstallationClaim(ctx,tx,principal.ID);err!=nil{s.verifier.Revoke(ctx,ref);return Principal{},err}
 	for _,operation:=range []func()error{func()error{return putPlan(ctx,tx,plan)},func()error{return putTenant(ctx,tx,tenant)},func()error{return putPrincipal(ctx,tx,principal)},func()error{return putMembership(ctx,tx,membership)},func()error{return putRole(ctx,tx,role)},func()error{return putBinding(ctx,tx,binding)},func()error{return putCredential(ctx,tx,credential)}}{if err=operation();err!=nil{s.verifier.Revoke(ctx,ref);return Principal{},err}}
 	if err=tx.Commit();err!=nil{s.verifier.Revoke(ctx,ref);return Principal{},err};s.record(ctx,principal.ID,tenant.ID,"installation.claim","principal",principal.ID,"applied",principal.ID.String());return principal,nil
+}
+
+func reserveInstallationClaim(ctx context.Context, tx *sql.Tx, principal ID) error {
+	var existing uint64
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM identity_principals)+(SELECT COUNT(*) FROM identity_tenants)`).Scan(&existing); err != nil { return err }
+	if existing != 0 { return ErrConflict }
+	result, err := tx.ExecContext(ctx, `INSERT INTO identity_installation_claim(singleton,principal_id) VALUES(1,?) ON CONFLICT(singleton) DO NOTHING`, principal)
+	if err != nil { return err }
+	count, err := result.RowsAffected()
+	if err != nil { return err }
+	if count != 1 { return ErrConflict }
+	return nil
 }
 
 type CreateTenantCommand struct { Actor ActorContext; TenantID, ParentTenantID, SponsorID, PlanID, DelegationID ID; Kind TenantKind; Name string; Permissions []Permission; Quota ResourceQuota }
