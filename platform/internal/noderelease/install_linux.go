@@ -126,7 +126,9 @@ func NewInstaller() (*Installer, error) {
 	if os.Geteuid() != 0 || os.Getuid() != 0 {
 		return nil, fmt.Errorf("%w: panel-node-install must run as real and effective root", ErrUnsupported)
 	}
-	if err := ensureNodeStateParent(filepath.Dir(StateRoot)); err != nil { return nil, err }
+	if err := ensureNodeStateParent(filepath.Dir(StateRoot)); err != nil {
+		return nil, err
+	}
 	for _, entry := range []struct {
 		path string
 		mode os.FileMode
@@ -142,13 +144,23 @@ func NewInstaller() (*Installer, error) {
 // installer's own state subtree is private. Repair the old root-only parent
 // mode without changing any private child or accepting unsafe ownership.
 func ensureNodeStateParent(path string) error {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path { return ErrInvalid }
-	if err := validateRootOwnedAncestors(filepath.Dir(path)); err != nil { return err }
-	if err := os.Mkdir(path, 0755); err != nil && !os.IsExist(err) { return err }
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return ErrInvalid
+	}
+	if err := validateRootOwnedAncestors(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(path, 0755); err != nil && !os.IsExist(err) {
+		return err
+	}
 	info, err := os.Lstat(path)
 	metadata, ok := entryMetadata(info)
-	if err != nil || !ok || metadata.Uid != 0 || metadata.Gid != 0 || !info.IsDir() || (info.Mode().Perm() != 0700 && info.Mode().Perm() != 0755) { return ErrIntegrity }
-	if info.Mode().Perm() == 0700 { return os.Chmod(path, 0755) }
+	if err != nil || !ok || metadata.Uid != 0 || metadata.Gid != 0 || !info.IsDir() || (info.Mode().Perm() != 0700 && info.Mode().Perm() != 0755) {
+		return ErrIntegrity
+	}
+	if info.Mode().Perm() == 0700 {
+		return os.Chmod(path, 0755)
+	}
 	return nil
 }
 
@@ -848,6 +860,7 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 		if err = updateJournal(journal, installer.now()); err != nil {
 			return InstallReceipt{}, err
 		}
+		var pendingPackages []Artifact
 		for _, id := range manifest.InstallOrder {
 			artifact, _ := manifest.Artifact(id)
 			if artifact.Kind != ArtifactPackage {
@@ -870,12 +883,14 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 					return InstallReceipt{}, err
 				}
 			}
-			path := filepath.Join(journal.Candidate.ReleasePath, "packages", artifact.ID)
-			evidence, installErr := installOfflinePackage(ctx, path, artifact, manifest.Target)
-			if installErr != nil {
-				return installer.handlePreActivationFailure(ctx, journal, trust, installErr)
-			}
-			if err = completeEffect(journal, "install_package", artifact.ID, evidence, installer.now()); err != nil {
+			pendingPackages = append(pendingPackages, artifact)
+		}
+		packageEvidence, installErr := installOfflinePackages(ctx, journal.Candidate.ReleasePath, pendingPackages, manifest.Target)
+		if installErr != nil {
+			return installer.handlePreActivationFailure(ctx, journal, trust, installErr)
+		}
+		for _, artifact := range pendingPackages {
+			if err = completeEffect(journal, "install_package", artifact.ID, packageEvidence[artifact.ID], installer.now()); err != nil {
 				return InstallReceipt{}, err
 			}
 		}
@@ -1747,25 +1762,46 @@ func packageFields(ctx context.Context, path string, manager PackageManager, arc
 	return fields[0], fields[1], fields[2], nil
 }
 
-func installOfflinePackage(ctx context.Context, path string, artifact Artifact, target Target) (string, error) {
-	if err := verifyPackageMetadata(ctx, path, artifact, target); err != nil {
-		return "", err
+func installOfflinePackages(ctx context.Context, root string, artifacts []Artifact, target Target) (map[string]string, error) {
+	evidence := make(map[string]string, len(artifacts))
+	if len(artifacts) == 0 {
+		return evidence, nil
 	}
-	var err error
-	if artifact.Package.Manager == PackageDPKG {
-		_, err = runOfflineFixed(ctx, "/usr/bin/dpkg", "--force-downgrade", "--install", path)
-	} else {
-		_, err = runOfflineFixed(ctx, "/usr/bin/rpm", "-U", "--replacepkgs", "--oldpackage", path)
+	path, arguments := "/usr/bin/dpkg", []string{"--force-downgrade", "--install"}
+	if target.Distribution == DistributionAlma {
+		path, arguments = "/usr/bin/rpm", []string{"-U", "--replacepkgs", "--oldpackage"}
 	}
-	if err != nil {
-		return "", err
+	// Verify every input before any package mutation. Native package managers
+	// need the whole pending set to resolve cycles such as LSPHP/opcache.
+	for _, artifact := range artifacts {
+		packagePath := filepath.Join(root, "packages", artifact.ID)
+		if err := verifyPackageMetadata(ctx, packagePath, artifact, target); err != nil {
+			return nil, err
+		}
+		arguments = append(arguments, packagePath)
 	}
-	return installedPackageEvidence(ctx, artifact)
+	if _, err := runOfflineFixed(ctx, path, arguments...); err != nil {
+		return nil, err
+	}
+	for _, artifact := range artifacts {
+		value, err := installedPackageEvidence(ctx, artifact)
+		if err != nil {
+			return nil, err
+		}
+		evidence[artifact.ID] = value
+	}
+	return evidence, nil
 }
 
 func installedPackageEvidence(ctx context.Context, artifact Artifact) (string, error) {
 	if artifact.Package == nil {
 		return "", ErrInvalid
+	}
+	if artifact.Package.Manager == PackageDPKG {
+		status, err := runFixed(ctx, "/usr/bin/dpkg-query", "--show", "--showformat=${db:Status-Status} ${db:Status-Eflag}", artifact.Package.Name)
+		if err != nil || strings.TrimSpace(status) != "installed ok" {
+			return "", errors.Join(ErrIntegrity, err)
+		}
 	}
 	name, version, architecture, err := packageFields(ctx, "", artifact.Package.Manager, false, artifact.Package.Name)
 	if err != nil || name != artifact.Package.Name || version != artifact.Package.Version || architecture != artifact.Package.Architecture {
@@ -1787,16 +1823,16 @@ func restorePackages(ctx context.Context, release InstalledRelease, trust TrustS
 }
 
 func restorePackagesWithManifest(ctx context.Context, release InstalledRelease, manifest Manifest) error {
+	var artifacts []Artifact
 	for _, id := range manifest.InstallOrder {
 		artifact, _ := manifest.Artifact(id)
 		if artifact.Kind != ArtifactPackage {
 			continue
 		}
-		if _, err := installOfflinePackage(ctx, filepath.Join(release.ReleasePath, "packages", artifact.ID), artifact, manifest.Target); err != nil {
-			return err
-		}
+		artifacts = append(artifacts, artifact)
 	}
-	return nil
+	_, err := installOfflinePackages(ctx, release.ReleasePath, artifacts, manifest.Target)
+	return err
 }
 
 func runFixed(ctx context.Context, path string, arguments ...string) (string, error) {
@@ -2124,7 +2160,9 @@ func activateAndProbeService(ctx context.Context, probe ServiceProbe) (string, e
 	}
 	deadline := time.Now().Add(time.Duration(probe.TimeoutSeconds) * time.Second)
 	stableWindow := time.Duration(probe.TimeoutSeconds) * time.Second / 2
-	if stableWindow > 2*time.Second { stableWindow = 2*time.Second }
+	if stableWindow > 2*time.Second {
+		stableWindow = 2 * time.Second
+	}
 	var last string
 	var stableSince time.Time
 	var stableStarted uint64
@@ -2148,10 +2186,10 @@ func activateAndProbeService(ctx context.Context, probe ServiceProbe) (string, e
 			// Require the same activation to survive multiple observations;
 			// an auto-restart must not count as continuous readiness.
 			if time.Since(stableSince) >= stableWindow {
-			return digestJSON(struct {
-				Unit       string            `json:"unit"`
-				Properties map[string]string `json:"properties"`
-			}{probe.Unit, properties}), nil
+				return digestJSON(struct {
+					Unit       string            `json:"unit"`
+					Properties map[string]string `json:"properties"`
+				}{probe.Unit, properties}), nil
 			}
 		} else {
 			stableStarted, stableSince = 0, time.Time{}

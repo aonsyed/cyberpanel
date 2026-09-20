@@ -5,6 +5,40 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native package transaction fixed; OLS/LSPHP installed — 2026-09-20
+
+The node installer now verifies every pending package before mutation, records
+each package's pending effect, and passes the complete pending set to one native
+dpkg/rpm invocation inside the existing offline namespace. Completion evidence
+is collected for the set before marking per-package effects complete. Replay
+still checks completed effects against installed metadata. Retained-package
+restoration uses the same batch path so dependency cycles are not reintroduced
+during rollback. No force-depends or package rewriting was added.
+
+Debian completion evidence now additionally requires `installed ok`, not only
+matching name/version/architecture: unpacked or half-configured packages cannot
+be mistaken for completed effects. The real unpacked lsphp83-opcache fixture
+passed the rejection regression before recovery. Root-QEMU uncached node-release
+tests, including isolated-network and managed-config checks, passed (0.025 s).
+The new installer then reconciled the existing staged sequence-18 journal.
+
+The real LSPHP/opcache cycle resolved and `qemu-web-3.1.17` committed at
+2026-09-20T04:32:17Z, receipt
+`dda8171ee7ce2782b5d1830b19e37340cbabb152b9fe02cb531f5ef354e729a2`.
+`dpkg --audit` returned no findings. Executing the real vendor binaries confirmed
+OpenLiteSpeed 1.9.2 and LSPHP CLI 8.3.33 with opcache. Module inspection includes
+bcmath, curl, gd, intl, mbstring, mysqli/mysqlnd, PDO MySQL/SQLite, soap, sodium,
+XML/XSL and zip. This is binary/module evidence, not a managed HTTP site test.
+RPM batch execution still requires actual Alma qualification.
+
+OLS is inactive with its QEMU hold condition false. Actual executor startup now
+passes the OLS-directory prerequisite but stops at systemd mount setup because
+`/var/lib/cyberpanel-containers` is absent. Its restart loop was stopped. Next:
+use the existing installer identity provisioner for missing container/gateway
+identities (which creates the container home and subordinate ranges), publish the
+already-tested engine-config loader fix in a signed executor, then continue real
+service startup. Core/gateway and the full API/browser remain unqualified.
+
 ### Real OLS/LSPHP inputs admitted; package-cycle blocker identified — 2026-09-20
 
 Verified the vendor's Noble ARM64 repository metadata using only its RSA4096

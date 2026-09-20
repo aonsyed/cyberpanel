@@ -43,9 +43,13 @@ assembled from all five signed PHP inputs and signed n8n/Hermes candidate
 recipes. Signed outer node release sequence 15 now installs that component;
 the installed binary completed authority/catalog initialization, receipt replay
 and secret bootstrap. Sequence 17 now installs core/gateway/execd binaries,
-units and configs. Real executor startup fails because OpenLiteSpeed is not yet
-installed (`/usr/local/lsws/conf` missing); its restart loop was stopped. Install
-the real web/PHP stack next, then continue startup and API/browser qualification.
+units and configs. Sequence 18 now installs real OLS 1.9.2/LSPHP 8.3.33 after fixing
+native package cycles via verified batch installation. dpkg audit is clean and
+vendor binaries/modules execute. Real executor startup next requires the missing
+container service identity/home; use the existing installer identity provisioner.
+Its restart loop is stopped. Publish the tested engine-edition loader fix before
+continuing startup and API/browser qualification. OLS remains held stopped until
+managed configuration is ready.
 The existing guest disk was safely expanded to 40 GiB, removing the repeated
 staging-space constraint. Native release sequence 16 installed real
 mail/DNS prerequisites installed, dpkg audit clean, external services held stopped
