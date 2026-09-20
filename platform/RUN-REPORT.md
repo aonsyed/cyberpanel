@@ -5,6 +5,25 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Database-wide grant names are literal — source, 2026-09-20
+
+Actual QEMU MariaDB regression demonstrated that generated grants on a synthetic
+`qg_scope_<random>` database permitted both SELECT and INSERT on a separate
+`qgxscopex<random>` database. Backtick quoting alone did not make underscores
+literal. The test failed twice before the fix, once per unauthorized operation.
+
+Changed shared database-scope GRANT generation to escape underscores; table and
+routine identifier quoting remains unchanged. Native test now passes: intended
+database readable, neighboring database read/write denied. It also seeds the old
+broad grant before replacement, proving the existing revoke-all/replace path
+removes old wildcard authority rather than retaining it. Account, both databases
+and the private credential file are synthetic and cleaned after every run.
+Final QEMU root/offline live-enabled database and panel-execd suites both exit0.
+
+Source correction only; installed54 and previously created grants are unchanged.
+Deployment alone does not rewrite existing grants: explicit managed-grant
+reconciliation and installed verification remain required before release.
+
 ### Isolated import allocation and loader — source, 2026-09-20
 
 Added private root executor allocation/config/discard primitives, bound to the

@@ -13,6 +13,16 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Native grant isolation correction (source, not deployed): QEMU confirmed that
+unescaped underscores in database-wide GRANT names match neighboring database
+names, even inside backticks. Shared grant generation now escapes underscores
+for database scope only. Real MariaDB regression proves intended DB access and
+denies reads/writes in the matching neighbor, including replacement of an old
+broad grant (revoked, not retained alongside the new exact grant). Database/execd
+suites pass. This fixes generation/replacement, NOT existing installed grants
+until they are reconciled. Installed54 still needs the corrected executor and
+explicit managed-grant reconciliation; prioritize that before exposure.
+
 Isolated import native primitives (source only): root executor now allocates a
 job-digest-bound temporary database from validated protected source metadata,
 issues a random local loader credential using the existing native loader code,

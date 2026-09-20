@@ -431,7 +431,9 @@ func grantStatements(mutation grantMutation) (string, error) {
 		script.WriteString(" ON ")
 		switch grant.Scope {
 		case GrantScopeDatabase:
-			script.WriteString(quotedIdentifier(mutation.Database.Name))
+			// Database-wide GRANT names are patterns even inside backticks.
+			// SQLIdentifier permits underscores, which must remain literal here.
+			script.WriteString("`" + strings.ReplaceAll(mutation.Database.Name.String(), "_", "\\_") + "`")
 			script.WriteString(".*")
 		case GrantScopeTable:
 			script.WriteString(quotedIdentifier(mutation.Database.Name))
