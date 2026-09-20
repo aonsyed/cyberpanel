@@ -5,6 +5,25 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Current-code application component rebuilt — 2026-09-20
+
+Rebuilt both panel and assembler from `d14f9440b` inside Ubuntu ARM64 QEMU,
+then assembled all five previously verified PHP archives and both signed
+container candidate recipes without downloads. New candidate:
+`/home/harness/panel-component-d14f9440b.tar.gz`, 355,918,034 bytes,
+SHA-256 `59bf9d5bf006e90d104dc96d7cd1696a893177020fa266179ba68d9ef70370ff`.
+Gzip integrity and the actual archived manifest were checked. Catalog sequence
+2 identifies `qemu-apps-d14f9440b`, content digest
+`fb5ed2c5341192bd577517c7e273c1b408abe543aa81f482e72bbdd475a7487a`.
+Panel binary SHA-256:
+`c8c6350ac103aade3df5cb180ad6f6394afa3ca1a7b351f16bb87fbfe89d40e7`;
+assembler SHA-256:
+`7251e5535c5cf74b886fde77ebdda377e175ffc8a4a0f25a369e61066154b339`.
+This supersedes the older component, not the installed authority-only node.
+The outer signed node release and full service/API/browser qualification remain
+pending. Guest disk has 2.2 GB free; avoid additional large image pulls until
+space is recovered or the existing virtual disk is safely expanded.
+
 ### Persistent container policy and real reboot verified — 2026-09-20
 
 The existing initialize/migrate installer hooks now provision the embedded,
