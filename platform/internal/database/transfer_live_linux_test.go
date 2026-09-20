@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -237,7 +238,81 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 				t.Fatalf("round trip contents differ: %q %v", got, err)
 			}
 			verifyOrdinaryNativeImports(t, ctx, store, backend, job, target, query)
+			verifyIsolatedNativeImport(t, ctx, exportConfigs.executor, store, job, query)
 		})
+	}
+}
+
+func verifyIsolatedNativeImport(t *testing.T, ctx context.Context, executor *LinuxMariaDBExecutor, store *LinuxTransferArtifactStore, job TransferJob, query func(context.Context, string) (string, error)) {
+	t.Helper()
+	isolated, err := executor.allocateTransferImport(ctx, job)
+	if err != nil {
+		t.Fatal("allocate isolated import", err)
+	}
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := executor.discardTransferImport(cleanup, job, isolated); err != nil && !errors.Is(err, ErrNotFound) {
+			t.Error("discard isolated import", err)
+		}
+	})
+	replay, err := executor.allocateTransferImport(ctx, job)
+	if err != nil || replay != isolated {
+		t.Fatal("allocation replay", err)
+	}
+	configs := isolatedImportConfigs{executor: executor, isolated: isolated}
+	wrong := isolated
+	wrong.Name, _ = ParseSQLIdentifier("mysql")
+	if _, err := (isolatedImportConfigs{executor: executor, isolated: wrong}).TransferClientConfig(ctx, job, wrong.Name); err == nil {
+		t.Fatal("caller-selected import database accepted")
+	}
+	config, err := configs.TransferClientConfig(ctx, job, isolated.Name)
+	if err != nil {
+		t.Fatal("isolated import credentials", err)
+	}
+	defer config.Release()
+	if _, err := configs.TransferClientConfig(ctx, job, isolated.Name); err == nil {
+		t.Fatal("duplicate loader accepted")
+	}
+	if err := executor.discardTransferImport(ctx, job, isolated); !errors.Is(err, ErrConflict) {
+		t.Fatal("active import could be discarded", err)
+	}
+	source, err := executor.transferImportSource(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{"SELECT * FROM mysql.user;", "CREATE TABLE `" + source.Name.String() + "`.import_escape(id INT);"} {
+		cmd := exec.CommandContext(ctx, mariaDBClientBinary, "--defaults-file="+config.Path, "--protocol=socket", "--socket="+mariaDBSocket, "--batch")
+		cmd.Stdin = strings.NewReader(statement)
+		if cmd.Run() == nil {
+			t.Fatal("isolated loader escaped scope")
+		}
+	}
+	backend, err := NewLinuxTransferBackend(store, resolvedExportConfig{descriptor: config}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := backend.Import(ctx, job, isolated.Name, func(TransferStreamProgress) error { return nil })
+	if err != nil || receipt.Partial || !receipt.InputVerified {
+		t.Fatal("native isolated import", err)
+	}
+	if _, err := os.Lstat(config.Path); !os.IsNotExist(err) {
+		t.Fatal("import credential retained", err)
+	}
+	accountCount, err := query(ctx, "SELECT COUNT(*) FROM mysql.user WHERE User='cpmig_"+strings.TrimPrefix(config.Token.String(), "migloader-")+"';")
+	if err != nil || accountCount != "0" {
+		t.Fatal("native loader retained", err)
+	}
+	got, err := query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+isolated.Name.String()+"`.sample ORDER BY id;")
+	if err != nil || got != "1:transfer round trip:0001FF\n2:NULL:NULL" {
+		t.Fatal("isolated import contents differ", err)
+	}
+	if err = executor.discardTransferImport(ctx, job, isolated); err != nil {
+		t.Fatal("discard", err)
+	}
+	count, err := query(ctx, "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='"+isolated.Name.String()+"';")
+	if err != nil || count != "0" {
+		t.Fatal("isolated database retained", err)
 	}
 }
 

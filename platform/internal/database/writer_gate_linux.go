@@ -227,7 +227,7 @@ func (executor *LinuxMariaDBExecutor) admitWriterTransfer(ctx context.Context, t
 
 func (executor *LinuxMariaDBExecutor) guardRootSQL(ctx context.Context, statement mariaDBStatement) (context.Context, func(), error) {
 	switch statement {
-	case sqlObserveStatus, sqlObserveDatabase, sqlObservePrincipal, sqlObserveGrants, sqlObserveTuning, sqlObserveHA, sqlObserveNativePrincipal:
+	case sqlObserveStatus, sqlObserveDatabase, sqlObservePrincipal, sqlObserveGrants, sqlObserveTuning, sqlObserveHA, sqlObserveNativePrincipal, sqlObserveDataDirectory:
 		return ctx, func() {}, nil
 	case sqlWriterSessionAudit, sqlWriterSessions:
 		fence, _ := ctx.Value(writerFenceCapability{}).(bool)

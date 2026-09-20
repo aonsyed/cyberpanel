@@ -13,6 +13,21 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Isolated import native primitives (source only): root executor now allocates a
+job-digest-bound temporary database from validated protected source metadata,
+issues a random local loader credential using the existing native loader code,
+and removes that credential/account after use. Duplicate issuance, caller-selected
+target and discard during active loading are denied. Writer-authority cancellation
+reaches the native import process; credential-cleanup errors cannot report success.
+Free-space preflight queries the actual MariaDB data directory (2GiB headroom,
+not aggregate reservation or native allocation quota). Generated names contain no
+SQL grant wildcard characters. QEMU SQL/gzip native import, scope denial, expected
+rows, account/config cleanup and isolated database discard pass. This path is
+private, not broker/API exposed; verification/promotion, crash recovery of loading
+or ambiguous creation, catalog/service wiring and upload/UI remain unfinished.
+Installed54 unchanged. Broader existing native database-grant underscore escaping
+needs explicit verification before relying on exact-name isolation elsewhere.
+
 Ordinary SQL import format follow-up (source, not installed): native backend no
 longer requires our private export comment. All SQL still passes the constrained
 reader; optional initial UTF-8 BOM is consumed without bypassing byte/digest

@@ -5,6 +5,38 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Isolated import allocation and loader — source, 2026-09-20
+
+Added private root executor allocation/config/discard primitives, bound to the
+sealed import job and protected source tenant/site/generation/instance. Durable
+creating/allocated/loading/closed/discarding records prevent automatic adoption
+of unknown databases or concurrent loader replacement. Native database names
+contain no grant-pattern wildcards. Disk preflight observes `@@datadir` through
+the closed SQL command set and checks its filesystem, not the panel state mount.
+This is requested bytes plus2GiB headroom, not aggregate reservations/index quota.
+
+Credentials reuse the native temporary loader implementation: random loopback
+account granted only the isolated database, private runtime config, no root SQL
+import session. Import subprocess follows the native writer-gate context and
+credential expiry. Successful results now require credential cleanup; cleanup
+errors produce ambiguous rather than completed imports. Failure cleanup records
+closed only after proved account/config removal. Unproven creation remains closed
+to automatic reuse/deletion. Crash recovery of loading records is still pending.
+
+Actual QEMU native SQL/gzip tests allocate and replay allocation, reject a forged
+target name, issue credentials, reject duplicate issuance and active discard,
+deny mysql.user reads and source-database writes, then import into the isolated
+database and query exact NULL/text/binary rows. Config file is absent and native
+loader account count is0 after import; explicit discard removes the isolated
+database. Tests use real native root allocation/loader code; source metadata and
+export secret delivery remain fixtures. All generated resources are cleaned.
+Final QEMU offline/root live-enabled database and panel-execd suites exit0.
+
+Not deployed; installed54 unchanged. These private primitives still need the
+catalog's verification/promotion and broker/service/API/upload/UI integration.
+They are not a completed or exposed production import feature. Wider existing
+native GRANT database-name underscore escaping needs separate exact-scope proof.
+
 ### Ordinary single-database SQL import format — source, 2026-09-20
 
 Removed mandatory CyberPanel export-comment check from the transfer import

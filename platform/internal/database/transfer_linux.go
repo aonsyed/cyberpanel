@@ -52,6 +52,8 @@ type TransferClientConfigDescriptor struct {
 	Direction TransferDirection
 	ReadOnly bool
 	ExpiresAt time.Time
+	// Context carries native writer-authority cancellation, never caller input.
+	Context context.Context
 	Release func() error
 }
 
@@ -153,6 +155,13 @@ func (backend *LinuxTransferBackend) Import(ctx context.Context, job TransferJob
 	if err != nil { return TransferProcessReceipt{}, err }
 	if err = validateTransferClientConfig(descriptor, job, database); err != nil { releaseTransferConfig(descriptor); return TransferProcessReceipt{}, err }
 	defer releaseTransferConfig(descriptor)
+	if descriptor.Context != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		stop := context.AfterFunc(descriptor.Context, cancel)
+		defer stop(); defer cancel()
+		if descriptor.Context.Err() != nil { return TransferProcessReceipt{}, ErrTransferCancelled }
+	}
 	if !descriptor.ExpiresAt.IsZero() {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, descriptor.ExpiresAt)
@@ -202,12 +211,18 @@ func (backend *LinuxTransferBackend) Import(ctx context.Context, job TransferJob
 		if closeErr := gzipReader.Close(); runErr == nil { runErr = closeErr }
 	}
 	if verifyErr := verifiedInput.Verify(); runErr == nil { runErr = verifyErr }
+	operationContextErr := ctx.Err()
+	// A successful import must not conceal a leaked credential/account.
+	if descriptor.Release != nil {
+		if cleanupErr := descriptor.Release(); cleanupErr != nil { runErr = ErrAmbiguous }
+	}
 	receipt := SealTransferProcessReceipt(TransferProcessReceipt{ExitCode: exitCode, Partial: runErr != nil, BytesProcessed: verifiedInput.count, RowsProcessed: job.Source.Rows,
 		StderrDigest: stderr.Digest(), StderrBytes: stderr.Size(), StderrTruncated: stderr.Truncated(), InputVerified: runErr == nil && verifiedInput.verified, CompletedAt: backend.now().UTC()})
 	if runErr != nil {
+		if errors.Is(runErr, ErrAmbiguous) { return receipt, ErrAmbiguous }
 		if errors.Is(runErr, ErrTransferUnsafeSQL) { return receipt, ErrTransferUnsafeSQL }
 		if errors.Is(runErr, ErrTransferLimit) { return receipt, ErrTransferLimit }
-		if errors.Is(runErr, ErrTransferCancelled) || errors.Is(ctx.Err(), context.Canceled) { return receipt, ErrTransferCancelled }
+		if errors.Is(runErr, ErrTransferCancelled) || errors.Is(operationContextErr, context.Canceled) { return receipt, ErrTransferCancelled }
 		return receipt, ErrTransferStale
 	}
 	if receipt.Validate(job) != nil { return TransferProcessReceipt{}, ErrTransferInvalid }

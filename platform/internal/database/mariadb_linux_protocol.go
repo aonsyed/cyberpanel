@@ -61,6 +61,7 @@ const (
 	sqlWriterSessions
 	sqlKillWriterSession
 	sqlStopWriterReplication
+	sqlObserveDataDirectory
 )
 
 type principalMutation struct {
@@ -246,6 +247,9 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 			return "", ErrInvalidResource
 		}
 		return databaseObservation(database), nil
+	case sqlObserveDataDirectory:
+		if len(values) != 0 { return "", ErrInvalidCommand }
+		return "SELECT @@datadir;\n", nil
 	case sqlCreateDatabase:
 		database, ok := oneValue[Database](values)
 		if !ok || database.Validate() != nil {
