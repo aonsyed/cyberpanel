@@ -5,6 +5,31 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Signed UI assets and gateway loading — 2026-09-20
+
+Added a constrained `release_asset` kind for immutable UI/catalog files (root:
+root, mode 0444), retaining per-file signature-bound hashes and the existing
+generation activation/rollback path. Destination/mode rejection tests passed
+inside Ubuntu ARM64 QEMU. Signed fixture sequence 14, `qemu-ui-assets-3.1.13`,
+installed the existing four daemons plus all four files from the already-built
+UI. Manifest `355620ec6358c34c3f52423ffa665e2f478da6ca2919b7ff2ac201259758e3da`,
+bundle `ffe8ac0606b13e9ab3f788af3efc2ade270e494182d27e773f7ce430b241c2d6`,
+receipt `2138c681b5adb241a5f838bf09c4d96b222d1bf38fd054f65c4b42c857cd28f9`.
+All installed asset bytes matched their source files, modes/owners matched, and
+reconcile returned no pending operations. All four daemons remained active.
+
+The actual gateway static loader initially rejected these managed file symlinks.
+Its new entry point pins the UI through the protected managed index to one
+immutable generation, then uses the unchanged symlink-rejecting loader.
+`TestQEMUInstalledUIAssets` reproduced the failure before the fix and passed
+afterward, loading the signed installed tree and checking real loopback HTTP
+responses against the installed index/CSS/JavaScript bytes. Uncached paneld and
+node-release suites and `go build ./cmd/...` passed offline in QEMU. This is
+asset delivery evidence, not a rendered-browser or installed gateway/core claim.
+Full core startup still requires the real signed application recipes/catalog,
+their already-trusted keys, and bootstrap state; those have not been fabricated
+or bypassed. No OS/toolchain/image downloads occurred.
+
 ### Peer inspector product-installer integration — 2026-09-20
 
 The closed product catalog now requires the inspector executable in the existing

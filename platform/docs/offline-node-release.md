@@ -11,6 +11,16 @@ Their bootstrap artifact definitions are
 
 ## Fixed paths and bundle layout
 
+The optional `release_asset` kind carries UI files beneath
+`/usr/lib/cyberpanel/ui/`, application-catalog members beneath
+`/usr/lib/cyberpanel/bin/application-catalog/`, and the two exact container recipe
+paths `/usr/lib/cyberpanel/bin/container-recipes/n8n.json` and `hermes.json`.
+Assets must be root-owned, mode `0444`; arbitrary executables, systemd units,
+host trust and mutable authority paths are not asset destinations. Each file is
+individually hashed in the signed manifest and uses the same immutable generation,
+activation and rollback mechanism as other release files. Outer signatures do not
+replace the application recipe signatures or install their keys as host trust.
+
 Run `panel-node-install paths` on a node to print the authoritative paths:
 
 | Purpose | Path |

@@ -17,6 +17,24 @@ func ResolveConfigPath(path string) (string, error) {
 	return resolveConfigPath(path, "/etc/cyberpanel", ActiveRelease, ReleaseRoot)
 }
 
+// ResolveUIRoot selects one immutable generation via its managed index. The
+// static loader still rejects symlinks within that generation. Never walk the
+// public per-file links, which could otherwise cross an activation boundary.
+func ResolveUIRoot(path string) (string, error) {
+	if path != "/usr/lib/cyberpanel/ui" {
+		return "", ErrInvalid
+	}
+	index, err := resolveConfigPath(filepath.Join(path, "index.html"), path, ActiveRelease, ReleaseRoot)
+	if err != nil {
+		return "", err
+	}
+	root := filepath.Dir(index)
+	if err := configAncestors(root); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
 func resolveConfigPath(path, configRoot, active, releases string) (string, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return "", ErrInvalid

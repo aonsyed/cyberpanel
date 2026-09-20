@@ -150,6 +150,7 @@ type ArtifactKind string
 
 const (
 	ArtifactBinary  ArtifactKind = "binary"
+	ArtifactAsset   ArtifactKind = "release_asset"
 	ArtifactConfig  ArtifactKind = "config"
 	ArtifactUnit    ArtifactKind = "systemd_unit"
 	ArtifactPackage ArtifactKind = "os_package"
@@ -247,6 +248,10 @@ func (artifact Artifact) validate(target Target) error {
 		}
 	case ArtifactConfig:
 		if mode != 0444 && mode != 0644 {
+			return ErrInvalid
+		}
+	case ArtifactAsset:
+		if mode != 0444 {
 			return ErrInvalid
 		}
 	case ArtifactUnit:
@@ -445,6 +450,11 @@ func allowedDestination(kind ArtifactKind, destination string) bool {
 		return pathBelow(destination, "/usr/lib/cyberpanel/bin") || pathBelow(destination, "/usr/local/bin") || pathBelow(destination, "/usr/local/sbin") || pathBelow(destination, "/usr/local/libexec/cyberpanel")
 	case ArtifactConfig:
 		return pathBelow(destination, "/etc/cyberpanel")
+	case ArtifactAsset:
+		return pathBelow(destination, "/usr/lib/cyberpanel/ui") ||
+			pathBelow(destination, "/usr/lib/cyberpanel/bin/application-catalog") ||
+			destination == "/usr/lib/cyberpanel/bin/container-recipes/n8n.json" ||
+			destination == "/usr/lib/cyberpanel/bin/container-recipes/hermes.json"
 	case ArtifactUnit:
 		return filepath.Dir(destination) == "/etc/systemd/system"
 	default:

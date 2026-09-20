@@ -59,3 +59,40 @@ func TestBinaryDestinationBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestReleaseAssetBoundary(t *testing.T) {
+	artifact := Artifact{ID: "ui-index", Kind: ArtifactAsset, SHA256: strings.Repeat("a", 64), Size: 128, Mode: "0444"}
+	for _, path := range []string{
+		"/usr/lib/cyberpanel/ui/index.html",
+		"/usr/lib/cyberpanel/ui/assets/main.js",
+		"/usr/lib/cyberpanel/bin/application-catalog/manifest.json",
+		"/usr/lib/cyberpanel/bin/application-catalog/artifacts/product.tar.gz",
+		"/usr/lib/cyberpanel/bin/container-recipes/n8n.json",
+		"/usr/lib/cyberpanel/bin/container-recipes/hermes.json",
+	} {
+		artifact.Destination = path
+		if err := artifact.validate(Target{}); err != nil {
+			t.Errorf("rejected asset %s: %v", path, err)
+		}
+	}
+	for _, path := range []string{
+		"/usr/lib/cyberpanel/ui", "/usr/lib/cyberpanel/ui-evil/index.html",
+		"/usr/lib/cyberpanel/ui/../bin/cyberpanel", "/usr/lib/cyberpanel/bin/cyberpanel",
+		"/usr/lib/cyberpanel/bin/container-recipes/unknown.json",
+		"/usr/lib/cyberpanel/bin/application-catalog-evil/manifest.json",
+		"/etc/cyberpanel/containers/recipe-trust.json", "/etc/systemd/system/panel-core.service",
+		"/var/lib/cyberpanel/control/control.db", "/usr/local/bin/script",
+	} {
+		artifact.Destination = path
+		if err := artifact.validate(Target{}); err == nil {
+			t.Errorf("accepted out-of-scope asset %s", path)
+		}
+	}
+	artifact.Destination = "/usr/lib/cyberpanel/ui/index.html"
+	for _, mode := range []string{"0644", "0555", "0755", "0666", "0600"} {
+		artifact.Mode = mode
+		if err := artifact.validate(Target{}); err == nil {
+			t.Errorf("accepted asset mode %s", mode)
+		}
+	}
+}
