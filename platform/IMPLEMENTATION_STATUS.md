@@ -46,9 +46,12 @@ and secret bootstrap. Sequence 17 now installs core/gateway/execd binaries,
 units and configs. Sequence 18 now installs real OLS 1.9.2/LSPHP 8.3.33 after fixing
 native package cycles via verified batch installation. dpkg audit is clean and
 vendor binaries/modules execute. Real executor startup next requires the missing
-container service identity/home; use the existing installer identity provisioner.
-Its restart loop is stopped. Publish the tested engine-edition loader fix before
-continuing startup and API/browser qualification. OLS remains held stopped until
+container service identity/home, now provisioned through the existing installer.
+Sequence 19 installs the engine-edition loader fix. Startup next exposed malware
+socket initialization before siteops established shared-directory ownership;
+that order is fixed and both real listeners passed a QEMU probe, but the new
+executor binary still needs signed publication. Its restart loop is stopped.
+Continue startup and API/browser qualification. OLS remains held stopped until
 managed configuration is ready.
 The existing guest disk was safely expanded to 40 GiB, removing the repeated
 staging-space constraint. Native release sequence 16 installed real

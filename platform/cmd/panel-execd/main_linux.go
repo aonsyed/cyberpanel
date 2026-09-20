@@ -181,11 +181,6 @@ func main() {
 		log.Fatalf("initialize malware worker: %v", err)
 	}
 	defer malwareWorker.Close()
-	malwareListener, err := malwarescan.ListenLinuxMalwareWorker(controlGID)
-	if err != nil {
-		log.Fatalf("listen on malware worker socket: %v", err)
-	}
-	defer malwareListener.Close()
 	host, err := siteops.NewLinuxHost()
 	if err != nil {
 		log.Fatalf("initialize privileged host: %v", err)
@@ -204,6 +199,13 @@ func main() {
 		log.Fatalf("listen on privileged siteops socket: %v", err)
 	}
 	defer listener.Close()
+	// ListenDefault establishes the shared runtime directory's root/control
+	// ownership before the malware listener enforces that exact boundary.
+	malwareListener, err := malwarescan.ListenLinuxMalwareWorker(controlGID)
+	if err != nil {
+		log.Fatalf("listen on malware worker socket: %v", err)
+	}
+	defer malwareListener.Close()
 	server := &siteops.Server{Authorizer: policy, Handler: executor, Admission: mutationAdmission, MaximumConcurrent: 128}
 	installedEdition := webengine.Edition(edition)
 	configurationStore, err := fsstore.New(webEngineConfigurationRoot, installedEdition)

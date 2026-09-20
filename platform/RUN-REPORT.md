@@ -5,6 +5,37 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Service identities provisioned; executor runtime ordering fixed — 2026-09-20
+
+Invoked the existing installer LinuxHost.EnsureIdentity in QEMU for the missing
+gateway/container identities, rather than duplicating user/group allocation.
+Gateway is UID 993/GID 984; containers UID 992/GID 983, home
+`/var/lib/cyberpanel-containers` (0750), subordinate UID/GID ranges
+524288:65536. This is explicit QEMU bootstrap; automatic fresh-node orchestration
+of these identities remains part of installation qualification.
+
+Rebuilt the executor at `9089d42fe`, including the signed engine-edition config
+resolver, and installed signed sequence 19 `qemu-executor-3.1.18`:
+bundle `/var/tmp/panel-executor-3.1.18.tar`, SHA-256
+`92e0827f628e3fd0ae867b96e5acfcbe90d10d873dfc2bc610f7ea5c4ddbda8f`;
+manifest `f7ca6216861a72f373d37fb2bf0b0e84e8734ac415591125906df17b51b84a0e`;
+receipt `25ffce4d18c30299fc0ccfe49b4311d146dd145c44b202a97321721399264a70`.
+The signed release committed, but its newly started executor failed at malware
+socket admission: systemd creates `/run/cyberpanel` as root:root, while malware
+requires root:control ownership. The siteops listener already establishes that
+ownership but was initialized later. Stopped the executor restart loop.
+
+Moved malware listener creation immediately after siteops listener creation,
+preserving its exact permission check and root executor group. QEMU build and
+uncached siteops tests passed (cmd/panel-execd and malwarescan have no package
+tests). A guarded QEMU probe using the actual shared-directory and Unix socket
+paths successfully opened both real listeners in the corrected order, then
+closed them. The ordering fix is built at
+`/home/harness/bin/panel-execd-runtime-order` but is NOT installed in sequence 19.
+Publish it before the next full startup claim. Core/gateway remain unstarted;
+OLS remains under the explicit configuration hold. Further runtime configuration
+and complete API/browser/lifecycle qualification remain required.
+
 ### Native package transaction fixed; OLS/LSPHP installed — 2026-09-20
 
 The node installer now verifies every pending package before mutation, records
