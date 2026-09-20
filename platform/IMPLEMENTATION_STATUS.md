@@ -11,6 +11,27 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## View native capture/verification — 2026-09-21 (INCOMPLETE, source only)
+
+Closed read-only SQL operations now capture SHOW CREATE VIEW in its own schema
+context plus ordered native column names. Definitions are sanitized to INVOKER;
+captured name must match the requested view. Raw definition parsing preserves
+embedded tabs/newlines by separating only known leading/trailing result columns.
+Character-set and collation metadata are retained and included in schema proof.
+Verifier accepts healthy native views without double-counting their table rows.
+QEMU tests exercise actual capture/columns/integrity and prove removing a view
+changes the schema digest; all database/API/core/execd suites pass.
+
+Continue this feature, not a new side task: production loader CREATE VIEW/SHOW
+VIEW grants remain unmodified; destination recreation/promotion and recovery are
+not implemented. Before mutation, persist native view definitions/columns with
+the isolated record. Recreate dependency placeholders with matching columns,
+then replace definitions as INVOKER in destination context, preserving captured
+charset/collation; verify exact resulting schema before completion. Do not use
+naive schema-name text substitution or forget literal encoding semantics for
+non-UTF8 view definitions. Existing promoting-without-proof still fails ambiguous.
+Installed63 unchanged; do not advertise end-to-end views from these primitives.
+
 ## View import loading step — 2026-09-21 (INCOMPLETE, source only)
 
 Transfer reader now recognizes native CREATE VIEW dump envelopes, unwraps

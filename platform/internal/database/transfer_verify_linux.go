@@ -91,12 +91,26 @@ func (executor *LinuxMariaDBExecutor) observeTransferDatabase(bounded context.Co
 	verification := TransferVerification{IsolatedToken: isolated.Token, Health: HealthHealthy}
 	for _, line := range lines {
 		fields := strings.Split(line, "\t")
-		if len(fields) != 4 || fields[1] != "BASE TABLE" {
+		if len(fields) != 4 || (fields[1] != "BASE TABLE" && fields[1] != "VIEW") {
 			return TransferVerification{}, ErrTransferInvalid
 		}
 		name, err := hex.DecodeString(fields[0])
 		if err != nil {
 			return TransferVerification{}, ErrTransferInvalid
+		}
+		if fields[1] == "VIEW" {
+			view, err := executor.observeTransferView(bounded, connection, isolatedTransferTable{Database: target, Table: string(name)})
+			if err != nil {
+				return TransferVerification{}, err
+			}
+			schema.Write([]byte(fields[0] + "\x00VIEW\x00" + view.canonicalDefinition() + "\x00"))
+			check, err := connection.query(bounded, sqlCheckImportTable, isolatedTransferTable{Database: target, Table: string(name)})
+			if err != nil || !healthyTransferTableCheck(check) {
+				return TransferVerification{}, ErrTransferInvalid
+			}
+			integrity.Write([]byte(fields[0] + "\x00VIEW\x00"))
+			integrity.Write(check)
+			continue
 		}
 		switch fields[2] {
 		case "InnoDB", "MyISAM", "Aria", "MEMORY":
@@ -129,12 +143,7 @@ func (executor *LinuxMariaDBExecutor) observeTransferDatabase(bounded context.Co
 		if err != nil {
 			return TransferVerification{}, err
 		}
-		results := strings.Split(strings.TrimSpace(string(check)), "\n")
-		if len(results) != 1 {
-			return TransferVerification{}, ErrTransferInvalid
-		}
-		result := strings.Split(results[0], "\t")
-		if len(result) != 4 || result[1] != "check" || result[2] != "status" || result[3] != "OK" {
+		if !healthyTransferTableCheck(check) {
 			return TransferVerification{}, ErrTransferInvalid
 		}
 		integrity.Write([]byte(fields[0] + "\x00"))
@@ -150,4 +159,13 @@ func (executor *LinuxMariaDBExecutor) observeTransferDatabase(bounded context.Co
 		return TransferVerification{}, err
 	}
 	return verification, nil
+}
+
+func healthyTransferTableCheck(check []byte) bool {
+	results := strings.Split(strings.TrimSpace(string(check)), "\n")
+	if len(results) != 1 {
+		return false
+	}
+	result := strings.Split(results[0], "\t")
+	return len(result) == 4 && result[1] == "check" && result[2] == "status" && result[3] == "OK"
 }

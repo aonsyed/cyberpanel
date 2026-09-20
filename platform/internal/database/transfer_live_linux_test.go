@@ -285,7 +285,7 @@ func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
 			if err != nil || got != "1:transfer round trip:0001FF\n2:NULL:NULL" {
 				t.Fatalf("round trip contents differ: %q %v", got, err)
 			}
-			verifyOrdinaryNativeImports(t, ctx, store, backend, job, target, query)
+			verifyOrdinaryNativeImports(t, ctx, store, backend, job, target, query, exportConfigs.executor)
 			verifyIsolatedNativeImport(t, ctx, exportConfigs.executor, store, job, query)
 			verifyEmptyNativePromotion(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query, engine)
 			verifyServiceNativeImport(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query)
@@ -761,7 +761,7 @@ func verifyIsolatedNativeImport(t *testing.T, ctx context.Context, executor *Lin
 	}
 }
 
-func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *LinuxTransferArtifactStore, backend *LinuxTransferBackend, job TransferJob, target SQLIdentifier, query func(context.Context, string) (string, error)) {
+func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *LinuxTransferArtifactStore, backend *LinuxTransferBackend, job TransferJob, target SQLIdentifier, query func(context.Context, string) (string, error), executor *LinuxMariaDBExecutor) {
 	t.Helper()
 	reader, err := store.OpenTransferArtifact(ctx, job.Source.Identity)
 	if err != nil {
@@ -865,8 +865,35 @@ func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *Linux
 				if err != nil || got != "2" {
 					t.Fatal("loaded native view cannot read its tables", err)
 				}
+				var resource Database
+				if err := executor.readResource("databases", job.DatabaseID, &resource); err != nil {
+					t.Fatal(err)
+				}
+				resource.Name = target
+				instance, err := executor.instance(job.InstanceID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				connection, cleanup, err := executor.connection(ctx, instance)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer cleanup()
+				view, err := executor.observeTransferView(ctx, connection, isolatedTransferTable{Database: resource, Table: "sample_view"})
+				if err != nil || len(view.Columns) != 2 || view.Columns[0] != "id" || view.Columns[1] != "body" || !strings.Contains(view.Definition, "SQL SECURITY INVOKER") || strings.Contains(view.Definition, "`"+target.String()+"`.") {
+					t.Fatal("native view capture", err)
+				}
+				isolated := IsolatedTransferDatabase{Token: job.ID, InstanceID: job.InstanceID, Name: target, SourceDatabaseID: job.DatabaseID, SourceGeneration: job.DatabaseGeneration, CreatedAt: time.Now().UTC()}
+				verified, err := executor.observeTransferDatabase(ctx, connection, variant, isolated, resource)
+				if err != nil || verified.RowCount != 2 {
+					t.Fatal("view verification must not double count table rows", err)
+				}
 				if _, err = query(ctx, "DROP VIEW `"+target.String()+"`.sample_view;"); err != nil {
 					t.Fatal(err)
+				}
+				withoutView, err := executor.observeTransferDatabase(ctx, connection, variant, isolated, resource)
+				if err != nil || withoutView.SchemaDigest == verified.SchemaDigest {
+					t.Fatal("view absent from schema verification", err)
 				}
 			}
 		})

@@ -4983,3 +4983,16 @@ database/apiserver/cyberpanel/panel-execd suites passed inside Ubuntu ARM64 QEMU
 with live transfer flag/offline Go/cache settings. Native probe also verified
 SHOW CREATE VIEW after USE emits same-schema table references without the schema
 prefix. Probe schemas dropped. No package changes/downloads/release installation.
+# Native view definition capture and verification — 2026-09-21
+
+QEMU Ubuntu ARM64: actual root-native observation captures a scoped-loader view,
+ordered id/body columns and sanitized invoker definition in its own schema
+context. Complete database verification accepts the healthy view and still counts
+two base rows, not four. Removing the view changes its schema digest. Captured
+character-set/collation are included in canonical view evidence. Existing SQL/gzip
+and engine variants pass; no installed view-promotion claim.
+
+Using the established offline QEMU Go/cache configuration and
+CYBERPANEL_QEMU_LIVE_TRANSFER=1, full database/apiserver/cyberpanel/panel-execd
+suites pass. Production loader grants and destination recreation/promotion remain
+unfinished. No native package changes, downloads, or new release deployment.

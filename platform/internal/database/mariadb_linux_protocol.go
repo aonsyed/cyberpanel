@@ -67,6 +67,8 @@ const (
 	sqlCountImportRows
 	sqlCheckImportTable
 	sqlPromoteImportTables
+	sqlObserveImportView
+	sqlObserveImportViewColumns
 )
 
 type principalMutation struct {
@@ -262,6 +264,11 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 		database,ok:=oneValue[Database](values)
 		if !ok || database.Validate()!=nil{return "",ErrInvalidResource}
 		return "SELECT HEX(TABLE_NAME),TABLE_TYPE,COALESCE(ENGINE,''),COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0) FROM information_schema.TABLES WHERE TABLE_SCHEMA='"+database.Name.String()+"' ORDER BY BINARY TABLE_NAME;\n",nil
+	case sqlObserveImportView, sqlObserveImportViewColumns:
+		table,ok:=oneValue[isolatedTransferTable](values);if !ok{return "",ErrInvalidResource}
+		name,err:=isolatedTableSQL(table);if err!=nil{return "",err}
+		if statement==sqlObserveImportView { return "USE "+quotedIdentifier(table.Database.Name)+"; SHOW CREATE VIEW "+name+";\n",nil }
+		return "SELECT HEX(COLUMN_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='"+table.Database.Name.String()+"' AND HEX(TABLE_NAME)='"+hex.EncodeToString([]byte(table.Table))+"' ORDER BY ORDINAL_POSITION;\n",nil
 	case sqlObserveImportSchema,sqlCountImportRows,sqlCheckImportTable:
 		table,ok:=oneValue[isolatedTransferTable](values);if !ok{return "",ErrInvalidResource}
 		name,err:=isolatedTableSQL(table);if err!=nil{return "",err}
