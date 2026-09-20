@@ -5,6 +5,43 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Signed web catalog candidate; host-space install guard — 2026-09-20
+
+Source `5b432d144` accepts only installer-managed immutable-release links for
+engine/PHP catalogs, public trust keys and repository metadata. It uses the
+existing release resolver, opens the pinned file no-follow/nonblocking, then
+checks ownership, mode, size and read length. Arbitrary links and writable or
+oversized catalogs remain rejected; catalog signature verification is unchanged.
+QEMU passed the complete management, node-release, cyberpanel and panel-execd
+package suites, and built both updated binaries. A gated installed-catalog test
+now verifies signed resolution, pinned package hash/native metadata and matching
+installed OLS version; it has NOT yet run against the candidate installation.
+
+Assembled sequence 36 `qemu-web-catalog-3.1.35` (103 artifacts, 507857532 bytes)
+with the existing native OLS package, signed engine catalog, public key and
+repository metadata. Bundle SHA256:
+`0e4f0d231672f67349b6fd551f8ca1de78ab211428357ae9d8fd63c10b089888`;
+manifest `818f8aca469212f151a25298fac852e2d2bafbaef2bc6886c8a65d780cda9edc`.
+Guest bundle: `/var/tmp/panel-web-catalog-3.1.35.tar`.
+Spec: `/home/harness/cyberpanel-web-catalog-spec.json`.
+The native package cache was explicitly provisioned in QEMU from the retained
+package; automatic production package-cache provisioning remains to be wired.
+
+The host-space guard rejected installation BEFORE any service stop, mail-config
+restore or installer execution. Installed release remains sequence 35. Initial
+web activation/core/API/UI qualification is still incomplete. Host free space
+ended near 1.7 GiB, below the existing 3 GiB build/install minimum; guest free
+space is 9.7 GiB. Do not bypass the guard or mistake a built candidate for an
+installed/qualified release. More host space is needed before deployment.
+
+Removed only verified duplicate staging sequences 4, 6, 7, 9–20, 33 and 34;
+every payload was hashed against its manifest and retained installed tree first.
+All installed releases/journals remain. Compacted guest bundles 33–35 losslessly
+into `/var/tmp/retained-mail-33-35.tar.zst` (440 MiB); extracted SHA256 values
+match the previously recorded originals for all three before originals were
+removed. Recover using `zstd -dc --long=30` and tar extraction. Candidate 36
+remains uncompressed. No OS-image or Go download occurred.
+
 ### Native web package version validation — 2026-09-20
 
 QEMU reproduced rejection of the installed OLS version `1.9.2-1+noble`

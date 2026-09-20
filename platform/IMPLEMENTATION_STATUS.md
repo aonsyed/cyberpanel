@@ -4,6 +4,16 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Latest candidate checkpoint (2026-09-20): `5b432d144` supports strict managed
+release links for signed web catalogs/keys/repositories; all four affected Go
+package suites and both binary builds pass in QEMU. Signed sequence 36 is built
+at `/var/tmp/panel-web-catalog-3.1.35.tar`, NOT installed: host free space is
+about 1.7 GiB, below the 3 GiB install guard. Release 35 remains active. Reclaim
+host space before installing; then run the gated native catalog test and finish
+initial verified web activation. Guest old bundles 33–35 are preserved together
+in `/var/tmp/retained-mail-33-35.tar.zst`, with each extraction hash verified.
+Production package-cache provisioning and web bootstrap remain incomplete.
+
 Latest source checkpoint (2026-09-20): fixed web artifact validation rejecting
 the actual native OLS `1.9.2-1+noble` package version. Regression reproduced and
 full management suite passed in QEMU; signatures and identifier rules unchanged.
