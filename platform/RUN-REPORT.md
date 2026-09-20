@@ -5,6 +5,22 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Real WordPress release input — 2026-09-20
+
+Prepared a version-2 WordPress 7.1 recipe from the existing QEMU archive
+`/home/harness/wordpress-7.1.tar.gz`, after checking its actual 35,356,041 bytes
+and SHA-256 `05a5f89138f632b7329f1202f2a0553c5f7fe4daf8e4b9ca7ebae9b9466b9e86`.
+The existing QEMU-only signing key signed the canonical payload; the production
+`VerifySignedRecipeDocument` verifier accepted the resulting envelope, digest
+`30f4a5cda438cf1531ea526f281822e30280091d0a5ab6c6f810345de5543760`.
+Inputs are in guest `/home/harness/application-inputs-20260920/`; the preparation
+program is retained in the host QEMU run directory. No private key was printed,
+no host trust was installed, and no additional download ran. The recipe selects
+PHP 8.3; the declared platform/engine matrix is not evidence of certification.
+This is one real input, not a complete catalog: the other four PHP artifacts and
+their recipes, n8n/Hermes recipes and OCI inputs, and full runtime provisioning
+remain unfinished. Existing archive contents were not replaced by dummy files.
+
 ### Signed UI assets and gateway loading — 2026-09-20
 
 Added a constrained `release_asset` kind for immutable UI/catalog files (root:
