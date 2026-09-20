@@ -11,7 +11,29 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
-## Current recovery point — 2026-09-21 (installed57 committed)
+## Current recovery point — 2026-09-21 (installed58 committed)
+
+Export-backed import UI is installed and qualified: after a verified download,
+choose another ready database on the same site, check the destination, type its
+name to confirm, run import and inspect status. Wrong confirmation disables
+submission; mutation failures retain the job ID and offer inspection rather
+than automatic retry. Concurrent console/export actions and close are disabled
+during import requests. New exports reset import controls by sealed job/artifact
+digest, not the reused export ID. Upload is explicitly NOT offered by this flow.
+
+QEMU UI typecheck/build pass. Installed58 browser passkey→export→destination
+selection→confirmation→native import→status passed for gzip and plain SQL,
+including390px layout and new-export state reset. Live native rows, NULL/BLOB,
+scope/tamper rejection, replay, durable audit/job/projection and cleanup pass.
+Both new destination fixtures and source table removed. All three runtime
+executables resolve to manifest72d1056e3d3697d6a5990b6edc00cbfcb959851080d413a3a7742651c545b227.
+Credential binding unchanged; guest installer archive removed after retained
+host checksum matched. Verified active/previous staging cleanup ran; guest2.7GiB
+free (older historical staging remains). No vendor changes/downloads/new workers.
+Next: SQL/gzip upload ingestion, then replacement/async/recovery and remaining
+full parity requirements. Do not call export-backed imports full import parity.
+
+## Previous recovery point — installed57
 
 Authenticated export-backed imports qualified in the existing Ubuntu ARM64
 guest: gzip on installed56, plain SQL on installed57. Native text/NULL/BLOB

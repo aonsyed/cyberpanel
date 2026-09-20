@@ -4487,3 +4487,45 @@ digests match. Guest archive removed only after host/guest checksums matched and
 installed57 was committed; host copy retained in ignored .work/qemu. Guest3.2GiB
 free. No downloads, native component changes, new workers or committed binaries.
 Import UI/upload, replacement, async jobs and broad parity remain pending.
+
+### Installed export-backed database import UI — 2026-09-21
+
+Added DatabaseExportImport to the SQL console after a fully verified export
+download. It lists same-site ready destinations excluding the source, handles
+pagination, invokes native destination preparation, requires exact typed target
+confirmation and displays durable job ID/status. Submitted errors offer explicit
+inspection, not automatic mutation retries. Console query/export/close controls
+cannot interrupt an in-flight import request. The UI explicitly identifies the
+source as a retained export, not an uploaded SQL file.
+
+Candidate browser qualification found an export identity reuse issue in the UI:
+gzip→SQL retained old import controls because the component was keyed by export
+ID. Keyed by sealed job digest plus artifact digest instead. Final source hashes
+match host and guest: DatabaseConsole179dcf6652b1ad2546ae32d7be8d6bf0f91931c90682d9fa25441fc2dfc55683;
+DatabaseExportImportd6e466ca1944e07de5f26d7af30daebec03b2dc6ca175c7a1ddec22e735e590b.
+
+QEMU npm run typecheck and npm run build passed (existing large-chunk warning).
+Installed signed58 using unchanged core/gateway/executor binaries plus new UI.
+Manifest72d1056e3d3697d6a5990b6edc00cbfcb959851080d413a3a7742651c545b227;
+receipt74edddc34d51c5126607d0d864064d7b22b55fbeddb1e6c47343d8401ed36660;
+bundle SHA256634dd06d881a2052c605febe8c39d8bef43eaa7400362ddf420a7fbbc08cc402.
+Committed receipt and actual core/gateway/execd process executable paths checked.
+
+Installed browser command (no candidate assets or mocked transport):
+`node /home/harness/qemu-passkey.cjs --console-fresh --export-live --import-ui`.
+Both gzip/plain: real passkey, browser export/digest, destination listing,
+source exclusion, disabled blank/wrong confirmation, exact-name confirmation,
+prepare200/run200/completed, UI status inspection200, native text/NULL/BLOB rows,
+wrong-site403, tampered job400, exact receipt replay200, deletion200 and native
+absence. New export reset previous import controls.390px interaction/overflow
+checks and SQL mutation denial/recovery passed. Both source and destinations
+were deliberately disposable test data; all were removed.
+
+Read-only audit probe --installed58 verified five scoped events per job,
+completed state, durable export-source digest, promotion receipt and deleted
+generation3 resources. Existing credential version/binding and approved executor
+digest unchanged. Guest bundle removed after host/guest SHA256 match; ignored
+host bundle retained. Installer prune-staging succeeded for active/previous
+releases; older historical staging remains. Guest2.7GiB free. No downloads,
+vendor changes, new workers or committed binaries. File-upload ingestion,
+replacement, long-running jobs and full parity qualification remain unfinished.

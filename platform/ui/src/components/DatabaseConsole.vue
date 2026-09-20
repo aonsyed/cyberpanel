@@ -1,16 +1,19 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { APIClient } from "../api";
+import DatabaseExportImport from "./DatabaseExportImport.vue";
 
 const props = defineProps<{ tenantId?: string | undefined; resource: Record<string, unknown> }>();
 const emit = defineEmits<{ close: [] }>();
 const api = inject<APIClient>("api")!;
 const principal = ref("");
 const busy = ref(false);
+const importBusy = ref(false);
+const verifiedExport = ref<{ job: Record<string, unknown>; artifact: ExportArtifact } | null>(null);
 const failure = ref("");
 const exportCompression = ref<"none" | "gzip">("gzip");
 const exportProgress = ref("");
-type ExportArtifact = { bytes: number; digest: string; compression: "none" | "gzip" };
+type ExportArtifact = { bytes: number; digest: string; compression: "none" | "gzip"; [key: string]: unknown };
 const statement = ref("SELECT DATABASE() AS current_database;");
 const session = ref<{ id: string; site_id: string; generation: number; expires_at: string } | null>(null);
 const metadata = ref<{ entries: Array<{ object_name: string; kind: string }> }>({ entries: [] });
@@ -41,7 +44,7 @@ async function open(): Promise<void> {
   finally { busy.value = false; }
 }
 async function query(): Promise<void> {
-  if (!session.value || busy.value) return;
+  if (!session.value || busy.value || importBusy.value) return;
   busy.value = true; failure.value = ""; result.value = null;
   try {
     const response = await api.invoke<NonNullable<typeof result.value>>("database.workspace.query", {
@@ -53,7 +56,7 @@ async function query(): Promise<void> {
   finally { busy.value = false; }
 }
 async function exportDatabase(): Promise<void> {
-  if (!session.value || busy.value) return;
+  if (!session.value || busy.value || importBusy.value) return;
   busy.value = true; failure.value = ""; exportProgress.value = "Preparing export…";
   const scope = { tenantId: props.tenantId, resourceId: session.value.site_id, expectedGeneration: session.value.generation, signal: controller.signal };
   const sessionID = session.value.id;
@@ -85,6 +88,7 @@ async function exportDatabase(): Promise<void> {
     const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(value => value.toString(16).padStart(2, "0")).join("");
     if (digest !== artifact.digest) throw new Error("Export integrity check failed. No file was saved.");
     if (controller.signal.aborted) throw new DOMException("Export cancelled", "AbortError");
+    verifiedExport.value = { job: prepared.result, artifact };
     const url = URL.createObjectURL(new Blob([bytes], { type: artifact.compression === "gzip" ? "application/gzip" : "application/sql" }));
     const link = document.createElement("a");
     link.href = url; link.download = `${String(props.resource.name).replace(/[^a-zA-Z0-9_-]/g, "_")}.sql${artifact.compression === "gzip" ? ".gz" : ""}`;
@@ -94,15 +98,16 @@ async function exportDatabase(): Promise<void> {
   } catch (error) { exportProgress.value = ""; failure.value = error instanceof Error ? error.message : "Export failed."; }
   finally { busy.value = false; }
 }
-function keydown(event: KeyboardEvent): void { if (event.key === "Escape") emit("close"); }
+function close(): void { if (!busy.value && !importBusy.value) emit("close"); }
+function keydown(event: KeyboardEvent): void { if (event.key === "Escape") close(); }
 onMounted(() => { principal.value = options.value[0]?.value || ""; window.addEventListener("keydown", keydown); });
 onBeforeUnmount(() => { controller.abort(); window.removeEventListener("keydown", keydown); });
 </script>
 
 <template>
-  <div class="console-layer" @mousedown.self="emit('close')">
+  <div class="console-layer" @mousedown.self="close">
     <aside class="database-console" role="dialog" aria-modal="true" aria-label="Database console">
-      <header><div><h2>{{ resource.name }} · SQL console</h2><p>Queries run with the selected principal’s grants, never the database administrator.</p></div><button class="button" type="button" @click="emit('close')">Close</button></header>
+      <header><div><h2>{{ resource.name }} · SQL console</h2><p>Queries run with the selected principal’s grants, never the database administrator.</p></div><button class="button" type="button" :disabled="busy || importBusy" @click="close">Close</button></header>
       <form v-if="!session" @submit.prevent="open">
         <label for="console-principal">Database principal</label>
         <select id="console-principal" v-model="principal" class="select" required :disabled="busy"><option value="" disabled>Select a principal</option><option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option></select>
@@ -112,8 +117,9 @@ onBeforeUnmount(() => { controller.abort(); window.removeEventListener("keydown"
       <template v-else>
         <p class="session-note">Expires {{ new Date(session.expires_at).toLocaleTimeString() }} · SELECT, SHOW, DESCRIBE and EXPLAIN · up to 1,000 rows</p>
         <p>Tables and views: {{ tables.join(', ') || 'None' }}</p>
-        <form @submit.prevent="exportDatabase"><label for="export-compression">Export tables and views</label><select id="export-compression" v-model="exportCompression" class="select" :disabled="busy"><option value="gzip">Compressed SQL (.sql.gz)</option><option value="none">SQL (.sql)</option></select><p>Uses this console session’s size and time limits. Routines, triggers and events are not included.</p><button class="button" type="submit" :disabled="busy">Export SQL</button><p v-if="exportProgress" role="status">{{ exportProgress }}</p></form>
-        <form @submit.prevent="query"><label for="console-statement">SQL statement</label><textarea id="console-statement" v-model="statement" class="textarea mono" rows="6" required :disabled="busy" spellcheck="false"></textarea><button class="button button-primary" type="submit" :disabled="busy">{{ busy ? 'Running…' : 'Run query' }}</button></form>
+        <form @submit.prevent="exportDatabase"><label for="export-compression">Export tables and views</label><select id="export-compression" v-model="exportCompression" class="select" :disabled="busy || importBusy"><option value="gzip">Compressed SQL (.sql.gz)</option><option value="none">SQL (.sql)</option></select><p>Uses this console session’s size and time limits. Routines, triggers and events are not included.</p><button class="button" type="submit" :disabled="busy || importBusy">Export SQL</button><p v-if="exportProgress" role="status">{{ exportProgress }}</p></form>
+        <DatabaseExportImport v-if="verifiedExport && api.available('database.import.prepare')" :key="String(verifiedExport.job.digest) + ':' + verifiedExport.artifact.digest" :tenant-id="tenantId" :source="verifiedExport.job" :artifact="verifiedExport.artifact" :disabled="busy" @busy="importBusy=$event"/>
+        <form @submit.prevent="query"><label for="console-statement">SQL statement</label><textarea id="console-statement" v-model="statement" class="textarea mono" rows="6" required :disabled="busy || importBusy" spellcheck="false"></textarea><button class="button button-primary" type="submit" :disabled="busy || importBusy">{{ busy ? 'Running…' : 'Run query' }}</button></form>
         <section v-if="result" aria-label="Query results" class="query-results"><p>{{ result.rows.length }} rows{{ result.truncated ? ' · result truncated' : '' }}</p><div class="result-scroll"><table><thead><tr><th v-for="(column,index) in result.columns" :key="index">{{ column.name }}</th></tr></thead><tbody><tr v-for="(row,index) in result.rows" :key="index"><td v-for="(value,column) in row.values" :key="column">{{ value.kind === 'null' ? 'NULL' : value.text }}</td></tr></tbody></table></div></section>
       </template>
       <p v-if="failure" role="alert" class="console-error">{{ failure }}</p>
