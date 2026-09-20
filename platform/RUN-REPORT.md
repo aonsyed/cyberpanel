@@ -5,6 +5,37 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Real installation claim and authenticated UI — 2026-09-20
+
+Signed43 qemu-claim-3.1.42 deployed the bootstrap fixes:
+bundle66453e248ac5e8fab9013c2c3659a51ba965cc4d77352aefb28c1db1efbb2d00,
+manifest5cbcc9a4ab0132bc39374aaed01e7317d39bde936bf15ac9f4fc2bc7c6b8d84c,
+receipt6faf12ecbbbfa71bb0e6f96379e558577358c533b82d8e87a6bcc8b1bad30cf0.
+Core built offline in QEMU. QEMU-only signing maximum42→43; key/minimum/expiry
+unchanged. Existing documented manual mail/WAF reconciliation still required.
+
+The actual local recovery socket accepted a dedicated QEMU installation owner
+claim with201, exercising real protected password enrollment and first-session
+authentication. Claim token consumed; replay of that same token returns401.
+Random account password stored only in the guest's0600 test credential file;
+neither password, claim token nor session/CSRF tokens were printed.
+
+QEMU Playwright exercised real browser login200 and authenticated overview with
+no page errors. Observed operations: anonymous session.current401 (expected),
+session.login200, observability.dashboard.get200, identity.tenant.list200.
+Navigated Users & tenants and opened Create tenant: manager, ownership contacts
+and delegation fields visible. No tenant submitted; MFA and tenant/site mutation
+journeys remain pending. Screenshots qemu-owner-dashboard.png and
+qemu-owner-tenant-form.png reside only in /home/harness. Core/gateway/OLS active
+on installed paths; no runtime candidate override.
+
+Before installation, archived obsolete34–36/40 to ignored host file
+.work/qemu/obsolete-releases-34-36-40.tar.gz, verified gzip plus four manifests,
+then removed exact guest roots under installer lock after active/rollback and
+process-map checks. Journals retained and archive is recoverable. After43,
+removed redundant42 bundle and three unused candidate executables; installed43
+and rollback42 preserved. No downloads, native builds or generated Git artifacts.
+
 ### Signed gateway completion and one-time bootstrap guard — 2026-09-20
 
 Archived obsolete guest releases37–39 to the ignored host artifact

@@ -6,6 +6,19 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest: signed43 qemu-claim-3.1.42 installed; bootstrap fix is deployed. Actual
+root-only local claim returned201 through the protected authentication broker;
+consumed-token replay returned401. Actual browser owner login200, authenticated
+overview/dashboard200 and identity.tenant.list200. Managed tenant form fields
+verified in browser; no tenant submitted yet. Dedicated QEMU account credentials
+are guest-only /home/harness/qemu-owner-login.json, mode0600; NEVER print or copy
+them into logs/Git. Claim token consumed. Core/gateway/OLS active, no candidate
+override. Next: MFA and real tenant/site provisioning workflows, plus remaining
+installation replay and cross-platform/native-LSE qualification. Overall parity
+remains incomplete. Guest obsolete34–36/40 archived outside Git then removed;
+redundant42 tar/candidate binaries removed; installed43/rollback42 retained.
+Signing trust currently ends at43.
+
 Latest installed checkpoint: sequence42 qemu-gateway-credential-3.1.41. Temporary
 gateway candidate override/binary REMOVED. Core, gateway and OLS active on normal
 installed paths; gateway health ready and QEMU desktop/mobile entry/invalid-login
