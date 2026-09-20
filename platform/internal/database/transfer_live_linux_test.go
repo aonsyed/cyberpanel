@@ -19,9 +19,10 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
-// Import still uses a root fixture. Export uses the production session-bound
-// config resolver and a native SELECT/SHOW VIEW account; only secret delivery
-// for that account is a fixture. All SQL subprocesses and artifacts are real.
+// Import uses a target-only native account with fixture credential provisioning.
+// Export uses the production session-bound config resolver and a native
+// SELECT/SHOW VIEW account; secret delivery remains a fixture. All SQL
+// subprocesses and artifacts are real; import provisioning is not production.
 type liveTransferConfigs struct {
 	path  string
 	token ResourceID
@@ -72,8 +73,32 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 	}
 	defer os.RemoveAll(configDir)
 	configPath := filepath.Join(configDir, "client.cnf")
-	if err = os.WriteFile(configPath, []byte("[client]\nuser=root\n"), 0600); err != nil {
+	importUser := "qemu_imp_" + hex.EncodeToString(random)
+	passwordBytes := make([]byte, 32)
+	if _, err = rand.Read(passwordBytes); err != nil {
 		t.Fatal(err)
+	}
+	defer wipeBytes(passwordBytes)
+	password := hex.EncodeToString(passwordBytes)
+	if _, err = query(ctx, "CREATE USER '"+importUser+"'@'localhost' IDENTIFIED BY '"+password+"'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,LOCK TABLES ON `"+target.String()+"`.* TO '"+importUser+"'@'localhost';"); err != nil {
+		t.Fatal("scoped import account setup failed")
+	}
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := query(cleanup, "DROP USER IF EXISTS '"+importUser+"'@'localhost';"); err != nil {
+			t.Error("import account cleanup failed")
+		}
+	})
+	if err = os.WriteFile(configPath, []byte("[client]\nuser="+importUser+"\npassword="+password+"\nlocal-infile=0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"SELECT * FROM mysql.user;", "CREATE TABLE `" + source.String() + "`.import_escape(id INT);"} {
+		command := exec.CommandContext(ctx, mariaDBClientBinary, "--defaults-file="+configPath, "--protocol=socket", "--socket="+mariaDBSocket, "--batch")
+		command.Stdin = strings.NewReader(forbidden)
+		if command.Run() == nil {
+			t.Fatal("import account escaped target database")
+		}
 	}
 	store, err := NewLinuxTransferArtifactStore(workspaceExportRoot, 1<<20, time.Now)
 	if err != nil {

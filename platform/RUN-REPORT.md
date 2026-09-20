@@ -5,6 +5,34 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Import SQL/client boundary hardening — source, 2026-09-20
+
+QEMU regression first reproduced acceptance of a MariaDB executable-comment
+`SELECT LOAD_FILE` statement and unquoted client shell/source escapes embedded
+in an otherwise allowed SET statement. No such payload was executed: the
+regression exercised the actual streaming reader and asserted rejection.
+Validator now recognizes MariaDB executable comments, rejects unquoted escapes,
+and preserves quoted data and ordinary comments. Native import client uses
+`--binary-mode=1 --local-infile=0` as an additional boundary.
+
+The first native round-trip rerun exposed rejection of the vendor's exact
+`/*M!999999\- enable the sandbox mode */` protective header. Inspected the
+installed mariadb-dump output and recognized only that exact preamble without
+exempting adjacent executable comments. No vendor build/patch/pin was involved.
+
+Changed native import fixture from root credentials to a random, local-only
+account with privileges solely on its generated target database. Direct native
+attempts to read mysql.user or create a table in the source database fail. Plain
+SQL and gzip imports still reconstruct the two expected NULL/text/binary rows.
+The fixture removes its account, temporary config, databases and artifacts.
+This is native privilege qualification with fixture provisioning, not production
+isolated-import credential/catalog/promotion or upload/API/UI completion.
+
+Final QEMU offline/root test command, live MariaDB enabled:
+`go test -p 2 ./internal/database ./cmd/panel-execd -count=1`, both exit0.
+New reader regressions and existing native transfer cases pass. Installed54 is
+unchanged; deploying this shared import/migrator-reader change remains pending.
+
 ### Installed export retention startup — 2026-09-20
 
 Installed54 `qemu-retention-3.1.53`, rollback53. Manifest

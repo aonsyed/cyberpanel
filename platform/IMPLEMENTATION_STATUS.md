@@ -13,6 +13,17 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Import safety follow-up (source, not installed): SQL stream validation now checks
+MariaDB `/*M! ... */` executable comments as well as MySQL comments and rejects
+unquoted client escapes. Import subprocess disables client commands and local
+infile. The exact native mariadb-dump sandbox header is preserved/recognized;
+vendor binaries are unchanged. QEMU regression reproduced bypasses before the
+fix, then passed. Native SQL/gzip round trips now import through a target-only
+account rather than root, with cross-database write/system-account-read denials.
+Account/config provisioning is still a fixture, NOT production isolated import.
+Installed54 remains unchanged; ordinary uploaded SQL, scoped import provisioning,
+verification/promotion and API/UI integration remain to be connected.
+
 LATEST INSTALLED: signed54 `qemu-retention-3.1.53`, rollback53 retained. Manifest
 `41d6b4eaa6815dcde6fb524906e7d0280b35309155dc9b3a46073500ca592e50`, receipt
 `bba182b090fb51d2e66618c97b21b712ebbce8bf76fd0ca399b38b9f49864f95`.

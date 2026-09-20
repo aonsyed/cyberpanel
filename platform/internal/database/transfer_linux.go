@@ -182,7 +182,7 @@ func (backend *LinuxTransferBackend) Import(ctx context.Context, job TransferJob
 		lastSafeBytes = verifiedInput.count
 		return checkpoint(TransferStreamProgress{Bytes: verifiedInput.count, Rows: 0, SafePoint: true})
 	})
-	arguments := []string{"--defaults-file=" + descriptor.Path, "--protocol=socket", "--socket=" + mariaDBSocket, "--skip-auto-rehash", "--binary-mode=0", "--database=" + database.String()}
+	arguments := []string{"--defaults-file=" + descriptor.Path, "--protocol=socket", "--socket=" + mariaDBSocket, "--skip-auto-rehash", "--binary-mode=1", "--local-infile=0", "--database=" + database.String()}
 	processContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	command := exec.CommandContext(processContext, mariaDBClientBinary, arguments...)
@@ -438,6 +438,9 @@ func (reader *constrainedTransferSQLReader) nextStatement() ([]byte, error) {
 			previous = character
 			continue
 		}
+		// Client metacommands are not SQL. Never forward an unquoted escape
+		// even when the enclosing statement starts with an allowed SQL token.
+		if character == '\\' { return nil, ErrTransferUnsafeSQL }
 		if previous == '-' && character == '-' || character == '#' { lineComment = true }
 		if previous == '/' && character == '*' { blockComment = true }
 		if character == '\'' || character == '"' || character == '`' { quote = character }
@@ -492,10 +495,20 @@ func normalizeTransferSQL(statement []byte) string {
 		if character == '\'' || character == '"' || character == '`' { quote = character; result = append(result, ' '); continue }
 		if character == '#' || character == '-' && index+1 < len(statement) && statement[index+1] == '-' { lineComment = true; index++; continue }
 		if character == '/' && index+1 < len(statement) && statement[index+1] == '*' {
-			executableComment = index+2 < len(statement) && statement[index+2] == '!'
+			// Native mariadb-dump emits this exact protective client preamble.
+			// Preserve its bytes but do not classify it as executable SQL. No
+			// other MariaDB executable comment is exempt from validation.
+			const sandboxHeader = "/*M!999999\\- enable the sandbox mode */"
+			if bytes.HasPrefix(statement[index:], []byte(sandboxHeader)) {
+				index += len(sandboxHeader)-1
+				result = append(result, ' ')
+				continue
+			}
+			mariaDBComment := index+3 < len(statement) && statement[index+2] == 'M' && statement[index+3] == '!'
+			executableComment = index+2 < len(statement) && statement[index+2] == '!' || mariaDBComment
 			executablePrefix = executableComment
 			blockComment = true
-			if executableComment { index += 2 } else { index++ }
+			if mariaDBComment { index += 3 } else if executableComment { index += 2 } else { index++ }
 			continue
 		}
 		result = appendTransferSQLCharacter(result, character)
