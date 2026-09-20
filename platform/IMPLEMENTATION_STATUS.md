@@ -11,11 +11,24 @@ WAF asset evidence now inventories installed root-owned CRS files directly;
 it no longer requires the cyberpanel-waf-crs package's runtime.sha256. Root-owned
 rules updates change the recorded digest without a panel rebuild/version lock.
 Ownership/mode/symlink/hardlink checks and bounded file/byte counts remain.
-QEMU targeted tests and installed asset check pass. Live services remain signed46;
-the guest's existing custom CRS package has NOT yet been replaced. Remaining:
-remove version-specific unicode.mapping reference, support/qualify normal native
-rules configuration paths, and replace the guest package without losing policy.
+QEMU targeted tests and installed asset check pass. Version-specific mapping
+reference removed: renders a trusted installed mapping from conventional native
+locations or a single discovered installed-release directory. Mapping bytes are
+included in activation evidence, even outside the CRS tree. Missing, writable or
+ambiguous assets fail closed; no download/build fallback. Actual installed OLS
+parser accepted generated policy with both installed and unversioned mapping
+paths in private mount namespaces. Installer replay preserves managed policy and
+rejects silently replacing an initial policy when installed mapping changes.
+Live services remain signed46; guest custom CRS package NOT yet replaced.
+Remaining: support/qualify normal native rules configuration paths and replace
+the guest package without losing policy.
 Do not resume third-party builds or claim native rules installation complete.
+
+LATEST UI CHECK: signed46 actual browser password/passkey login, fresh tenant
+site/file listings pass. Trashed qemu-ui-created.php and qemu-ui-upload.txt through
+UI: both access.trash.move201, rows removed, both native URLs404. Recoverable trash;
+no permanent deletion. Fresh pool s-fe852e1325344b402b32c638-g2 active with NO drop-ins.
+All four panel/web services active. Guest2.6GiB free; no new downloads/bundles.
 
 LATEST INSTALLED: signed46 qemu-site-3.1.45, current46/rollback45. Contains core
 startup retry/PHP journal fix, UI layout, strict executor sandbox, identity/web

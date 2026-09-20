@@ -5,6 +5,36 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed mapping discovery and real UI trash — 2026-09-20
+
+Removed the compiled-in ModSecurity release directory from generated initial and
+managed WAF policies. Mapping discovery prefers conventional root-owned paths in
+`/etc/modsecurity`, `/etc/modsecurity.d`, the native server's `conf/modsec`, or
+the CRS root. A single installed-release subdirectory is also accepted without
+pinning its name. Missing, empty, writable, unsafe or ambiguous mappings fail;
+no source-build/download fallback exists. Mapping bytes join activation evidence
+even when the mapping is outside the CRS directory. Exact initial-policy journal
+recognition remains valid across layout names. Installer replay preserves later
+managed policies and refuses silently replacing an initial policy after a layout
+change. The directive's meaning was checked against the upstream
+[ModSecurity manual](https://github.com/owasp-modsecurity/ModSecurity/wiki/Reference-Manual-(v3.x)#secunicodemapfile).
+
+QEMU Ubuntu ARM64 only: full operations and cyberpanel package suites passed.
+After adding native-parser checks, the focused installed-assets/mapping/installer
+tests passed with `CYBERPANEL_QEMU_WAF=1`. Actual installed OLS `lshttpd -t` accepted
+both installed and conventional unversioned mapping layouts, each bound only in
+a private read-only mount namespace. Live WAF files and server were not replaced.
+These source changes are NOT in installed signed46 yet. Normal CRS package/layout
+replacement remains pending; no claim that the guest custom package is removed.
+
+Installed signed46 UI: fresh password and real browser passkey login both HTTP200;
+fresh tenant site listing and file listing HTTP200. Used file-manager Trash on
+ONLY `qemu-ui-created.php` and `qemu-ui-upload.txt`: both `access.trash.move` HTTP201,
+both rows disappeared, and native HTTP now returns404 for both fixture URLs.
+Files are recoverable through trash, not permanently deleted. Fresh site's PHP
+pool remains active with empty DropInPaths; core/gateway/execd/OLS remain active.
+Guest free2.6GiB. No downloads, vendor builds, new workers, or release bundles.
+
 ### Signed46 installed; native UI verification and upgrade limits — 2026-09-20
 
 QEMU socket regression additionally proves web-worker write permission, unrelated

@@ -822,7 +822,11 @@ func (executor *LinuxOperationsExecutor) renderWAFGeneration(policies []WAFPolic
 		auditMode = "RelevantOnly"
 	}
 	fmt.Fprintf(&buffer, "# CyberPanel complete WAF policy generation\n# Node policy %s generation %d\nSecRuleEngine %s\nSecRequestBodyAccess On\nSecRequestBodyLimit %d\nSecAuditEngine %s\n", node.ID.String(), node.Generation, mode, node.RequestBodyLimitBytes, auditMode)
-	buffer.WriteString(wafParserConfiguration)
+	mappingPath, _, err := installedWAFUnicodeMapping("/")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	buffer.WriteString(wafParserConfigurationWithMapping(mappingPath))
 	packs := append([]WAFPack(nil), node.ProviderPacks...)
 	if node.CRS != nil {
 		packs = append([]WAFPack{*node.CRS}, packs...)

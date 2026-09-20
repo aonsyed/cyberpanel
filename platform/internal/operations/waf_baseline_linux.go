@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -47,16 +48,91 @@ SecAuditLogType Serial
 SecAuditLog /proc/self/fd/2
 SecArgumentSeparator &
 SecCookieFormat 0
-SecUnicodeMapFile /usr/share/modsecurity-crs/modsecurity-3.0.16/unicode.mapping 20127
 SecStatusEngine Off
 `
 
-func InitialWAFConfiguration() []byte {
-	return []byte("# CyberPanel initial WAF baseline v1\nSecRuleEngine On\nSecRequestBodyLimit 13107200\nSecAuditEngine RelevantOnly\n" + wafParserConfiguration + "Include " + baselineCRSEntry + "\n")
+func InitialWAFConfiguration() ([]byte, error) {
+	if err := VerifyInitialWAFAssets(); err != nil {
+		return nil, err
+	}
+	path, _, err := installedWAFUnicodeMapping("/")
+	if err != nil {
+		return nil, err
+	}
+	return initialWAFConfiguration(path), nil
+}
+
+func initialWAFConfiguration(mappingPath string) []byte {
+	return []byte("# CyberPanel initial WAF baseline v1\nSecRuleEngine On\nSecRequestBodyLimit 13107200\nSecAuditEngine RelevantOnly\n" + wafParserConfigurationWithMapping(mappingPath) + "Include " + baselineCRSEntry + "\n")
+}
+
+func wafParserConfigurationWithMapping(path string) string {
+	return strings.Replace(wafParserConfiguration, "SecStatusEngine Off\n", "SecUnicodeMapFile "+path+" 20127\nSecStatusEngine Off\n", 1)
 }
 
 func isInitialWAFConfiguration(content []byte) bool {
-	return bytes.Equal(content, InitialWAFConfiguration())
+	// Recognize the exact initial template with an installed-layout mapping path.
+	// This also preserves journal handoff for an initial policy written before a
+	// package update changed that path; arbitrary directives are never accepted.
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "SecUnicodeMapFile" && fields[2] == "20127" && allowedWAFMappingPath(fields[1]) {
+			return bytes.Equal(content, initialWAFConfiguration(fields[1]))
+		}
+	}
+	return false
+}
+
+func allowedWAFMappingPath(path string) bool {
+	if filepath.Clean(path) != path || filepath.Base(path) != "unicode.mapping" || strings.ContainsAny(path, "\r\n\t \"'`\\") {
+		return false
+	}
+	return strings.HasPrefix(path, baselineAssetsPath+"/") || path == "/etc/modsecurity/unicode.mapping" || path == "/etc/modsecurity.d/unicode.mapping" || path == "/usr/local/lsws/conf/modsec/unicode.mapping"
+}
+
+func installedWAFUnicodeMapping(root string) (string, []byte, error) {
+	// Prefer conventional package/configuration locations. The final glob permits
+	// an installed versioned layout without compiling its release into the panel.
+	paths := []string{"/etc/modsecurity/unicode.mapping", "/etc/modsecurity.d/unicode.mapping", "/usr/local/lsws/conf/modsec/unicode.mapping", baselineAssetsPath + "/unicode.mapping"}
+	versioned, err := filepath.Glob(filepath.Join(root, baselineAssetsPath, "*", "unicode.mapping"))
+	if err != nil {
+		return "", nil, err
+	}
+	for _, path := range versioned {
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return "", nil, err
+		}
+		paths = append(paths, "/"+relative)
+	}
+	var selected string
+	var selectedContent []byte
+	for i, path := range paths {
+		if !allowedWAFMappingPath(path) {
+			return "", nil, ErrConflict
+		}
+		full := filepath.Join(root, path)
+		if _, err := os.Lstat(full); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return "", nil, err
+		}
+		content, err := readTrustedWAFAsset(full, 2<<20)
+		if err != nil || len(content) == 0 {
+			return "", nil, errors.Join(errors.New("unsafe installed Unicode mapping"), err)
+		}
+		if i < 4 {
+			return path, content, nil
+		}
+		if selected != "" {
+			return "", nil, errors.New("multiple installed Unicode mappings; configure a conventional mapping path")
+		}
+		selected, selectedContent = path, content
+	}
+	if selected == "" {
+		return "", nil, errors.New("installed ModSecurity Unicode mapping is missing")
+	}
+	return selected, selectedContent, nil
 }
 
 func validateWAFPreviousGeneration(index wafActiveIndex, previous *wafNativeGeneration, snapshot operationsFileSnapshot) error {
@@ -125,6 +201,11 @@ func installedWAFAssets(root string) (wafSourceEvidence, error) {
 	if err != nil {
 		return wafSourceEvidence{}, err
 	}
+	mappingPath, mapping, err := installedWAFUnicodeMapping(root)
+	if err != nil {
+		return wafSourceEvidence{}, err
+	}
+	fmt.Fprintf(&inventory, "%s  %q\n", digestBytes(mapping), mappingPath)
 	return wafSourceEvidence{Provider: ResourceID{value: "cyberpanel"}, Name: ResourceID{value: "waf-runtime"}, Version: "installed", Digest: digestBytes(inventory.Bytes()), Path: baselineAssetsPath}, nil
 }
 

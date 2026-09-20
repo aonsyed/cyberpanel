@@ -40,14 +40,13 @@ func reconcileInitialWAF() error {
 			return err
 		}
 	}
-	return provisionInitialWAFFile(directory+"/cyberpanel.conf", operations.VerifyInitialWAFAssets)
+	return provisionInitialWAFFile(directory+"/cyberpanel.conf", operations.InitialWAFConfiguration)
 }
 
-func provisionInitialWAFFile(path string, verifyAssets func() error) error {
+func provisionInitialWAFFile(path string, initialConfiguration func() ([]byte, error)) error {
 	if err := trustedDNSAncestors(filepath.Dir(path)); err != nil {
 		return err
 	}
-	baseline := operations.InitialWAFConfiguration()
 	if info, err := os.Lstat(path); err == nil {
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || !info.Mode().IsRegular() || stat.Uid != 0 || stat.Gid != 0 || stat.Nlink != 1 || info.Mode().Perm() != 0600 || info.Size() > 64<<20 {
@@ -57,17 +56,24 @@ func provisionInitialWAFFile(path string, verifyAssets func() error) error {
 		if err != nil {
 			return err
 		}
-		if bytes.Equal(data, baseline) {
-			return verifyAssets()
+		if bytes.HasPrefix(data, []byte("# CyberPanel initial WAF baseline v1\n")) {
+			baseline, err := initialConfiguration()
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(data, baseline) {
+				return errors.New("initial WAF policy differs from installed rules; activate an updated managed policy")
+			}
 		}
 		// Later managed generations belong to the executor, not installer replay.
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := verifyAssets(); err != nil {
+	baseline, err := initialConfiguration()
+	if err != nil {
 		return err
 	}
-	_, err := ensureOwnedFile(path, 0600, 0, 0, baseline)
+	_, err = ensureOwnedFile(path, 0600, 0, 0, baseline)
 	return err
 }
