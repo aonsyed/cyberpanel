@@ -405,7 +405,9 @@ func (host *LinuxPowerDNSHost) reload(ctx context.Context, generation string) (P
 		GenerationID: generation,
 		ObservedAt:   host.now(),
 	}
-	output, err := runPowerDNSProcess(ctx, host.profile.systemctl, "reload-or-restart", host.profile.unit)
+	// A credential mount pins one config generation for the service lifetime.
+	// Restart to consume the newly activated generation, including on rollback.
+	output, err := runPowerDNSProcess(ctx, host.profile.systemctl, "restart", host.profile.unit)
 	receipt.EvidenceDigest = digestPowerDNSEvidence(string(output), powerDNSErrorText(err))
 	receipt.Success = err == nil
 	receipt.Healthy = err == nil

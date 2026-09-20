@@ -27,6 +27,7 @@ func reconcileDNSAuthority() error {
 	if os.Geteuid() != 0 {
 		return errors.New("DNS adoption requires root installer")
 	}
+	found := false
 	for _, path := range []string{"/etc/powerdns/pdns.conf", "/etc/pdns/pdns.conf"} {
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -35,6 +36,7 @@ func reconcileDNSAuthority() error {
 		if err != nil {
 			return err
 		}
+		found = true
 		if err = trustedDNSAncestors(filepath.Dir(path)); err != nil {
 			return err
 		}
@@ -89,7 +91,41 @@ func reconcileDNSAuthority() error {
 			return err
 		}
 	}
+	if found {
+		return installPowerDNSCredentialUnit()
+	}
 	return nil
+}
+
+const powerDNSCredentialUnit = `[Service]
+# Copy only the active config into the daemon's private credential mount.
+LoadCredential=pdns.conf:/var/lib/cyberpanel/powerdns/current/pdns/pdns.conf
+ExecStart=
+ExecStart=/usr/sbin/pdns_server --guardian=no --daemon=no --disable-syslog --log-timestamp=no --write-pid=no --config-dir=/run/credentials/pdns.service
+`
+
+func installPowerDNSCredentialUnit() error {
+	const directory = "/etc/systemd/system/pdns.service.d"
+	if err := trustedDNSAncestors(filepath.Dir(directory)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(directory, 0755); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if err := trustedDNSAncestors(directory); err != nil {
+		return err
+	}
+	path := filepath.Join(directory, "50-cyberpanel-credentials.conf")
+	if _, err := ensureOwnedFile(path, 0644, 0, 0, []byte(powerDNSCredentialUnit)); err != nil {
+		return err
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != powerDNSCredentialUnit {
+		return errors.New("PowerDNS credential unit differs from managed definition")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "/usr/bin/systemctl", "daemon-reload").Run()
 }
 
 func trustedDNSAncestors(path string) error {

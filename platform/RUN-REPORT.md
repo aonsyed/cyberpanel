@@ -5,6 +5,48 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native DNS config and live database access proven together — 2026-09-20
+
+Implemented named-user POSIX ACLs for the fixed pdns UID: execute-only access
+to the dedicated PowerDNS store directory, read/write to authority.db and its
+existing WAL/SHM files, and no owning-group/other access. Root retains ownership.
+The service cannot list or create/replace/unlink directory entries, so a daemon
+cannot substitute a symlink for the database opened by the privileged authority.
+Validation rejects wrong UID ACLs, world-writable files, symlinks, non-root owners,
+hard links and unsafe ancestors. Root-created SQLite sidecars are normalized to
+the exact named-user ACL. Authority startup validates existing paths and reapplies
+access without resetting it to owner-only on every reopen. No DB copy or backend
+substitution is used; native SQLite connections share the live WAL.
+
+Actual root-QEMU tests installed the ACLs, reopened the real authority, and ran
+a BEGIN IMMEDIATE / INSERT / ROLLBACK transaction as pdns via native SQLite.
+No zone was committed. The same UID could not write the store directory, list
+generations or read control.db. Wrong UID, world-write and symlink fixtures were
+rejected. Current visible modes are root:root 0710 (store) and 0660 (DB/WAL/SHM):
+the apparent group bits are ACL masks, not grants to the owning group.
+
+Installer reconciliation now writes and verifies the fixed pdns systemd drop-in
+50-cyberpanel-credentials.conf: LoadCredential copies only the active pdns.conf
+into the daemon's private mount; ExecStart selects that config directory. Native
+config activation now restarts the unit to repin the selected credential generation.
+Actual drop-in installation/replay and systemd unit verification passed in QEMU.
+
+A transient real pdns-UID service using the retained config through LoadCredential
+and the live SQLite files started successfully, launched primary/secondary and
+UDP/TCP backend threads, and answered a UDP DNS request on 127.0.0.1:15553. The
+unconfigured test zone returned REFUSED as expected (not a managed-zone success).
+The transient service was stopped. This proves the access boundary, not DNSSEC,
+transfers, managed zone lifecycle, or installed product startup.
+
+Affected package suites passed, native access tests passed again after ancestor
+validation, and candidate binaries exist as cyberpanel-pdns-access and
+panel-execd-pdns-access under /home/harness/bin. New changes are not yet signed
+or deployed. The tests prepared the QEMU ACLs and systemd drop-in; do not restart
+the old executor which still has the old permission-reset behavior. Core and
+native pdns remain inactive, admission closed. Next: reconcile the retained
+generation/ambiguous effect and deploy both binaries, then test normal port/service
+startup. Guest free space is 3.0 GiB. Alma/SELinux behavior remains unverified.
+
 ### Storage recovered; native DNS access failure isolated — 2026-09-20
 
 Offloaded five older native/service/web/executor bundle archives to the same

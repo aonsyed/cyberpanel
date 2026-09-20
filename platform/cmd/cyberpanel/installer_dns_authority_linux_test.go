@@ -7,9 +7,28 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+func TestQEMUPowerDNSCredentialUnit(t *testing.T) {
+	if os.Getenv("CYBERPANEL_QEMU_PDNS_ACCESS") != "1" {
+		t.Skip("explicit QEMU credential unit installation")
+	}
+	for i := 0; i < 2; i++ {
+		if err := installPowerDNSCredentialUnit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	content, err := os.ReadFile("/etc/systemd/system/pdns.service.d/50-cyberpanel-credentials.conf")
+	if err != nil || string(content) != powerDNSCredentialUnit {
+		t.Fatal("credential unit mismatch", err)
+	}
+	if out, err := exec.Command("/usr/bin/systemd-analyze", "verify", "pdns.service").CombinedOutput(); err != nil {
+		t.Fatalf("unit verification: %v: %s", err, out)
+	}
+}
 
 func TestPristineDNSConfigAdoption(t *testing.T) {
 	if os.Geteuid() != 0 {

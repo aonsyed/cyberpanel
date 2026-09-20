@@ -82,10 +82,16 @@ without changing request identity and reached native config activation. PowerDNS
 then failed reading config as pdns:pdns under the root-only generation store;
 rollback leaves no current link, but generation work now exists. Do not reuse
 empty-store recovery: fix native service access and reconcile actual generation
-state. Real pdns-UID probes show systemd credentials solve config access, but
-native startup then fails on the root-only SQLite DB/WAL/SHM under the private
-store. Fix both access boundaries together, retaining private config authority
-and proper live SQLite/secondary-write semantics. Core and PowerDNS restart
+state. Native access is now implemented and QEMU-proven: fixed pdns UID gets
+traverse-only store access and RW to the live DB/WAL/SHM through exact ACLs,
+without directory writes or control.db access. Installer config delivery uses
+systemd credentials; native activation restarts to repin the config. A real
+pdns-UID service started and answered an unconfigured loopback test query;
+native SQLite INSERT/ROLLBACK and isolation checks passed. These changes are
+not signed/deployed yet; tests prepared ACLs/drop-in. Do not restart the old
+executor, which resets those permissions. Reconcile the retained generation and
+ambiguous effect, deploy new binaries, then qualify normal native startup.
+Core and PowerDNS restart
 loops are stopped. Five older bundle copies were safely offloaded with matching
 hashes; installed state was not deleted. Guest now has 3.1 GiB
 free; safely recover storage before more bundles. Verified sequence 21–27
