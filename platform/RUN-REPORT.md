@@ -5,6 +5,40 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed66 ordinary mailbox browser and delivery — 2026-09-21
+
+Source5f31c57e1, release qemu-mail-delivery-3.1.65 sequence66. Signed installer
+committed manifest b4a3983b882d21d8fbbb4adc5f149d2a8afdc92a769c69dd9c509fb33e0609a5,
+receipt2abede596eb45d7af6be95475503640ab49e07e00468d0c564200aa0eba1e656.
+Actual running binary hashes equal assembly:
+
+- core: 17a323e861deffee62ad152ab24e2855faf582506bb24efc1f8442d7ff4c6236
+- gateway: 0b72870e7bfd31873258ee7b05034208fe7a4791a28a19b83f360903c500eb78
+- executor: 1c69c8ccbadd99fa322e74ee5c1921d6a80d5e1b6336b8d0e87742efd9727f3d
+
+All active, zero restarts. Native systemd A/B reproduced openat2 ENOSYS with
+RestrictSUIDSGID=true and success with false. The installer-managed executor
+unit now uses false, retaining NoNewPrivileges and bounded capabilities.
+Native doveadm regression reproduced count-quota initialization failure before
+quota_vsizes=yes; afterwards native quota and mail/API/core/executor suites pass.
+
+Installed browser passkey login and mailbox qa65 get/update return200/applied
+generation3. Independent NEW qa66 installed browser form completes create200,
+password enrollment201, activation200/applied. For both mailboxes actual IMAPS
+wrong-password rejection, SMTPS authenticated self-delivery, IMAPS retrieval by
+unique Message-ID, exact body comparison, and deletion of that message pass.
+Native LMTP logs confirm INBOX delivery. No external mail; local bootstrap TLS
+certificate verification intentionally disabled in QA clients. No claims for
+external acceptance, public certificate trust, DKIM, DNS automation or webmail.
+
+Old qa65 deferred probe delivered and was removed by exact INBOX UID+QA subject;
+queue and qa65 INBOX empty. QA credentials remain guest-only. Host-retained
+bundle SHA2566addbb5a940b262c5dc188083d46ca7a500de054c7b46e5564e1eaac50a5d36f
+verified before duplicate guest removal; staging pruned, guest3.6GiB free.
+Remaining concrete error: Dovecot master-auth password file is inaccessible
+under root-only /etc/cyberpanel/secrets. Ordinary mailbox auth passes; panel
+webmail remains unqualified. No downloads or native dependency builds/patches.
+
 ### Installed64 native mail maps and browser regression — 2026-09-21
 
 Source24528b64d. Before fix, TestQEMUPostfixOrdinaryMaps failed ordinary-domain

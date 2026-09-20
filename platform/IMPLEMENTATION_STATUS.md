@@ -4,7 +4,44 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
-## Current recovery point — 2026-09-21 (installed65; mailbox delivery in progress)
+## Current recovery point — 2026-09-21 (installed66; local mailbox delivery qualified)
+
+Release qemu-mail-delivery-3.1.65 sequence66 contains 5f31c57e1; installer
+committed manifest b4a3983b882d21d8fbbb4adc5f149d2a8afdc92a769c69dd9c509fb33e0609a5,
+receipt 2abede596eb45d7af6be95475503640ab49e07e00468d0c564200aa0eba1e656.
+Core/gateway/executor /proc executable hashes equal assembled binaries; all
+active with zero restarts. Executor retains NoNewPrivileges=yes and now has
+RestrictSUIDSGID=no in its installer-managed unit. Installation initially rejected
+the previous temporary candidate unit override; restored the verified managed
+symlink and resumed the same bundle successfully. No bypass of drift checking.
+
+Real passkey-authenticated API get/update applied qa65 mailbox generation3,
+regenerating native config with quota_vsizes=yes. Actual wrong-password rejection,
+SMTPS465 authenticated self-submission, IMAPS993 INBOX selection, exact unique
+Message-ID/content retrieval and probe-message deletion all pass. Also drove a
+NEW qa66 mailbox entirely through the installed browser form: create200,
+password-enroll201, activation200/applied; its independent SMTP-to-IMAP delivery
+and cleanup pass too. No external mail sent; bootstrap certificate verification
+disabled only in the local QA client. This proves ordinary local mailbox flow,
+not external mail acceptance, DKIM, DNS automation, webmail or complete mail parity.
+
+Queue is empty. The old deferred QA message delivered after the quota fix and
+was removed using exact qa65 INBOX UID1 plus its QA subject; qa65 INBOX empty.
+Both mailbox credential fixtures remain guest-only. The --mailbox-reapply key
+is consumed; do not rerun it with a newly read generation. The --fresh66 browser
+fixture is complete; native probe can be rerun without recreating that mailbox.
+Bundle retained on host, SHA256
+6addbb5a940b262c5dc188083d46ca7a500de054c7b46e5564e1eaac50a5d36f verified;
+duplicate guest bundle removed and installer staging pruned. Guest3.6GiB free.
+
+NEXT concrete mail gap: Dovecot auth logs permission denied reading root-only
+/etc/cyberpanel/secrets/mail-webmail-master. Ordinary mailbox authentication works,
+but panel webmail master authentication has not been qualified. Fix native
+credential integration without exposing the root secret tree or modifying vendor
+software, then drive the real panel webmail journey. Advanced routing/policy,
+DKIM/DNS and broader parity/matrix gates remain unfinished.
+
+## Previous recovery point — 2026-09-21 (installed65; mailbox delivery in progress)
 
 Release qemu-mailbox-3.1.64 sequence65 contains 8c9ff4459: mailbox form,
 Argon2id enrollment through the existing encrypted broker, and site-owned
