@@ -13,7 +13,7 @@ import (
 	"syscall"
 )
 
-const baselineManifestDigest = "be2f0cf033c538e9f594bc7996f7842d2f0984881dfba8d5d32871f8983acaef"
+const baselineManifestPath = "/usr/share/doc/cyberpanel-waf-crs/runtime.sha256"
 const baselineCRSEntry = "/usr/share/modsecurity-crs/owasp-crs.load"
 
 // Shared by first installation and subsequent policy generations. These parser
@@ -72,16 +72,30 @@ func validateWAFPreviousGeneration(index wafActiveIndex, previous *wafNativeGene
 	return nil
 }
 
-// Pin the recursive runtime manifest, not just a tiny Include file. Check for
-// extra files too: native wildcard Includes must not admit unlisted rules.
+// Validate the installed rules manifest rather than a compile-time release pin.
+// The root-owned installer/package manager owns this trust boundary. Each
+// activation records its digest, so later rule changes remain detectable.
 func VerifyInitialWAFAssets() error {
-	return verifyWAFAssets("/", "/usr/share/doc/cyberpanel-waf-crs/runtime.sha256", baselineManifestDigest)
+	_, err := installedWAFAssets("/")
+	return err
+}
+
+func installedWAFAssets(root string) (wafSourceEvidence, error) {
+	content, err := readTrustedWAFAsset(filepath.Join(root, baselineManifestPath), 64<<10)
+	if err != nil {
+		return wafSourceEvidence{}, err
+	}
+	digest := digestBytes(content)
+	if err := verifyWAFAssets(root, baselineManifestPath, digest); err != nil {
+		return wafSourceEvidence{}, err
+	}
+	return wafSourceEvidence{Provider: ResourceID{value: "cyberpanel"}, Name: ResourceID{value: "waf-runtime"}, Version: "installed", Digest: digest, Path: baselineManifestPath}, nil
 }
 
 func verifyWAFAssets(root, manifest, expected string) error {
 	content, err := readTrustedWAFAsset(filepath.Join(root, manifest), 64<<10)
-	if err != nil || digestBytes(content) != expected {
-		return errors.Join(errors.New("WAF runtime manifest differs from pinned release"), err)
+	if err != nil || len(content) == 0 || digestBytes(content) != expected {
+		return errors.Join(errors.New("WAF runtime manifest is empty or changed during verification"), err)
 	}
 	listed := make(map[string]bool)
 	for _, line := range strings.Split(strings.TrimSuffix(string(content), "\n"), "\n") {

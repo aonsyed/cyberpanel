@@ -59,6 +59,33 @@ func (s *Store) PrepareBootstrap(ctx context.Context, candidate activation.Recei
 	if err != nil {
 		return err
 	}
+	var record bootstrapRecord
+	if parseCanonicalJSON(raw, &record) != nil || !validDigest(record.Candidate) {
+		return errors.New("invalid bootstrap checkpoint")
+	}
+	if record.Candidate != candidate.Digest {
+		// A renderer/package update may replace a failed initial candidate.
+		// The activator has already proved the engine stopped. Only advance
+		// after the original vendor master has been restored, never while an
+		// older candidate or unrelated configuration is live.
+		previous := activation.Receipt{Edition: candidate.Edition, Digest: record.Candidate}
+		original, err := s.bootstrapOriginal(raw, previous)
+		if err != nil {
+			return err
+		}
+		if _, _, err := s.resolve(previous, false); err != nil {
+			return err
+		}
+		if !bytes.Equal(live, original) {
+			return errors.New("restore previous bootstrap before replacing candidate")
+		}
+		record.Candidate = candidate.Digest
+		updated, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		return s.replace(marker, updated)
+	}
 	original, err := s.bootstrapOriginal(raw, candidate)
 	if err != nil {
 		return err

@@ -4,9 +4,7 @@ package operations
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -76,6 +74,51 @@ func TestInitialWAFRecognitionIsExact(t *testing.T) {
 	}
 }
 
+func TestInstalledWAFManifestCanAdvanceWithoutPanelRebuild(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root QEMU ownership check")
+	}
+	root := t.TempDir()
+	relative := "usr/share/modsecurity-crs/rules/rule.conf"
+	path := filepath.Join(root, relative)
+	manifestPath := filepath.Join(root, baselineManifestPath)
+	for _, directory := range []string{filepath.Dir(path), filepath.Dir(manifestPath)} {
+		if err := os.MkdirAll(directory, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var previous string
+	for _, content := range []string{"# installed rules release one\n", "# installed rules release two\n"} {
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		manifest := []byte(digestBytes([]byte(content)) + "  " + relative + "\n")
+		if err := os.WriteFile(manifestPath, manifest, 0644); err != nil {
+			t.Fatal(err)
+		}
+		evidence, err := installedWAFAssets(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if evidence.Digest != digestBytes(manifest) || evidence.Digest == previous || evidence.Version != "installed" {
+			t.Fatal("installed release evidence not updated")
+		}
+		previous = evidence.Digest
+	}
+	if err := os.WriteFile(path, []byte("unmanifested change"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installedWAFAssets(root); err == nil {
+		t.Fatal("unmanifested rule change accepted")
+	}
+	if err := os.WriteFile(manifestPath, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installedWAFAssets(root); err == nil {
+		t.Fatal("empty manifest accepted")
+	}
+}
+
 func TestInitialWAFJournalHandoff(t *testing.T) {
 	baseline := operationsFileSnapshot{Existed: true, Mode: 0600, Content: InitialWAFConfiguration()}
 	if err := validateWAFPreviousGeneration(wafActiveIndex{}, nil, baseline); err != nil {
@@ -110,20 +153,13 @@ func TestInitialWAFJournalHandoff(t *testing.T) {
 	}
 }
 
-func TestQEMUInitialWAFRules(t *testing.T) {
+func TestQEMUInitialWAFAssets(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_WAF") != "1" {
 		t.Skip("installed QEMU native WAF required")
 	}
 	if err := VerifyInitialWAFAssets(); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "baseline.conf")
-	if err := os.WriteFile(path, InitialWAFConfiguration(), 0600); err != nil {
-		t.Fatal(err)
-	}
-	output, err := exec.Command("/home/harness/bin/modsec-rules-check-3.0.16", path).CombinedOutput()
-	if err != nil || !strings.Contains(string(output), "Test ok.") {
-		t.Fatalf("native baseline parse: %v\n%s", err, output)
-	}
-	t.Log(string(output))
+	// Native parsing is exercised by TestQEMURenderedInitialWebParser using
+	// the installed vendor server/module, not a separately compiled parser.
 }

@@ -5,6 +5,34 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed rules evidence and bootstrap checkpoint recovery — 2026-09-20
+
+Removed the compiled-in CRS manifest digest and fixed release label from WAF
+activation. The root-owned installed manifest now supplies recorded evidence;
+recursive content, owner/mode, hardlink/symlink, extra-file and manifest-change
+checks remain enforced. Empty manifests are rejected. QEMU tests prove two
+installed rule revisions work without rebuilding the panel, while unmanifested
+tampering still fails. This does not yet replace the custom CRS package/layout;
+that integration remains outstanding. Removed the obsolete opt-in custom parser
+test: asset verification remains, and vendor native parsing is exercised by the
+existing webactivation QEMU test.
+
+Bootstrap storage now permits an updated initial candidate only with no current
+managed receipt, verified previous sealed candidate/backup and live bytes equal
+to the restored vendor master. The activator's existing stopped-engine guard
+still precedes this. It preserves the original backup, atomically advances the
+candidate marker, and rejects unrestored/stale candidates. QEMU tests cover both
+edition formats; activation, fsstore, webactivation, operations and CLI suites
+pass.
+
+Actual guest checkpoint recovery also PASSES: ran `TestQEMUInitialWebParser`
+with `CYBERPANEL_QEMU_WEB_CANDIDATE=f80079fd4f9e32d8123ed69d51f68391690e4a4c3e63edd54e983e6adf77ce11`.
+It proved the engine stopped, advanced the old checkpoint, installed the sealed
+master for vendor parser validation, and restored the original master. No
+journals were deleted or reset. This is parser/bootstrap preparation evidence,
+not confirmed web activation: health attestation and signed updated deployment
+remain pending. OLS remains inactive and signed panel release remains37.
+
 ### Vendor dependency restoration and reference configuration — 2026-09-20
 
 User corrected the dependency ownership boundary: no local native server/module

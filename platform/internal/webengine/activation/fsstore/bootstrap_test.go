@@ -95,3 +95,57 @@ func TestBootstrapRejectsTamperedBackupOrUnrelatedLiveMaster(t *testing.T) {
 		})
 	}
 }
+
+func TestBootstrapUpdatedCandidateRequiresRestoredOriginal(t *testing.T) {
+	for _, edition := range []webengine.Edition{webengine.EditionOpenLiteSpeed, webengine.EditionLiteSpeedEnterprise} {
+		t.Run(string(edition), func(t *testing.T) {
+			root := privateRoot(t)
+			master := "httpd_config.conf"
+			if edition == webengine.EditionLiteSpeedEnterprise {
+				master = "httpd_config.xml"
+			}
+			if err := os.WriteFile(filepath.Join(root, master), []byte("vendor"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s, err := New(root, edition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			ctx := context.Background()
+			first, err := s.Stage(ctx, testGeneration(t, edition, 1, "first", "vhost"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := s.Stage(ctx, testGeneration(t, edition, 1, "updated", "vhost"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.PrepareBootstrap(ctx, first); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SwapMaster(ctx, first); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.PrepareBootstrap(ctx, second); err == nil {
+				t.Fatal("replaced unrestored bootstrap")
+			}
+			if err := s.RestoreBootstrap(ctx, first); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.PrepareBootstrap(ctx, second); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SwapMaster(ctx, second); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RestoreBootstrap(ctx, second); err != nil {
+				t.Fatal(err)
+			}
+			assertPrivateFile(t, filepath.Join(root, master), "vendor")
+			if err := s.RestoreBootstrap(ctx, first); err == nil {
+				t.Fatal("stale candidate regained checkpoint")
+			}
+		})
+	}
+}

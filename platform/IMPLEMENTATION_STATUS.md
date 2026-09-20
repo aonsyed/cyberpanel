@@ -6,6 +6,15 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest progress: installed rules evidence no longer hardcodes a manifest digest
+or release label. Root-owned installed manifests remain recursively verified;
+empty/tampered/unsafe assets fail. Custom CRS package/layout replacement remains.
+Guarded bootstrap candidate advancement implemented and QEMU-tested for both
+edition formats. Actual guest TestQEMUInitialWebParser PASSED for f80079fd...:
+old checkpoint advanced without deleting journals, vendor parser accepted new
+master, original master restored. OLS remains inactive. Five affected suites
+pass; full activation still needs health attestation and updated signed deploy.
+
 Consume vendor/distribution OLS, LiteSpeed Enterprise and ModSecurity packages.
 Do not fork, patch, compile or hard-pin these native dependencies (including
 LSQUIC). Our responsibility is panel installation/configuration/integration,
