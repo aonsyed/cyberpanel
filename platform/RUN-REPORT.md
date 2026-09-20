@@ -5,6 +5,45 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Rootless AppArmor inheritance mechanism verified — 2026-09-20
+
+Checked current upstream containers/common as well as the shipped version:
+both still reject named AppArmor profiles from rootless Podman. A runtime
+upgrade alone therefore does not remove this limitation.
+
+Tested inherited kernel confinement inside Ubuntu ARM64 QEMU using the already
+pinned n8n image. A new diagnostic profile, `qemu-container-inheritance`, was
+loaded without modifying any existing profile. `aa-exec` entered it before
+launching rootless Podman; the container ran as UID/GID 1000 with no network,
+all capabilities dropped, no-new-privileges, read-only root, 256 MiB memory and
+64 PIDs. Two read-only fixture files were mounted with equivalent DAC access.
+The diagnostic policy allowed one and explicitly denied the other.
+
+The first launch hit a profile D-Bus denial needed by the runtime's cgroup
+setup. Kernel audit evidence identified the denied method call; adding D-Bus
+permission to this diagnostic profile allowed the same probe to proceed.
+The real container then returned:
+
+```text
+qemu-container-inheritance (enforce)
+cat: can't open '/probe-denied': Permission denied
+inherited-denial-passed
+```
+
+The allowed file content was checked before the denied read. Thus the denial
+was not a missing image/file or failed container startup. The container was
+removed by `--rm`, the empty container list was checked, and the diagnostic
+profile was unloaded. Only its source and two harmless fixture files remain
+in the existing host QEMU run directory and guest harness directory.
+
+This proves a kernel inheritance mechanism, **not** the production sandbox.
+The intentionally broad diagnostic profile must not be packaged. Production
+work remains: narrowly confine runtime operations, prevent profile escape,
+check inherited enforcement rather than trusting a requested profile name,
+bind installed policy to the signed release, and verify actual workload/exec
+confinement. The existing MAC admission check was not relaxed. Do not replace
+it with the kernel-enabled flag or classify this tuple as qualified yet.
+
 ### Panel component assembled; rootless container isolation finding — 2026-09-20
 
 Prepared and verified signed ARM64 candidate container recipes using the existing
