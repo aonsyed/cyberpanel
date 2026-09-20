@@ -335,9 +335,10 @@ func validatePinnedApplicationArchive(filename string) error {
 		expanded += uint64(header.Size)
 		if expanded > 64<<30 { return ErrRecipeUntrusted }
 		name := strings.TrimPrefix(header.Name, "./")
+		if header.Typeflag == tar.TypeDir { name = strings.TrimSuffix(name, "/") }
 		if name == "" || strings.ContainsAny(name, "\\\x00") || path.IsAbs(name) || path.Clean(name) != name { return ErrRecipeUntrusted }
 		parts := strings.Split(name, "/")
-		if len(parts) < 2 || parts[0] == "" || parts[0] == "." || parts[0] == ".." { return ErrRecipeUntrusted }
+		if len(parts) < 2 && header.Typeflag != tar.TypeDir || parts[0] == "" || parts[0] == "." || parts[0] == ".." { return ErrRecipeUntrusted }
 		if top == "" { top = parts[0] } else if top != parts[0] { return ErrRecipeUntrusted }
 		switch header.Typeflag {
 		case tar.TypeReg, tar.TypeRegA, tar.TypeDir:

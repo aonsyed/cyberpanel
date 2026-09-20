@@ -5,6 +5,36 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Real archive admission and Mautic input — 2026-09-20
+
+The actual WordPress archive failed the production pinned-archive validator:
+standard directory headers such as `wordpress/` were rejected as noncanonical,
+and a top-level directory header was rejected for having no child segment.
+Corrected directory-only trailing-slash handling and permitted the single root
+directory. QEMU regression tests now accept the real WordPress archive and
+reject traversal, absolute paths, repeated separators and mixed roots. The
+uncached apps suite and core/application-release builds passed in QEMU.
+
+Downloaded the [official Mautic 7.2.0 full ZIP](https://github.com/mautic/mautic/releases/tag/7.2.0)
+inside QEMU: 105,174,048 bytes, SHA-256
+`520a4aede649144839e8512d8d046d25dc977d7be5288ab841eecb3ac9378deb`, matching
+GitHub's published asset digest. Installed native `unzip` (171 kB download).
+The real PHP 8.3 `bin/console mautic:install --help` succeeded and exposed the
+adapter's existing install options. No Mautic install or browser workflow is
+claimed.
+
+Prepared an offline single-root tar from a fresh extraction, with sorted paths,
+zero timestamps and numeric root ownership. Guest
+`/home/harness/mautic-7.2.0-rooted.tar.gz` is 89,809,522 bytes, SHA-256
+`a4be4794815496fa3ce15ea4b79474b98296d209bb5ce3d32d2f7a819d6134db`; it passes
+the real production archive validator. The earlier flat
+`mautic-7.2.0-prepared.tar.gz` is not a packageable input. A signed recipe for the
+prepared bytes and their release URL remains required; the ZIP URL must not be
+misrepresented as serving the prepared tar. Likewise, the earlier Joomla recipe
+authenticates the original flat archive but that archive still needs single-root
+preparation and a corresponding new recipe before installation. No OS images,
+toolchains, host trust changes or dummy product archives were introduced.
+
 ### Real Joomla input and missing XML prerequisite — 2026-09-20
 
 Downloaded the [official Joomla 6.1.3 full tar package](https://downloads.joomla.org/cms/joomla6/6-1-3)
