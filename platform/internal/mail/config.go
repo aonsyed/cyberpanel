@@ -469,13 +469,13 @@ func renderRspamd(snapshot ConfigSnapshot) []byte {
 	return []byte("bind_socket = \"127.0.0.1:11334\";\nsecure_ip = \"127.0.0.1\";\n.include(try=true,priority=1) \"/run/cyberpanel/mail/rspamd-controller-password.inc\"\n")
 }
 func renderRspamdRedis() []byte {
-	return []byte("servers = \"/run/redis/cyberpanel-mail.sock\";\ntimeout = 1s;\ndb = \"0\";\n")
+	return []byte("servers = \"/run/cyberpanel-mail-redis/redis.sock\";\ntimeout = 1s;\ndb = \"0\";\n")
 }
 func renderRspamdAntivirus() []byte {
 	return []byte("clamav {\n  symbol = \"CLAM_VIRUS\";\n  type = \"clamav\";\n  servers = \"/run/clamd/cyberpanel.sock\";\n  scan_mime_parts = true;\n  scan_text_mime = true;\n  action = \"reject\";\n}\n")
 }
 func renderMailRedis() []byte {
-	return []byte("bind 127.0.0.1 ::1\nprotected-mode yes\nport 0\nunixsocket /run/redis/cyberpanel-mail.sock\nunixsocketperm 0660\nsupervised systemd\ndaemonize no\ndir /var/lib/cyberpanel/mail/redis\ndbfilename mail.rdb\nappendonly yes\nappendfilename mail.aof\nappendfsync everysec\nmaxmemory 268435456\nmaxmemory-policy noeviction\nrename-command FLUSHALL \"\"\nrename-command FLUSHDB \"\"\nrename-command CONFIG \"\"\n")
+	return []byte("bind 127.0.0.1 ::1\nprotected-mode yes\nport 0\nunixsocket /run/cyberpanel-mail-redis/redis.sock\nunixsocketperm 0660\nsupervised systemd\ndaemonize no\ndir /var/lib/cyberpanel-mail-redis\ndbfilename mail.rdb\nappendonly yes\nappendfilename mail.aof\nappendfsync everysec\nmaxmemory 268435456\nmaxmemory-policy noeviction\nrename-command FLUSHALL \"\"\nrename-command FLUSHDB \"\"\nrename-command CONFIG \"\"\n")
 }
 func renderClamAV(snapshot ConfigSnapshot) []byte {
 	_ = snapshot

@@ -5,6 +5,61 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native mail adoption and dedicated Redis qualified — 2026-09-20
+
+Implemented installer-only adoption of five Ubuntu mail defaults. Dovecot and
+ClamAV match ucf's stored default hashes; OpenDKIM matches dpkg's conffile record;
+Postfix master.cf matches the package's master.cf.dist digest. Generated Postfix
+main.cf must match the exact observed stock Ubuntu option set and host identity;
+unknown, duplicate or changed options fail closed. All regular files are checked
+before adoption, native mail services must be inactive, and originals are retained
+as root:root 0600 SHA-256-named backups. Actual native default verification,
+edited-Postfix rejection, adoption/replay and backup content/privacy checks passed
+in QEMU. This is not generic adoption of customized installations; Alma remains
+unqualified and has no new automatic adoption path.
+
+A real binding test then failed at /etc/redis/cyberpanel-mail.conf: Ubuntu ships
+/etc/redis as redis:redis 2770. Kept that vendor directory unchanged and moved
+the panel binding to /etc/cyberpanel/mail/redis.conf. The dedicated mail Redis
+instance now receives its config through a private systemd credential, uses
+/var/lib/cyberpanel-mail-redis for private state and
+/run/cyberpanel-mail-redis/redis.sock for its Unix-only endpoint. The Ubuntu unit
+runs as redis with _rspamd socket-group access; it cannot write the panel config
+directory. Rspamd rendering and the native health probe use the same socket.
+
+The actual Ubuntu unit started under its vendor sandbox plus the managed drop-in.
+Native redis-cli PING returned PONG as both redis and _rspamd. Negative access
+checks rejected Rspamd reading the private input config and Redis writing the
+panel config directory. A temporary /run test credential override was removed
+and the service stopped after the test; the managed /etc drop-in remains. Actual
+mail binding reconciliation now passes. Mail/core/executor package suites and
+both binary builds passed in QEMU.
+
+Signed sequence 32 `qemu-mail-native-3.1.31` committed; installed reconciliation
+passed and adopted the defaults again. Before package reinstall, restored only
+the five test-adopted links to their checksum-verified original bytes, preserving
+backups: package scripts must not encounter dangling first-generation links.
+This remains an upgrade/failure-recovery ordering concern until managed mail
+has a valid current generation.
+
+Bundle SHA-256 `0de6b050e3cf75675266efe1a45281f1ebf77f4e8d3831bfee04b98a1a68e6b9`;
+manifest `1f2ad3cbc25820761e0851bc60f0044b6b0da16ba8f14d07baf376de60363acf`;
+receipt `d4ba3ee88ef2844155ef1e5241aa70f07438b69998af9fd714e2612449de27ce`.
+
+Core now stages the real mail generation, but native Dovecot validation fails:
+`Garbage after '{'` at line 14. The renderer emits one-line semicolon-delimited
+passdb/service/plugin blocks, which native doveconf rejects. A direct native
+Postfix check completed with warnings; direct doveconf exited 89. Fix the
+renderer and validate native configs before another signed deployment. Core
+restart loop is stopped; no managed mail current link remains after rollback.
+Retained generation: mailgen_99e5cb1dd2c2ee5de57928109134ad35-e4b640feb98c2072.
+PowerDNS and executor admission remain active. Mail service delivery, core,
+gateway/API/UI and the current-revision four-target matrix are not certified.
+
+Sequence 31 archive was checksum-verified on the host and removed only from
+guest /var/tmp; installed releases/journals were untouched. After sequence 32,
+guest free space is 3.9 GiB. No OS images or Go archives were downloaded.
+
 ### Installed native DNS startup and executor admission verified — 2026-09-20
 
 Sequence 30 `qemu-pdns-access-3.1.29` deployed the scoped database ACL/config

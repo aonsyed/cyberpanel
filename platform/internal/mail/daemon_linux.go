@@ -137,11 +137,11 @@ func profileForMail(platform LinuxMailPlatform) (mailProfile, error) {
 	case MailUbuntuNoble:
 		base.units[ServiceRedis] = "redis-server@cyberpanel-mail.service"
 		base.units[ServiceClamAV] = "clamav-daemon.service"
-		base.bindings = append(base.bindings, mailBinding{"/etc/redis/cyberpanel-mail.conf", MailConfigurationRoot + "/current/redis/redis.conf"}, mailBinding{"/etc/clamav/clamd.conf", MailConfigurationRoot + "/current/clamav/clamd.conf"})
+		base.bindings = append(base.bindings, mailBinding{"/etc/cyberpanel/mail/redis.conf", MailConfigurationRoot + "/current/redis/redis.conf"}, mailBinding{"/etc/clamav/clamd.conf", MailConfigurationRoot + "/current/clamav/clamd.conf"})
 	case MailAlma9:
 		base.units[ServiceRedis] = "redis@cyberpanel-mail.service"
 		base.units[ServiceClamAV] = "clamd@cyberpanel.service"
-		base.bindings = append(base.bindings, mailBinding{"/etc/redis/cyberpanel-mail.conf", MailConfigurationRoot + "/current/redis/redis.conf"}, mailBinding{"/etc/clamd.d/cyberpanel.conf", MailConfigurationRoot + "/current/clamav/clamd.conf"})
+		base.bindings = append(base.bindings, mailBinding{"/etc/cyberpanel/mail/redis.conf", MailConfigurationRoot + "/current/redis/redis.conf"}, mailBinding{"/etc/clamd.d/cyberpanel.conf", MailConfigurationRoot + "/current/clamav/clamd.conf"})
 	default:
 		return mailProfile{}, ErrInvalidCommand
 	}
@@ -680,7 +680,7 @@ func (host *LinuxMailHost) probeAll(ctx context.Context) (string, error) {
 			failures = append(failures, err)
 		}
 	}
-	redisOutput, redisErr := runMailProcess(ctx, host.profile.redisCLI, "-s", "/run/redis/cyberpanel-mail.sock", "PING")
+	redisOutput, redisErr := runMailProcess(ctx, host.profile.redisCLI, "-s", "/run/cyberpanel-mail-redis/redis.sock", "PING")
 	evidence = append(evidence, string(redisOutput), errorText(redisErr))
 	if redisErr != nil || strings.TrimSpace(string(redisOutput)) != "PONG" {
 		failures = append(failures, errors.Join(ErrInvalidReceipt, redisErr))

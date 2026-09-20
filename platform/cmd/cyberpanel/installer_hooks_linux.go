@@ -63,7 +63,7 @@ func runInstallerHook(arguments []string) error {
 	indexPath:=filepath.Join(hookRoot,"by-hook",invocation.Verb+"-"+invocation.Release+"-"+invocation.Component+".json")
 	// Reconcile live authority even when this release already has a receipt.
 	// A receipt cannot prove the broker still holds the matching signing key.
-	if invocation.Verb=="reconcile-services" { if err=reconcileWebEngineAuthority();err!=nil{return err};if err=reconcileDNSAuthority();err!=nil{return err};if _,err=reconcileMalwareApprovalTrust();err!=nil{return err} }
+	if invocation.Verb=="reconcile-services" { if err=reconcileWebEngineAuthority();err!=nil{return err};if err=reconcileDNSAuthority();err!=nil{return err};if err=reconcileMailAuthority();err!=nil{return err};if _,err=reconcileMalwareApprovalTrust();err!=nil{return err} }
 	var containerPolicyPath string
 	if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority" { if err=validatePackagedContainerRecipes();err!=nil{return err};containerPolicyPath,err=containers.ProvisionRootlessContainerPolicy(context.Background());if err!=nil{return err} }
 	if existing,loadErr:=readHookJournal(indexPath);loadErr==nil { if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority"{manifest,validateErr:=apps.ValidateLinuxApplicationCatalog(context.Background(),"",time.Now().UTC());if validateErr!=nil||manifest.ReleaseID!=invocation.Release{return errors.Join(errors.New("application catalog no longer matches installer receipt"),validateErr)}};_,err=io.WriteString(os.Stdout,existing.Response);return err } else if !errors.Is(loadErr,os.ErrNotExist){return loadErr}

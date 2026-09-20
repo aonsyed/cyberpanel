@@ -38,6 +38,17 @@ into fewer files does not bypass the line limits.
 
 ## Current position
 
+Sequence 32 (2026-09-20) now deploys verified Ubuntu mail-default adoption and
+the dedicated mail Redis config/unit boundary. Real Redis unit/socket and access
+checks pass in QEMU; native mail binding reconciliation passes. Core gets as far
+as staging mail configuration, then native doveconf rejects the renderer's
+one-line blocks (`Garbage after '{'`, line 14). Fix native Dovecot syntax before
+another deployment. Core is stopped; mail current link is absent after rollback,
+retained generation is mailgen_99e5cb1dd2c2ee5de57928109134ad35-e4b640feb98c2072.
+Do not reinstall mail packages over dangling config links without restoring the
+verified original defaults first (backups remain). DNS and executor admission
+are active. Guest free space is 3.9 GiB; sequence 32 archive remains in /var/tmp.
+
 Newest checkpoint (2026-09-20, sequences 30–31): installed PowerDNS now runs on
 normal IPv4/IPv6 TCP/UDP port 53; the real `rping` health probe passes. Executor
 mutation admission is ready and survives executor restart. The startup effect
