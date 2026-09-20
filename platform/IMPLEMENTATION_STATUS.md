@@ -6,22 +6,41 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
-LATEST RECOVERY POINT (supersedes deployment statements below): installed signed49
-qemu-activation-3.1.48, current49/rollback48. Manifest
-26aa0129bda6bf61e0b3e7f072dea7a50d3d30e112625b35ecf3cd4b895dd6ee;
-receiptcac220e70339346bfaef0ecd5a8fc05d8fa91d85ec1c0944b8f16316dd6da5d4.
-Core/gateway/execd/broker all verified executing installed49 paths. Core/gateway/
-broker active, Result=success,NRestarts=0. No candidate broker override or binary;
+LATEST RECOVERY POINT (supersedes deployment statements below): installed signed51
+qemu-recovery-3.1.50, current51/rollback49. Manifest
+2d437a4005a10afd8fd085954919dd3da8e11156de38c857d0a54819b3fcfbbb;
+receipt6b4428abe69ef69267572963869c1772a555790c892bbe976d6a6fc4b201aaeb.
+Core/gateway/execd/broker all verified executing installed51 paths and active.
+No candidate broker override or binary;
 gateway localhost HTTPS/passkey fixture remains. Real installed UI password and
 passkey login200, database.list200, console.issue201, metadata/query200; correct
 database rendered, mutation rejected400, recovery query200,390px layout PASS.
-Mail manifest and WAF root:root0600 unchanged. This specific Ubuntu ARM64 upgrade
-needed NO manual recovery; full install/upgrade/rollback matrix remains pending.
+Mail manifest unchanged through rollback. This Ubuntu ARM64 upgrade, injected
+gateway failure/rollback, rejected retry and next upgrade needed NO manual service
+recovery. Full distribution/architecture/edition matrix remains pending.
+
+FAULT/RECOVERY PROOF: signed50 deliberately contained a failing PANEL gateway
+ExecStartPre and changed executor6dc26f46... (not a vendor change). Authority moved
+forward then restored; gateway failure produced rolled_back receipt5560667132...
+and actual services returned to49. UI login/passkey/query all pass after rollback.
+Retry50 stayed rolled_back without reactivation. Signed51 with normal gateway and
+new executor then committed; same UI checks pass again, credential still version1.
+Authority now matches installed executor6dc26f46e3e6cd36078c9bda7bc7ebeba6ca445987b5e5fc744f6dcf620ebeca.
+Trying50 after51 rejected the old source frontier without changing active51.
+
+DISK LEAK FIX: completed releases retained ~481MiB duplicate staging EACH. Added
+bounded root-owned/digest-matched cleanup after Apply (including admission rejects)
+and durable completion/recovery. prune-staging verifies current/previous retained
+trees before removing their extraction copies; recovered ~1GiB from48/49. QEMU
+tests cover symlink/root/mode/digest/traversal rejection, replay and retained-file
+safety. Live50 rollback+retry,51 commit and50-after51 rejection all remove staging.
+Current51/rollback49 retained. Fault50 root/bundle archived then removed; bundle51
+archived then guest duplicate removed. Guest3.1GiB free. Native dependencies untouched.
 
 Credential fix: root-only signed consumer-release authorization, NOT secret
 rewriting during upgrades. Version-sensitive consumers retain original version/
 binding; existing principal remains version1, binding1ff23cac..., original anchor
-12dd0aad... approved for installed executor0cbfaac2.... Root installer pairs exact
+12dd0aad... approved for installed executor6dc26f46.... Root installer pairs exact
 binary destinations from verified retained/current manifests; broker atomically
 records bounded transitions and rejects stale/conflicting replays. Tenant,
 adapter, operation and live process identity checks remain. Broker grants AND
@@ -37,13 +56,14 @@ signed execd/core/gateway even when old manifest service list omitted them. Sign
 verifies that fix without manual starts. QEMU secrets/noderelease/architecture
 suites and installer build pass. `/home/harness/bin/panel-node-install-native`
 is updated; system bootstrap installer path has NOT been updated/qualified.
-Remaining next: installed rollback/failure recovery (especially old brokers that
-predate authority mapping), ordinary native CRS path qualification, writable SQL/
-import/export parity, broader service journeys and current four-target matrix.
+Remaining next: broader interruption/failure cases, ordinary native CRS paths,
+writable SQL/import/export parity, broader service journeys and current four-target
+matrix. Compatibility with incomplete historical development releases is not an
+additional product requirement.
 
 Storage: obsolete guest releases28/29/30/45 and47 removed after verified ignored
-host archives; redundant48/49 bundles and candidate binaries removed. Current49/
-rollback48 retained. Archives under main repo .work/qemu are recoverable; no
+host archives; redundant48/49 bundles and candidate binaries removed. Current51/
+rollback49 retained. Archives under main repo .work/qemu are recoverable; no
 downloads, workers, third-party builds or committed binary artifacts.
 
 LATEST INSTALLER FIX (source, not deployed): native offline package phase now

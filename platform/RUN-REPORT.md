@@ -5,6 +5,57 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Actual failure rollback, retry, subsequent upgrade and staging cleanup — 2026-09-20
+
+Installed51 `qemu-recovery-3.1.50`, retained rollback49. Manifest
+`2d437a4005a10afd8fd085954919dd3da8e11156de38c857d0a54819b3fcfbbb`, receipt
+`6b4428abe69ef69267572963869c1772a555790c892bbe976d6a6fc4b201aaeb`.
+All core/gateway/execd/secretd process executable paths resolve into51; all active.
+
+Signed QEMU-only candidate50 deliberately changed the panel executor digest from
+0cbfaac2... to6dc26f46... and supplied a panel gateway unit with failing ExecStartPre.
+No vendor component changed. Apply failed at the gateway probe and automatically
+restored49: receipt state rolled_back, digest
+`5560667132313104f8d0cfd37a7e352151d6c9f9318e15e00fa7c11ec7f5fe7c`.
+Both authorize_consumers and restore_consumers effects completed. No manual
+service starts, password resets or policy edits used for recovery. Real browser
+login/passkey200, console201, metadata/query200, rejected mutation400, recovery
+query200 and390px interaction passed after rollback. Mail manifest unchanged.
+Retrying50 produced rolled_back without activation; later normal51 committed and
+passed the same installed UI workflow with executor6dc26f46... actually running.
+Original principal remains version1 with unchanged binding1ff23cac... .
+
+Found duplicate extraction directories accumulating after each apply. Added
+root-owned, exact-digest staging cleanup when Apply exits and when recovery
+completes, without deleting the input bundle or materialized rollback packages.
+New prune-staging command first verifies BOTH current/previous signed release
+trees, then removes only their redundant extractions. Live command recovered
+about1GiB from staging48/49. QEMU noderelease suite passes with root fixtures for
+cleanup, absent-target replay, wrong digest, target/root symlink, writable parent,
+traversal ID and protection of a file referenced by a symlink inside staging.
+
+Actual staging directories were absent after50 rollback,50 retry and51 commit.
+One final older50 admission after51 reproduced source-frontier rejection and
+proved rejected extraction cleanup; active51/previous49 unchanged. The first
+attempt to replay50 immediately after archiving correctly rejected its temporary
+harness group ownership; restored root:root0600 before exercising the replay.
+This fixture setup rejection is not claimed as rollback evidence.
+
+Fault50 bundle archived ignored on host with SHA256
+`22a16aac48583960054631d05346ed3e1c00213466855cae7d6b68545215c224`;
+its failed materialized root and guest bundle were removed after terminal-journal,
+current/previous and process-map checks. Normal51 bundle archived SHA256
+`f627d1e93d2ddc53772e600cc25b80f688b11c927e235febdbb07748b2e21ed0`;
+redundant guest bundle and final replay input removed after verification. Current51/
+rollback49 intact; guest3.1GiB free. Fault unit was never committed to product source
+and removed from assembly staging. No new downloads/workers or vendor builds/pins.
+
+Limits: this is Ubuntu ARM64 normal upgrade/activation-failure recovery evidence,
+not power-loss injection or the complete four-target/OLS+LSE service matrix. The
+tested bootstrap executable is still the native harness installer; its system
+installation path remains unqualified. Full CyberPanel functional parity remains
+open, including writable SQL/import/export and broader native service journeys.
+
 ### Signed consumer authority and frontend activation verified — 2026-09-20
 
 Signed49 `qemu-activation-3.1.48` installed, rollback48 retained. Manifest

@@ -62,9 +62,21 @@ func main() {
 		}
 		writeJSON(status)
 	case "reconcile-secrets":
-		if len(os.Args)!=2 {usage()}
-		if err:=installer.ReconcileSecretConsumers(ctx);err!=nil{log.Fatalf("reconcile signed consumer authority: %v",err)}
-		writeJSON(map[string]string{"state":"reconciled"})
+		if len(os.Args) != 2 {
+			usage()
+		}
+		if err := installer.ReconcileSecretConsumers(ctx); err != nil {
+			log.Fatalf("reconcile signed consumer authority: %v", err)
+		}
+		writeJSON(map[string]string{"state": "reconciled"})
+	case "prune-staging":
+		if len(os.Args) != 2 {
+			usage()
+		}
+		if err := installer.PruneInstalledStaging(ctx); err != nil {
+			log.Fatalf("prune verified redundant staging: %v", err)
+		}
+		writeJSON(map[string]string{"state": "pruned"})
 	case "paths":
 		if len(os.Args) != 2 {
 			usage()
@@ -95,6 +107,7 @@ Commands:
   apply --bundle /absolute/release.tar  verify every member before mutation, then install or resume
   reconcile                            converge or roll back every durable incomplete operation
   reconcile-secrets                    authorize consumers from verified current/previous releases
+  prune-staging                        remove duplicate staging after verifying retained releases
   status                               print the installed frontier and journals
   paths                                print the fixed trust, state, staging, release, and active paths
 

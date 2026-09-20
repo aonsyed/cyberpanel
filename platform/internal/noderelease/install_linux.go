@@ -80,18 +80,18 @@ type EffectRecord struct {
 
 type Journal struct {
 	ConsumerPredecessor *InstalledRelease `json:"consumer_predecessor,omitempty"`
-	SchemaVersion  uint16            `json:"schema_version"`
-	OperationID    string            `json:"operation_id"`
-	ManifestDigest string            `json:"manifest_digest"`
-	State          string            `json:"state"`
-	Candidate      InstalledRelease  `json:"candidate"`
-	Previous       *InstalledRelease `json:"previous,omitempty"`
-	Effects        []EffectRecord    `json:"effects"`
-	Failure        string            `json:"failure,omitempty"`
-	Generation     uint64            `json:"generation"`
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
-	CompletedAt    time.Time         `json:"completed_at,omitempty"`
+	SchemaVersion       uint16            `json:"schema_version"`
+	OperationID         string            `json:"operation_id"`
+	ManifestDigest      string            `json:"manifest_digest"`
+	State               string            `json:"state"`
+	Candidate           InstalledRelease  `json:"candidate"`
+	Previous            *InstalledRelease `json:"previous,omitempty"`
+	Effects             []EffectRecord    `json:"effects"`
+	Failure             string            `json:"failure,omitempty"`
+	Generation          uint64            `json:"generation"`
+	CreatedAt           time.Time         `json:"created_at"`
+	UpdatedAt           time.Time         `json:"updated_at"`
+	CompletedAt         time.Time         `json:"completed_at,omitempty"`
 }
 
 type InstallReceipt struct {
@@ -170,7 +170,7 @@ func (installer *Installer) Apply(ctx context.Context, bundlePath string) (Insta
 		return InstallReceipt{}, ErrInvalid
 	}
 	var receipt InstallReceipt
-	err := installer.withLock(func() error {
+	err := installer.withLock(func() (applyErr error) {
 		if _, err := installer.reconcileLocked(ctx, ""); err != nil {
 			return err
 		}
@@ -187,6 +187,11 @@ func (installer *Installer) Apply(ctx context.Context, bundlePath string) (Insta
 			return err
 		}
 		manifest := envelope.Manifest
+		// Recovery reads the materialized release, never its extraction copy.
+		// Also clean authenticated bundles rejected by admission/source checks.
+		defer func() {
+			applyErr = errors.Join(applyErr, cleanupCompletedStaging(StagingRoot, manifest.ManifestDigest))
+		}()
 		state, stateErr := loadInstalledState()
 		if stateErr != nil && !errors.Is(stateErr, ErrNotFound) {
 			return stateErr
@@ -211,7 +216,7 @@ func (installer *Installer) Apply(ctx context.Context, bundlePath string) (Insta
 				return journalErr
 			}
 			receipt = receiptFor(operation, state.Active, "committed", completedAt)
-			return nil
+			return cleanupCompletedStaging(StagingRoot, manifest.ManifestDigest)
 		}
 		if err = admitManifest(manifest, state, stateErr); err != nil {
 			return err
@@ -228,9 +233,9 @@ func (installer *Installer) Apply(ctx context.Context, bundlePath string) (Insta
 			if journal.State == "committed" || journal.State == "rolled_back" {
 				receipt = receiptFor(journal.OperationID, journal.Candidate, journal.State, journal.CompletedAt)
 				if journal.State == "rolled_back" {
-					return ErrRollback
+					return errors.Join(ErrRollback, cleanupCompletedStaging(StagingRoot, manifest.ManifestDigest))
 				}
-				return nil
+				return cleanupCompletedStaging(StagingRoot, manifest.ManifestDigest)
 			}
 		} else if !errors.Is(journalErr, ErrNotFound) {
 			return journalErr
@@ -793,9 +798,9 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 	if journal.State == "committed" || journal.State == "rolled_back" {
 		receipt := receiptFor(journal.OperationID, journal.Candidate, journal.State, journal.CompletedAt)
 		if journal.State == "rolled_back" {
-			return receipt, ErrRollback
+			return receipt, errors.Join(ErrRollback, cleanupCompletedStaging(StagingRoot, journal.ManifestDigest))
 		}
-		return receipt, nil
+		return receipt, cleanupCompletedStaging(StagingRoot, journal.ManifestDigest)
 	}
 	initialState := journal.State
 	activeDigest, activeErr := observeActiveRelease()
@@ -812,7 +817,7 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 		if err := updateJournal(journal, installer.now()); err != nil {
 			return InstallReceipt{}, err
 		}
-		return receiptFor(journal.OperationID, journal.Candidate, journal.State, journal.CompletedAt), nil
+		return receiptFor(journal.OperationID, journal.Candidate, journal.State, journal.CompletedAt), cleanupCompletedStaging(StagingRoot, journal.ManifestDigest)
 	}
 	envelope, manifest, err := loadRetainedEnvelope(journal.Candidate, trust, installer.now())
 	if err != nil {
@@ -974,7 +979,9 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 		}
 		if !execute {
 			if service.Unit == "panel-secretd.service" {
-				if err = installer.transitionSecretConsumers(ctx, journal, trust, false); err != nil { return installer.rollbackLocked(ctx, journal, trust, err) }
+				if err = installer.transitionSecretConsumers(ctx, journal, trust, false); err != nil {
+					return installer.rollbackLocked(ctx, journal, trust, err)
+				}
 			}
 			continue
 		}
@@ -986,7 +993,9 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 			return InstallReceipt{}, err
 		}
 		if service.Unit == "panel-secretd.service" {
-			if err = installer.transitionSecretConsumers(ctx, journal, trust, false); err != nil { return installer.rollbackLocked(ctx, journal, trust, err) }
+			if err = installer.transitionSecretConsumers(ctx, journal, trust, false); err != nil {
+				return installer.rollbackLocked(ctx, journal, trust, err)
+			}
 		}
 	}
 	activeDigest, err = observeActiveRelease()
@@ -1015,7 +1024,7 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 	if err = updateJournal(journal, installer.now()); err != nil {
 		return InstallReceipt{}, err
 	}
-	return receiptFor(journal.OperationID, journal.Candidate, journal.State, journal.CompletedAt), nil
+	return receiptFor(journal.OperationID, journal.Candidate, journal.State, journal.CompletedAt), cleanupCompletedStaging(StagingRoot, journal.ManifestDigest)
 }
 
 func (installer *Installer) handlePreActivationFailure(ctx context.Context, journal *Journal, trust TrustStore, cause error) (InstallReceipt, error) {
@@ -1063,7 +1072,9 @@ func (installer *Installer) rollbackLocked(ctx context.Context, journal *Journal
 	}
 	// Stop dependents before their providers, without repeated restart cascades.
 	if _, candidate, err := loadRetainedEnvelopeWithoutTime(journal.Candidate, trust); err == nil {
-		if err = quiescePanelFrontends(ctx, candidate); err != nil { return installer.markRecovery(journal, "candidate_frontend_stop_failed") }
+		if err = quiescePanelFrontends(ctx, candidate); err != nil {
+			return installer.markRecovery(journal, "candidate_frontend_stop_failed")
+		}
 	}
 	for _, service := range journal.Candidate.Services {
 		if err := stopService(ctx, service.Unit); err != nil {
@@ -1128,7 +1139,7 @@ func (installer *Installer) rollbackLocked(ctx context.Context, journal *Journal
 		return InstallReceipt{}, errors.Join(cause, err)
 	}
 	receipt := receiptFor(journal.OperationID, journal.Candidate, journal.State, journal.CompletedAt)
-	return receipt, cause
+	return receipt, errors.Join(cause, cleanupCompletedStaging(StagingRoot, journal.ManifestDigest))
 }
 
 func (installer *Installer) recoverVerificationFailure(ctx context.Context, journal *Journal, trust TrustStore, cause error) (InstallReceipt, error) {
@@ -1159,7 +1170,7 @@ func (installer *Installer) recoverVerificationFailure(ctx context.Context, jour
 		if err := updateJournal(journal, installer.now()); err != nil {
 			return InstallReceipt{}, errors.Join(cause, err)
 		}
-		return receiptFor(journal.OperationID, journal.Candidate, journal.State, journal.CompletedAt), cause
+		return receiptFor(journal.OperationID, journal.Candidate, journal.State, journal.CompletedAt), errors.Join(cause, cleanupCompletedStaging(StagingRoot, journal.ManifestDigest))
 	}
 }
 
