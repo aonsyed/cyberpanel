@@ -5,6 +5,47 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Storage recovered; native DNS access failure isolated — 2026-09-20
+
+Offloaded five older native/service/web/executor bundle archives to the same
+host run directory and independently matched all guest/host SHA-256 values:
+
+| Guest archive (now removed; host copy retained) | SHA-256 |
+| --- | --- |
+| panel-native-3.1.15.tar | d705febff5e5f5f6a3915ac2bf16826126b2626e56bd0187f04444596a5bd4a6 |
+| panel-services-3.1.16.tar | 6ec81cbe498bb28649b1360cb3e738aee063332ee9c975942cc791a7eed5750e |
+| panel-web-3.1.17.tar | 25420a193f549c61c6af1dd77042d29d1b7d2b8c5bbddfe46860d59740ab7e6b |
+| panel-executor-3.1.18.tar | 92e0827f628e3fd0ae867b96e5acfcbe90d10d873dfc2bc610f7ea5c4ddbda8f |
+| panel-executor-3.1.19.tar | aca74b78ccc945f44abbc2e96f14bf7bbd3d2b2db3812c44950bafd33d96a353 |
+
+Removed only those verified /var/tmp copies. Guest free space rose from 805 MiB
+to 3.1 GiB. Retained installed releases and node journals/staging were untouched.
+Those installed generations and staging each occupy about 7.3 GiB; do not remove
+them manually without the installer's recovery/retention invariants.
+
+Native access probes ran only inside QEMU, as the real pdns UID/GID. The retained
+generation is pdns-1-1a42b650351b-1b1cbb355ab4. Its config is root:pdns 0440,
+but the generation's pdns directory is root:root 0550 and the store root is
+root:root 0700. A systemd read-only file bind into a separate runtime directory
+allowed actual pdns_server --config=check to pass. A separate real LoadCredential
+probe also passed, without changing private-store permissions.
+
+Then drove the native daemon with that systemd credential, a separate runtime
+socket directory, loopback 127.0.0.1:15553 and an 8-second timeout. It read config,
+opened its control socket and bound UDP/TCP, then failed opening the SQLite
+authority database. The database plus WAL/SHM are root:root 0600 beneath the same
+0700 store. Thus config delivery alone does not fix startup: native backend data
+access also needs a correctly scoped boundary. The probe exited with failure;
+it is not a passing DNS service test. No service UID or config/database modes
+were weakened, and no database was moved or rewritten.
+
+Next: solve native config and backend access together, retaining root-only
+installer/generation authority and excluding the core database. Account for
+SQLite WAL and native secondary-zone writes; do not mount/copy a stale database
+snapshot as a live authority. Reconcile the retained generation/ambiguous effect
+after the access fix. Core and native PowerDNS remain stopped, executor admission
+closed. No new release was assembled during this diagnostic/storage turn.
+
 ### Evidence-bound recovery of unapplied PowerDNS startup — 2026-09-20
 
 Read-only inspection of the real control database confirmed one ambiguous
