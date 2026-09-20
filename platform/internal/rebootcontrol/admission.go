@@ -20,6 +20,7 @@ func NewAdmissionGate(ctx context.Context,db *sql.DB,bootID string,now func()tim
 	tx,err:=db.BeginTx(ctx,nil);if err!=nil{return nil,err};defer tx.Rollback()
 	for _,statement:=range []string{
 		executionSchema,
+		executionRecoverySchema,
 		`CREATE TABLE IF NOT EXISTS reboot_admission_gate(singleton INTEGER PRIMARY KEY CHECK(singleton=1),epoch INTEGER NOT NULL,closed INTEGER NOT NULL,plan_id TEXT NOT NULL,fence INTEGER NOT NULL,boot_id TEXT NOT NULL)`,
 		`INSERT OR IGNORE INTO reboot_admission_gate VALUES(1,0,0,'',0,'')`,
 		`CREATE TABLE IF NOT EXISTS reboot_api_invocations(id TEXT PRIMARY KEY,operation TEXT NOT NULL,request_id TEXT NOT NULL,idempotency_digest TEXT NOT NULL,boot_id TEXT NOT NULL,epoch INTEGER NOT NULL,status TEXT NOT NULL,admitted_at TEXT NOT NULL,completed_at TEXT NOT NULL)`,

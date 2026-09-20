@@ -5,6 +5,46 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Evidence-bound recovery of unapplied PowerDNS startup — 2026-09-20
+
+Read-only inspection of the real control database confirmed one ambiguous
+powerdns/startup_configuration effect, epoch 0, with no successful response.
+Added recovery only for that fixed local startup boundary after a native probe
+proves managed bindings correct, no current generation, empty generations and
+staging directories, and inactive PowerDNS. Ordinary ambiguous admission remains
+rejected. Recovery retains the exact binding/epoch, rotates the lease token and
+archives the old token, status, boot, timestamps and evidence digest atomically.
+Core owns creation of the history table; executor waits for it during bootstrap.
+
+All four affected package suites passed in QEMU. Regression tests reject missing
+or active effects, changed bindings, wrong boundaries, changed epochs, closed
+gates and stale settlement leases; successful recovery preserves the record ID
+and prior attempt and permits terminal receipt replay. Actual native QEMU proof
+passed for the inactive empty store and rejected an added empty staging marker;
+only that test marker was removed afterward. Both binaries built in QEMU.
+
+Signed sequence 29 `qemu-pdns-recovery-3.1.28` committed and its reconciliation
+hook passed, deploying config adoption, preflight and recovery together.
+Bundle SHA-256 `68cf1d64bf323c2adc1aa2ca96878c59d93cc0f6936311358c409a52710a7469`;
+manifest `c3f8ca20f7414ae105d8ba498480791c70945a8de0d4dd035290662baf3eb408`;
+receipt `64769688c920b0e1a2f4a54c58b8a560cda90fe862cfe1632826c3f88925db12`.
+Actual executor recovered the prior attempt and reached native PowerDNS config
+validation/activation. Database inspection confirms one archived attempt and
+the same current effect, now ambiguous following the new native failure.
+
+PowerDNS's native service runs as pdns:pdns and failed reading its managed config;
+the generation store's root directory is root:root 0700. After rollback the
+current link is absent. Core and PowerDNS restart loops were stopped. Do not
+retry the empty-store recovery now that generation work exists: qualify native
+service access and reconcile the actual staged/activated generation instead.
+Admission stays closed and full core/gateway/API/UI qualification is incomplete.
+
+Offloaded the sequence 29 archive to the host run directory, verified SHA-256
+against the recorded bundle hash, then removed only its guest /var/tmp copy.
+The archive remains recoverable on the host. Installed generations and journals
+were not removed. Guest space remains tight; do not stage another full release
+until storage is recovered safely.
+
 ### Pristine native PowerDNS configuration adoption implemented — 2026-09-20
 
 Installer service reconciliation now adopts only the fixed native PowerDNS

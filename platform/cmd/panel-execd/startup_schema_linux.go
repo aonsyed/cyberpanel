@@ -20,11 +20,11 @@ func startupAdmissionSchemaReady(ctx context.Context, raw *rebootcontrol.SQLExec
 		}
 	}
 	var count int
-	err := raw.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('reboot_admission_gate','reboot_execution_effects','reboot_states')`).Scan(&count)
+	err := raw.DB.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('reboot_admission_gate','reboot_execution_effects','reboot_states','reboot_execution_recoveries')`).Scan(&count)
 	if err != nil {
 		return err
 	}
-	if count != 3 {
+	if count != 4 {
 		return rebootcontrol.ErrConflict
 	}
 	return nil

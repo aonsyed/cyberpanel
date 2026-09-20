@@ -53,6 +53,10 @@ const executionSchema = `CREATE TABLE IF NOT EXISTS reboot_execution_effects(
  admitted_at TEXT NOT NULL,completed_at TEXT NOT NULL,response BLOB NOT NULL,response_digest TEXT NOT NULL)`
 
 func (store *SQLExecutionAdmission) AdmitExecution(ctx context.Context, binding ExecutionBinding) (ExecutionLease, error) {
+	return store.admitExecution(ctx, binding, "")
+}
+
+func (store *SQLExecutionAdmission) admitExecution(ctx context.Context, binding ExecutionBinding, recoveryEvidence string) (ExecutionLease, error) {
 	if store == nil || store.DB == nil || ctx == nil || !identifierPattern.MatchString(store.BootID) ||
 		binding.Boundary == "" || len(binding.Boundary)>64 || binding.Method=="" || len(binding.Method)>128 ||
 		binding.EffectID=="" || len(binding.EffectID)>512 || !validDigest(binding.RequestDigest) ||
@@ -71,14 +75,20 @@ func (store *SQLExecutionAdmission) AdmitExecution(ctx context.Context, binding 
 	bound := ExecutionDigest(binding)
 	var oldBinding, state, responseDigest string; var cached []byte; var oldEpoch uint64
 	err = tx.QueryRowContext(ctx, `SELECT binding_digest,status,epoch,response,response_digest FROM reboot_execution_effects WHERE id=?`,id).Scan(&oldBinding,&state,&oldEpoch,&cached,&responseDigest)
+	recovering := false
 	if err==nil {
 		if oldBinding!=bound || oldEpoch>epoch { return ExecutionLease{}, ErrIntegrity }
-		if state!="completed" { return ExecutionLease{}, ErrUnproven }
+		if state!="completed" {
+			if recoveryEvidence=="" || state!="ambiguous" || oldEpoch!=epoch { return ExecutionLease{}, ErrUnproven }
+			recovering = true
+		} else {
 		if len(cached)==0 || len(cached)>1<<20 || digestBytes(cached)!=responseDigest { return ExecutionLease{}, ErrIntegrity }
 		// Returning an exact terminal receipt never invokes the handler again.
 		return ExecutionLease{ID:id,Epoch:oldEpoch,Cached:cached},nil
+		}
 	}
-	if !errors.Is(err,sql.ErrNoRows) { return ExecutionLease{}, err }
+	if !recovering && !errors.Is(err,sql.ErrNoRows) { return ExecutionLease{}, err }
+	if recoveryEvidence!="" && !recovering { return ExecutionLease{}, ErrUnproven }
 	var blocked bool
 	if err=tx.QueryRowContext(ctx, `SELECT `+admissionClosedSQL).Scan(&blocked); err!=nil { return ExecutionLease{},err }
 	classification := "mutation"
@@ -104,7 +114,14 @@ func (store *SQLExecutionAdmission) AdmitExecution(ctx context.Context, binding 
 	} else if blocked { return ExecutionLease{},ErrConflict }
 	var token [32]byte; if _,err=rand.Read(token[:]);err!=nil{return ExecutionLease{},err}
 	lease:=ExecutionLease{ID:id,Epoch:epoch,Token:digestBytes(token[:])}
-	_,err=tx.ExecContext(ctx,`INSERT INTO reboot_execution_effects(id,boundary,method,effect_id,request_digest,caller,resource,binding_digest,classification,boot_id,epoch,token,status,admitted_at,completed_at,response,response_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'active',?,'',X'','')`,id,binding.Boundary,binding.Method,binding.EffectID,binding.RequestDigest,binding.Caller,binding.Resource,bound,classification,store.BootID,epoch,lease.Token,time.Now().UTC().Format(time.RFC3339Nano))
+	if recovering {
+		at := time.Now().UTC().Format(time.RFC3339Nano)
+		_,err=tx.ExecContext(ctx,`INSERT INTO reboot_execution_recoveries(effect_id,attempt_token,binding_digest,epoch,boot_id,status,admitted_at,completed_at,evidence_digest,recovered_at) SELECT id,token,binding_digest,epoch,boot_id,status,admitted_at,completed_at,?,? FROM reboot_execution_effects WHERE id=?`,recoveryEvidence,at,id)
+		if err!=nil{return ExecutionLease{},err}
+		_,err=tx.ExecContext(ctx,`UPDATE reboot_execution_effects SET token=?,boot_id=?,status='active',admitted_at=?,completed_at='',response=X'',response_digest='' WHERE id=? AND status='ambiguous' AND binding_digest=? AND epoch=?`,lease.Token,store.BootID,at,id,bound,epoch)
+	} else {
+		_,err=tx.ExecContext(ctx,`INSERT INTO reboot_execution_effects(id,boundary,method,effect_id,request_digest,caller,resource,binding_digest,classification,boot_id,epoch,token,status,admitted_at,completed_at,response,response_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'active',?,'',X'','')`,id,binding.Boundary,binding.Method,binding.EffectID,binding.RequestDigest,binding.Caller,binding.Resource,bound,classification,store.BootID,epoch,lease.Token,time.Now().UTC().Format(time.RFC3339Nano))
+	}
 	if err!=nil{return ExecutionLease{},err}
 	if store.ValidateStore!=nil{if err=store.ValidateStore();err!=nil{return ExecutionLease{},err}}
 	if err=tx.Commit();err!=nil{return ExecutionLease{},err}

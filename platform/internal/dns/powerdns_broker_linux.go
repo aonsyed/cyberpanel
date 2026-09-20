@@ -941,11 +941,21 @@ func (server *PowerDNSDaemonServer) ReconcileStartup(ctx context.Context, admiss
 		return errors.Join(ErrPowerDNSDaemonOperation, err)
 	}
 	digest := rebootcontrol.ExecutionDigest(snapshot)
-	lease, err := admission.AdmitExecution(ctx, rebootcontrol.ExecutionBinding{Boundary: "powerdns", Method: "startup_configuration", EffectID: digest, RequestDigest: digest, Caller: "panel-execd-startup", Resource: rebootcontrol.ExecutionResource(struct {
+	binding := rebootcontrol.ExecutionBinding{Boundary: "powerdns", Method: "startup_configuration", EffectID: digest, RequestDigest: digest, Caller: "panel-execd-startup", Resource: rebootcontrol.ExecutionResource(struct {
 		Node     string
 		Database PowerDNSDatabaseBinding
 		Snapshot string
-	}{snapshot.NodeID, snapshot.Database, digest})})
+	}{snapshot.NodeID, snapshot.Database, digest})}
+	lease, err := admission.AdmitExecution(ctx, binding)
+	if errors.Is(err, rebootcontrol.ErrUnproven) {
+		if recovery, ok := admission.(interface {
+			RecoverUnappliedPowerDNSStartup(context.Context, rebootcontrol.ExecutionBinding, string) (rebootcontrol.ExecutionLease, error)
+		}); ok {
+			evidence, observeErr := server.Host.unappliedStartupEvidence(ctx, digest)
+			if observeErr != nil { return errors.Join(err, observeErr) }
+			lease, err = recovery.RecoverUnappliedPowerDNSStartup(ctx, binding, evidence)
+		}
+	}
 	if err != nil {
 		return err
 	}

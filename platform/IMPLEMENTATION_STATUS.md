@@ -76,9 +76,14 @@ package bytes, requires PowerDNS inactive, preserves a root-only SHA-256-named
 backup and publishes the fixed managed link. Actual Ubuntu QEMU adoption/replay
 and rejection fixtures passed; RPM remains unverified. Candidate panel binary is
 built but not deployed. The test prepared the actual QEMU config; PowerDNS stays
-inactive and generations remain empty. Resolve durable failed-effect recovery
-before deploying both fixes, without bypassing admission, changing
-request identity, or deleting receipts. Core restart loop is stopped. Guest has 2.0 GiB
+inactive after adoption. Sequence 29 now deploys adoption, preflight and narrow
+unapplied-startup recovery together. Real recovery archived the prior attempt
+without changing request identity and reached native config activation. PowerDNS
+then failed reading config as pdns:pdns under the root-only generation store;
+rollback leaves no current link, but generation work now exists. Do not reuse
+empty-store recovery: fix native service access and reconcile actual generation
+state. Core and PowerDNS restart loops are stopped. Guest storage is critical;
+offload verified bundle duplicates before further builds/releases. Guest had 321 MiB
 free; safely recover storage before more bundles. Verified sequence 21–27
 archives were moved to host storage, freeing about 1.9 GiB. Executor readiness and
 core/gateway startup are not yet proven.
