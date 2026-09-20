@@ -5,6 +5,44 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Real OLS/LSPHP inputs admitted; package-cycle blocker identified — 2026-09-20
+
+Verified the vendor's Noble ARM64 repository metadata using only its RSA4096
+key `3E892522DB44E1B063D366C5011AA62DEDA1F085`, obtained over HTTPS from the
+official repository. The older DSA1024 key was inspected but NOT trusted. A
+dedicated deb822 source scopes Signed-By to the vendor key; global apt trust is
+unchanged. apt verified Release/Release.gpg and fetched its ARM64 package index.
+The vendor setup script remains unexecuted.
+
+Downloaded 15 authenticated packages (22.4 MB) into `/var/tmp/panel-web-packages`,
+including OpenLiteSpeed `1.9.2-1+noble`, LSPHP `8.3.33-1+noble`, common/mysql/curl/
+intl/sqlite3/opcache and their native dependencies. No Apache or replacement
+OS/toolchain images were fetched. Vendor postinst inspection found a direct
+systemctl restart bypassing policy-rc.d. A temporary root-owned drop-in at
+`/etc/systemd/system/lshttpd.service.d/10-qemu-hold.conf` requires the deliberately
+absent `/run/cyberpanel-qemu-web-configured`; remove this fixture only after managed
+configuration is ready. Do not claim OLS activation from package installation.
+
+Signed candidate sequence 18, `qemu-web-3.1.17`, contains 97 artifacts and
+506,002,559 payload bytes:
+bundle `/var/tmp/panel-web-3.1.17.tar`, SHA-256
+`25420a193f549c61c6af1dd77042d29d1b7d2b8c5bbddfe46860d59740ab7e6b`;
+manifest `8fd38f03117a231006e5def5e6428f72725f56a55e2e7727a60dacf1b189454c`.
+Admission succeeded, but one-at-a-time dpkg installation stopped at lsphp83-opcache
+because it depends on lsphp83; direct package metadata inspection confirms that
+lsphp83 also depends on lsphp83-opcache. Reordering cannot fix this cycle. Next:
+run the complete verified package set as a native package transaction, preserving
+effect journaling and offline isolation, and retry this same candidate. Do not
+use force-depends or alter vendor payloads. opcache is currently unpacked but
+unconfigured; the web release has not committed and OLS is not yet installed.
+
+Separately, the actual signed engine.edition symlink reproduced an executor
+loader failure (`engine edition file has unsafe metadata`). The loader now uses
+the existing generation-pinning config resolver before its regular-file metadata
+checks, preserving arbitrary-link rejection. The installed-config QEMU regression
+went red then green, and uncached siteops/node-release suites passed. This fix
+still needs to be built into the next signed executor binary before activation.
+
 ### Service binaries/units installed; web-engine prerequisite identified — 2026-09-20
 
 Expanded the existing Ubuntu ARM64 qcow2 from 24 GiB to 40 GiB after a clean guest
