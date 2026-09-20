@@ -132,14 +132,7 @@ func resolveLocalPHPArtifact(ctx context.Context, version string, extensions []s
 }
 
 func readSignedLocalPHPCatalog(requireRoot bool, now time.Time) (localPHPCatalogPayload, string, error) {
-	info, err := os.Lstat(localPHPArtifactCatalogPath)
-	if err != nil {
-		return localPHPCatalogPayload{}, "", err
-	}
-	if !safeLocalCatalogFile(info, localPHPArtifactCatalogLimit, requireRoot) {
-		return localPHPCatalogPayload{}, "", ErrInvalid
-	}
-	content, err := os.ReadFile(localPHPArtifactCatalogPath)
+	content, err := readCatalogFile(localPHPArtifactCatalogPath, localPHPArtifactCatalogLimit, requireRoot)
 	if err != nil {
 		return localPHPCatalogPayload{}, "", err
 	}
@@ -179,11 +172,7 @@ func readLocalPHPTrustKey(keyID string, requireRoot bool) (ed25519.PublicKey, er
 	if filepath.Dir(path) != localPHPArtifactTrustRoot {
 		return nil, ErrInvalid
 	}
-	info, err := os.Lstat(path)
-	if err != nil || !safeLocalCatalogFile(info, 4096, requireRoot) {
-		return nil, ErrInvalid
-	}
-	content, err := os.ReadFile(path)
+	content, err := readCatalogFile(path, 4096, requireRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -243,9 +232,7 @@ func resolveLocalArtifact(ctx context.Context, request ArtifactRequest, requireR
 }
 
 func readLocalArtifactCatalog(requireRoot bool)(localArtifactCatalog,error){
-	info,err:=os.Lstat(localArtifactCatalogPath);if err!=nil{return localArtifactCatalog{},err}
-	if !safeLocalCatalogFile(info,localArtifactCatalogLimit,requireRoot){return localArtifactCatalog{},ErrInvalid}
-	content,err:=os.ReadFile(localArtifactCatalogPath);if err!=nil{return localArtifactCatalog{},err}
+	content,err:=readCatalogFile(localArtifactCatalogPath,localArtifactCatalogLimit,requireRoot);if err!=nil{return localArtifactCatalog{},err}
 	decoder:=json.NewDecoder(bytes.NewReader(content));decoder.DisallowUnknownFields()
 	var signed signedEngineCatalog
 	if decoder.Decode(&signed)!=nil||decoder.Decode(&struct{}{})!=io.EOF{return localArtifactCatalog{},ErrInvalid}
