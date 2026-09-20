@@ -13,6 +13,22 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+LATEST INSTALLED: signed55 `qemu-grants-3.1.54`, rollback54. Manifest
+`73da2a34415c5c379e44475c9bf70c4ee909195520780f07a4b50d8ebaea6e00`, receipt
+`2274cfe905433db87b532f722b46998ef135e0048d6e504217900990f5a54226`.
+Core/gateway/execd actual executable paths resolve into55. Replaced existing
+qemu_user46 managed grants via authenticated `database.grants.replace`, preserving
+its privilege list and advancing generation1→2. Native old unescaped grant became
+literal; matching-neighbor SELECT/INSERT denied while own DB create/insert/select
+and established negative checks pass. Same idempotency request replay returns
+applied200 without advancing past2. Installed passkey/login, console/query,
+mutation denial/recovery and390px interaction pass. Credential version1/binding
+unchanged; approved executor digest matches installed. Guest duplicate bundle
+removed after host checksum match; current/rollback retained. This reconciles one
+existing QA principal, NOT a fleet-wide automatic grant migration. Production
+upgrade reconciliation remains required; isolated import verification/promotion,
+crash recovery and service/API/upload/UI wiring remain unfinished.
+
 Native grant isolation correction (source, not deployed): QEMU confirmed that
 unescaped underscores in database-wide GRANT names match neighboring database
 names, even inside backticks. Shared grant generation now escapes underscores

@@ -5,6 +5,41 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed literal-grant replacement — 2026-09-20
+
+Installed55 `qemu-grants-3.1.54`, rollback54. Manifest
+`73da2a34415c5c379e44475c9bf70c4ee909195520780f07a4b50d8ebaea6e00`, receipt
+`2274cfe905433db87b532f722b46998ef135e0048d6e504217900990f5a54226`, committed.
+Only panel executor rebuilt inside QEMU; actual core/gateway/execd process paths
+checked against55. Credential remains version1/original binding, approved and
+installed executor digest `ddccb5ef12354ad747601db601537f1dad2a125fefc2b1a6b6733addc3e15864`.
+
+Before reconciliation native mysql.db stored unescaped `qemu_ui46` for the
+existing QA principal. Installed-browser password/passkey authentication followed
+by `database.grants.replace` returned applied200. The request preserved the
+existing grant list (create/drop/insert/select) and used expected generation1.
+Native grant now stores the escaped literal name; protected grant generation2.
+The initial harness mistakenly expected201 and stopped after successful mutation;
+corrected it to200 and replayed the SAME persisted request/idempotency key. Replay
+returned applied200, generation remained2. No duplicate mutation was issued.
+
+Created an absent synthetic neighbor `qemuxui46`, checked the actual qemu_user46
+credential cannot SELECT or INSERT there (native privilege-denial errors), then
+dropped that exact neighbor in finally cleanup. Original database account still
+creates/inserts/reads its generated fixture table; ungranted UPDATE and mysql.user
+read remain denied. Its table was removed afterward. Installed console issues201,
+metadata/query200, mutation400, recovery query200 and390px interaction all pass.
+
+Removed regenerable1.4GiB Go cache after build to preserve release-install headroom.
+Ignored host archive SHA256 `bf2472d01a5c364c14460dc8625fae658d82bf4dc20565ec53a9c4e46fed535f`
+matched guest before removing the duplicate guest tar. Completed55 staging absent;
+current55/rollback54 retained. No vendor changes/builds/pins/downloads.
+
+Scope: one existing managed QA principal reconciled through the real authorized
+API, not an automatic all-principal/fleet upgrade migration. Installed executor
+contains recent import primitives, but private isolated-import code remains
+unexposed; full import workflow and installed parity remain incomplete.
+
 ### Database-wide grant names are literal — source, 2026-09-20
 
 Actual QEMU MariaDB regression demonstrated that generated grants on a synthetic
