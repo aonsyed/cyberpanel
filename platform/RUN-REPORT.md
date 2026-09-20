@@ -5,6 +5,56 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Original site effect recovered to prepared — 2026-09-20
+
+Implemented a narrow initial-identity recovery path between siteops and execution
+admission. Its read-only registry evidence requires exact scope/request digest,
+same generation/fence, zero roots/pools, and either allocated/failed host operation
+or active/completed identity record. This permits retry of the existing idempotent
+identity operation; it does not assert host success. The existing SQL recovery
+transaction retains the old attempt, replaces its lease token, and still enforces
+ambiguity, epoch and drain guards. Startup wrapper requires executor readiness.
+No RPC operation, caller-supplied proof, lease deletion or journal reset added.
+
+Uncached QEMU siteops, rebootcontrol and panel-execd tests pass. Rejections cover
+running record, changed digest/fence/operation, wrong failure, existing root and
+suspended binding; SQL integration covers active lease, changed epoch, preserved
+prior attempt, stale settlement rejection and terminal replay.
+
+Candidate executor built in QEMU and loaded through runtime unit override
+99-qemu-site-recovery.conf, retaining strict filesystem confinement. The original
+accepted effect through the guest-only provisioning diagnostic reached PREPARED.
+Registry confirms identity attempt2 complete, directories complete and pool
+complete, generation1. Native cyberpanel-lsapi-s-10983ef8baf3818d87768836-g1.service
+is active/running. All three corresponding execution admission rows are completed.
+No second site-create request was sent. Hosting command remains ambiguous and
+hosting_sites count is0: web activation/final commit are not yet qualified.
+Core was stopped during executor restart then explicitly started; the pending
+core startup-retry fix has not yet been live-tested in an updated core binary.
+
+Storage guard correctly blocked the first build below2GiB. Copied redundant45
+bundle to ignored host .work/qemu/panel-tenant-3.1.44.tar, verified both copies
+against a0026d61bc6e05d3bdcb408749244013e598704fe1a1b7c4911f029381b5ee8c,
+then removed only the guest tar under installer lock. Recoverable host copy,
+current45 and rollback44 preserved. Guest2.5GiB free. No downloads/vendor builds.
+
+### Bounded startup admission contention retry — 2026-09-20
+
+The prior native SQLITE_BUSY startup failure is now reproduced deterministically
+using two real SQLite connections to a temporary WAL database in QEMU. A writer
+holds the gate row while core initializes; the original implementation immediately
+returned database-is-locked before the writer released. Initialization now retries
+the complete rolled-back attempt for SQLITE_BUSY and its extended codes only,
+within five seconds or the caller's earlier deadline. Other failures are returned
+unchanged; no gate state, effect receipt or safety check is bypassed.
+
+The regression now passes after releasing the writer and verifies one gate row.
+A second held writer proves caller deadline cancellation. Full uncached QEMU
+cmd/cyberpanel and internal/rebootcontrol suites pass. Changes were formatted in
+QEMU and retrieved to source. This is source-level regression evidence, NOT a
+claim that an updated core binary has passed a native concurrent-service restart;
+that remains part of the next accumulated release qualification. No downloads.
+
 ### Site creation: layout, persisted PHP profile and executor sandbox — 2026-09-20
 
 Candidate AppShell explicitly places main content in grid column2. The previous

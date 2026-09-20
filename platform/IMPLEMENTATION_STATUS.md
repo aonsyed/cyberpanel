@@ -6,6 +6,25 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest recovery checkpoint: original site effect is now PREPARED through the real
+QEMU executor protocol. Initial identity attempt2 completed, directories and PHP83
+LSAPI pool completed atgeneration1; native pool service active/running. Outer
+siteops admission rows all completed; original hosting command still ambiguous
+and hosting_sites still empty. Next: original command's web activation/final commit,
+not another create request. No site-serving success claimed yet.
+Executor candidate /usr/local/libexec/cyberpanel/qemu-execd-site-recovery is active
+via /run/systemd/system/panel-execd.service.d/99-qemu-site-recovery.conf (strict
+filesystem override remains). Signed45 unchanged. Recovery only permits exact
+initial identity records: allocated/failed host operation or active/completed,
+no roots/pools, matching scope/digest/fence. It reuses the existing admission
+recovery transaction, preserving previous attempt and reboot gating. QEMU tests
+cover unsafe records, active admission, changed epoch and stale settlement.
+The native retry used original accepted request through the guest-only diagnostic,
+not UI resubmission or DB/journal reset. Core restarted afterward.
+Redundant45 tar moved to ignored host .work/qemu/panel-tenant-3.1.44.tar; both
+SHA256 values match a0026d61bc6e05d3bdcb408749244013e598704fe1a1b7c4911f029381b5ee8c.
+Guest copy removed under installer lock; current45/rollback44 intact; guest2.5GiB.
+
 Latest site checkpoint: candidate UI fixes shell-main placement in column2.
 QEMU browser checks passed at1280/1920/1024, collapsed navigation and390 mobile;
 candidate static assets only, real installed45 API/authentication. Site submission
@@ -26,7 +45,11 @@ request; installed45 would omit it again on save, so deploy source fix before
 resuming full provisioning. Guest2.1GiB free; no new full bundle/downloads.
 Executor restart also restarted dependent core; simultaneous admission startup
 hit SQLITE_BUSY and core stopped (test override Restart=no). Explicit core start
-restored live gateway readiness. Startup contention/retry remains unresolved.
+restored live gateway readiness. Source now retries only SQLITE_BUSY across the
+whole rolled-back admission initialization, capped at5s and caller cancellation.
+QEMU two-connection WAL test reproduced immediate failure before fix; now waits
+for writer release, retains one gate row, and respects caller deadline. Complete
+cmd/cyberpanel and rebootcontrol suites pass. Fix not yet packaged/live-qualified.
 Earlier checkpoints below are historical and superseded where noted.
 
 Latest: signed45 qemu-tenant-3.1.44 installed; current45/rollback44. Tenant create

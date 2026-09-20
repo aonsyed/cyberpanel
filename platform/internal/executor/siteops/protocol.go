@@ -145,7 +145,7 @@ func (server *Server) serveConnection(connection net.Conn) {
 	ctx, cancel := context.WithDeadline(context.Background(), request.Deadline); defer cancel()
 	if server.Admission==nil{return}
 	binding:=rebootcontrol.ExecutionBinding{Boundary:"siteops",Method:string(request.Operation),EffectID:string(request.EffectKey),RequestDigest:request.Digest(),Caller:"authenticated-panel-core",Resource:string(request.RuntimeKey)}
-	lease,err:=server.Admission.AdmitExecution(ctx,binding);if err!=nil{return}
+	lease,err:=server.admitSiteExecution(ctx,request,binding);if err!=nil{return}
 	if len(lease.Cached)!=0 {
 		var cached Response
 		if json.Unmarshal(lease.Cached,&cached)==nil { cached.RequestID=request.RequestID;if cached.Validate(request,time.Now().UTC())==nil{_=writeFrame(connection,wireReply{Response:cached})} };return
