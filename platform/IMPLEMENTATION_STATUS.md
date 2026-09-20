@@ -6,6 +6,42 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Use normal vendor/distribution OLS/LSE and related packages, following the native
+CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
+forks, patches or product version pins. Panel configuration/service integration
+and QEMU qualification remain our responsibility; inventory is not a version pin.
+
+## Current recovery point — installed export fix, 2026-09-20
+
+Supersedes the installed51/source-only statements in the historical entries below.
+Installed53 `qemu-dbexport-3.1.52`, rollback52 retained. Manifest
+`a86b11f2e4bec45397b732579379e6f78f7caaf2db1e784fde8e1e8111c57419`;
+receipt `99a00d8cccc9c535eabcbce3e14088e3bcf65834a6f6a3dab1fac0387ba3589c`.
+Core/gateway/execd process executable paths rechecked against that installed root.
+
+Installed52 exposed export403: root executor records retain applied effect-input
+metadata (Provisioning/Pending), while the coordinator separately projects its
+confirmed SQL records to Ready/InSync. Export authorization incorrectly required
+the coordinator projection in both stores. Corrected the executor check without
+removing tenant/site/generation/expiry/principal checks or canonical readiness.
+The native regression now models these separate states. QEMU database, apiserver,
+cyberpanel and panel-execd suites pass against matching host/guest source hashes.
+
+Installed53 real Chromium workflow previously passed SQL and gzip prepare200,
+export201, download200, expected text/binary content and complete SHA256 checking,
+plus passkey login, console query, mutation denial and 390px interaction. No mocked
+export responses or candidate UI interception were used. See RUN-REPORT.md.
+Generated SQL table/artifacts and redundant guest release bundles were removed;
+current and rollback releases retained. Latest guest free space: 4.6GiB.
+
+Next: automatic export retention collection, larger asynchronous transfers and
+production isolated import. Current console export bounds remain 1MiB/30s/1000
+estimated rows; actual streamed row accounting, routines/triggers/events, external
+DB transport and full OS/architecture/edition qualification remain open. This is
+not completion of database parity or the overall goal.
+
+## Historical checkpoints (newest first)
+
 EXPORT API/UI SOURCE CONNECTED: coordinator prepares sealed jobs from current
 workspace/database metadata and derives access again for execution/download.
 Added MFA/database:console site-scoped export_prepare, export (mutating with

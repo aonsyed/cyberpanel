@@ -5,6 +5,55 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed native database export — 2026-09-20
+
+Installed53 `qemu-dbexport-3.1.52`, rollback52 retained. Manifest
+`a86b11f2e4bec45397b732579379e6f78f7caaf2db1e784fde8e1e8111c57419`, receipt
+`99a00d8cccc9c535eabcbce3e14088e3bcf65834a6f6a3dab1fac0387ba3589c`.
+Committed receipt and actual core/gateway/execd `/proc/<pid>/exe` paths were
+rechecked after resumption; all three resolve into that release.
+
+Installed52 returned403 for export despite successful console access. Protected
+executor records preserve applied input metadata, whereas the coordinator's SQL
+projection is promoted to Ready/InSync. The export credential provider wrongly
+required the latter state in the former store. The native fixture was changed to
+reproduce this distinction: plain/gzip tests failed before the provider fix.
+Executor authorization now accepts appropriate pending applied-input records;
+canonical coordinator readiness and exact resource/session authorization remain.
+
+QEMU Ubuntu ARM64 command (rerun after resumption, all four packages exit0):
+
+```sh
+sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root \
+  GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath \
+  GOPROXY=off GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 \
+  ./internal/database ./internal/apiserver ./cmd/cyberpanel ./cmd/panel-execd -count=1
+```
+
+Host and guest changed-source SHA256 match: credentials `134383201e89859502f1594ff8dcd7981f65b33e522d4719e409528348d15672`,
+native regression `b797c46bee4776fc19864ea23af9ab6af676dbddd9bcc5ca9c69ca5010e81e6e`.
+
+Before resumption, installed Chromium harness `qemu-passkey.cjs --console-fresh
+--export-live` passed against53, without candidate UI or export mocking: password
+and passkey200, console201, metadata/query200, rejected mutation400, recovered
+query200; SQL and gzip each prepare200/export201/download200. Browser downloads
+contained the fixture table, expected text and binary `0x0001FF`, correct filename,
+and verified complete SHA256. Mobile390px interaction passed. This is the recorded
+installed-browser result, not a claim that the browser was rerun on resumption.
+
+Generated fixture table and its two private export artifacts were removed after
+checking; original QA database/principal retained. Regenerable guest Go cache was
+cleared to recover3.6GiB before the builds. Duplicate guest52/53 bundle files were
+removed only after matching ignored host archives; archive53 SHA256
+`7da5470091db933ccf255eb65728c6355e2df723525586778df3d8e74004a6f8`.
+Current53/rollback52 retained, completed53 staging absent, guest4.6GiB free on
+resumption. No third-party component builds, patches, pins or downloads.
+
+Limits: this proves bounded local console export, not full import/export parity.
+Automatic retention collection, larger async exports, actual streamed row limits,
+production isolated imports and routines/triggers/events remain unfinished, as
+do external database exports and the complete installed OS/architecture matrix.
+
 ### Actual failure rollback, retry, subsequent upgrade and staging cleanup — 2026-09-20
 
 Installed51 `qemu-recovery-3.1.50`, retained rollback49. Manifest

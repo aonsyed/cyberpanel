@@ -242,6 +242,12 @@ func (repository liveExportRepository) LoadResource(ctx context.Context, kind Re
 	if err := repository.executor.readResource(directory, id, resource); err != nil {
 		return ResourceEnvelope{}, err
 	}
+	// The coordinator stores the confirmed projection separately from the
+	// executor's applied input record. Match that distinction in this fixture.
+	meta := resource.Meta()
+	if meta.Status.Lifecycle == LifecycleProvisioning && meta.Status.Reconciliation == ReconciliationPending {
+		setResourceStatus(resource, ResourceStatus{Lifecycle: LifecycleReady, Health: HealthHealthy, Reconciliation: ReconciliationInSync, ObservedGeneration: meta.Generation})
+	}
 	return EncodeResource(resource)
 }
 
@@ -393,7 +399,7 @@ func liveWorkspaceExportFixture(t *testing.T, ctx context.Context, prefix string
 		t.Fatal(err)
 	}
 	metadata := Metadata{ID: job.DatabaseID, TenantID: job.TenantID, SiteID: job.SiteID, Generation: job.DatabaseGeneration, Status: instance.Status}
-	metadata.Status.ObservedGeneration = metadata.Generation
+	metadata.Status = ResourceStatus{Lifecycle: LifecycleProvisioning, Health: HealthUnknown, Reconciliation: ReconciliationPending}
 	charset, _ := ParseSQLIdentifier("utf8mb4")
 	collation, _ := ParseSQLIdentifier("utf8mb4_unicode_ci")
 	db := Database{Metadata: metadata, InstanceID: job.InstanceID, Name: name, Charset: charset, Collation: collation, QuotaBytes: 1 << 20}

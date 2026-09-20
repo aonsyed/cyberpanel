@@ -62,10 +62,29 @@ func (executor *LinuxMariaDBExecutor) authorizeWorkspaceExport(ctx context.Conte
 	if err != nil {
 		return session, database, principal, err
 	}
-	if database.InstanceID != job.InstanceID || instance.Placement != PlacementLocal || !workspaceReady(session.Metadata) || !workspaceReady(database.Metadata) || !workspaceReady(principal.Metadata) || !workspaceReady(instance.Metadata) {
+	if database.InstanceID != job.InstanceID || instance.Placement != PlacementLocal || !workspaceExportExecutorRecord(session.Metadata) || !workspaceExportExecutorRecord(database.Metadata) || !workspaceExportExecutorRecord(principal.Metadata) || !workspaceReady(instance.Metadata) {
 		return session, database, principal, ErrUnauthorized
 	}
 	return session, database, principal, nil
+}
+
+// Applied executor records retain effect input metadata. Only the coordinator
+// projects the successful receipt to Ready/InSync in its separate repository.
+// Presence here follows native proof, but terminal/revoking states still deny
+// access. Generation, tenant, expiry and disabled checks remain in workspaceResources.
+func workspaceExportExecutorRecord(metadata Metadata) bool {
+	if workspaceReady(metadata) {
+		return true
+	}
+	if metadata.Status.Reconciliation != ReconciliationPending {
+		return false
+	}
+	switch metadata.Status.Lifecycle {
+	case LifecycleProvisioning, LifecycleUpdating, LifecycleReady:
+		return true
+	default:
+		return false
+	}
 }
 
 func (configs *LinuxWorkspaceExportConfigs) writeClientConfig(ctx context.Context, job TransferJob, session DatabaseWorkspaceSession, principal DatabasePrincipal, name SQLIdentifier, releaseSlot func()) (TransferClientConfigDescriptor, error) {
