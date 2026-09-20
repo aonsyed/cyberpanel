@@ -5,6 +5,64 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native SMTP and installed-edition regressions — 2026-09-20
+
+The rendered Postfix master.cf omitted internal services, reproducing a native
+SMTP TLS timeout in 7.37 seconds. Added the standard internal queue, map, TLS,
+rewrite, delivery, logging and connection-management services; immutable panel
+paths remain outside chroot. The same native daemon test then completed TLS,
+EHLO and QUIT. Extending it to STARTTLS reproduced a 454 response caused by
+OpenDKIM socket permission denial and a missing Rspamd milter socket.
+
+Added a managed Rspamd Unix milter override and a fixed root-only executor mode
+that grants Postfix named-UID traversal/socket access for exactly OpenDKIM and
+Rspamd. It does not add Postfix to signing/config groups or follow final socket
+symlinks. Native TLS on 465 and STARTTLS on 25/587 now pass; plaintext AUTH is
+absent and AUTH appears after encryption. Installer startup hooks reapply grants
+after daemon socket recreation; configuration reload uses restart for these
+milters and ClamAV (whose vendor USR2 reload only refreshes signatures).
+These candidate changes are not yet in a signed installed release.
+
+The web-engine edition regression reproduced `not found` against the actual
+signed installer's engine.edition symlink. Reused the strict node-release config
+resolver, pinned the generation, opened no-follow and retained ownership/mode/
+size checks. The actual signed-edition test passes. Remaining web startup work:
+the QEMU release lacks `/etc/cyberpanel/webengine/catalog.json` and an activated
+managed native web configuration; OpenLiteSpeed remains intentionally held.
+Do not claim the complete web-engine inspection/startup now passes.
+
+An initial combined package run was interrupted after disk pressure made the VM
+unresponsive; only its reported mail package pass counts. Terminated the exact
+QEMU process, resumed the same intact overlay, and added a private local QMP
+socket. QMP confirmed running, disk I/O status OK, and guest SSH recovered.
+Removed the failed partial archive copy, rebuildable Go cache and the identified
+21 MiB interrupted Go temporary directory, then trimmed freed guest blocks.
+No installed release, journal, source tree, OS image or signing key was removed.
+
+Verified committed staging sequences 25–28 artifact-by-artifact against both
+their signed manifest hashes and retained installed releases, then removed only
+those four duplicate staging directories under the installer lock. Synced and
+trimmed; host free space rose to about 3.5 GiB, guest free to 3.6 GiB. Installed
+releases and rollback payloads remain. The harness SSH entry now refuses Go
+build/tests and signed assembly/install below 3 GiB host or 2 GiB guest free;
+its low-space denial was exercised (exit 75). Completed the same manifest and
+retained-payload verification for sequences 29–32 and removed only their staging
+duplicates under the installer lock. After sync/trim, host free space was about
+4.7 GiB and guest free 5.0 GiB while rebuilding. All installed releases remain.
+
+The restarted full affected check passes in QEMU: internal/mail (including actual
+SMTP/STARTTLS and Postfix/nobody socket permission checks), cmd/cyberpanel,
+cmd/panel-execd, internal/webengine/management (including signed installed
+edition), and internal/noderelease (including unsafe managed-path rejection).
+No interrupted or host execution is counted as verification.
+
+All original host tar archives were losslessly gzip-compressed. The gzip copies
+of sequences 31/32 are now stored in `retained-mail-pdns-pair.tar.zst` in the
+QEMU run directory; extraction hashes exactly match their previous gzip files
+(`e236ffe7b0e930d1adc1d1232a334f24625f58729c867d51ec1a3462bab610ed`
+and `f1b544aa39afbe2bde40e456ff295d154d13bd38a4b60035a3115eed98d764a9`).
+Their separate duplicate gzip files were removed only after verification.
+
 ### Signed native mail startup advances to protocol checks — 2026-09-20
 
 Source `53322d734` built and tested entirely inside Ubuntu ARM64 QEMU. Signed

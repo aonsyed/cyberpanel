@@ -4,7 +4,18 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
-Latest checkpoint (2026-09-20): signed sequence 34 includes source `53322d734`:
+Latest candidate checkpoint (2026-09-20): Postfix internal services, scoped milter
+socket grants and Rspamd Unix milter binding now pass native SMTPS and STARTTLS
+on 465/25/587, plaintext AUTH denial, and unprivileged socket-access denial.
+Installed edition inspection now accepts only the strict signed-release link.
+All five affected package suites pass in QEMU. Candidate changes still await
+signed deployment. Further web bootstrap is missing the signed engine catalog
+and activated native configuration; OLS remains intentionally held. Removed
+only verified duplicate committed staging sequences 25–32, preserving installed
+releases/journals/archives; QEMU now has discard, a private QMP control socket and
+a low-space build/install guard. Source and exact evidence are in RUN-REPORT.
+
+Previous installed checkpoint: signed sequence 34 includes source `53322d734`:
 native mail ACL isolation, ClamAV scan boundary, executor sandbox and OpenDKIM
 PID-file fixes. All six native mail services start. Actual TLS IMAP CAPABILITY
 and LOGOUT pass; SMTP TLS stalls because generated master.cf lacks proxymap

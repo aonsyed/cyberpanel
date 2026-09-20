@@ -145,6 +145,7 @@ func profileForMail(platform LinuxMailPlatform) (mailProfile, error) {
 	default:
 		return mailProfile{}, ErrInvalidCommand
 	}
+	base.bindings = append(base.bindings, mailBinding{"/etc/rspamd/override.d/worker-proxy.inc", MailConfigurationRoot + "/current/rspamd/worker-proxy.inc"})
 	return base, nil
 }
 
@@ -357,6 +358,11 @@ func (host *LinuxMailHost) controlService(ctx context.Context, service MailServi
 		verb = "restart"
 	case ServiceReload:
 		verb = "reload"
+		// ClamAV's USR2 reloads signatures, not configuration. Milter sockets
+		// need their fixed ExecStartPost access grant after recreation.
+		if service == ServiceClamAV || service == ServiceRspamd || service == ServiceOpenDKIM {
+			verb = "restart"
+		}
 	default:
 		return receipt, ErrInvalidCommand
 	}
@@ -474,7 +480,7 @@ func (host *LinuxMailHost) storeArtifacts(ctx context.Context, generation Config
 			gid = host.Ownership.PostfixGID
 		case ArtifactDovecot:
 			gid = host.Ownership.DovecotGID
-		case ArtifactRspamd, ArtifactRspamdRedis, ArtifactRspamdAntivirus:
+		case ArtifactRspamd, ArtifactRspamdRedis, ArtifactRspamdAntivirus, ArtifactRspamdMilter:
 			gid = host.Ownership.RspamdGID
 		case ArtifactOpenDKIM, ArtifactOpenDKIMKeyTable, ArtifactOpenDKIMSigningTable, ArtifactOpenDKIMTrustedHosts:
 			gid = host.Ownership.OpenDKIMGID
@@ -648,6 +654,7 @@ func (host *LinuxMailHost) validateGeneration(ctx context.Context, id string) (s
 	root := filepath.Join(MailConfigurationRoot, "generations", id)
 	commands := [][]string{{host.profile.postfix, "-c", filepath.Join(root, "postfix"), "check"}, {host.profile.doveconf, "-c", filepath.Join(root, "dovecot/dovecot.conf"), "-n"}, {host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/worker-controller.inc")}, {host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/redis.conf")}, {host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/antivirus.conf")}, {host.profile.opendkim, "-n", "-x", filepath.Join(root, "opendkim/opendkim.conf")}}
 	evidence := []string{}
+	commands = append(commands, []string{host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/worker-proxy.inc")})
 	for _, command := range commands {
 		output, err := runMailProcess(ctx, command[0], command[1:]...)
 		evidence = append(evidence, command[0], string(output), errorText(err))

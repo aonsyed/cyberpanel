@@ -102,6 +102,12 @@ type writerAuthorityRecovery interface {
 }
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "--mail-milter-access" {
+		if err := mail.PrepareNativeMilterAccess(os.Args[2]); err != nil {
+			log.Fatal("mail milter socket access failed")
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--mariadb-writer-supervisor" {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()

@@ -28,6 +28,7 @@ const (
 	ArtifactRspamd                 ArtifactRole = "rspamd"
 	ArtifactRspamdRedis            ArtifactRole = "rspamd_redis"
 	ArtifactRspamdAntivirus        ArtifactRole = "rspamd_antivirus"
+	ArtifactRspamdMilter           ArtifactRole = "rspamd_milter"
 	ArtifactOpenDKIM               ArtifactRole = "opendkim"
 	ArtifactOpenDKIMKeyTable       ArtifactRole = "opendkim_key_table"
 	ArtifactOpenDKIMSigningTable   ArtifactRole = "opendkim_signing_table"
@@ -92,6 +93,7 @@ func (ConfigRenderer) Render(snapshot ConfigSnapshot) (ConfigGeneration, error) 
 		artifact(ArtifactRspamd, "rspamd/worker-controller.inc", 0640, renderRspamd(normalized)),
 		artifact(ArtifactRspamdRedis, "rspamd/redis.conf", 0640, renderRspamdRedis()),
 		artifact(ArtifactRspamdAntivirus, "rspamd/antivirus.conf", 0640, renderRspamdAntivirus()),
+		artifact(ArtifactRspamdMilter, "rspamd/worker-proxy.inc", 0640, renderRspamdMilter()),
 		artifact(ArtifactOpenDKIM, "opendkim/opendkim.conf", 0640, renderOpenDKIM()),
 		artifact(ArtifactOpenDKIMKeyTable, "opendkim/KeyTable", 0640, renderKeyTable(normalized)),
 		artifact(ArtifactOpenDKIMSigningTable, "opendkim/SigningTable", 0640, renderSigningTable(normalized)),
@@ -384,7 +386,37 @@ func renderPostfixMain(snapshot ConfigSnapshot) []byte {
 	return out.Bytes()
 }
 func renderPostfixMaster() []byte {
-	return []byte("smtp      inet  n       -       n       -       -       smtpd\nsubmission inet n       -       n       -       -       smtpd -o syslog_name=postfix/submission -o smtpd_tls_security_level=encrypt -o smtpd_sasl_auth_enable=yes\nsmtps     inet  n       -       n       -       -       smtpd -o syslog_name=postfix/smtps -o smtpd_tls_wrappermode=yes -o smtpd_sasl_auth_enable=yes\ncyberpanel-policy unix - n n - 0 spawn user=cyberpanel argv=/usr/libexec/cyberpanel/mail-policy\n")
+	// Keep internal transports alongside listeners. Chroot is disabled because
+	// immutable maps, TLS material and broker sockets live outside the spool.
+	return []byte(`smtp      inet  n       -       n       -       -       smtpd
+submission inet n       -       n       -       -       smtpd -o syslog_name=postfix/submission -o smtpd_tls_security_level=encrypt -o smtpd_sasl_auth_enable=yes
+smtps     inet  n       -       n       -       -       smtpd -o syslog_name=postfix/smtps -o smtpd_tls_wrappermode=yes -o smtpd_sasl_auth_enable=yes
+pickup    unix  n       -       n       60      1       pickup
+cleanup   unix  n       -       n       -       0       cleanup
+qmgr      unix  n       -       n       300     1       qmgr
+tlsmgr    unix  -       -       n       1000?   1       tlsmgr
+rewrite   unix  -       -       n       -       -       trivial-rewrite
+bounce    unix  -       -       n       -       0       bounce
+defer     unix  -       -       n       -       0       bounce
+trace     unix  -       -       n       -       0       bounce
+verify    unix  -       -       n       -       1       verify
+flush     unix  n       -       n       1000?   0       flush
+proxymap  unix  -       -       n       -       -       proxymap
+proxywrite unix -      -       n       -       1       proxymap
+smtp      unix  -       -       n       -       -       smtp
+relay     unix  -       -       n       -       -       smtp
+showq     unix  n       -       n       -       -       showq
+error     unix  -       -       n       -       -       error
+retry     unix  -       -       n       -       -       error
+discard   unix  -       -       n       -       -       discard
+local     unix  -       n       n       -       -       local
+virtual   unix  -       n       n       -       -       virtual
+lmtp      unix  -       -       n       -       -       lmtp
+anvil     unix  -       -       n       -       1       anvil
+scache    unix  -       -       n       -       1       scache
+postlog   unix-dgram n  -       n       -       1       postlogd
+cyberpanel-policy unix - n n - 0 spawn user=cyberpanel argv=/usr/libexec/cyberpanel/mail-policy
+`)
 }
 func renderPostfixTLS(snapshot ConfigSnapshot) []byte {
 	var out bytes.Buffer
@@ -542,6 +574,9 @@ func renderRspamd(snapshot ConfigSnapshot) []byte {
 }
 func renderRspamdRedis() []byte {
 	return []byte("servers = \"/run/cyberpanel-mail-redis/redis.sock\";\ntimeout = 1s;\ndb = \"0\";\n")
+}
+func renderRspamdMilter() []byte {
+	return []byte("bind_socket = \"/run/rspamd/milter.sock mode=0660\";\nmilter = yes;\n")
 }
 func renderRspamdAntivirus() []byte {
 	return []byte("clamav {\n  symbol = \"CLAM_VIRUS\";\n  type = \"clamav\";\n  servers = \"/run/clamd/cyberpanel.sock\";\n  scan_mime_parts = true;\n  scan_text_mime = true;\n  action = \"reject\";\n}\n")

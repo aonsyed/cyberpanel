@@ -22,7 +22,35 @@ func installMailRuntimeUnits() error {
 	if err := installMailRedisUnit(); err != nil {
 		return err
 	}
-	return installMailClamAVUnit()
+	if err := installMailClamAVUnit(); err != nil {
+		return err
+	}
+	return installMailMilterUnits()
+}
+
+func installMailMilterUnits() error {
+	for _, service := range []string{"opendkim", "rspamd"} {
+		directory := "/etc/systemd/system/" + service + ".service.d"
+		if err := trustedDNSAncestors(filepath.Dir(directory)); err != nil {
+			return err
+		}
+		if err := os.Mkdir(directory, 0755); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		if err := trustedDNSAncestors(directory); err != nil {
+			return err
+		}
+		content := []byte("[Service]\nExecStartPost=+/usr/local/libexec/cyberpanel/panel-execd --mail-milter-access " + service + "\n")
+		path := directory + "/50-cyberpanel-milter.conf"
+		if _, err := ensureOwnedFile(path, 0644, 0, 0, content); err != nil {
+			return err
+		}
+		actual, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(actual, content) {
+			return errors.New("mail milter unit differs from managed definition")
+		}
+	}
+	return exec.Command("/usr/bin/systemctl", "daemon-reload").Run()
 }
 
 func installMailClamAVUnit() error {
