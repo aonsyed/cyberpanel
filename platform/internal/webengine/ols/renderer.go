@@ -128,6 +128,10 @@ func renderServer(request native.RenderRequest, index renderIndex, bindings []we
 	tuning := request.Desired.Engine.Tuning
 	output.WriteString("# CyberPanel managed complete OpenLiteSpeed generation\n")
 	output.WriteString("serverName cyberpanel-managed\n")
+	output.WriteString("user cyberpanel-web\ngroup cyberpanel-web\ndisableWebAdmin 1\n")
+	output.WriteString("mime $SERVER_ROOT/conf/mime.properties\n")
+	output.WriteString("errorlog $SERVER_ROOT/logs/error.log {\n  logLevel WARN\n  rollingSize 10M\n  enableStderrLog 1\n}\n")
+	output.WriteString("accesslog $SERVER_ROOT/logs/access.log {\n  rollingSize 10M\n  keepDays 30\n  compressArchive 1\n}\n")
 	output.WriteString("showVersionNumber 0\n")
 	output.WriteString("autoLoadHtaccess 0\n")
 	if tuning.Generation != 0 {

@@ -4,6 +4,18 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Newest source candidate (2026-09-20): dedicated web worker identity, required
+MIME/error/access logging in both renderers, root-owned system static roots,
+read-only native config mounts and isolated stopped-process observer implemented.
+QEMU affected suites + native installer/observer checks pass; candidate binaries
+rebuilt. Real pending-plan native parser advances to missing WAF policy
+`/usr/local/lsws/conf/modsec/cyberpanel.conf`; keep WAF enforced. Matching
+ols-modsecurity ARM64 package is installed and retained for next signed bundle.
+Installed release still 37, newest code NOT signed/deployed. Next also needs
+health attestation provisioning and safe transition from failed bootstrap marker
+8ad3d376... to new renderer digest 0b9c811b... without resetting journals.
+OLS/core remain unqualified. Detailed evidence: newest RUN-REPORT section.
+
 Latest installed checkpoint (2026-09-20): signed sequence 37 now includes mail
 recovery, initial web activation and scoped broker/admission retry. Same request
 advanced after fixing vendor-owned `conf/vhosts` (installer fix native-tested,

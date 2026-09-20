@@ -5,6 +5,52 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native worker identity and config authority candidate — 2026-09-20
+
+Both edition renderers now emit dedicated `cyberpanel-web` user/group,
+disabled vendor WebAdmin, required MIME source and bounded error/access logs.
+The installer hook provisions the non-root/nologin service identity and fixed
+root-owned default/maintenance/suspended content and health directories.
+`lshttpd.service` receives read-only config and /etc mounts, no CAP_SYS_ADMIN,
+and control-group shutdown. Root installer reconciliation passed twice in QEMU;
+the unprivileged worker can read its static page but cannot write the master.
+
+Initial validation now runs the fixed native parser in a bounded transient
+systemd service with private /tmp and read-only config. Stopped-service checking
+additionally observes kernel executable identities, including processes outside
+the unit. Since the main executor deliberately lacks ptrace capability, the
+fixed read-only observer receives only CAP_SYS_PTRACE/CAP_DAC_READ_SEARCH for
+at most ten seconds; main broker privileges are unchanged. QEMU tested the
+observer path, running executable rejection, cancellation, and the built
+executor's `--webengine-stopped-proof` dispatch.
+
+`TestQEMURenderedInitialWebParser` reads the real pending bootstrap plan
+read-only, composes/renders it, stages sealed artifacts and bind-mounts its
+master only into the parser namespace. It re-verifies sealed bytes/metadata
+after parsing. Native progression: missing user/group resolved; missing MIME
+and access logging resolved; missing system vhost root resolved. OLS attempted
+its recursive permission repair, but read-only mounts denied it and generation
+verification still passed. No live master/checkpoint was replaced by this test.
+
+Downloaded and installed only the matching native ARM64 `ols-modsecurity`
+1.9.2-1+noble prerequisite (2,550,958 bytes, no maintainer scripts), verified
+against apt metadata SHA256
+`7b99e9ff8806a104021cec860c900cf470ccd8e23696ed6f3d2a6b7f6786ad1f`.
+Retained under guest source `web-packages/ols-modsecurity_1.9.2-1+noble_arm64.deb`;
+must include it in the next signed bundle/catalog. No OS/Go image downloads.
+Native parser now fails loading absent `/usr/local/lsws/conf/modsec/cyberpanel.conf`.
+Do not disable WAF or substitute an empty policy to make the parser pass.
+
+Affected QEMU suites passed: both renderers, webactivation, install, cyberpanel
+and panel-execd, with native authority check enabled. Both candidate binaries
+rebuilt into the existing guest `*-web-bootstrap` paths. Installed release is
+still 37; these source changes are not signed/deployed. Native parser remains
+RED and no core/OLS health is claimed. Next: provision genuine initial WAF
+policy, health attestation material, and safely reconcile the older failed
+bootstrap marker when renderer digest changes (do not delete/reset it).
+Old marker binds 8ad3d376..., newest rendered candidate 0b9c811b.... OLS hold
+remains in place. Guest free 6.8 GiB, host 244 GiB, Git pack 485.74 MiB.
+
 ### Sequence 37 and first-activation recovery — 2026-09-20
 
 Installed signed `qemu-web-bootstrap-3.1.36` (sequence 37), manifest

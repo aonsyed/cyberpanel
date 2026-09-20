@@ -3,6 +3,9 @@ package main
 import (
 	"crypto/sha256"
 	"os"
+	"os/exec"
+	"os/user"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -40,5 +43,13 @@ func TestQEMUWebEngineAuthority(t *testing.T) {
 	}
 	if _, err = fsstore.New("/usr/local/lsws/conf", webengine.EditionOpenLiteSpeed); err != nil {
 		t.Fatal(err)
+	}
+	account, err := user.Lookup("cyberpanel-web")
+	if err != nil || account.Uid == "0" {
+		t.Fatal("missing unprivileged web worker", err)
+	}
+	unit, err := exec.Command("/usr/bin/systemctl", "show", "lsws.service", "-p", "ReadOnlyPaths", "-p", "KillMode").Output()
+	if err != nil || !strings.Contains(string(unit), "/usr/local/lsws/conf") || !strings.Contains(string(unit), "KillMode=control-group") {
+		t.Fatalf("native authority protection: %s %v", unit, err)
 	}
 }

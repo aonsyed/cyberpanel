@@ -18,6 +18,9 @@ func reconcileWebEngineAuthority() error {
 	if err != nil {
 		return err
 	}
+	if err := reconcileWebWorker(); err != nil {
+		return err
+	}
 	master := "httpd_config.conf"
 	if edition == siteops.EditionLiteSpeedEnterprise {
 		master = "httpd_config.xml"

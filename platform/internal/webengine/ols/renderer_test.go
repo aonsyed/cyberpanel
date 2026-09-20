@@ -101,6 +101,15 @@ func TestRenderAssignsUniqueNativeNamesToCollidingListenerRefs(t *testing.T) {
 	}
 }
 
+func TestRenderIsolatesNativeWorkerFromPanelAndVendorAdmin(t *testing.T) {
+	generation, err := New().Render(context.Background(), renderRequest(t, webengine.EditionOpenLiteSpeed))
+	if err != nil { t.Fatal(err) }
+	server := artifactContent(t, generation, native.ArtifactServer, "engine")
+	for _, directive := range []string{"\nuser cyberpanel-web\n", "\ngroup cyberpanel-web\n", "\ndisableWebAdmin 1\n"} {
+		if !strings.Contains(server, directive) { t.Fatalf("missing worker isolation directive %q", directive) }
+	}
+}
+
 func TestRenderDerivesUniqueVHostLSAPIAndTLSIdentityPerSite(t *testing.T) {
 	generation, err := New().Render(context.Background(), renderRequest(t, webengine.EditionOpenLiteSpeed))
 	if err != nil {

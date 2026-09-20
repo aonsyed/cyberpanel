@@ -102,6 +102,12 @@ type writerAuthorityRecovery interface {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == webactivation.StoppedProofMode {
+		if err := webactivation.RunStoppedProof(); err != nil {
+			log.Fatalf("native web stopped proof failed: %v", err)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "--mail-milter-access" {
 		if err := mail.PrepareNativeMilterAccess(os.Args[2]); err != nil {
 			log.Fatal("mail milter socket access failed")

@@ -7,8 +7,12 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const lswsControlPath = "/usr/local/lsws/bin/lswsctrl"
@@ -42,13 +46,87 @@ func (FixedRunner) CheckStopped(ctx context.Context) error {
 	if (values["ActiveState"] != "inactive" && values["ActiveState"] != "failed") || values["MainPID"] != "0" || values["ControlPID"] != "0" {
 		return errors.New("initial web activation requires a stopped service")
 	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	// The normal executor intentionally lacks ptrace authority. Grant only
+	// read/observe capabilities to this fixed, short-lived observer rather
+	// than broadening the long-lived mutation broker's privileges.
+	return exec.CommandContext(ctx, "/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--collect",
+		"--property=ProtectSystem=strict", "--property=ProtectHome=read-only",
+		"--property=PrivateNetwork=yes", "--property=NoNewPrivileges=yes",
+		"--property=RuntimeMaxSec=10s", "--property=CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH",
+		self, StoppedProofMode).Run()
+}
+
+const StoppedProofMode = "--webengine-stopped-proof"
+
+func RunStoppedProof() error {
+	if os.Geteuid() != 0 {
+		return errors.New("native process observation requires root")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return requireExecutableStopped(ctx, "/usr/local/lsws/bin/lshttpd")
+}
+
+// A daemon launched outside systemd has MainPID=0 in the unit. Inspect the
+// kernel's executable links as well; process titles and stale PID files are
+// not proof that the engine is stopped.
+func requireExecutableStopped(ctx context.Context, executable string) error {
+	wanted, err := os.Stat(executable)
+	if err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return err
+	}
+	processes, err := os.ReadDir("/proc")
+	if err != nil {
+		return err
+	}
+	for _, process := range processes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := strconv.ParseUint(process.Name(), 10, 32); err != nil {
+			continue
+		}
+		path := "/proc/" + process.Name() + "/exe"
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		target, err := os.Readlink(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if os.SameFile(wanted, info) || strings.TrimSuffix(target, " (deleted)") == resolved {
+			return errors.New("initial web activation found a running native engine outside stopped-service proof")
+		}
+	}
 	return nil
 }
 func (FixedRunner) ValidateInitial(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("bootstrap context required")
 	}
-	return exec.CommandContext(ctx, "/usr/local/lsws/bin/lshttpd", "-t").Run()
+	// Native OLS validation also runs its conf-permission repair. A transient
+	// service gives the parser a read-only view instead of allowing it to
+	// transfer panel-owned state back to the vendor WebAdmin account.
+	return exec.CommandContext(ctx, "/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--collect",
+		"--property=ReadOnlyPaths=/usr/local/lsws/conf /etc",
+		"--property=CapabilityBoundingSet=~CAP_SYS_ADMIN", "--property=PrivateTmp=yes",
+		"--property=RuntimeMaxSec=20s", "--property=TimeoutStopSec=5s",
+		"/usr/local/lsws/bin/lshttpd", "-t").Run()
 }
 func (FixedRunner) StartInitial(ctx context.Context) error {
 	if ctx == nil {
