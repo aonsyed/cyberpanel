@@ -158,5 +158,8 @@ func bootstrapControlRepositories(ctx context.Context, handle *sql.DB) (controlR
 	if err = repositories.Database.EnsureBootstrapResources(ctx, localInstance, localNetworkPolicy); err != nil {
 		return controlRepositories{}, fmt.Errorf("bootstrap local database resources: %w", err)
 	}
+	if err = bootstrapExecutionAdmission(ctx, handle); err != nil {
+		return controlRepositories{}, fmt.Errorf("bootstrap execution admission: %w", err)
+	}
 	return repositories, nil
 }

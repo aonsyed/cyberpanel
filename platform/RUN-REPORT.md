@@ -5,6 +5,42 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Core admission bootstrap precedes privileged startup effects — 2026-09-20
+
+Core now initializes the reboot repository and execution admission gate with its
+other repositories, before domain assembly can request privileged mail effects.
+The executor observes the core-owned schema before recovery and retries while
+the required bootstrap tables are absent. It never creates or repairs schema;
+invalid store ownership and recovery failures still fail closed. Table presence
+alone does not mark mutation admission ready: full startup recovery still must
+complete. Existing reboot gate closure and recovery logic are retained.
+
+QEMU tests for both command packages passed uncached. The core regression runs
+the real repository bootstrap twice and verifies the singleton admission row.
+Executor regression verifies repeated absent-schema observations create no
+tables, partial schema stays closed, complete schema becomes observable, the
+mutation wrapper remains closed before recovery, and invalid store validation
+is rejected. Both updated binaries built inside QEMU.
+
+Offloaded sequence 25–27 archives to the existing host run directory; all three
+SHA-256 values match recorded release hashes. Removed only those verified guest
+/var/tmp copies, recoverable from the host, freeing about 1.4 GiB. Installed
+generations, journals, trust and rollback state remain intact.
+
+Signed sequence 28 `qemu-admission-3.1.27` installed both corrected binaries;
+reconciliation passed. Bundle SHA-256
+`10eac057b8ebe915b776621805260326004e77e358624d46b1add704da224713`;
+manifest `fd0d55742ef4e202739d6224f4c22ec867cfa8550232c95655e82b336d38827a`;
+receipt `f933e5bcccc685fc189bcc19cc7a0a5ee883bbd3eed32820cb4915c69ac324bc`.
+Actual executor first logged admission-bootstrap pending, then retried after
+core initialization and progressed past the missing-schema failure. It remains
+closed because PowerDNS startup configuration now fails with daemon generation
+conflict. Core's mail activation therefore remains blocked; core restart loop
+was stopped. Investigate native PowerDNS config adoption and the failed startup
+effect's durable recovery before another restart, without deleting receipts or
+opening admission. Guest free space is 1.6 GiB; further bundles need safe storage
+recovery first. Full startup and product qualification remain incomplete.
+
 ### Shared systemd credential boundary for mail keys — 2026-09-20
 
 Moved the proven private credential validator into the existing secrets package,

@@ -687,10 +687,13 @@ func main() {
 	}
 }
 
-func reconcileStartupMutations(ctx context.Context, raw rebootcontrol.ExecutionAdmission, admission *startupMutationAdmission, managementHost *management.LinuxLifecycleHost, operationsExecutor *operations.LinuxOperationsExecutor, pdnsServer *dns.PowerDNSDaemonServer, identity startupRecoveryIdentity) {
+func reconcileStartupMutations(ctx context.Context, raw *rebootcontrol.SQLExecutionAdmission, admission *startupMutationAdmission, managementHost *management.LinuxLifecycleHost, operationsExecutor *operations.LinuxOperationsExecutor, pdnsServer *dns.PowerDNSDaemonServer, identity startupRecoveryIdentity) {
 	waitingForDrain := false
 	for {
-		err := completeStartupMutationRecovery(ctx, raw, managementHost, operationsExecutor, pdnsServer, identity)
+		err := startupAdmissionSchemaReady(ctx, raw)
+		if err == nil {
+			err = completeStartupMutationRecovery(ctx, raw, managementHost, operationsExecutor, pdnsServer, identity)
+		}
 		if err == nil {
 			admission.markReady()
 			log.Printf("privileged mutation admission is ready")
@@ -704,7 +707,7 @@ func reconcileStartupMutations(ctx context.Context, raw rebootcontrol.ExecutionA
 			return
 		}
 		if !waitingForDrain {
-			log.Printf("privileged mutation admission remains closed while reboot drain is active")
+			log.Printf("privileged mutation admission remains closed while core admission bootstrap or reboot drain is pending")
 			waitingForDrain = true
 		}
 		timer := time.NewTimer(15 * time.Second)

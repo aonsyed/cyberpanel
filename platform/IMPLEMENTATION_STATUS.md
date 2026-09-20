@@ -64,11 +64,13 @@ passes the database executor digest after sequence 25 adds validated managed
 release resolution. Sequence 26 shares the verified private credential boundary
 with webmail/campaign loaders; actual QEMU credential checks passed. Sequence 27
 declares webmail state; actual directories are cyberpanel-owned 0700. Startup
-now hits a dependency cycle: mail activation precedes core admission-schema
-initialization, while executor mutations require that schema and successful
-recovery. One executor restart confirmed the schema is still missing. Fix core
-initialization ordering and fail-closed recovery/readiness, not a root schema
-workaround. Core restart loop is stopped. Four verified sequence 21–24
+sequence 28 initializes core admission schema before domain startup and makes
+executor recovery wait for missing bootstrap tables. QEMU regression checks and
+installed startup confirm it passes the former missing-schema blocker. Executor
+now remains closed on a PowerDNS native configuration generation conflict;
+resolve config adoption and durable failed-effect recovery without bypassing
+admission or deleting receipts. Core restart loop is stopped. Guest has 1.6 GiB
+free; safely recover storage before more bundles. Verified sequence 21–27
 archives were moved to host storage, freeing about 1.9 GiB. Executor readiness and
 core/gateway startup are not yet proven.
 Continue startup and API/browser qualification. OLS remains held stopped until
