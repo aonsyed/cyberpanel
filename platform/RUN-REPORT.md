@@ -5,6 +5,52 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Complete PHP recipe input set — 2026-09-20
+
+Prepared the four remaining signed version-2 recipes inside Ubuntu ARM64 QEMU
+using the existing test authority `qemu-password-pair-20260919`, epoch 1.
+The existing WordPress 7.1 envelope remains in
+`/home/harness/application-inputs-20260920/wordpress-7.1.recipe.json`.
+The new envelopes/public key are in `/home/harness/php-inputs-20260920-v3`:
+
+| Recipe file | Product | Canonical payload SHA-256 |
+| --- | --- | --- |
+| `joomla.recipe.json` | Joomla 6.1.3 | `081d6fd64e7dcf6e2352c8359a759f216c479f21607fc131edf992161428301e` |
+| `mautic.recipe.json` | Mautic 7.2.0 | `5a9eb5475d2ce9c82f93acfa2eb95d24a2e04500a2364a3e213ca459ac992696` |
+| `prestashop.recipe.json` | PrestaShop 9.1.5, Classic distribution 9.1.5-5.0 | `e29e330578287fecc77b4fee1deb3ba0c0d02577c28381a92e140d9f2342e54c` |
+| `magento_open_source.recipe.json` | Magento 2.4.7-p10, dependency-updated candidate | `3a89a12fa5495246fb4de7d1effb656d2f8e4ea469ea6d92fe8842ae321ed204` |
+
+All four passed the production archive validator, signature verification and
+certified-definition contract checks. PHP is narrowed to 8.3; the declared
+OS/architecture/engine matrix is not an empirical qualification claim.
+Each recipe pins the already-tested rooted archive listed in prior sections.
+The new Joomla recipe supersedes both previous envelopes referencing the flat
+upstream archive. No private signing material was printed or copied to the host;
+the helper wipes its signing bytes after preparation and installs no trust key.
+
+Prepared archives are served by the unprivileged `qemu-php-inputs` fixture at
+`https://127.0.0.1:19443/<archive-sha256>.tar.gz`, only inside the guest. Every
+response was streamed and digest/size checked with certificate verification
+before signing. The exact-path allowlist serves only these four archives.
+The TLS certificate is local to the fixture (`fixture-tls.pem`), not a system
+trust addition; it expires after 24 hours and the service has a six-hour runtime
+cap. These URLs are temporary QEMU release inputs, not published production
+download locations. Offline installation consumes catalog bytes, not these URLs.
+
+The full component still requires signed n8n/Hermes recipes and their real image
+layers/runtime checks. A complete PHP input set is not a complete panel release.
+Built fresh QEMU Linux executables from source `2c9dfc833` with `-trimpath`:
+`/home/harness/bin/cyberpanel-2c9dfc833`, SHA-256
+`db1a1f9b004f738d7fbfaa146d486632a3348b0411bfe1ec508bfc07eff22800`, and
+`/home/harness/bin/application-release-2c9dfc833`, SHA-256
+`35d7711e3ecb3622e931ef41fb29342e99e1801efbc6d5cb0fd4520b3d38dc72`.
+The actual assembler read `/home/harness/application-release-input.json`,
+accepted the five persisted PHP recipes and archive layouts, then stopped at
+the absent `oci-inputs-20260920/n8n.recipe.json`. No component was emitted and
+assembly success is not claimed. The input JSON retains the real paths/digests
+for continuation. Public recipes/certificate/key were also copied to the host's
+existing QEMU run directory; the private authority key remains only in the guest.
+
 ### Offline WordPress archive path and real OCI metadata — 2026-09-20
 
 Release inspection found WordPress's install path still fetched its archive
