@@ -4611,3 +4611,53 @@ Installed58 unchanged and its three services active. Guest7.9GiB free. Remaining
 next step is browser file-picker/row-action integration and signed installed
 identity→upload→native import/audit qualification. No downloads, new workers,
 vendor builds/pins/patches, host project tests or binary artifacts committed.
+
+### Installed SQL/gzip file-picker import — 2026-09-21
+
+Added database row action and DatabaseUploadImport dialog; no SQL principal is
+required. The browser checks nonempty/64MiB bound and gzip magic, hashes source
+bytes, sends256KiB chunks, resumes from current native offset and verifies the
+final descriptor digest/size/compression. Empty-target preparation precedes typed
+confirmation and actual import. Submitted outcomes are inspected, not blindly
+rerun. Start-over discards unfinished uploads; finalized artifacts retain their
+expiry. UI explicitly states unsupported views/routines/triggers/events and no
+replacement. APIClient now optionally accepts a stable requestId because core
+idempotency binds the entire envelope, including that ID.
+
+QEMU npm run typecheck/build passed; existing large-chunk warning remains.
+Core, gateway and executor trimpath builds passed. All4 edited UI source hashes
+match host/guest. Signed installed59 is committed:
+manifest550cfb5b1837dc60d7539e7d182ac6d448eeb34bd2bc87f77f3d25dc0f190648;
+receipt574137b14855fa64795f4dc377ebf518c93b8f2e49ff1501b7b65c262b41d584;
+bundle SHA2567fe438e2d344d69232be1eb968973dd2e5ab19dab32ebba1f3232d488edc7a29.
+Actual core/gateway/execd process executable paths resolve into that manifest.
+
+Installed browser command, no candidate assets or mocked API data:
+`node /home/harness/qemu-passkey.cjs --file-import-live`.
+Real passkey login and existing SQL-console regression passed. Disposable target
+databases were created through the authenticated API without principals. Ordinary
+SQL contained a large inert comment and two text/NULL/BLOB rows; SQL used3 chunks
+at1440px, gzip2 chunks at390px. Empty file submission disabled; wrong confirmation
+disabled. Begin201, status/chunks/finish/prepare200, wrong-site status403,
+run200/completed, persisted inspection200 and native row equality passed.
+Dialog overflow checks passed at both viewports.
+
+For SQL, the test deliberately discarded the successful begin response before
+the browser received it (real server mutation, no mocked response data), then
+clicked retry. Identical request/idempotency identities recovered the original
+upload and completed it. SQLite audit shows exactly one begin per upload,3/2
+chunk mutations, allowed status and applied finish, plus3 correctly scoped import
+events per job. Durable intent digest, immutable job upload source, promotion
+receipt and generation3 deleted database resource verified. Audit contains no
+SQL payload. Protected artifact descriptors and raw SHA256 matched the original
+uploaded file bytes before cleanup.
+
+Both destination databases were removed through the API and native absence
+checked. Removed the two individually verified disposable uploaded payload
+directories; upload store now contains only .upload-lock. Audit/intents/jobs
+remain as evidence. Redundant guest bundle removed after host/guest checksum
+match; host ignored copy retained. Guest7.1GiB free. Credential version1/binding
+unchanged; approved and installed executor digest9cdeef3c792e89f60f1ba3ad2961fb9b63fe4566ea5d64f0516a8c0f06d6e648
+match. No vendor changes, downloads, new workers, host tests or Git binaries.
+Remaining import parity: replacement/restorepoints, SQL objects, long-running
+jobs and recovery; broader panel journeys/matrix are also unfinished.

@@ -11,7 +11,34 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
-## Current recovery point — 2026-09-21 (installed58 committed)
+## Current recovery point — 2026-09-21 (installed59 committed)
+
+SQL/gzip file upload UI is installed and qualified end-to-end. Database row
+action opens a file picker without requiring a SQL principal. It checks size
+and gzip signature, hashes bytes, uploads256KiB chunks with stable request AND
+idempotency identities, resumes from native status, checks finalized SHA256,
+prepares the empty destination, requires typed confirmation, then runs/inspects
+the import. Start over discards unfinished bytes; finalized artifacts expire.
+UI accurately states current table-only, empty-destination,64MiB limits.
+
+QEMU UI typecheck/build and all3 binary builds passed. Installed59 browser tests
+passed SQL(3 chunks,1440px) and gzip(2 chunks,390px), including empty-file refusal,
+wrong confirmation, wrong-site403, native text/NULL/BLOB data and job inspection.
+Deliberately lost begin response recovered via identical request/idempotency
+identity; persisted audit proves one allocation. Real upload/import audits,
+durable intents/jobs, promotion and deleted generation3 database projections
+verified. Both disposable destination databases and both verified uploaded
+payload directories removed; upload store contains only its lock. Guest7.1GiB
+free after removing duplicate install bundle (host SHA256-matched copy retained).
+
+Manifest550cfb5b1837dc60d7539e7d182ac6d448eeb34bd2bc87f77f3d25dc0f190648
+is committed; all3 process executables verified. Credential version1 and original
+binding preserved; approved/installed executor9cdeef3c792e89f60f1ba3ad2961fb9b63fe4566ea5d64f0516a8c0f06d6e648
+match. No vendor changes/downloads/new workers. Next: remaining import parity
+(replacement/restorepoints, SQL objects, long-running jobs and recovery), plus
+the other unfinished whole-panel journeys/matrix. Full parity is NOT complete.
+
+## Previous recovery point — source wiring before installed59
 
 Upload broker/API wiring now implemented in source (NOT installed58):
 database.upload.begin accepts database_id/compression/bytes/digest and returns

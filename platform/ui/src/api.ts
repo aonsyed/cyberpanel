@@ -39,8 +39,8 @@ export class APIClient {
   operation(name: string): OperationDescription | undefined { return this.catalog.get(name); }
   available(name: string): boolean { return this.catalog.has(name); }
 
-  async invoke<T>(operation: string, options: { tenantId?: string | undefined; resourceId?: string | undefined; expectedGeneration?: number | undefined; payload?: unknown; idempotencyKey?: string; signal?: AbortSignal | undefined } = {}): Promise<ResponseEnvelope<T>> {
-    const requestID = opaqueID("req");
+  async invoke<T>(operation: string, options: { tenantId?: string | undefined; resourceId?: string | undefined; expectedGeneration?: number | undefined; payload?: unknown; idempotencyKey?: string; requestId?: string; signal?: AbortSignal | undefined } = {}): Promise<ResponseEnvelope<T>> {
+    const requestID = options.requestId || opaqueID("req");
     const description = this.catalog.get(operation);
     if (!description) throw new Error(`Operation ${operation} is not available on this node.`);
     const headers = new Headers({ "Content-Type": "application/json", Accept: "application/json", "X-Request-ID": requestID });
