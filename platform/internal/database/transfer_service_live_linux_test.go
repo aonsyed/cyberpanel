@@ -108,6 +108,9 @@ func verifyServiceNativeImport(t *testing.T, ctx context.Context, executor *Linu
 	if err = executor.writeResource("databases", live.ID, live); err != nil {
 		t.Fatal(err)
 	}
+	if job.UploadSource != nil {
+		verifyNativeUploadBroker(t, ctx, client, *job.UploadSource)
+	}
 	control, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "service-control.db"))
 	if err != nil {
 		t.Fatal(err)

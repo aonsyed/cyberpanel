@@ -200,9 +200,18 @@ func TestTransferUploadCapacityDiscardAndExpiredReclamation(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		candidate := intent
 		candidate.ID, _ = NewResourceID(fmt.Sprintf("bounded-upload-%d", i))
+		candidate.TenantID, _ = site.NewTenantID(fmt.Sprintf("bounded-tenant-%d", i/4))
 		candidate, _ = SealTransferUploadIntent(candidate)
 		if _, err := store.Begin(ctx, candidate); err != nil {
 			t.Fatal("bounded upload", i, err)
+		}
+		if i == 3 {
+			extra := candidate
+			extra.ID, _ = NewResourceID("scoped-excess")
+			extra, _ = SealTransferUploadIntent(extra)
+			if _, err := store.Begin(ctx, extra); !errors.Is(err, ErrTransferLimit) {
+				t.Fatal("tenant admission unbounded", err)
+			}
 		}
 	}
 	if _, err := store.Begin(ctx, intent); !errors.Is(err, ErrTransferLimit) {
@@ -229,5 +238,44 @@ func TestTransferUploadCapacityDiscardAndExpiredReclamation(t *testing.T) {
 	entries, err := os.ReadDir(store.artifacts.root)
 	if err != nil || len(entries) != 1 || entries[0].Name() != ".upload-lock" {
 		t.Fatalf("pending bytes leaked: %d %v", len(entries), err)
+	}
+}
+
+func TestTransferUploadIdleRetention(t *testing.T) {
+	store, intent, data := uploadFixture(t, TransferCompressionNone)
+	ctx := context.Background()
+	if _, err := store.Begin(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, intent, 0, data[:3]); err != nil {
+		t.Fatal(err)
+	}
+	finished := intent
+	finished.ID, _ = NewResourceID("finished-upload")
+	finished, _ = SealTransferUploadIntent(finished)
+	if _, err := store.Begin(ctx, finished); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, finished, 0, data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Finish(ctx, finished); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := store.CollectExpired(ctx, 64); err != nil || count != 0 {
+		t.Fatal("live upload removed", count, err)
+	}
+	store.artifacts.now = func() time.Time { return intent.ExpiresAt.Add(time.Second) }
+	for i := 0; i < 2; i++ {
+		if count, err := store.CollectExpired(ctx, 1); err != nil || count != 1 {
+			t.Fatal("expired pending/published bytes not collected", count, err)
+		}
+	}
+	if count, err := store.CollectExpired(ctx, 64); err != nil || count != 0 {
+		t.Fatal("retention replay", count, err)
+	}
+	entries, err := os.ReadDir(store.artifacts.root)
+	if err != nil || len(entries) != 1 || entries[0].Name() != ".upload-lock" {
+		t.Fatal("expired upload bytes leaked", err)
 	}
 }

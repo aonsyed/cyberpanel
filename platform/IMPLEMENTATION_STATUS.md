@@ -13,6 +13,28 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — 2026-09-21 (installed58 committed)
 
+Upload broker/API wiring now implemented in source (NOT installed58):
+database.upload.begin accepts database_id/compression/bytes/digest and returns
+{intent,state}; chunk/status/finish/discard accept intent plus chunk offset/data
+(base64 JSON bytes). All require database:manage, MFA, site scope and destination
+generation. Actor/tenant/site/generation are rechecked in the domain; native
+executor rechecks the owned ready local destination. Status is read-only/fresh;
+other operations use mutation admission. Uploads are bounded4 pending per tenant,
+32 globally. Creation persists its sealed intent before native allocation, so
+ambiguous-response retry preserves timestamp/expiry/artifact identity. Audit
+stores digest/scope/offset, never SQL bytes. Import prepare accepts mutually
+exclusive source_export/upload_source and verifies finalized upload metadata.
+
+Existing daemon retention loop now collects expired pending and published
+uploads at startup/hourly. QEMU four-package suites passed, including live broker
+begin/chunk/replay/fresh status/finish/discard, native tenant rejection, ordinary
+SQL/gzip import, HTTP policy fixtures, durable intent retry and idle retention.
+Installed58 services remain active and unchanged; guest7.9GiB free. NEXT: row
+action/file-picker UI (no SQL principal required), then build/install updated
+core+gateway+execd/UI and qualify real identity→browser upload→native import,
+audit and cleanup. HTTP tests use explicit auth/domain fixtures, not installed
+upload proof. No downloads/vendor changes/new workers.
+
 Upload source/storage/native execution implemented in source after installed58:
 TransferUploadIntent seals tenant/site/destination generation/actor, SQL/gzip,
 size/hash and expiry. Root-private upload storage supports256KiB chunks up to

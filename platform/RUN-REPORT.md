@@ -4570,3 +4570,44 @@ Guest8.1GiB free after tests; installed58 services active and unchanged.
 No downloads/vendor builds/pins/patches, new workers or host tests.
 Remaining: upload broker dispatch/HTTP authorization and per-scope admission,
 prepare/run API support, periodic retention and browser file-picker integration.
+
+### Upload broker/API, durable intent retries and retention — 2026-09-21
+
+Added closed transfer_upload broker operation with begin/chunk/status/finish/
+discard actions, bounded framing, typed receipts and per-upload mutation
+admission. Status is uncached read-only observation; each native operation
+rechecks the destination's tenant/site/generation and local-ready instance.
+Upload storage now bounds4 pending intents per tenant in addition to32 total.
+Daemon startup/hourly maintenance collects expired pending and published bytes;
+it does not initialize an unused store and serializes with active uploads.
+
+Added database.upload.begin/chunk/status/finish/discard HTTP contracts, all
+database:manage + MFA + site scope. Domain execution rechecks identity, actor,
+tenant/site/database generation and target readiness. Begin persists server-issued
+intent in database_upload_intents_v1 before allocation; retries retain original
+timestamps/expiry/digest and reject changed content under the same identity.
+Only metadata/digests/offsets enter upload audit events. Existing import prepare
+accepts one of source_export/upload_source and verifies finalized upload status
+before constructing its bound import job. No new vendor component or package.
+
+QEMU-only validation:
+`CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off GOTOOLCHAIN=local go test -p 2 ./internal/database ./internal/apiserver ./cmd/cyberpanel ./cmd/panel-execd -count=1`
+All four passed. Real broker/native tests cover17-byte chunks, exact chunk and
+finish replay, fresh progress per chunk, finalized artifact status, discard and
+foreign-tenant refusal, in addition to SQL/gzip isolated import/promotion.
+Closed-frame tests reject mixed request/response payloads, excess offsets and
+unknown actions. Admission tests cover tenant and global caps. Idle retention
+preserves live data and removes expired pending/published data with bounded,
+repeatable collection.
+
+HTTP tests drive a real listening core with explicit signature/auth/domain
+fixtures: registration/mutation semantics, action binding, actor/site propagation,
+unknown actor fields, oversized/beyond-end chunks, anonymous/missing-scope,
+denied and password-only requests. SQLite retry tests preserve initial upload
+intent and refuse changed byte count; domain scope checks reject different actor,
+tenant/site and generation. These are NOT installed identity/upload proof.
+
+Installed58 unchanged and its three services active. Guest7.9GiB free. Remaining
+next step is browser file-picker/row-action integration and signed installed
+identity→upload→native import/audit qualification. No downloads, new workers,
+vendor builds/pins/patches, host project tests or binary artifacts committed.

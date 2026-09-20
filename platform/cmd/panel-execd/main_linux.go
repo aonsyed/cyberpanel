@@ -864,6 +864,10 @@ func collectDatabaseExports(ctx context.Context, executor *database.LinuxMariaDB
 		} else if collected > 0 {
 			log.Printf("collected %d expired database exports", collected)
 		}
+		sweep,cancel=context.WithTimeout(ctx,time.Minute)
+		collected,err=executor.CollectExpiredUploads(sweep,64)
+		cancel()
+		if err!=nil{log.Printf("collect expired database uploads: %v",err)}else if collected>0{log.Printf("collected %d expired database uploads",collected)}
 		select {
 		case <-ctx.Done():
 			return

@@ -37,6 +37,7 @@ const (
 	BrokerMariaDBHA         BrokerOperation = "mariadb_ha"
 	BrokerMigrationRestore BrokerOperation = "migration_restore"
 	BrokerTransferImport BrokerOperation = "transfer_import"
+	BrokerTransferUpload BrokerOperation = "transfer_upload"
 )
 
 type MariaDBHAAction string
@@ -89,6 +90,7 @@ type WorkspaceBrokerRequest struct {
 }
 
 type BrokerRequest struct {
+	TransferUpload *TransferUploadRequest `json:"transfer_upload,omitempty"`
 	TransferImport *TransferImportRequest `json:"transfer_import,omitempty"`
 	Version      uint32               `json:"version"`
 	RequestID    string               `json:"request_id"`
@@ -105,6 +107,7 @@ type BrokerRequest struct {
 }
 
 type BrokerResponse struct {
+	TransferUpload *TransferUploadResult `json:"transfer_upload,omitempty"`
 	TransferImport *TransferImportResult `json:"transfer_import,omitempty"`
 	Version      uint32                `json:"version"`
 	RequestID    string                `json:"request_id"`
@@ -122,6 +125,7 @@ type BrokerResponse struct {
 }
 
 func (request BrokerRequest) validate(now time.Time) error {
+	if request.Operation!=BrokerTransferUpload && request.TransferUpload!=nil{return ErrInvalidCommand}
 	if request.Operation!=BrokerTransferImport && request.TransferImport!=nil{return ErrInvalidCommand}
 	if request.Operation!=BrokerWorkspaceExportRead && request.WorkspaceExportRead!=nil{return ErrInvalidCommand}
 	if request.Operation!=BrokerWorkspaceExport && request.WorkspaceExport!=nil{return ErrInvalidCommand}
@@ -131,6 +135,8 @@ func (request BrokerRequest) validate(now time.Time) error {
 		return ErrInvalidCommand
 	}
 	switch request.Operation {
+	case BrokerTransferUpload:
+		if request.Effect!=nil || request.Compensation!=nil || request.Workspace!=nil || request.MariaDBHA!=nil || request.TransferUpload==nil || request.TransferUpload.Validate()!=nil{return ErrInvalidCommand}
 	case BrokerTransferImport:
 		if request.Effect!=nil || request.Compensation!=nil || request.Workspace!=nil || request.MariaDBHA!=nil || request.TransferImport==nil || request.TransferImport.validate()!=nil{return ErrInvalidCommand}
 	case BrokerWorkspaceExportRead:
@@ -173,6 +179,7 @@ func (request BrokerRequest) validate(now time.Time) error {
 }
 
 func (response BrokerResponse) validate(request BrokerRequest) error {
+	if request.Operation!=BrokerTransferUpload && response.TransferUpload!=nil{return ErrInvalidReceipt}
 	if request.Operation!=BrokerTransferImport && response.TransferImport!=nil{return ErrInvalidReceipt}
 	if request.Operation!=BrokerWorkspaceExportRead && response.ExportChunk!=nil{return ErrInvalidReceipt}
 	if request.Operation!=BrokerWorkspaceExport && response.Export!=nil{return ErrInvalidReceipt}
@@ -182,6 +189,7 @@ func (response BrokerResponse) validate(request BrokerRequest) error {
 		return ErrInvalidReceipt
 	}
 	if response.FailureCode != "" {
+		if response.TransferUpload!=nil{return ErrInvalidReceipt}
 		if response.TransferImport!=nil{return ErrInvalidReceipt}
 		if response.ExportChunk!=nil{return ErrInvalidReceipt}
 		if response.Export!=nil{return ErrInvalidReceipt}
@@ -191,6 +199,8 @@ func (response BrokerResponse) validate(request BrokerRequest) error {
 		return nil
 	}
 	switch request.Operation {
+	case BrokerTransferUpload:
+		if response.Effect!=nil || response.Compensation!=nil || response.Metadata!=nil || response.Query!=nil || response.MariaDBHA!=nil || response.TransferUpload==nil || request.TransferUpload==nil || !response.TransferUpload.matches(*request.TransferUpload){return ErrInvalidReceipt};return nil
 	case BrokerTransferImport:
 		if response.Effect!=nil || response.Compensation!=nil || response.Metadata!=nil || response.Query!=nil || response.MariaDBHA!=nil || response.TransferImport==nil || request.TransferImport==nil || !response.TransferImport.matches(*request.TransferImport){return ErrInvalidReceipt};return nil
 	case BrokerWorkspaceExportRead:
@@ -647,12 +657,15 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 	// rechecks that proof under writer admission; observation must not cache a
 	// stale proof or poison the mutation journal on a premature request.
 	if request.Operation==BrokerTransferImport && (request.TransferImport.Action=="verify" || request.TransferImport.Action=="preview") { mutation=false }
+	if request.Operation==BrokerTransferUpload && request.TransferUpload.Action=="status" { mutation=false }
 	if request.Operation==BrokerMariaDBHA && request.MariaDBHA.Action==MariaDBHAObserve { mutation=false }
 	var lease rebootcontrol.ExecutionLease
 	if mutation {
 		if server.Admission==nil{return}
 		binding:=rebootcontrol.ExecutionBinding{Boundary:"database",Method:string(request.Operation),Caller:"authenticated-panel-core"}
 		switch request.Operation {
+		case BrokerTransferUpload:
+			binding.RequestDigest=rebootcontrol.ExecutionDigest(request.TransferUpload);binding.EffectID="transfer-upload:"+binding.RequestDigest;binding.Resource=rebootcontrol.ExecutionResource(struct{Tenant,Site,Database,Upload string}{request.TransferUpload.Intent.TenantID.String(),request.TransferUpload.Intent.SiteID.String(),request.TransferUpload.Intent.DatabaseID.String(),request.TransferUpload.Intent.ID.String()})
 		case BrokerTransferImport:
 			binding.RequestDigest=rebootcontrol.ExecutionDigest(request.TransferImport);binding.EffectID="transfer-import:"+binding.RequestDigest;binding.Resource=rebootcontrol.ExecutionResource(struct{Tenant,Site,Database,Job string}{request.TransferImport.Job.TenantID.String(),request.TransferImport.Job.SiteID.String(),request.TransferImport.Job.DatabaseID.String(),request.TransferImport.Job.ID.String()})
 		case BrokerWorkspaceExport:
@@ -688,6 +701,12 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 	response := BrokerResponse{Version: DatabaseBrokerProtocolVersion, RequestID: request.RequestID, Operation: request.Operation}
 	var err error
 	switch request.Operation {
+	case BrokerTransferUpload:
+		uploader,ok:=server.Executor.(TransferUploadExecutor)
+		if !ok{err=ErrInvalidCommand;break}
+		var result TransferUploadResult
+		result,err=uploader.ExecuteTransferUpload(ctx,*request.TransferUpload)
+		if err==nil && result.matches(*request.TransferUpload){response.TransferUpload=&result}
 	case BrokerTransferImport:
 		importer,ok:=server.Executor.(TransferImportExecutor)
 		if !ok{err=ErrInvalidCommand;break}
@@ -800,12 +819,13 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		}
 		if err == nil && validateMariaDBHAResult(*request.MariaDBHA, result) == nil { response.MariaDBHA = &result }
 	}
-	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil && response.InstanceStatus == nil && response.MariaDBHA == nil && response.MigrationRestore == nil && response.Export==nil && response.ExportChunk==nil && response.TransferImport==nil {
+	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil && response.InstanceStatus == nil && response.MariaDBHA == nil && response.MigrationRestore == nil && response.Export==nil && response.ExportChunk==nil && response.TransferImport==nil && response.TransferUpload==nil {
 		response.FailureCode = classifyBrokerFailure(err)
 	}
 	if response.validate(request)!=nil{return}
 	if mutation {
 		terminal:=err==nil && response.Query!=nil
+		if response.TransferUpload!=nil{terminal=err==nil}
 		if response.TransferImport!=nil{terminal=err==nil}
 		if response.Export!=nil{terminal=err==nil}
 		if response.Effect!=nil{terminal=response.Effect.Outcome==EffectConfirmed || response.Effect.Outcome==EffectRejected && !response.Effect.MutationObserved}

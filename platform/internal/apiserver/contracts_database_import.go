@@ -10,7 +10,8 @@ import (
 
 type DatabaseImportPreparePayload struct {
 	DatabaseID   database.ResourceID                 `json:"database_id"`
-	SourceExport database.TransferJob                `json:"source_export"`
+	SourceExport *database.TransferJob               `json:"source_export,omitempty"`
+	UploadSource *database.TransferUploadIntent      `json:"upload_source,omitempty"`
 	Artifact     database.TransferArtifactDescriptor `json:"artifact"`
 }
 type DatabaseImportRunPayload struct {
@@ -21,17 +22,20 @@ type DatabaseImportInspectPayload struct {
 }
 
 func registerDatabaseImportContracts(registry *Registry) error {
+	if err := registerDatabaseUploadContracts(registry); err != nil {
+		return err
+	}
 	for _, op := range []Operation{
 		{Name: "database.import.prepare", NewPayload: func() any { return &DatabaseImportPreparePayload{} }, ValidatePayload: func(v any) error {
 			p := v.(*DatabaseImportPreparePayload)
-			if p.DatabaseID.IsZero() || p.SourceExport.Validate() != nil || p.SourceExport.Direction != database.TransferExport || p.Artifact.Validate() != nil {
+			if p.DatabaseID.IsZero() || p.Artifact.Validate() != nil || (p.SourceExport == nil) == (p.UploadSource == nil) || p.SourceExport != nil && (p.SourceExport.Validate() != nil || p.SourceExport.Direction != database.TransferExport) || p.UploadSource != nil && p.UploadSource.Validate() != nil {
 				return ErrInvalidRequest
 			}
 			return nil
 		}},
 		{Name: "database.import.run", Mutating: true, NewPayload: func() any { return &DatabaseImportRunPayload{} }, ValidatePayload: func(v any) error {
 			p := v.(*DatabaseImportRunPayload)
-			if p.Job.Validate() != nil || p.Job.Direction != database.TransferImport || p.Job.ExportSource == nil || p.Job.ConflictPolicy != database.TransferConflictFail {
+			if p.Job.Validate() != nil || p.Job.Direction != database.TransferImport || (p.Job.ExportSource == nil && p.Job.UploadSource == nil) || p.Job.ConflictPolicy != database.TransferConflictFail {
 				return ErrInvalidRequest
 			}
 			return nil
@@ -57,6 +61,9 @@ func registerDatabaseImportContracts(registry *Registry) error {
 }
 
 func bindDatabaseImportContracts(registry *Registry, services DomainServices) error {
+	if err := bindDatabaseUploadContracts(registry, services); err != nil {
+		return err
+	}
 	service := services.DatabaseTransfers
 	if service == nil {
 		return nil

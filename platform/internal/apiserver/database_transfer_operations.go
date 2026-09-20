@@ -26,6 +26,7 @@ type DatabaseTransferService interface {
 }
 
 type DatabaseTransferOperations struct {
+	control     *sql.DB
 	repository  *database.SQLRepository
 	jobs        *database.SQLiteTransferRepository
 	coordinator database.Coordinator
@@ -45,7 +46,10 @@ func NewDatabaseTransferOperations(ctx context.Context, db *sql.DB, repository *
 	if err = jobs.BootstrapTransfers(ctx); err != nil {
 		return nil, err
 	}
-	return &DatabaseTransferOperations{repository: repository, jobs: jobs, coordinator: coordinator, sites: sites, identity: identityService, audit: writer}, nil
+	if err = bootstrapDatabaseUploadIntents(ctx, db); err != nil {
+		return nil, err
+	}
+	return &DatabaseTransferOperations{control: db, repository: repository, jobs: jobs, coordinator: coordinator, sites: sites, identity: identityService, audit: writer}, nil
 }
 
 func (operations *DatabaseTransferOperations) PrepareDatabaseImport(ctx context.Context, inv Invocation, p DatabaseImportPreparePayload) (database.TransferJob, error) {
@@ -78,7 +82,23 @@ func (operations *DatabaseTransferOperations) PrepareDatabaseImport(ctx context.
 	if target.Status.Lifecycle != database.LifecycleReady || target.Status.Health != database.HealthHealthy || target.Status.Reconciliation != database.ReconciliationInSync {
 		return database.TransferJob{}, database.ErrUnavailable
 	}
-	job := database.TransferJob{ID: id, IdempotencyKey: command, TenantID: tenant, SiteID: siteID, DatabaseID: target.ID, DatabaseGeneration: target.Generation, InstanceID: target.InstanceID, Direction: database.TransferImport, Format: p.Artifact.Format, Compression: p.Artifact.Compression, Source: &p.Artifact, ExportSource: &p.SourceExport, Selection: p.SourceExport.Selection, Limits: database.TransferLimits{MaximumBytes: 64 << 20, MaximumRows: 1_000_000, MaximumDuration: 90 * time.Second}, ConflictPolicy: database.TransferConflictFail, Retention: database.TransferRetention{RetainUntil: p.Artifact.ExpiresAt}, CreatedBy: inv.Actor.PrincipalID.String(), CreatedAt: now, Impact: database.SealTransferImpactPreview(database.TransferImpactPreview{DatabaseID: target.ID, DatabaseGeneration: target.Generation, CapturedAt: now})}
+	selection := database.TransferSelection{Schema: true, Data: true}
+	if p.SourceExport != nil {
+		selection = p.SourceExport.Selection
+	}
+	if p.UploadSource != nil {
+		if err = operations.authorizeUpload(ctx, inv, *p.UploadSource); err != nil {
+			return database.TransferJob{}, err
+		}
+		verified, verifyErr := operations.coordinator.ExecuteTransferUpload(ctx, database.TransferUploadRequest{Action: "status", Intent: *p.UploadSource})
+		if verifyErr != nil {
+			return database.TransferJob{}, verifyErr
+		}
+		if verified.Artifact == nil || *verified.Artifact != p.Artifact {
+			return database.TransferJob{}, database.ErrTransferStale
+		}
+	}
+	job := database.TransferJob{ID: id, IdempotencyKey: command, TenantID: tenant, SiteID: siteID, DatabaseID: target.ID, DatabaseGeneration: target.Generation, InstanceID: target.InstanceID, Direction: database.TransferImport, Format: p.Artifact.Format, Compression: p.Artifact.Compression, Source: &p.Artifact, ExportSource: p.SourceExport, UploadSource: p.UploadSource, Selection: selection, Limits: database.TransferLimits{MaximumBytes: 64 << 20, MaximumRows: 1_000_000, MaximumDuration: 90 * time.Second}, ConflictPolicy: database.TransferConflictFail, Retention: database.TransferRetention{RetainUntil: p.Artifact.ExpiresAt}, CreatedBy: inv.Actor.PrincipalID.String(), CreatedAt: now, Impact: database.SealTransferImpactPreview(database.TransferImpactPreview{DatabaseID: target.ID, DatabaseGeneration: target.Generation, CapturedAt: now})}
 	job, err = database.SealTransferJob(job)
 	if err != nil {
 		return database.TransferJob{}, err
@@ -103,7 +123,7 @@ func databaseImportIdentity(inv Invocation) (database.ResourceID, string) {
 }
 
 func (operations *DatabaseTransferOperations) service(inv Invocation, job database.TransferJob) (database.TransferService, error) {
-	if job.Validate() != nil || job.Direction != database.TransferImport || job.ExportSource == nil || job.TenantID.String() != inv.Request.TenantID || job.SiteID.String() != inv.Request.ResourceID || job.Limits.MaximumBytes > 64<<20 || job.Limits.MaximumRows > 1_000_000 || job.Limits.MaximumDuration > 90*time.Second {
+	if job.Validate() != nil || job.Direction != database.TransferImport || (job.ExportSource == nil && job.UploadSource == nil) || job.TenantID.String() != inv.Request.TenantID || job.SiteID.String() != inv.Request.ResourceID || job.Limits.MaximumBytes > 64<<20 || job.Limits.MaximumRows > 1_000_000 || job.Limits.MaximumDuration > 90*time.Second {
 		return database.TransferService{}, database.ErrUnauthorized
 	}
 	execution, err := database.NewBrokerImportExecution(operations.coordinator, job)

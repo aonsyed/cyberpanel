@@ -40,6 +40,16 @@ func (store *LinuxTransferUploadStore) locked(ctx context.Context, intent Transf
 	if !store.artifacts.now().Before(intent.ExpiresAt) || store.artifacts.now().Before(intent.CreatedAt) {
 		return ErrTransferStale
 	}
+	return store.withLock(ctx, func() error { return operation(filepath.Join(store.artifacts.root, ".upload-"+intent.Digest)) })
+}
+
+func (store *LinuxTransferUploadStore) withLock(ctx context.Context, operation func() error) error {
+	if store == nil || store.artifacts == nil || ctx == nil {
+		return ErrTransferInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := verifyPrivateTransferDirectory(store.artifacts.root); err != nil {
 		return err
 	}
@@ -61,7 +71,7 @@ func (store *LinuxTransferUploadStore) locked(ctx context.Context, intent Transf
 		return ErrConflict
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	return operation(filepath.Join(store.artifacts.root, ".upload-"+intent.Digest))
+	return operation()
 }
 
 func (store *LinuxTransferUploadStore) Begin(ctx context.Context, intent TransferUploadIntent) (offset uint64, err error) {
@@ -106,7 +116,7 @@ func (store *LinuxTransferUploadStore) Begin(ctx context.Context, intent Transfe
 		if e != nil {
 			return e
 		}
-		pending := 0
+		pending, scoped := 0, 0
 		for _, entry := range entries {
 			if len(entry.Name()) > 8 && entry.Name()[:8] == ".upload-" && validSHA256(entry.Name()[8:]) {
 				staleDirectory := filepath.Join(store.artifacts.root, entry.Name())
@@ -133,9 +143,12 @@ func (store *LinuxTransferUploadStore) Begin(ctx context.Context, intent Transfe
 					continue
 				}
 				pending++
+				if previous.TenantID == intent.TenantID {
+					scoped++
+				}
 			}
 		}
-		if pending >= 32 {
+		if pending >= 32 || scoped >= 4 {
 			return ErrTransferLimit
 		}
 		if e = os.Mkdir(directory, 0700); e != nil {
@@ -165,6 +178,40 @@ func (store *LinuxTransferUploadStore) Begin(ctx context.Context, intent Transfe
 			return e
 		}
 		committed = true
+		return nil
+	})
+	return
+}
+
+func (store *LinuxTransferUploadStore) Status(ctx context.Context, intent TransferUploadIntent) (offset uint64, artifact *TransferArtifactDescriptor, err error) {
+	err = store.locked(ctx, intent, func(directory string) error {
+		reader, e := store.artifacts.OpenTransferArtifact(ctx, intent.ArtifactIdentity())
+		if e == nil {
+			descriptor := reader.Descriptor()
+			e = reader.Close()
+			if e != nil {
+				return e
+			}
+			if !intent.matchesArtifact(descriptor) {
+				return ErrConflict
+			}
+			artifact = &descriptor
+			offset = descriptor.Bytes
+			return nil
+		}
+		if !os.IsNotExist(e) {
+			return e
+		}
+		file, e := store.open(directory, intent, false)
+		if e != nil {
+			return e
+		}
+		defer file.Close()
+		info, e := file.Stat()
+		if e != nil {
+			return e
+		}
+		offset = uint64(info.Size())
 		return nil
 	})
 	return
