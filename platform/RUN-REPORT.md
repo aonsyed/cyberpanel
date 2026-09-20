@@ -5,6 +5,24 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Whole-source build and installed mail/DNS checkpoint — 2026-09-21
+
+Git archive of 6d76bc266 synchronized into existing Ubuntu ARM64 QEMU guest.
+Root/offline Go with TMPDIR=/root and existing guest caches ran
+`go test -p 2 ./... -count=1` followed by `go build -p 2 ./...`; combined exit0.
+Native opt-in environment flags were absent, so gated native cases skip; packages
+without test files establish compilation only.
+
+Then CYBERPANEL_QEMU_INSTALLED_SMTP=1 and CYBERPANEL_QEMU_PDNS_RUNNING=1 enabled
+`go test ./internal/mail ./internal/dns -run
+'TestQEMU(InstalledSMTP|PowerDNSNativeHealthProbe)$' -count=1 -v`.
+Both pass (0.201s and 0.012s). SMTP checks active Postfix/Dovecot/Rspamd/OpenDKIM/
+ClamAV/mail-Redis, native TLS465, and STARTTLS25/587 AUTH gating. The fixture
+permits the bootstrap certificate; no public trust or message delivery claim.
+PowerDNS exercises the native health probe, not a zone provisioning journey.
+Installed63 remains unchanged. No downloads or native package changes. Guest
+free space after checks3.2GiB; host218GiB before run.
+
 ### Native latin1 view import — source, 2026-09-21
 
 New real MariaDB dump fixture failed before loading with unsafe-SQL rejection:

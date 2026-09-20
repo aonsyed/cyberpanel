@@ -4,6 +4,18 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+## Whole-source and installed service checkpoint — 2026-09-21
+
+Source 6d76bc266: offline QEMU Ubuntu ARM64 `go test -p 2 ./... -count=1`
+and `go build -p 2 ./...` both exit0. Native opt-in tests were not enabled in
+that whole-suite run; packages reporting no test files are build evidence only.
+Separate installed-service checks pass: all six mail units active, SMTPS465
+handshake/EHLO/QUIT, STARTTLS25/587 with AUTH absent before TLS and present after,
+and the real PowerDNS native health probe. Bootstrap certificate verification is
+explicitly disabled in the SMTP fixture; this is not public certificate trust,
+mailbox login/message delivery, DNS-record publication or full UI qualification.
+Installed63 unchanged. Guest free3.2GiB, host218GiB; no new downloads or packages.
+
 ## Native dependency ownership boundary — user correction 2026-09-20
 
 Use normal vendor/distribution OLS/LSE and related packages, following the native
