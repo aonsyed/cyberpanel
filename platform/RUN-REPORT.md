@@ -5,6 +5,47 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native mail access, scan boundary and executor sandbox — 2026-09-20
+
+Added root-controlled POSIX ACL grants for the six native mail identities:
+traverse-only authority roots, read/traverse only each daemon's own role tree,
+and narrowly scoped Postfix access to the fallback TLS pair. Native QEMU checks
+verify own-config reads, cross-role/list/write denials, preserved generation
+digests, replay, and rejection of unsafe ancestors, symlinks and hardlinks.
+
+Installed ClamAV's declared Unix scan socket and scoped supplemental group access
+for core/Rspamd, plus an additive local AppArmor rule (not profile disabling).
+Actual QEMU native tests passed clean/EICAR INSTREAM scans, both allowed clients,
+unprivileged denial, and the running clamd process's enforcing AppArmor label.
+Freshclam downloaded and verified daily 28129, main 63 and bytecode 339 in QEMU;
+fresh offline signature provisioning remains incomplete.
+
+Signed sequence 33 (`qemu-mail-access-3.1.32`) committed, then its installed
+reconciliation hook ran. Bundle SHA256
+`02f158ae975a53c199835734aedbe2b83989c8c8ef65957690170e4272abd2b2`;
+manifest `c48941551a68889e60e0f36645e23c235a1501970ae913b8e3612f9f231e67d8`;
+receipt `68508935baaee450ca26e873fc81382fa7539d9040508f8d7ac92d50e5fe0435`.
+This did not qualify core startup: native Postfix validation exposed two executor
+sandbox mismatches. A systemd-run negative control reproduces getifaddrs failure
+without AF_NETLINK; adding it passes. Under the combined root/mount sandbox,
+CAP_SETUID was absent from effective/permitted capabilities despite remaining
+bounded. Explicit ambient CAP_SETUID preserves that existing allowed capability;
+the complete selected unit security settings now pass native Postfix check.
+NoNewPrivileges and the other sandbox settings remain enabled.
+
+Temporary QEMU executor drop-in applies these two source unit changes. All mail
+configuration validators then completed and startup reached native services.
+OpenDKIM's forking unit stalled because the renderer omitted its required PID
+file. Added `/run/opendkim/opendkim.pid`; an isolated actual vendor-unit test now
+starts successfully and checks its PID file and milter socket. Runtime test
+override is removed afterward. Mail and installer package suites and both Go
+binaries build successfully in QEMU. Full installed mail delivery/core startup
+remain unqualified; the latest unit/renderer changes await a signed release.
+
+Host disk filled while offloading sequence 33. Removed only the incomplete
+168 MiB host copy; the complete guest bundle remains. Preserve previous releases,
+journals and VM disks; compress archived bundles losslessly before further builds.
+
 ### Native mail configuration checks repaired and verified — 2026-09-20
 
 The installed Dovecot failure was reproduced by a native renderer regression:

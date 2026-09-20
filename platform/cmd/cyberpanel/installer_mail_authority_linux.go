@@ -77,7 +77,7 @@ func reconcileMailAuthority() error {
 			if err := bootstrapDefaultMailCertificate(); err != nil {
 				return err
 			}
-			return installMailRedisUnit()
+			return installMailRuntimeUnits()
 		}
 		return nil
 	}
@@ -99,7 +99,7 @@ func reconcileMailAuthority() error {
 	if err := bootstrapDefaultMailCertificate(); err != nil {
 		return err
 	}
-	return installMailRedisUnit()
+	return installMailRuntimeUnits()
 }
 
 func pristineUbuntuMailDigest(path string, content []byte) (string, error) {

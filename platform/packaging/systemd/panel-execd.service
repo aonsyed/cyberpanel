@@ -39,8 +39,11 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 RestrictNamespaces=~cgroup
 SystemCallArchitectures=native
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Native Postfix validation enumerates local interfaces through netlink.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL CAP_SETGID CAP_SETUID CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_MKNOD CAP_AUDIT_WRITE
+# Preserve the already-bounded UID-switch capability across the mount sandbox.
+AmbientCapabilities=CAP_SETUID
 ReadWritePaths=/etc /var/lib/cyberpanel /var/lib/cyberpanel/site-taskd-malware /var/lib/cyberpanel/malware-quarantine /var/lib/cyberpanel-containers /var/backups/cyberpanel /run/cyberpanel /run/user /sys/fs/cgroup /etc/systemd/system /usr/local/lsws/conf
 LimitNOFILE=4096
 TasksMax=256

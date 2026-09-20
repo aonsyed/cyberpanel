@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestQEMUDovecotRenderedConfiguration(t *testing.T) {
@@ -78,5 +79,65 @@ func TestQEMUOpenDKIMRenderedConfiguration(t *testing.T) {
 	command := exec.Command("/usr/sbin/opendkim", "-n", "-x", filepath.Join(directory, "opendkim.conf"))
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("native OpenDKIM parser: %v: %s", err, output)
+	}
+}
+
+func TestQEMUOpenDKIMNativeUnit(t *testing.T) {
+	if os.Getenv("CYBERPANEL_QEMU_MAIL_OPENDKIM") != "1" {
+		t.Skip("requires QEMU native OpenDKIM stopped for isolated startup")
+	}
+	state, err := exec.Command("/usr/bin/systemctl", "show", "opendkim", "-p", "ActiveState", "--value").Output()
+	if err != nil || (string(state) != "inactive\n" && string(state) != "failed\n") {
+		t.Fatal("OpenDKIM must be stopped", err)
+	}
+	directory, err := os.MkdirTemp("/run", "cyberpanel-opendkim-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	if err := os.Chmod(directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := bytes.ReplaceAll(renderOpenDKIM(), []byte("/var/lib/cyberpanel/mail/current/opendkim"), []byte(directory))
+	for name, data := range map[string][]byte{"opendkim.conf": content, "KeyTable": {}, "SigningTable": {}, "TrustedHosts": renderOpenDKIMTrustedHosts()} {
+		if err := os.WriteFile(filepath.Join(directory, name), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const dropdir = "/run/systemd/system/opendkim.service.d"
+	const override = dropdir + "/90-qemu-mail.conf"
+	if err := os.MkdirAll(dropdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(override, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = exec.Command("/usr/bin/systemctl", "stop", "opendkim").Run()
+		_ = os.Remove(override)
+		_ = exec.Command("/usr/bin/systemctl", "daemon-reload").Run()
+	}()
+	_, err = f.WriteString("[Service]\nExecStart=\nExecStart=/usr/sbin/opendkim -x " + directory + "/opendkim.conf\nTimeoutStartSec=5s\n")
+	closeErr := f.Close()
+	if err != nil || closeErr != nil {
+		t.Fatal(err, closeErr)
+	}
+	if err := exec.Command("/usr/bin/systemctl", "daemon-reload").Run(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if output, err := exec.CommandContext(ctx, "/usr/bin/systemctl", "start", "opendkim").CombinedOutput(); err != nil {
+		t.Fatalf("native OpenDKIM unit startup: %v %s", err, output)
+	}
+	if err := exec.Command("/usr/bin/systemctl", "is-active", "--quiet", "opendkim").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat("/run/opendkim/opendkim.sock"); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatal("native milter socket missing", err)
+	}
+	if data, err := os.ReadFile("/run/opendkim/opendkim.pid"); err != nil || len(bytes.TrimSpace(data)) == 0 {
+		t.Fatal("native PID file missing", err)
 	}
 }

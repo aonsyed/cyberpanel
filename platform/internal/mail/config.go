@@ -554,7 +554,7 @@ func renderClamAV(snapshot ConfigSnapshot) []byte {
 	return []byte("LocalSocket /run/clamd/cyberpanel.sock\nLocalSocketMode 0660\nFixStaleSocket yes\nUser clamav\nDatabaseDirectory /var/lib/clamav\nLogSyslog yes\nLogTime yes\nForeground yes\nDetectPUA yes\nHeuristicAlerts yes\nScanMail yes\nScanArchive yes\nStreamMaxLength 268435456\nMaxFileSize 268435456\nMaxScanSize 536870912\n")
 }
 func renderOpenDKIM() []byte {
-	return []byte("Mode sv\nCanonicalization relaxed/simple\nSocket local:/run/opendkim/opendkim.sock\nUserID opendkim:opendkim\nUMask 007\nKeyTable file:/var/lib/cyberpanel/mail/current/opendkim/KeyTable\nSigningTable refile:/var/lib/cyberpanel/mail/current/opendkim/SigningTable\nExternalIgnoreList refile:/var/lib/cyberpanel/mail/current/opendkim/TrustedHosts\nInternalHosts refile:/var/lib/cyberpanel/mail/current/opendkim/TrustedHosts\n")
+	return []byte("Mode sv\nCanonicalization relaxed/simple\nSocket local:/run/opendkim/opendkim.sock\nPidFile /run/opendkim/opendkim.pid\nUserID opendkim:opendkim\nUMask 007\nKeyTable file:/var/lib/cyberpanel/mail/current/opendkim/KeyTable\nSigningTable refile:/var/lib/cyberpanel/mail/current/opendkim/SigningTable\nExternalIgnoreList refile:/var/lib/cyberpanel/mail/current/opendkim/TrustedHosts\nInternalHosts refile:/var/lib/cyberpanel/mail/current/opendkim/TrustedHosts\n")
 }
 func renderOpenDKIMTrustedHosts() []byte { return []byte("127.0.0.1\n::1\nlocalhost\n") }
 func renderKeyTable(snapshot ConfigSnapshot) []byte {

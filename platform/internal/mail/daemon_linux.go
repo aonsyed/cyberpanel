@@ -276,6 +276,9 @@ func (host *LinuxMailHost) ApplyGeneration(ctx context.Context, generation Confi
 	if _, err = host.Store.Stage(ctx, storeGenerationID, storageDigest, artifacts); err != nil {
 		return receipt, err
 	}
+	if err = host.prepareNativeConfigAccess(storeGenerationID, storageDigest); err != nil {
+		return receipt, err
+	}
 	current, err := host.Store.Current()
 	if err != nil {
 		return receipt, err
