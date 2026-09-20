@@ -13,6 +13,17 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Retention follow-up (source, not yet installed): executor now schedules bounded
+startup/hourly expiration collection. Only validated root-private published
+artifacts past retention are removed, with legal holds, incoming writes and
+malformed/unknown contents preserved. Exact-file deletion uses a durable rename
+and resumable tombstone instead of recursive deletion. QEMU actual-filesystem
+tests cover expiry, holds, cancellation, bounds, interrupted removal and unsafe
+files; database/execd suites pass. Installed53 does NOT yet run this collector.
+Next installed qualification must prove automatic startup collection before
+calling retention cleanup deployed; abandoned incoming writers and explicit
+delete-after-success workflow remain separate unfinished retention cases.
+
 Supersedes the installed51/source-only statements in the historical entries below.
 Installed53 `qemu-dbexport-3.1.52`, rollback52 retained. Manifest
 `a86b11f2e4bec45397b732579379e6f78f7caaf2db1e784fde8e1e8111c57419`;

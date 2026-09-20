@@ -5,6 +5,28 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Expired export collector — source verification, 2026-09-20
+
+Added root-daemon startup/hourly collection, at most64 deleted artifacts per
+pass with a one-minute context. Uses existing retention/expiry metadata and
+hashed artifact identity, validates root ownership/modes and metadata, refuses
+symlinks/hardlinks or unexpected files, and preserves legal holds/incoming writes.
+Rename to a private tombstone is synced before exact payload/descriptor removal;
+retries resume after rename, payload removal or descriptor removal. No recursive
+deletion and no vendor changes. Missing stores are not initialized by maintenance.
+
+QEMU Ubuntu ARM64 root-owned filesystem tests passed for expired/live/held
+artifacts, all three interrupted-removal states, unknown contents, bad metadata,
+identity mismatch, symlink, hardlink, unsafe mode, cancellation, maximum deletion
+count, repeat collection and active-writer preservation. Full database and
+panel-execd package tests passed with native MariaDB live transfer tests enabled.
+Command uses the same offline/root QEMU environment documented below, selecting
+`./internal/database ./cmd/panel-execd -count=1`.
+
+This is source verification, NOT installed daemon qualification: installed53
+remains unchanged. Startup/hourly execution in the installed release, abandoned
+incoming-writer cleanup and explicit delete-after-success workflow remain open.
+
 ### Installed native database export — 2026-09-20
 
 Installed53 `qemu-dbexport-3.1.52`, rollback52 retained. Manifest

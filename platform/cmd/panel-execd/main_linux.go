@@ -103,7 +103,9 @@ type writerAuthorityRecovery interface {
 
 func main() {
 	if len(os.Args) == 4 && os.Args[1] == "--lsapi-web-access" {
-		if err := siteops.GrantLSAPIWebAccess(context.Background(), os.Args[2], os.Args[3]); err != nil { log.Fatal(err) }
+		if err := siteops.GrantLSAPIWebAccess(context.Background(), os.Args[2], os.Args[3]); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 	if len(os.Args) == 2 && os.Args[1] == webactivation.StoppedProofMode {
@@ -655,6 +657,7 @@ func main() {
 	startupIdentity := startupRecoveryIdentity{Version: 1, BootID: executionAdmission.BootID, PID: os.Getpid(), StartedAt: startupBegan, PowerDNS: pdnsSnapshot}
 	go reconcileStartupMutations(ctx, executionAdmission, mutationAdmission, managementHost, operationsExecutor, pdnsServer, startupIdentity)
 	go collectTombstones(ctx, executor)
+	go collectDatabaseExports(ctx, databaseExecutor)
 	select {
 	case <-ctx.Done():
 		_ = listener.Close()
@@ -845,6 +848,26 @@ func collectTombstones(ctx context.Context, executor *siteops.Executor) {
 			} else if collected > 0 {
 				log.Printf("collected %d expired site tombstones", collected)
 			}
+		}
+	}
+}
+
+func collectDatabaseExports(ctx context.Context, executor *database.LinuxMariaDBExecutor) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		sweep, cancel := context.WithTimeout(ctx, time.Minute)
+		collected, err := executor.CollectExpiredWorkspaceExports(sweep, 64)
+		cancel()
+		if err != nil {
+			log.Printf("collect expired database exports: %v", err)
+		} else if collected > 0 {
+			log.Printf("collected %d expired database exports", collected)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }
