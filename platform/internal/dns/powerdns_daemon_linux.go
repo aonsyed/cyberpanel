@@ -497,6 +497,16 @@ func ensurePowerDNSBinding(binding powerDNSBinding) error {
 	return nil
 }
 
+func checkPowerDNSBindingBeforeActivation(binding powerDNSBinding) error {
+	if !validPowerDNSBinding(binding) { return ErrInvalidDNS }
+	if err := validateRootOwnedPowerDNSDirectory("/etc"); err != nil { return err }
+	if err := validateRootOwnedPowerDNSDirectory(filepath.Dir(binding.link)); err != nil { return err }
+	_, err := os.Lstat(binding.link)
+	if errors.Is(err, os.ErrNotExist) { return nil }
+	if err != nil { return err }
+	return observePowerDNSBinding(binding)
+}
+
 func observePowerDNSBinding(binding powerDNSBinding) error {
 	if !validPowerDNSBinding(binding) {
 		return ErrInvalidDNS

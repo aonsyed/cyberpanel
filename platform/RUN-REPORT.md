@@ -5,6 +5,34 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Reject unmanaged PowerDNS config before execution admission — 2026-09-20
+
+Confirmed /etc/powerdns/pdns.conf is the unmodified native package conffile:
+regular root:pdns 0640, MD5 `1143e56f8921c7bd5135569c90600e19` matches dpkg's
+conffile record, SHA-256
+`3d41154e93c96acee3cf10d5eb9b28f15de5a0a76e4a7273e7632bedfee74bb3`.
+PowerDNS is inactive. The existing binding code correctly refuses to overwrite
+it, but startup acquired an execution lease before checking that boundary.
+
+Added a strictly read-only binding preflight before startup execution admission.
+Existing untrusted/native regular config is rejected before any lease; a missing
+file under validated root-owned config ancestors may still be created by the
+existing admitted activation path. Arbitrary links remain rejected. No package
+config was overwritten, no effect receipt was deleted, and admission stays closed.
+
+Actual root-QEMU regression drove ReconcileStartup against this native conffile,
+verified daemoncfg.ErrConflict, zero admission calls, and unchanged config inode
+and permissions. DNS/executor package suites passed uncached, and executor built
+as /home/harness/bin/panel-execd-pdns-preflight. This binary is not deployed yet.
+Next: installer-owned adoption of a verified pristine native config with a
+recoverable backup, plus evidence-based reconciliation of the already ambiguous
+startup effect. Do not re-key the request or delete its row merely to retry.
+
+Sequence 28 archive was copied to the host run directory and SHA-256 verified
+against its signed-release evidence before removing the guest /var/tmp copy.
+It remains recoverable on the host; no installed state was removed. Guest free
+space is now 2.0 GiB, still requiring care before assembling another full bundle.
+
 ### Core admission bootstrap precedes privileged startup effects — 2026-09-20
 
 Core now initializes the reboot repository and execution admission gate with its

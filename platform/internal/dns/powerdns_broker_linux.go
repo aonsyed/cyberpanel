@@ -934,6 +934,12 @@ func (server *PowerDNSDaemonServer) ReconcileStartup(ctx context.Context, admiss
 	if admission == nil || server.Authority == nil || snapshot.Validate(server.Host.ControlDatabaseFingerprint) != nil {
 		return ErrPowerDNSDaemonOperation
 	}
+	// Reject unmanaged native configuration before acquiring an execution
+	// lease. No privileged effect has occurred at this point, and a package
+	// adoption conflict must not become an ambiguous executed operation.
+	if err := checkPowerDNSBindingBeforeActivation(server.Host.profile.configuration); err != nil {
+		return errors.Join(ErrPowerDNSDaemonOperation, err)
+	}
 	digest := rebootcontrol.ExecutionDigest(snapshot)
 	lease, err := admission.AdmitExecution(ctx, rebootcontrol.ExecutionBinding{Boundary: "powerdns", Method: "startup_configuration", EffectID: digest, RequestDigest: digest, Caller: "panel-execd-startup", Resource: rebootcontrol.ExecutionResource(struct {
 		Node     string

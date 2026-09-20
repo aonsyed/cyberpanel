@@ -67,9 +67,13 @@ declares webmail state; actual directories are cyberpanel-owned 0700. Startup
 sequence 28 initializes core admission schema before domain startup and makes
 executor recovery wait for missing bootstrap tables. QEMU regression checks and
 installed startup confirm it passes the former missing-schema blocker. Executor
-now remains closed on a PowerDNS native configuration generation conflict;
-resolve config adoption and durable failed-effect recovery without bypassing
-admission or deleting receipts. Core restart loop is stopped. Guest has 1.6 GiB
+now remains closed on a PowerDNS native configuration generation conflict.
+The native file is verified pristine against dpkg and PowerDNS is inactive.
+A new read-only preflight passes the real QEMU startup regression: config
+conflicts now reject before acquiring execution leases. Updated executor is
+built but not deployed. Resolve installer config adoption with a recoverable
+backup and durable failed-effect recovery without bypassing admission, changing
+request identity, or deleting receipts. Core restart loop is stopped. Guest has 2.0 GiB
 free; safely recover storage before more bundles. Verified sequence 21–27
 archives were moved to host storage, freeing about 1.9 GiB. Executor readiness and
 core/gateway startup are not yet proven.
