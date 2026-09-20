@@ -4,7 +4,41 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
-## Current recovery point — 2026-09-21 (installed64 committed)
+## Current recovery point — 2026-09-21 (installed65; mailbox delivery in progress)
+
+Release qemu-mailbox-3.1.64 sequence65 contains 8c9ff4459: mailbox form,
+Argon2id enrollment through the existing encrypted broker, and site-owned
+Maildir provisioning. Installer state committed; manifest
+24fcabbef4488836dbe7e424c62958f52413ca9aaa4581655a78cd34e41ce90a,
+receipt ebfec6c38d0281d8c6108ebf024c95684527932e6631f3b7f4358a0af952c875.
+Core/gateway/execd running hashes matched assembled binaries. Real browser
+creation and enrollment passed. Initial QA activation used a truncated site ID;
+corrected ID is site-api_936846e75f31b3096dda36c98c7a1755cf6aebc7ac9bfcc2.
+
+Corrected activation then reproduced HTTP500. Restricted syscall trace proved
+openat2 returned ENOSYS. Native systemd-run A/B proved RestrictSUIDSGID=true
+caused it, while false permitted the descriptor-confined open. Source executor
+unit now explicitly disables this incompatible filter, retaining NoNewPrivileges,
+capability limits and strict filesystem checks. Candidate unit installed directly
+in QEMU (not yet in a new signed bundle). Real activation now returns200/applied,
+mailbox generation2. Native wrong-password rejection, valid IMAP login and
+authenticated SMTPS self-submission pass. Delivery/INBOX failed because rendered
+Dovecot count quota omitted quota_vsizes=yes. Native quota regression reproduced
+the exact error; renderer fix passes it and mail/API/core/execd package suites.
+Native sandbox openat2 negative/positive regression also passes.
+
+NEXT: package/install these unit+renderer fixes, regenerate native mail config
+through a new valid API update, then rerun SMTP-to-IMAP proof. Do NOT rerun
+--mailbox-repair-site: fixture is complete and mailbox is generation2.
+Guest-only qemu-mailbox-login65.json contains credentials; never print/copy it.
+qemu-mailbox-native.py sends only to qa65@qemu-mail.example.invalid and deletes
+its exact message after verification. One earlier probe is deferred in Postfix
+queue 695DC16348; retry/clean only that QA message after fixing quota.
+Master-webmail auth file also logs a traversal-permission error; ordinary
+password auth succeeds, but master/webmail access remains unqualified.
+No new workers, downloads or vendor modifications. All broader parity gaps remain.
+
+## Previous recovery point — 2026-09-21 (installed64 committed)
 
 Release qemu-mail-integration-3.1.63 sequence64 contains source24528b64d:
 recent import/view/encoding changes, real mail-domain creation UI, and ordinary

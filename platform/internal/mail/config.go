@@ -556,6 +556,7 @@ protocol lmtp {
 }
 plugin {
   quota = count:User quota
+  quota_vsizes = yes
   quota_rule = *:storage=0
   sieve = file:~/sieve;active=~/.dovecot.sieve
 }

@@ -30,6 +30,29 @@ func TestQEMUDovecotRenderedConfiguration(t *testing.T) {
 	}
 }
 
+func TestQEMUDovecotMailboxQuota(t *testing.T) {
+	address := os.Getenv("CYBERPANEL_QEMU_MAILBOX")
+	if address == "" {
+		t.Skip("requires an enrolled disposable mailbox in QEMU")
+	}
+	if ValidateAddress(Address(address)) != nil {
+		t.Fatal("invalid fixture mailbox")
+	}
+	content := renderDovecot(ConfigSnapshot{Postmaster: "postmaster@qemu.invalid"})
+	content = bytes.ReplaceAll(content, []byte("/run/cyberpanel/mail/dovecot-users"), []byte("/var/lib/cyberpanel/mail/current/dovecot/users"))
+	path := filepath.Join(t.TempDir(), "dovecot.conf")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("/usr/bin/doveadm", "-c", path, "-o", "mail_plugins=quota", "quota", "get", "-u", address).CombinedOutput()
+	if err != nil {
+		t.Fatalf("native mailbox quota initialization: %v: %s", err, output)
+	}
+	if !bytes.Contains(output, []byte("STORAGE")) {
+		t.Fatalf("missing native storage quota: %s", output)
+	}
+}
+
 func TestQEMUMailNativeConfigValidators(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_MAIL_CONFIG") != "1" {
 		t.Skip("requires native QEMU mail validators")

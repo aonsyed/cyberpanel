@@ -35,7 +35,11 @@ ProtectKernelLogs=true
 ProtectControlGroups=false
 ProtectClock=true
 LockPersonality=true
-RestrictSUIDSGID=true
+# systemd's SUID/SGID filter returns ENOSYS for openat2 because it cannot
+# inspect open_how. The executor requires openat2's descriptor-relative,
+# no-symlink confinement. Keep NoNewPrivileges and explicit file-mode checks;
+# do not replace those safe filesystem operations with an openat fallback.
+RestrictSUIDSGID=false
 RestrictRealtime=true
 RestrictNamespaces=~cgroup
 SystemCallArchitectures=native

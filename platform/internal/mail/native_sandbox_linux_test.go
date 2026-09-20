@@ -7,8 +7,49 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
+
+func TestQEMUExecutorOpenat2(t *testing.T) {
+	if os.Getenv("CYBERPANEL_QEMU_OPENAT2_HELPER") == "1" {
+		fd, err := openMailProductRoot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		syscall.Close(fd)
+		return
+	}
+	if os.Getenv("CYBERPANEL_QEMU_MAIL_SANDBOX") != "1" {
+		t.Skip("requires QEMU systemd")
+	}
+	unit, err := os.ReadFile("../../packaging/systemd/panel-execd.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restriction string
+	for _, line := range strings.Split(string(unit), "\n") {
+		if strings.HasPrefix(line, "RestrictSUIDSGID=") {
+			restriction = line
+		}
+	}
+	if restriction == "" {
+		t.Fatal("missing explicit executor SUID/SGID policy")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := func(property string) ([]byte, error) {
+		return exec.Command("/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--collect", "-p", property, "--setenv=CYBERPANEL_QEMU_OPENAT2_HELPER=1", executable, "-test.run=^TestQEMUExecutorOpenat2$").CombinedOutput()
+	}
+	if output, err := probe("RestrictSUIDSGID=true"); err == nil || !strings.Contains(string(output), "function not implemented") {
+		t.Fatalf("negative control did not reproduce blocked openat2: %v %s", err, output)
+	}
+	if output, err := probe(restriction); err != nil {
+		t.Fatalf("executor policy prevents confined filesystem access: %v %s", err, output)
+	}
+}
 
 func TestQEMUPostfixExecutorAddressFamilies(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_MAIL_SANDBOX") != "1" {
