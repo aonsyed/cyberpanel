@@ -31,6 +31,7 @@ const (
 	BrokerCompensate     BrokerOperation = "compensate"
 	BrokerWorkspaceMetadata BrokerOperation = "workspace_metadata"
 	BrokerWorkspaceQuery    BrokerOperation = "workspace_query"
+	BrokerWorkspaceExport   BrokerOperation = "workspace_export"
 	BrokerInstanceStatus    BrokerOperation = "instance_status"
 	BrokerMariaDBHA         BrokerOperation = "mariadb_ha"
 	BrokerMigrationRestore BrokerOperation = "migration_restore"
@@ -96,6 +97,7 @@ type BrokerRequest struct {
 	InstanceID   ResourceID              `json:"instance_id,omitempty"`
 	MariaDBHA    *MariaDBHARequest    `json:"mariadb_ha,omitempty"`
 	MigrationRestore *MigrationRestoreRequest `json:"migration_restore,omitempty"`
+	WorkspaceExport *WorkspaceExportRequest `json:"workspace_export,omitempty"`
 }
 
 type BrokerResponse struct {
@@ -109,16 +111,20 @@ type BrokerResponse struct {
 	InstanceStatus *MariaDBInstanceStatus `json:"instance_status,omitempty"`
 	MariaDBHA    *MariaDBHAResult      `json:"mariadb_ha,omitempty"`
 	MigrationRestore *MigrationRestoreReceipt `json:"migration_restore,omitempty"`
+	Export *TransferProcessReceipt `json:"export,omitempty"`
 	FailureCode  string                `json:"failure_code,omitempty"`
 }
 
 func (request BrokerRequest) validate(now time.Time) error {
+	if request.Operation!=BrokerWorkspaceExport && request.WorkspaceExport!=nil{return ErrInvalidCommand}
 	if request.Operation != BrokerMigrationRestore && request.MigrationRestore != nil { return ErrInvalidCommand }
 	if request.Operation != BrokerInstanceStatus && !request.InstanceID.IsZero() { return ErrInvalidCommand }
 	if request.Version != DatabaseBrokerProtocolVersion || !validBrokerRequestID(request.RequestID) || request.Deadline.IsZero() || !request.Deadline.After(now) || request.Deadline.After(now.Add(2*time.Minute)) {
 		return ErrInvalidCommand
 	}
 	switch request.Operation {
+	case BrokerWorkspaceExport:
+		if request.Effect!=nil || request.Compensation!=nil || request.Workspace!=nil || request.MariaDBHA!=nil || request.WorkspaceExport==nil || request.WorkspaceExport.validate(now)!=nil{return ErrInvalidCommand}
 	case BrokerMigrationRestore:
 		if request.Effect!=nil || request.Compensation!=nil || request.Workspace!=nil || request.MariaDBHA!=nil || request.MigrationRestore==nil || request.MigrationRestore.validate()!=nil { return ErrInvalidCommand }
 	case BrokerObserveOrApply:
@@ -155,18 +161,22 @@ func (request BrokerRequest) validate(now time.Time) error {
 }
 
 func (response BrokerResponse) validate(request BrokerRequest) error {
+	if request.Operation!=BrokerWorkspaceExport && response.Export!=nil{return ErrInvalidReceipt}
 	if request.Operation != BrokerMigrationRestore && response.MigrationRestore != nil { return ErrInvalidReceipt }
 	if request.Operation != BrokerInstanceStatus && response.InstanceStatus != nil { return ErrInvalidReceipt }
 	if response.Version != DatabaseBrokerProtocolVersion || response.RequestID != request.RequestID || response.Operation != request.Operation {
 		return ErrInvalidReceipt
 	}
 	if response.FailureCode != "" {
+		if response.Export!=nil{return ErrInvalidReceipt}
 		if response.Effect != nil || response.Compensation != nil || response.Metadata != nil || response.Query != nil || response.InstanceStatus != nil || response.MariaDBHA != nil || response.MigrationRestore != nil || !validBrokerFailure(response.FailureCode) {
 			return ErrInvalidReceipt
 		}
 		return nil
 	}
 	switch request.Operation {
+	case BrokerWorkspaceExport:
+		if response.Effect!=nil || response.Compensation!=nil || response.Metadata!=nil || response.Query!=nil || response.MariaDBHA!=nil || response.Export==nil || request.WorkspaceExport==nil || !request.WorkspaceExport.matches(*response.Export){return ErrInvalidReceipt};return nil
 	case BrokerMigrationRestore:
 		if response.Effect!=nil || response.Compensation!=nil || response.Metadata!=nil || response.Query!=nil || response.MariaDBHA!=nil || response.MigrationRestore==nil || request.MigrationRestore==nil || !response.MigrationRestore.matches(*request.MigrationRestore) { return ErrInvalidReceipt }; return nil
 	case BrokerObserveOrApply:
@@ -344,7 +354,7 @@ func validBrokerRequestID(value string) bool {
 
 func validBrokerFailure(value string) bool {
 	switch value {
-	case "invalid_request", "unauthorized", "not_found", "conflict", "deadline", "unavailable", "internal", "ambiguous":
+	case "invalid_request", "unauthorized", "not_found", "conflict", "deadline", "unavailable", "internal", "ambiguous", "transfer_limit":
 		return true
 	default:
 		return false
@@ -619,6 +629,8 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		if server.Admission==nil{return}
 		binding:=rebootcontrol.ExecutionBinding{Boundary:"database",Method:string(request.Operation),Caller:"authenticated-panel-core"}
 		switch request.Operation {
+		case BrokerWorkspaceExport:
+			binding.RequestDigest=rebootcontrol.ExecutionDigest(request.WorkspaceExport);binding.EffectID="workspace-export:"+binding.RequestDigest;binding.Resource=rebootcontrol.ExecutionResource(request.WorkspaceExport.Access)
 		case BrokerObserveOrApply:
 			binding.EffectID=request.Effect.EffectID;binding.RequestDigest=rebootcontrol.ExecutionDigest(request.Effect);binding.Resource=rebootcontrol.ExecutionResource(request.Effect.Scope)
 		case BrokerCompensate:
@@ -650,6 +662,12 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 	response := BrokerResponse{Version: DatabaseBrokerProtocolVersion, RequestID: request.RequestID, Operation: request.Operation}
 	var err error
 	switch request.Operation {
+	case BrokerWorkspaceExport:
+		exporter,ok:=server.Executor.(WorkspaceExportExecutor)
+		if !ok{err=ErrInvalidCommand;break}
+		var receipt TransferProcessReceipt
+		receipt,err=exporter.ExportWorkspaceDatabase(ctx,*request.WorkspaceExport)
+		if err==nil && request.WorkspaceExport.matches(receipt){response.Export=&receipt}
 	case BrokerObserveOrApply:
 		var receipt EffectReceipt
 		receipt, err = server.Executor.ObserveOrApply(ctx, *request.Effect)
@@ -744,12 +762,13 @@ func (server *DatabaseBrokerServer) serve(connection net.Conn) {
 		}
 		if err == nil && validateMariaDBHAResult(*request.MariaDBHA, result) == nil { response.MariaDBHA = &result }
 	}
-	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil && response.InstanceStatus == nil && response.MariaDBHA == nil && response.MigrationRestore == nil {
+	if response.Effect == nil && response.Compensation == nil && response.Metadata == nil && response.Query == nil && response.InstanceStatus == nil && response.MariaDBHA == nil && response.MigrationRestore == nil && response.Export==nil {
 		response.FailureCode = classifyBrokerFailure(err)
 	}
 	if response.validate(request)!=nil{return}
 	if mutation {
 		terminal:=err==nil && response.Query!=nil
+		if response.Export!=nil{terminal=err==nil}
 		if response.Effect!=nil{terminal=response.Effect.Outcome==EffectConfirmed || response.Effect.Outcome==EffectRejected && !response.Effect.MutationObserved}
 		if response.Compensation!=nil{terminal=response.Compensation.Outcome==EffectConfirmed}
 		if response.MigrationRestore!=nil || response.MariaDBHA!=nil { terminal=err==nil }
@@ -801,6 +820,10 @@ func readDatabaseBrokerFrameLimit(reader io.Reader, target any, maximum uint32) 
 
 func classifyBrokerFailure(err error) string {
 	switch {
+	case errors.Is(err, ErrTransferLimit): return "transfer_limit"
+	case errors.Is(err, ErrTransferCancelled): return "deadline"
+	case errors.Is(err, ErrTransferStale): return "conflict"
+	case errors.Is(err, ErrTransferInvalid), errors.Is(err, ErrTransferUnsafeSQL): return "invalid_request"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled): return "deadline"
 	case errors.Is(err, ErrUnauthorized): return "unauthorized"
 	case errors.Is(err, ErrNotFound): return "not_found"
@@ -815,6 +838,7 @@ func classifyBrokerFailure(err error) string {
 
 func brokerFailure(code string) error {
 	switch code {
+	case "transfer_limit": return ErrTransferLimit
 	case "invalid_request": return ErrInvalidCommand
 	case "unauthorized": return ErrUnauthorized
 	case "not_found": return ErrNotFound

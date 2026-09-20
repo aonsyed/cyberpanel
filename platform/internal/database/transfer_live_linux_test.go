@@ -5,7 +5,9 @@ package database
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
+	"github.com/aonsyed/cyberpanel/platform/internal/rebootcontrol"
 )
 
 // Import still uses a root fixture. Export uses the production session-bound
@@ -72,7 +75,7 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 	if err = os.WriteFile(configPath, []byte("[client]\nuser=root\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewLinuxTransferArtifactStore(filepath.Join(t.TempDir(), "artifacts"), 1<<20, time.Now)
+	store, err := NewLinuxTransferArtifactStore(workspaceExportRoot, 1<<20, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,18 +98,74 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			artifact := TransferArtifactIdentity{StoreID: id("fixture-store"), ArtifactID: id("fixture-" + string(compression)), Generation: 1}
 			job := TransferJob{ID: id("job-" + string(compression)), IdempotencyKey: "fixture-" + string(compression), TenantID: tenant, SiteID: siteID, DatabaseID: id(prefix + "-database"), DatabaseGeneration: 1, InstanceID: id("mariadb-local"), Direction: TransferExport, Format: TransferFormatSQL, Compression: compression, Destination: &artifact, Selection: TransferSelection{Schema: true, Data: true}, Limits: TransferLimits{MaximumBytes: 1 << 20, MaximumRows: 100, MaximumDuration: time.Minute}, ConflictPolicy: TransferConflictFail, Retention: TransferRetention{RetainUntil: now.Add(time.Hour)}, CreatedBy: "fixture-user", CreatedAt: now}
 			job.Impact = SealTransferImpactPreview(TransferImpactPreview{DatabaseID: job.DatabaseID, DatabaseGeneration: 1, SchemaObjects: 1, Rows: 2, Bytes: 1024, CapturedAt: now})
+			artifact = WorkspaceExportArtifact(job)
+			job.Destination = &artifact
+			artifactPath, err := store.artifactPath(artifact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(artifactPath); err != nil {
+					t.Error("export artifact cleanup", err)
+				}
+			})
 			job, err = SealTransferJob(job)
 			if err != nil {
 				t.Fatal(err)
 			}
 			exportConfigs := liveWorkspaceExportFixture(t, ctx, prefix, job, source, query)
-			exportBackend, err := NewLinuxTransferBackend(store, exportConfigs, time.Now)
+			exportClient := liveExportBroker(t, ctx, exportConfigs.executor)
+			request := WorkspaceExportRequest{Access: exportConfigs.access, Job: job}
+			receipt, err := exportClient.ExportWorkspaceDatabase(ctx, request)
+			if err != nil {
+				t.Fatalf("native export: %v (exit %d)", err, receipt.ExitCode)
+			}
+			replay, err := exportClient.ExportWorkspaceDatabase(ctx, request)
+			if err != nil || replay.Digest != receipt.Digest {
+				t.Fatal("broker export replay differs", err)
+			}
+			directReplay, err := exportConfigs.executor.ExportWorkspaceDatabase(ctx, request)
+			if err != nil || directReplay.Artifact == nil || *directReplay.Artifact != *receipt.Artifact {
+				t.Fatal("executor publication replay differs", err)
+			}
+			frame, err := exportClient.request(ctx, BrokerWorkspaceExport)
 			if err != nil {
 				t.Fatal(err)
 			}
-			receipt, err := exportBackend.Export(ctx, job, source, func(TransferStreamProgress) error { return nil })
+			frame.WorkspaceExport = &request
+			if err = frame.validate(time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			frame.Workspace = &WorkspaceBrokerRequest{Access: request.Access}
+			if frame.validate(time.Now()) == nil {
+				t.Fatal("mixed broker operation accepted")
+			}
+			frame.Workspace = nil
+			response := BrokerResponse{Version: frame.Version, RequestID: frame.RequestID, Operation: frame.Operation, Export: &receipt}
+			if response.validate(frame) != nil {
+				t.Fatal("valid export receipt rejected")
+			}
+			wrongReceipt := receipt
+			wrongArtifact := *receipt.Artifact
+			wrongArtifact.Identity.Generation++
+			wrongReceipt.Artifact = &wrongArtifact
+			wrongReceipt = SealTransferProcessReceipt(wrongReceipt)
+			response.Export = &wrongReceipt
+			if response.validate(frame) == nil {
+				t.Fatal("different artifact accepted")
+			}
+			wrongRequest := request
+			wrongJob := request.Job
+			wrongDestination := *wrongJob.Destination
+			wrongDestination.Generation++
+			wrongJob.Destination = &wrongDestination
+			wrongJob, err = SealTransferJob(wrongJob)
 			if err != nil {
-				t.Fatalf("native export: %v (exit %d)", err, receipt.ExitCode)
+				t.Fatal(err)
+			}
+			wrongRequest.Job = wrongJob
+			if _, err = exportClient.ExportWorkspaceDatabase(ctx, wrongRequest); err == nil {
+				t.Fatal("caller-selected artifact destination accepted")
 			}
 			job.Direction, job.Source, job.Destination = TransferImport, receipt.Artifact, nil
 			job, err = SealTransferJob(job)
@@ -129,6 +188,52 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+// This private QEMU socket uses a fixture peer authorizer. Framing, dispatch,
+// SQL reboot admission, protected-resource checks and MariaDB execution are real.
+type liveExportPeer struct{}
+
+func (liveExportPeer) Authorize(net.Conn) error { return nil }
+
+type liveExportDialer struct{ path string }
+
+func (d liveExportDialer) DialContext(ctx context.Context) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, "unix", d.path)
+}
+
+func liveExportBroker(t *testing.T, ctx context.Context, executor *LinuxMariaDBExecutor) *BrokerClient {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "admission.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	repo, err := rebootcontrol.NewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = repo.Bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = rebootcontrol.NewAdmissionGate(ctx, db, "qemu-export-boot", time.Now); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "broker.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &DatabaseBrokerServer{Authorizer: liveExportPeer{}, Executor: executor, Admission: &rebootcontrol.SQLExecutionAdmission{DB: db, BootID: "qemu-export-boot"}}
+	done := make(chan struct{})
+	go func() { defer close(done); _ = server.Serve(listener) }()
+	t.Cleanup(func() { listener.Close(); <-done })
+	client, err := NewBrokerClient(FramedDatabaseBrokerTransport{Dialer: liveExportDialer{path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
 }
 
 // Only the secret delivery is in-memory. The export configuration resolver,

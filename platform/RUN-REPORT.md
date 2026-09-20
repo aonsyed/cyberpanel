@@ -3737,6 +3737,44 @@ After verification, the AlmaLinux ARM64 and both AMD64 guests were shut down.
 Their overlays and logs are retained. Ubuntu ARM64 remains running on loopback
 SSH port 22193 for the next installed-release work; its temporary Vite server
 is stopped. No base images or evidence were deleted.
+# Native export through the executor broker — 2026-09-20
+
+Added a closed `workspace_export` broker operation, typed client and Linux
+executor implementation. It uses the prior session-bound credential provider,
+not a root dump account. Job-derived artifact identities prohibit caller-chosen
+storage destinations; frames reject mixed operation payloads and receipts must
+match the exact destination, format, compression, byte/row counts and retention.
+The reboot admission journal records the effect and replays the original result.
+The executor can reauthorize and recover an existing immutable artifact without
+dumping again; its reconstructed receipt records recovery completion time, while
+journal replay preserves the original receipt. New exports check free disk space
+for the requested maximum plus 2GiB; this is a preflight, not aggregate quota
+reservation. Transfer limit/cancellation/stale errors cross the closed broker
+error mapping without exposing subprocess output or credentials.
+
+The QEMU live round-trip test now starts an actual private Unix socket and calls
+the real framed client/server, backed by a real SQLite reboot-admission store.
+It exports plain and gzip SQL with the scoped native database account, verifies
+exact broker receipt replay and executor artifact recovery, then imports through
+native MariaDB and checks NULL/binary/text row contents. Negative checks reject
+mixed payloads, mismatched receipt artifacts and caller-selected destinations.
+Socket peer authorization and secret delivery are explicit fixtures; production
+peer-auth integration is not claimed. Import still uses a root test fixture.
+
+QEMU Ubuntu ARM64 only: guest gofmt on new files/test; then
+`sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root
+GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off
+GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/database
+./cmd/cyberpanel ./cmd/panel-execd -count=1` passed all three packages, exit 0.
+Fixture accounts, databases, state resources, sockets, journal DBs, credentials
+and exact job-owned artifact directories are removed by test cleanup. Installed
+signed51 and vendor packages are unchanged; no downloads or host tests occurred.
+
+Pending: authorized download delivery, user-facing API/UI, large asynchronous
+jobs beyond workspace session bounds, isolated-import authorization/promotion,
+retention collection and broader target qualification. This is source-level
+broker integration, not a deployed or complete import/export feature.
+
 # Session-bound native export credentials — 2026-09-20
 
 Added `LinuxWorkspaceExportConfigs` for the existing native transfer backend.

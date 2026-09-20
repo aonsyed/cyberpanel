@@ -6,6 +6,24 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+DATABASE EXPORT BROKER PROGRESS: closed workspace_export client/server operation
+now calls the real Linux executor/session credential provider/native dump and
+publishes artifacts under protected database/transfers storage. Destination is
+derived from the full export specification; request/receipt matching rejects
+mixed operations and unrelated artifacts. Reboot admission journals the effect
+and replays its original receipt. Executor-level artifact recovery reauthorizes
+the session and does not rerun the dump. A preflight preserves 2GiB guest free
+space beyond the requested maximum (not an aggregate quota reservation).
+QEMU actual private Unix socket → framed broker → SQLite reboot admission →
+native scoped account export → plain/gzip import passed, including journal and
+artifact replay. Peer authentication and secret delivery are fixtures; native
+execution, framing, admission and protected-resource checks are real. Full
+database/core/execd suites pass. Installed51 unchanged. Next: authorized artifact
+download and user-facing API/UI, production isolated import and larger async
+transfer jobs (workspace exports intentionally inherit session size/time bounds).
+Full parity, retention collection and the OS/architecture/edition matrix remain
+unfinished; no additional native dependency work is needed for this step.
+
 DATABASE EXPORT CREDENTIAL FOLLOW-UP: added LinuxWorkspaceExportConfigs, which
 revalidates protected session/database/principal/instance state and resolves the
 session credential through the existing purpose-bound secret source. It enforces
