@@ -13,6 +13,22 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+LATEST INSTALLED: signed54 `qemu-retention-3.1.53`, rollback53 retained. Manifest
+`41d6b4eaa6815dcde6fb524906e7d0280b35309155dc9b3a46073500ca592e50`, receipt
+`bba182b090fb51d2e66618c97b21b712ebbce8bf76fd0ca399b38b9f49864f95`.
+Installed executor startup collected two synthetic expired artifacts, including
+an interrupted deletion; held/unexpired fixtures survived. The opt-in QEMU
+verifier asserted all four outcomes before removing the two remaining fixtures.
+Transfers directory is empty afterward. Actual core/gateway/execd executable
+paths match54. Original DB credential version/binding survives with the new
+approved executor digest. Real Chromium passkey/login, live console/query,
+mutation rejection/recovery and390px interaction pass after upgrade. Ignored host
+bundle SHA verified before removing its redundant guest copy; guest3.8GiB free.
+Hourly timer is wired but was not observed for a full hour; startup path is proven.
+Large asynchronous exports, production isolated import and remaining full parity
+work are next. Abandoned incoming cleanup/delete-after-success remain open.
+
+Prior source checkpoint (now superseded by installed54 verification):
 Retention follow-up (source, not yet installed): executor now schedules bounded
 startup/hourly expiration collection. Only validated root-private published
 artifacts past retention are removed, with legal holds, incoming writes and

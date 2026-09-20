@@ -5,6 +5,41 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed export retention startup — 2026-09-20
+
+Installed54 `qemu-retention-3.1.53`, rollback53. Manifest
+`41d6b4eaa6815dcde6fb524906e7d0280b35309155dc9b3a46073500ca592e50`, receipt
+`bba182b090fb51d2e66618c97b21b712ebbce8bf76fd0ca399b38b9f49864f95`, state committed.
+Only our executor binary was rebuilt, inside QEMU, from collector source.
+Core/gateway/executor processes all resolve into54. Existing credential remains
+version1 with binding `1ff23cac43f83986652be2690e9df44d996f04bfa8510619534206a1cda86b38`;
+approved/installed executor digest matches
+`25a38cd01d936ede55844a5ac1526038752a134c7faf44d2ef7969956be80a06`.
+
+New opt-in `TestQEMURetentionDaemonFixture` seeds four synthetic, root-private
+artifacts under the actual executor store before installation: expired, expired
+with legal hold, unexpired and expired tombstone with payload already removed.
+Only explicit `CYBERPANEL_QEMU_LIVE_TRANSFER=1` plus
+`CYBERPANEL_QEMU_RETENTION_PHASE=seed` or `verify` enables it; normal suites skip it.
+Seed and verify commands use QEMU root/offline Go, selecting exactly
+`-run ^TestQEMURetentionDaemonFixture$ -count=1 -v`. Both exit0.
+
+Actual installed54 daemon journal at18:29:44 reports `collected 2 expired database
+exports`. Verify phase confirms expired/tombstone paths absent and held/live
+paths present, then removes only its two exact preserved synthetic fixtures.
+The actual transfer store is empty afterward. No manual collector invocation
+performed between seed and verify: service startup executed the production path.
+Hourly timing itself was not observed over a complete hour.
+
+Installed Chromium `qemu-passkey.cjs --console-fresh` passes after upgrade:
+password/passkey200, authenticated overview, console201, metadata/query200,
+mutation400, valid recovery query200 and390px interaction. No candidate UI mock.
+No vendor components changed/rebuilt/downloaded. Bundle archived ignored on host,
+SHA256 `0bf7b3e137fb456b4b10c8d1744ff3e4c882d7d0d4563b5c93bcd6e691c7d103`
+matched guest before deleting the redundant guest tar. Current/rollback retained;
+guest3.8GiB free. Abandoned incoming writes and delete-after-success remain outside
+this expiration pass; larger async transfers/import/full parity still incomplete.
+
 ### Expired export collector — source verification, 2026-09-20
 
 Added root-daemon startup/hourly collection, at most64 deleted artifacts per

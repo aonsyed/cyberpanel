@@ -168,3 +168,80 @@ func TestTransferRetentionBoundAndActiveWriter(t *testing.T) {
 		t.Fatal("invalid bound accepted")
 	}
 }
+
+// Opt-in installed-daemon probe. Seed immediately before a signed upgrade, then
+// verify after service activation. Ordinary test runs never touch installed data.
+func TestQEMURetentionDaemonFixture(t *testing.T) {
+	phase := os.Getenv("CYBERPANEL_QEMU_RETENTION_PHASE")
+	if phase == "" {
+		t.Skip("explicit QEMU installed-daemon probe only")
+	}
+	if os.Getenv("CYBERPANEL_QEMU_LIVE_TRANSFER") != "1" || os.Geteuid() != 0 || (phase != "seed" && phase != "verify") {
+		t.Fatal("invalid QEMU fixture invocation")
+	}
+	now := time.Now().UTC()
+	store, err := NewLinuxTransferArtifactStore(workspaceExportRoot, MaximumTransferBytes, func() time.Time { return now.Add(-2 * time.Hour) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeID, _ := NewResourceID("qemu-retention-daemon-fixture")
+	for _, variant := range []string{"expired", "held", "live", "interrupted"} {
+		artifactID, _ := NewResourceID("qemu-retention-daemon-" + variant)
+		id := TransferArtifactIdentity{StoreID: storeID, ArtifactID: artifactID, Generation: 1}
+		directory, _ := store.artifactPath(id)
+		if phase == "seed" {
+			retention := TransferRetention{RetainUntil: now.Add(-time.Hour), LegalHold: variant == "held"}
+			if variant == "live" {
+				retention.RetainUntil = now.Add(time.Hour)
+			}
+			writer, err := store.BeginTransferArtifact(context.Background(), id, TransferFormatSQL, TransferCompressionNone, retention)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data := []byte("-- synthetic QEMU retention probe; no customer data\n")
+			if _, err = writer.Write(data); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = writer.Commit(context.Background(), transferDigest(data), uint64(len(data)), 0); err != nil {
+				t.Fatal(err)
+			}
+			if variant == "interrupted" {
+				target := filepath.Join(store.root, ".expired-"+filepath.Base(directory))
+				if err = os.Rename(directory, target); err != nil {
+					t.Fatal(err)
+				}
+				if err = os.Remove(filepath.Join(target, "payload")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			continue
+		}
+		if variant == "interrupted" {
+			directory = filepath.Join(store.root, ".expired-"+filepath.Base(directory))
+		}
+		_, err := os.Lstat(directory)
+		if variant == "expired" || variant == "interrupted" {
+			if !os.IsNotExist(err) {
+				t.Fatalf("daemon failed to collect %s: %v", variant, err)
+			}
+		} else if err != nil {
+			t.Fatalf("daemon removed protected %s: %v", variant, err)
+		}
+	}
+	if phase == "verify" {
+		// Only after all preservation assertions pass, remove the two exact
+		// synthetic fixtures; never recursively clean the installed export root.
+		for _, variant := range []string{"held", "live"} {
+			artifactID, _ := NewResourceID("qemu-retention-daemon-" + variant)
+			directory, _ := store.artifactPath(TransferArtifactIdentity{StoreID: storeID, ArtifactID: artifactID, Generation: 1})
+			for _, name := range []string{"payload", "descriptor.json"} {
+				if err := os.Remove(filepath.Join(directory, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Remove(directory); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
