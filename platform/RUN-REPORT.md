@@ -4449,3 +4449,41 @@ environment. All six changed Go files match host/guest SHA256. Guest2.8GiB free.
 Installed55 is unchanged; installed API/audit qualification and browser import
 UI remain pending. No vendor changes, downloads, extra workers or binaries
 committed.
+
+### Installed import identity correction and API qualification — 2026-09-21
+
+Installed56 completed gzip import, then exposed a plain-SQL preparation collision:
+read-only prepare requests omit Idempotency-Key, but job identity used commandID,
+which depends on it. Derive job identity from tenant, authenticated actor and
+request ID instead. Regression checks stable same-request identity and distinct
+request/tenant/actor identities. Red/green regression and affected database,
+apiserver, cyberpanel and panel-execd suites (including native SQL/gzip) passed
+inside QEMU before the signed57 build/install.
+
+Revalidated installed57 committed receipt and actual core/gateway/execd process
+executables. Manifest:
+`51a8e4fd922ed4a8f1b2ac4b853e4ebf7c99cee0bd919f8c571593387cbfdcc0`.
+Receipt: `4d8ac14b73a0760fda98ba0c1814166eb1e3af117a542e387ca454c2f0dedcab`.
+Bundle SHA256: `5f829ea64f15b8a17d7b00d7ec45cce7b54506b10239eac5c0b631fb4598280b`.
+
+Guest browser harness qemu-passkey.cjs --console-fresh --export-live --import-live
+passed real passkey authentication, console queries/mutation rejection,390px
+interaction and gzip/plain browser downloads with full digest verification.
+Plain-SQL import prepare/run/inspect returned200; native text/NULL/BLOB rows
+matched. Wrong-site inspection403, digest-tampered job400, completed-job replay200.
+Disposable destination deletion returned200/applied and native absence checked.
+Previously completed gzip fixture was not recreated.
+
+Read-only SQLite audit probe verified both gzip/plain jobs: four scoped audit
+events each, create/execute applied and read allowed, authenticated actor/tenant
+and site/database bindings, completed job state, durable source-export digest,
+promotion job digest, deleted generation3 core database resource. The probe's
+first attempt mishandled SQLite BLOB Uint8Array JSON; corrected harness decoding
+and reran successfully. This was a probe error, not a product failure.
+
+Source export test table removed. Both temporary destination databases removed.
+Existing credential version1/binding retained; approved and installed executor
+digests match. Guest archive removed only after host/guest checksums matched and
+installed57 was committed; host copy retained in ignored .work/qemu. Guest3.2GiB
+free. No downloads, native component changes, new workers or committed binaries.
+Import UI/upload, replacement, async jobs and broad parity remain pending.

@@ -19,6 +19,27 @@ import (
 
 type importHTTPAuth struct{ exportHTTPAuth }
 
+func TestImportPreparationIdentityDoesNotUseEmptyReadIdempotencyKey(t *testing.T) {
+	actor, _ := identity.NewID("import-owner")
+	inv := Invocation{Actor: Actor{PrincipalID: actor}, Request: RequestEnvelope{Operation: "database.import.prepare", TenantID: "import-tenant", ResourceID: "import-site", RequestID: "prepare-request-one"}}
+	first, key := databaseImportIdentity(inv)
+	if same, sameKey := databaseImportIdentity(inv); same != first || sameKey != key {
+		t.Fatal("same preparation identity changed")
+	}
+	for _, change := range []func(*Invocation){
+		func(v *Invocation) { v.Request.RequestID = "prepare-request-two" },
+		func(v *Invocation) { v.Request.TenantID = "other-tenant" },
+		func(v *Invocation) { v.Actor.PrincipalID, _ = identity.NewID("another-import-owner") },
+	} {
+		next := inv
+		change(&next)
+		id, nextKey := databaseImportIdentity(next)
+		if id == first || nextKey == key {
+			t.Fatal("distinct read-only preparations share a durable job identity")
+		}
+	}
+}
+
 func (auth *importHTTPAuth) Authorize(_ context.Context, actor Actor, permission identity.Permission, scope identity.Scope, assurance identity.AssuranceLevel) error {
 	if auth.denied || permission != identity.MustPermission("database:manage") || scope.Kind != identity.ScopeSite || assurance != identity.AssuranceMFA || actor.Assurance < assurance {
 		return ErrForbidden

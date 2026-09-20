@@ -11,7 +11,28 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
-## Current recovery point — 2026-09-21 (installed55 unchanged)
+## Current recovery point — 2026-09-21 (installed57 committed)
+
+Authenticated export-backed imports qualified in the existing Ubuntu ARM64
+guest: gzip on installed56, plain SQL on installed57. Native text/NULL/BLOB
+rows, persisted inspection, exact completed-job replay, real identity/audit
+records and core promotion projection passed. Wrong-site inspection returned403;
+tampered job returned400. Both disposable destination databases and source test
+table were removed. Real passkey login, console SQL/mutation rejection, gzip/plain
+browser downloads with SHA256 and390px console interaction passed on57.
+
+Fixed preparation job-ID collision: read-only prepare has no idempotency key,
+so derive its identity from tenant, authenticated actor and request ID. The
+regression and affected four-package/native SQL/gzip suites passed in QEMU.
+Signed release57 manifest51a8e4fd922ed4a8f1b2ac4b853e4ebf7c99cee0bd919f8c571593387cbfdcc0
+is committed; all three process executables resolve into that release. Existing
+credential version/binding preserved. Redundant guest installer archive removed
+after matching retained host SHA256; guest3.2GiB free. No vendor changes/downloads.
+Next: import UI/upload integration; replacement, long-running jobs and remaining
+full parity qualification remain unfinished. Historical source-only notes below
+are superseded by this installed evidence, not claims about those missing flows.
+
+## Previous recovery point — installed55
 
 Import API/runtime wiring (source only): database.import.prepare/run/inspect
 are registered and connected during domain-service assembly. Contracts require

@@ -58,8 +58,7 @@ func (operations *DatabaseTransferOperations) PrepareDatabaseImport(ctx context.
 		return database.TransferJob{}, ErrInvalidRequest
 	}
 	now := time.Now().UTC()
-	digest := sha256.Sum256([]byte(inv.Request.TenantID + ":" + commandID(inv)))
-	id, _ := database.NewResourceID("import-" + hex.EncodeToString(digest[:]))
+	id, command := databaseImportIdentity(inv)
 	gate := databaseTransferAuthority{operations: operations, invocation: inv}
 	if err = gate.AuthorizeDatabaseTransfer(ctx, database.TransferAuthorizationRequest{Actor: inv.Actor.PrincipalID.String(), TenantID: tenant, SiteID: siteID, DatabaseID: p.DatabaseID, JobID: id, Action: database.AuthorizeTransferCreate}); err != nil {
 		return database.TransferJob{}, err
@@ -79,7 +78,7 @@ func (operations *DatabaseTransferOperations) PrepareDatabaseImport(ctx context.
 	if target.Status.Lifecycle != database.LifecycleReady || target.Status.Health != database.HealthHealthy || target.Status.Reconciliation != database.ReconciliationInSync {
 		return database.TransferJob{}, database.ErrUnavailable
 	}
-	job := database.TransferJob{ID: id, IdempotencyKey: commandID(inv), TenantID: tenant, SiteID: siteID, DatabaseID: target.ID, DatabaseGeneration: target.Generation, InstanceID: target.InstanceID, Direction: database.TransferImport, Format: p.Artifact.Format, Compression: p.Artifact.Compression, Source: &p.Artifact, ExportSource: &p.SourceExport, Selection: p.SourceExport.Selection, Limits: database.TransferLimits{MaximumBytes: 64 << 20, MaximumRows: 1_000_000, MaximumDuration: 90 * time.Second}, ConflictPolicy: database.TransferConflictFail, Retention: database.TransferRetention{RetainUntil: p.Artifact.ExpiresAt}, CreatedBy: inv.Actor.PrincipalID.String(), CreatedAt: now, Impact: database.SealTransferImpactPreview(database.TransferImpactPreview{DatabaseID: target.ID, DatabaseGeneration: target.Generation, CapturedAt: now})}
+	job := database.TransferJob{ID: id, IdempotencyKey: command, TenantID: tenant, SiteID: siteID, DatabaseID: target.ID, DatabaseGeneration: target.Generation, InstanceID: target.InstanceID, Direction: database.TransferImport, Format: p.Artifact.Format, Compression: p.Artifact.Compression, Source: &p.Artifact, ExportSource: &p.SourceExport, Selection: p.SourceExport.Selection, Limits: database.TransferLimits{MaximumBytes: 64 << 20, MaximumRows: 1_000_000, MaximumDuration: 90 * time.Second}, ConflictPolicy: database.TransferConflictFail, Retention: database.TransferRetention{RetainUntil: p.Artifact.ExpiresAt}, CreatedBy: inv.Actor.PrincipalID.String(), CreatedAt: now, Impact: database.SealTransferImpactPreview(database.TransferImpactPreview{DatabaseID: target.ID, DatabaseGeneration: target.Generation, CapturedAt: now})}
 	job, err = database.SealTransferJob(job)
 	if err != nil {
 		return database.TransferJob{}, err
@@ -93,6 +92,14 @@ func (operations *DatabaseTransferOperations) PrepareDatabaseImport(ctx context.
 		return database.TransferJob{}, err
 	}
 	return database.SealTransferJob(job)
+}
+
+func databaseImportIdentity(inv Invocation) (database.ResourceID, string) {
+	// Prepare is read-only and must not carry an idempotency key. Bind each
+	// durable intent to its authenticated actor and request identity instead.
+	digest := sha256.Sum256([]byte(inv.Request.TenantID + "\x00" + inv.Actor.PrincipalID.String() + "\x00" + inv.Request.RequestID))
+	id, _ := database.NewResourceID("import-" + hex.EncodeToString(digest[:]))
+	return id, id.String()
 }
 
 func (operations *DatabaseTransferOperations) service(inv Invocation, job database.TransferJob) (database.TransferService, error) {
