@@ -4,6 +4,16 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Latest source candidate (2026-09-20): first web activation is wired from the
+SQL node-config journal through verified rendering to a snapshot-one-only
+bootstrap. Durable vendor backup, native validation/start, live digest proof,
+and stop-before-restore handling are implemented. QEMU workflow/file-store tests
+pass (including tamper/reopen/failure cases); both candidate binaries are built
+as `cyberpanel-web-bootstrap` / `panel-execd-web-bootstrap` in the guest bin dir.
+NOT signed/deployed yet; release 36 remains installed and native web startup is
+still unqualified. Next: qualify broker retry behavior and controlled native
+bootstrap, then signed deployment including the mail recovery fix.
+
 Latest installed checkpoint (2026-09-20): sequence 36 is committed and its
 signed engine catalog, managed links, package hash/native metadata and installed
 OLS version pass the explicit QEMU check. Upgrade exposed same-generation mail

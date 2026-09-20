@@ -5,6 +5,40 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### First web activation implementation candidate — 2026-09-20
+
+Reproduced the first-activation gap in QEMU: the activator rejected snapshot one
+because there was no previous current receipt. Implemented a separate initial
+path under the existing activation locks, restricted to snapshot one and stores
+with no current-state file. It requires a stopped native service, durably saves
+the vendor master, swaps the independently rendered candidate, runs the native
+parser, starts the fixed service and obtains the existing digest-attesting HTTP
+proof before confirming. Failure stops the service before restoring the saved
+master; it never labels an unverified vendor baseline a healthy rollback.
+
+The file-store checkpoint verifies the immutable candidate and backup digest,
+survives reopening, refuses unrelated live-master changes, and cannot reset an
+already-adopted node. The control runtime now prepares the first complete node
+configuration in the existing SQL journal and finalizes it only after the
+privileged activation receipt confirms the exact rendered digest.
+
+QEMU tests went from failing the missing-current path to passing initial
+activation and failed-probe restoration. Additional checks pass for parser
+rejection without service start, failed stop without overwriting a live master,
+later-snapshot rejection, both-edition file-store reopen/restore, and backup/live
+tamper rejection. These are workflow tests and real file-store checks, NOT yet
+native OLS/LSE startup qualification. Activation/fsstore, lswsruntime, management,
+cyberpanel and panel-execd suites pass; the activation broker package compiles
+but has no existing package tests. Both candidate binaries were built in QEMU:
+`/home/harness/bin/cyberpanel-web-bootstrap` and
+`/home/harness/bin/panel-execd-web-bootstrap` (also include the mail recovery fix).
+
+Installed release remains 36. Candidate changes have not been signed/deployed;
+native initial startup, SQL finalization and the broker's ambiguous-receipt retry
+behavior still need qualification. The QEMU OLS service hold remains in place.
+Do not claim the web engine/core is running. Host free space ~246 GiB and Git
+packs ~486 MiB remain stable after checkpoint exclusion.
+
 ### Sequence 36 installed; native catalog and mail recovery — 2026-09-20
 
 After disk cleanup, QMP reported `io-error` / `nospace`: QEMU had automatically

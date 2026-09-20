@@ -424,6 +424,9 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize web-engine management service: %w", err)
 	}
+	if err = webManagementRuntime.EnsureInitialConfiguration(ctx); err != nil {
+		return apiserver.DomainServices{}, fmt.Errorf("activate initial web-engine configuration: %w", err)
+	}
 	nodeState, err := catalog.NodeState(ctx)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("inspect web-engine node state: %w", err)

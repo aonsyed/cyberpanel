@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"reflect"
 	"strings"
 	"sync"
@@ -91,6 +92,9 @@ func (a *Activator) Apply(ctx context.Context, generation native.ConfigGeneratio
 	}
 	previous, err := a.Store.Current(ctx)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) && generation.SnapshotGeneration == 1 && matchesGeneration(candidate, generation) {
+			return a.bootstrap(ctx, candidate)
+		}
 		return ambiguousWith(candidate, Receipt{}), fmt.Errorf("read current receipt: %w", err)
 	}
 	if !matchesGeneration(candidate, generation) || !validCurrent(previous) || previous.Edition != candidate.Edition {
