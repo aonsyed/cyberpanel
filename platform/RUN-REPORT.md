@@ -5,6 +5,30 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Real Joomla and Mautic installations — 2026-09-20
+
+Ubuntu ARM64 QEMU now passes actual Joomla 6.1.3 and Mautic 7.2.0 installations
+against MariaDB using native PHP 8.3 and the production
+`certifiedApplicationArgumentBootstrap`. Each opt-in check verifies its archive
+digest, extracts into a fresh unprivileged fixture, creates a random isolated
+database/principal, passes secrets through the protected argument file rather
+than process arguments, runs the real installer and checks its generated
+configuration plus the administrator database row. The argument file is consumed.
+Temporary files, test databases and principals are removed even on failure.
+
+The first Mautic attempt failed because the test inherited root's `TMPDIR` while
+running PHP as the unprivileged harness user. Corrected the fixture environment
+and cleared supplementary groups; this was a harness error, not a product fix.
+Both live installs then passed, followed by the full uncached apps suite with
+both live flags enabled (8.922 seconds). Guest native PHP curl/gd/intl/mbstring/zip
+dependencies required an 810 kB download; no OS image or toolchain was fetched.
+
+Flags: `CYBERPANEL_QEMU_INSTALL_JOOMLA=1` and
+`CYBERPANEL_QEMU_INSTALL_MAUTIC=1`, run as QEMU root with the existing protected
+fixtures. This proves the upstream installer and argument-bootstrap boundary,
+not LSPHP/OLS/LSE execution, secret-broker leasing, HTTP login, full panel
+installation, application updates or backup/restore. Those gates remain open.
+
 ### Real archive admission and Mautic input — 2026-09-20
 
 The actual WordPress archive failed the production pinned-archive validator:
