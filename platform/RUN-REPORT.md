@@ -5,6 +5,38 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Sequence 36 installed; native catalog and mail recovery — 2026-09-20
+
+After disk cleanup, QMP reported `io-error` / `nospace`: QEMU had automatically
+stopped on the earlier exhausted host disk. Resumed that same VM via QMP (no
+image replacement), checked the candidate hash and installed sequence 36.
+`qemu-web-catalog-3.1.35` committed with manifest
+`818f8aca469212f151a25298fac852e2d2bafbaef2bc6886c8a65d780cda9edc` and receipt
+`0aca1e201bd7808c06fb9a179b82f2e30dd64f6fb608b9cf8b6fd19783c68573`.
+Installer reconciliation returned applied; dpkg audit was clean. The explicit
+installed-engine-catalog test passed against managed catalog/key/repository
+links, the real signature, pinned package bytes/native metadata and installed
+OLS version. This closes catalog admission, not native web activation.
+
+Core startup then reproduced a same-generation mail recovery bug: retained mail
+configuration was valid but package-install service stops left mail inactive;
+the unchanged-generation branch only probed and returned an ambiguous outcome.
+Added recovery that validates the retained generation before reload/restart and
+then probes all services. Healthy replay remains probe-only. The gated native
+QEMU test failed before the fix, then passed after it, including refusal to start
+an invalid generation, actual SMTP/TLS/STARTTLS recovery, and no restart evidence
+on healthy replay. The complete mail, management, cyberpanel and panel-execd
+suites passed with installed-SMTP/catalog checks enabled. Recovery source is
+NOT yet in a signed release; the native test restored current service health.
+
+The resumed VM clock lagged host UTC by about 63 minutes despite reporting NTP
+synchronized; synchronized guest UTC to the host before subsequent checks.
+The subsequent installed-core start gets past mail and fails web inspection.
+OLS remains held inactive and `/usr/local/lsws/conf/.panel-state/current` is
+absent. Next: deploy the recovery fix and implement initial verified web
+activation/catalog finalization. Core/API/UI and complete mailbox delivery
+remain unqualified. Guest free space is 8.7 GiB; shared Git packs remain ~486 MiB.
+
 ### Disk exhaustion root cause corrected — 2026-09-20
 
 The earlier attribution to insufficient user-provided space was wrong. The

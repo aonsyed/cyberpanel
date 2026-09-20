@@ -4,6 +4,16 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Latest installed checkpoint (2026-09-20): sequence 36 is committed and its
+signed engine catalog, managed links, package hash/native metadata and installed
+OLS version pass the explicit QEMU check. Upgrade exposed same-generation mail
+restart recovery: fixed and red/green tested against native daemons; recovery
+source still awaits the next signed release. Four affected suites pass. Native
+mail is healthy again; core reaches web inspection and fails because initial
+web activation is absent (OLS held inactive, no current activation receipt).
+Next: signed recovery deployment and initial verified web bootstrap. Git pack
+size remains ~486 MiB after the checkpoint exclusion fix.
+
 Disk blocker corrected (2026-09-20): automatic Git checkpoint trees had captured
 QEMU overlays through the main checkout, growing shared `.git` to ~241 GiB.
 Unused temporary packs and obsolete runtime checkpoint objects were reclaimed;

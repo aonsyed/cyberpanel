@@ -307,9 +307,7 @@ func (host *LinuxMailHost) ApplyGeneration(ctx context.Context, generation Confi
 	}
 	receipt.PreviousGeneration = current
 	if current == storeGenerationID {
-		probe, probeErr := host.probeAll(ctx)
-		receipt.ProbeDigest = probe
-		return receipt, probeErr
+		return host.reconcileCurrentGeneration(ctx, receipt)
 	}
 	previous, err := host.Store.Activate(ctx, storeGenerationID)
 	receipt.ActivationDigest = digestMailEvidence(storeGenerationID, previous, errorText(err))
@@ -345,6 +343,24 @@ func (host *LinuxMailHost) ApplyGeneration(ctx context.Context, generation Confi
 		return receipt, errors.Join(reloadErr, probeErr)
 	}
 	return receipt, errors.Join(ErrAmbiguous, reloadErr, probeErr, rollbackErr, rollbackReloadErr, rollbackProbeErr)
+}
+func (host *LinuxMailHost) reconcileCurrentGeneration(ctx context.Context, receipt MailActivationReceipt) (MailActivationReceipt, error) {
+	probe, err := host.probeAll(ctx)
+	receipt.ProbeDigest = probe
+	if err == nil {
+		return receipt, nil
+	}
+	// A retained generation can be correct while its services are stopped
+	// after an upgrade or reboot. Validate before restoring that desired state;
+	// healthy replays remain probe-only and do not restart live services.
+	receipt.ValidationDigest, err = host.validateGeneration(ctx, receipt.GenerationID)
+	if err != nil {
+		return receipt, err
+	}
+	var reloadErr, probeErr error
+	receipt.ReloadDigest, reloadErr = host.reloadAll(ctx)
+	receipt.ProbeDigest, probeErr = host.probeAll(ctx)
+	return receipt, errors.Join(reloadErr, probeErr)
 }
 func (host *LinuxMailHost) ControlService(ctx context.Context, service MailService, action MailServiceAction) (MailServiceReceipt, error) {
 	if host == nil {
