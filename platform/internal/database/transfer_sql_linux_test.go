@@ -44,3 +44,28 @@ func TestTransferSQLPreservesQuotedAndOrdinaryComments(t *testing.T) {
 		}
 	}
 }
+
+func TestTransferSQLStandardDuplicateKeyForms(t *testing.T) {
+	for _, input := range []string{
+		"INSERT IGNORE INTO `sample` VALUES (1,'SELECT is data');",
+		"REPLACE INTO `sample` VALUES (1,'replacement');",
+		"/*!40101 INSERT IGNORE INTO `sample` VALUES (1,NULL) */;",
+	} {
+		reader := newConstrainedTransferSQLReader(bufio.NewReader(strings.NewReader(input)), nil)
+		output, err := io.ReadAll(reader)
+		if err != nil || string(output) != input {
+			t.Fatalf("dump form changed/rejected: %v", err)
+		}
+	}
+	for _, input := range []string{
+		"REPLACE INTO sample SELECT * FROM mysql.user;",
+		"INSERT IGNORE INTO sample VALUES (LOAD_FILE('/etc/passwd'));",
+		"REPLACE INTO sample VALUES (1); \\! forbidden;",
+		"INSERT IGNORE sample VALUES (1);",
+	} {
+		reader := newConstrainedTransferSQLReader(bufio.NewReader(strings.NewReader(input)), nil)
+		if _, err := io.ReadAll(reader); !errors.Is(err, ErrTransferUnsafeSQL) {
+			t.Fatalf("unsafe form accepted: %v", err)
+		}
+	}
+}

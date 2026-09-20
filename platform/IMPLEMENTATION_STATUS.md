@@ -11,6 +11,17 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Ordinary SQL duplicate-key forms — 2026-09-21 (source, not deployed)
+
+Constrained import now accepts INSERT IGNORE INTO and REPLACE INTO, retaining
+the existing SELECT/file-access/client-command bans and scoped loader authority.
+Native QEMU tests verify exact duplicate-key behavior for SQL and gzip: ignored
+duplicates preserve original text/BLOB, replacement changes only the intended row.
+Ordinary/BOM imports and unsafe-form rejection still pass, as do complete
+database/API/core/execd suites. This is row-level SQL dump support, NOT replacement
+of a live database. Views remain unsupported by staging verification/promotion;
+allowing CREATE VIEW alone would not complete that feature. Installed63 unchanged.
+
 ## Replacement-import constraint — 2026-09-21
 
 QEMU native MariaDB probe ruled out holding BACKUP STAGE BLOCK_DDL on the

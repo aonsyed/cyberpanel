@@ -761,11 +761,17 @@ func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *Linux
 		t.Fatal("invalid native dump fixture", err)
 	}
 	raw = bytes.TrimPrefix(raw, []byte(transferSQLMagic))
-	for _, bom := range []bool{false, true} {
-		t.Run(map[bool]string{false: "ordinary", true: "utf8-bom"}[bom], func(t *testing.T) {
+	for index, form := range []string{"ordinary", "utf8-bom", "insert-ignore", "replace"} {
+		t.Run(form, func(t *testing.T) {
 			plain := append([]byte(nil), raw...)
-			if bom {
+			if form == "utf8-bom" {
 				plain = append([]byte{0xef, 0xbb, 0xbf}, plain...)
+			}
+			if form == "insert-ignore" {
+				plain = append(plain, []byte("\nINSERT IGNORE INTO `sample` VALUES (1,'must not overwrite',X'AA');\n")...)
+			}
+			if form == "replace" {
+				plain = append(plain, []byte("\nREPLACE INTO `sample` VALUES (2,'replacement',NULL);\n")...)
 			}
 			data := plain
 			if job.Compression == TransferCompressionGzip {
@@ -780,10 +786,7 @@ func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *Linux
 				data = buffer.Bytes()
 			}
 			identity := job.Source.Identity
-			identity.Generation += 10
-			if bom {
-				identity.Generation++
-			}
+			identity.Generation += 10 + uint64(index)
 			writer, err := store.BeginTransferArtifact(ctx, identity, job.Format, job.Compression, job.Retention)
 			if err != nil {
 				t.Fatal(err)
@@ -821,7 +824,11 @@ func verifyOrdinaryNativeImports(t *testing.T, ctx context.Context, store *Linux
 				t.Fatalf("ordinary native import: %v", err)
 			}
 			got, err := query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+target.String()+"`.sample ORDER BY id;")
-			if err != nil || got != "1:transfer round trip:0001FF\n2:NULL:NULL" {
+			expected := "1:transfer round trip:0001FF\n2:NULL:NULL"
+			if form == "replace" {
+				expected = "1:transfer round trip:0001FF\n2:replacement:NULL"
+			}
+			if err != nil || got != expected {
 				t.Fatal("ordinary import contents differ", err)
 			}
 		})

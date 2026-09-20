@@ -491,10 +491,18 @@ func validateTransferSQLStatement(statement []byte) error {
 	if fields[0] == "SET" && bytes.Contains(statement, []byte("(")) { return ErrTransferUnsafeSQL }
 	allowed := fields[0] == "SET" || fields[0] == "COMMIT" || len(fields) >= 2 && ((fields[0] == "CREATE" && (fields[1] == "TABLE" || fields[1] == "INDEX")) ||
 		(fields[0] == "DROP" && (fields[1] == "TABLE" || fields[1] == "VIEW" || fields[1] == "INDEX")) || fields[0] == "ALTER" && fields[1] == "TABLE" ||
-		fields[0] == "INSERT" && fields[1] == "INTO" || fields[0] == "LOCK" && fields[1] == "TABLES" || fields[0] == "UNLOCK" && fields[1] == "TABLES" ||
+		transferDataStatement(fields) || fields[0] == "LOCK" && fields[1] == "TABLES" || fields[0] == "UNLOCK" && fields[1] == "TABLES" ||
 		fields[0] == "START" && fields[1] == "TRANSACTION")
 	if !allowed { return ErrTransferUnsafeSQL }
 	return nil
+}
+
+// Standard dump forms still run only under the isolated database loader's
+// scoped grants. The common SELECT/file/client-command bans above also apply.
+func transferDataStatement(fields []string) bool {
+	if len(fields) < 2 { return false }
+	if (fields[0] == "INSERT" || fields[0] == "REPLACE") && fields[1] == "INTO" { return true }
+	return len(fields) >= 3 && fields[0] == "INSERT" && fields[1] == "IGNORE" && fields[2] == "INTO"
 }
 
 func normalizeTransferSQL(statement []byte) string {

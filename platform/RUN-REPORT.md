@@ -4936,3 +4936,17 @@ the schemas. MariaDB refused the rename with ERROR4145: active BACKUP STAGE.
 This invalidates same-connection backup-stage locking as the promotion mechanism.
 The process exited, releasing the lock, and both created schemas were dropped.
 No panel source behavior, installed package, or release changed in this probe.
+# Ordinary INSERT IGNORE / REPLACE imports — 2026-09-21
+
+QEMU Ubuntu ARM64 targeted `Test(TransferSQL|QEMUTransferNativeRoundTrip)` passed.
+The native round-trip fixture now imports ordinary, BOM, INSERT IGNORE and REPLACE
+forms in both plain SQL/gzip. Native row queries prove duplicate INSERT IGNORE
+leaves existing text/BLOB unchanged and REPLACE changes the selected row. SELECT
+sources, LOAD_FILE and client escapes remain rejected. The native target fixture
+uses a scoped SQL account; this is not installed HTTP/upload qualification.
+
+With the existing guest Go/cache configuration, TMPDIR=/root,
+CYBERPANEL_QEMU_LIVE_TRANSFER=1, GOPROXY=off and GOTOOLCHAIN=local, full database,
+apiserver, cyberpanel and panel-execd package suites passed. No native package
+changes or downloads. Installed63 unchanged; view and live-database replacement
+support are not claimed by these tests.
