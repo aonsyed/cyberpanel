@@ -5,6 +5,46 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### HTTPS passkeys and first real tenant-create attempt — 2026-09-20
+
+QEMU reproduced rejection of HTTPS8090 and configured localhost by `webAuthnRP`.
+The fix permits valid panel ports and localhost, retaining HTTPS, same-host and
+configured-origin enforcement, and explicitly rejecting IP RP IDs. Regression
+tests include invalid ports, alternate hosts, plaintext, paths and userinfo.
+
+Signed44 qemu-passkey-3.1.43 installed:
+bundle `4d494f24b75bd74e9a9b95fd21696a7138863ddb3f7224cfe6c2ea4dd6176c0a`,
+manifest `64839c71f265d9b84016eb72cfe545368465e987498c3cadcd52f8d14074a291`,
+receipt `62631362f71e7948c8c40937e4ffdc7f59ffaeb0dccdd0775ae98e5b12daf472`.
+Existing manual mail/WAF install reconciliation was still necessary. No vendor
+source compilation or patches. Current44/rollback43 retained; redundant43 tar and
+abandoned core candidates removed. Guest approximately2.3GiB free.
+
+Actual QEMU Chromium virtual-authenticator enrollment returned201/200. Passkey
+login was intermittent401: isolated actual failed assertion to rejection of
+Chromium's `other_keys_can_be_added_here` client-data member. The
+[WebAuthn CollectedClientData specification](https://www.w3.org/TR/webauthn-3/#dictionary-client-data)
+requires tolerance of unknown keys. Dedicated client-data decoding now allows
+extensions without relaxing our API envelopes, duplicate-key rejection, challenge,
+origin or cross-origin validation. Signature verification still uses original bytes.
+Regression went red for both registration/assertion extension cases, then green;
+negative duplicate/origin/challenge/trailing-data cases remain rejected.
+
+QEMU command `go test -p 2 ./internal/authn ./internal/apiserver ./internal/identity
+-count=1` passed offline. The changed verifier was built in QEMU and exercised
+under the native authd sandbox via temporary99-qemu-clientdata.conf override.
+Actual UI passkey login succeeded repeatedly, including a browser-generated
+assertion WITH the extension; HTTP200, assurance3, authenticated overview rendered.
+This verifier fix is not yet in signed44. Gateway uses a temporary localhost HTTPS
+fixture at8090; browser certificate bypass is limited to that self-signed fixture.
+Core uses installed44; authd/core/gateway/OLS all active, HTTPS readiness200.
+
+Next actual UI tenant-create attempt reached the backend but returned503
+`unavailable`. No successful tenant creation or site provisioning claimed.
+Harness and test credentials remain guest-only/ignored; captured assertion and
+virtual-authenticator private key must never be printed or committed. The temporary
+diagnostic Go file was removed from guest source after isolating the failure.
+
 ### Real installation claim and authenticated UI — 2026-09-20
 
 Signed43 qemu-claim-3.1.42 deployed the bootstrap fixes:

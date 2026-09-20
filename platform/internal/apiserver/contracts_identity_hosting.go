@@ -397,7 +397,31 @@ func validateWebAuthnLoginFinish(value any)error{payload:=value.(*WebAuthnLoginF
 func validateWebAuthnEnrollmentBegin(value any)error{if _,err:=identity.NewID(value.(*WebAuthnEnrollmentBeginPayload).CredentialID);err!=nil{return invalid("WebAuthn enrollment")};return nil}
 func validateWebAuthnEnrollmentFinish(value any)error{payload:=value.(*WebAuthnEnrollmentFinishPayload);if _,err:=identity.NewID(payload.CredentialID);err!=nil||!validBrowserCredentialJSON(payload.Response){return invalid("WebAuthn response")};return nil}
 func validBrowserCredentialJSON(value json.RawMessage)bool{if len(value)<16||len(value)>2<<20||value[0]!='{'||value[len(value)-1]!='}'{return false};var decoded map[string]json.RawMessage;decoder:=json.NewDecoder(strings.NewReader(string(value)));decoder.DisallowUnknownFields();return decoder.Decode(&decoded)==nil&&len(decoded)>0}
-func webAuthnRP(meta RequestMeta)(string,error){if !meta.TLS||meta.Origin==""{return "",ErrForbidden};host,err:=normalizeHost(meta.Host);if err!=nil{return "",ErrForbidden};origin,err:=url.Parse(meta.Origin);if err!=nil||origin.Scheme!="https"||origin.User!=nil||origin.Path!=""||origin.RawQuery!=""||origin.Fragment!=""||!strings.EqualFold(origin.Hostname(),host)||(origin.Port()!=""&&origin.Port()!="443"){return "",ErrForbidden};if !validMailHostname(host){return "",ErrForbidden};return host,nil}
+func webAuthnRP(meta RequestMeta) (string, error) {
+	if !meta.TLS || meta.Origin == "" {
+		return "", ErrForbidden
+	}
+	host, err := normalizeHost(meta.Host)
+	if err != nil {
+		return "", ErrForbidden
+	}
+	origin, err := url.Parse(meta.Origin)
+	if err != nil || origin.Scheme != "https" || origin.User != nil || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" || !strings.EqualFold(origin.Hostname(), host) {
+		return "", ErrForbidden
+	}
+	// The gateway checks the exact configured origin before signing metadata.
+	// An RP ID excludes the port, but the HTTPS origin may use the panel port.
+	if _, err := normalizeOrigin(meta.Origin); err != nil {
+		return "", ErrForbidden
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return "", ErrForbidden
+	}
+	if host != "localhost" && !validMailHostname(host) {
+		return "", ErrForbidden
+	}
+	return host, nil
+}
 
 type SiteCreatePayload struct{ProjectID string `json:"project_id"`;PrimaryHostname string `json:"primary_hostname"`;PHPProfile site.PHPProfile `json:"php_profile"`}
 type SiteActionPayload struct{Action string `json:"action"`}

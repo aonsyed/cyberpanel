@@ -6,6 +6,29 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest authentication checkpoint: signed44 qemu-passkey-3.1.43 installed, previous43
+retained. HTTPS port/RP fix deployed in core. Actual Chromium WebAuthn enrollment
+returned201/200. Repeated login exposed strict client-data parsing: Chromium's
+optional `other_keys_can_be_added_here` caused401. Source now accepts extensible
+CollectedClientData while preserving duplicate-key, challenge, origin, cross-origin
+and signature checks. Focused QEMU authn/apiserver/identity tests pass uncached.
+Actual browser login WITH that extra field now returns200 and assurance3.
+IMPORTANT: client-data fix is tested via TEMPORARY native authd unit override,
+/run/systemd/system/panel-authd.service.d/99-qemu-clientdata.conf ->
+/usr/local/libexec/cyberpanel/qemu-authd-clientdata. It is NOT in signed44 yet.
+Gateway has TEMPORARY HTTPS localhost8090 fixture override
+/run/systemd/system/panel-gateway.service.d/99-qemu-passkey.conf; config/cert/key
+under /run/cyberpanel-qemu-passkey. Browser ignores ONLY this fixture's self-signed
+certificate; production TLS provisioning is not qualified. Core runs installed44.
+Real UI tenant create with phishing-resistant session returned503 unavailable;
+next diagnose that concrete failure, then package accumulated panel fixes.
+Guest-only harness /home/harness/qemu-passkey.cjs reuses a saved0600 virtual-key
+fixture /home/harness/qemu-virtual-passkey.json. NEVER print/copy test private keys,
+passwords or captured assertions into Git. Do not repeat enrollment unnecessarily.
+No vendor source builds/patches/downloads. Redundant43 bundle and abandoned core
+candidate binaries removed (~594MiB); current44/rollback43 remain. Guest2.3GiB free:
+reclaim verified obsolete artifacts BEFORE another full bundle. Trust maximum44.
+
 Latest: signed43 qemu-claim-3.1.42 installed; bootstrap fix is deployed. Actual
 root-only local claim returned201 through the protected authentication broker;
 consumed-token replay returned401. Actual browser owner login200, authenticated
