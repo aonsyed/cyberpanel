@@ -47,9 +47,12 @@ runtime limitation before declaring container integration operational. Exact
 artifact hashes, evidence and remaining limits are in `RUN-REPORT.md`.
 Fixed-generation inherited AppArmor confinement is now implemented in the
 native launcher and admission path. Real QEMU container checks cover identity,
-allowed/denied reads and rejected unconfined transitions. Signed installer
-policy loading, boot/retirement integration and complete sandbox qualification
-remain pending. No unconfined MAC fallback was enabled.
+allowed/denied reads and rejected unconfined transitions. Installer policy
+provisioning is implemented; persistent publication, kernel-state replay and a
+real Ubuntu ARM64 reboot passed. Native AppArmor boot loading retained the exact
+enforcing generation and post-reboot container admission/confinement passed.
+Outer signed installer invocation, safe retirement and complete sandbox
+qualification remain pending. No unconfined MAC fallback was enabled.
 
 Latest executable verification is recorded in `RUN-REPORT.md`: the current
 application database/TLS changes passed the full uncached Go suite in Ubuntu

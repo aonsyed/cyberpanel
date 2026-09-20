@@ -5,6 +5,32 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Persistent container policy and real reboot verified — 2026-09-20
+
+The existing initialize/migrate installer hooks now provision the embedded,
+versioned AppArmor policy before receipt replay. The root-only provisioner
+validates trusted parent/parser metadata, rejects altered, writable or symlinked
+generation files, loads only embedded bytes, atomically persists root-owned
+0644 policy under `/etc/apparmor.d`, and verifies kernel enforcement. Existing
+generations are retained; no rollback unloads live workload confinement.
+
+Ubuntu ARM64 QEMU tests passed for persistent publication, reload after kernel
+state loss, unchanged inode on replay and rejection of unsafe files. Uncached
+containers/cyberpanel package checks and the panel build passed. The exported
+provisioner then installed the policy in the actual guest. A real reboot changed
+boot ID from `05b6f627-1117-4dd2-b34c-8e08d5f0d005` to
+`7139051b-e1f2-45bc-a7a6-3d0d11f29c9d`; AppArmor's native boot service loaded the
+exact enforcing generation without invoking the provisioner again. All four
+installed authority services returned active. Native rootless runtime admission
+and actual container confinement tests then passed (0.610 seconds), using the
+already boot-loaded policy rather than loading a test profile.
+
+This verifies policy persistence, not a full signed node installation: the hook
+has not yet been exercised through the outer signed installer. Core/gateway/execd
+remain uninstalled. The temporary PHP HTTPS input fixture stopped with reboot;
+the verified offline archives and signed recipes remain available. Other OS/arch
+qualification and complete workload lifecycle checks remain pending.
+
 ### Fixed-profile native container confinement implemented — 2026-09-20
 
 The native rootless launcher now enters a fixed AppArmor profile through the

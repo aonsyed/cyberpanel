@@ -64,9 +64,11 @@ func runInstallerHook(arguments []string) error {
 	// Reconcile live authority even when this release already has a receipt.
 	// A receipt cannot prove the broker still holds the matching signing key.
 	if invocation.Verb=="reconcile-services" { if _,err=reconcileMalwareApprovalTrust();err!=nil{return err} }
-	if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority" { if err=validatePackagedContainerRecipes();err!=nil{return err} }
+	var containerPolicyPath string
+	if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority" { if err=validatePackagedContainerRecipes();err!=nil{return err};containerPolicyPath,err=containers.ProvisionRootlessContainerPolicy(context.Background());if err!=nil{return err} }
 	if existing,loadErr:=readHookJournal(indexPath);loadErr==nil { if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority"{manifest,validateErr:=apps.ValidateLinuxApplicationCatalog(context.Background(),"",time.Now().UTC());if validateErr!=nil||manifest.ReleaseID!=invocation.Release{return errors.Join(errors.New("application catalog no longer matches installer receipt"),validateErr)}};_,err=io.WriteString(os.Stdout,existing.Response);return err } else if !errors.Is(loadErr,os.ErrNotExist){return loadErr}
 	changed,err:=applyHook(invocation);if err!=nil{return err}
+	if containerPolicyPath!="" { changed=append(changed,containerPolicyPath) }
 	responseValue:=struct{Version uint32 `json:"version"`;Hook,Release,Component,State string}{1,invocation.Verb,invocation.Release,invocation.Component,"applied"}
 	response,err:=json.Marshal(responseValue);if err!=nil{return err};response=append(response,'\n');sum:=sha256.Sum256(response);receiptDigest:=hex.EncodeToString(sum[:])
 	now:=time.Now().UTC();journal:=hookJournal{Version:1,Verb:invocation.Verb,Release:invocation.Release,Component:invocation.Component,ReceiptDigest:receiptDigest,Response:string(response),Changed:changed,State:"applied",CreatedAt:now,UpdatedAt:now}
