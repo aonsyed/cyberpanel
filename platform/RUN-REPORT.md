@@ -5,6 +5,24 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Mail domain browser/API integration — 2026-09-21
+
+QEMU installed browser with real password/passkey authentication: old generic
+mail form reproducibly returned400 invalid_request (flat domain/site_id/
+dns_automation). Candidate form sends typed policy and domain through installed
+API; both return200. First QA assertion mistakenly expected201; fresh read then
+confirmed exactly one active generation1 domain, not a failed provisioning call.
+QEMU npm typecheck/build pass. A second authenticated candidate-browser run reads
+the actual domain projection and verifies the creation dialog fits390px viewport.
+Final domain.ts action metadata-only cleanup also passes QEMU typecheck.
+
+No actual mail delivery success claimed: direct native postmap query against the
+configured Unix socket returns missing socket. Postfix/Dovecot remain active;
+ordinary domains are not covered by the migration-only static-map path. Next work
+is missing lookup integration plus mailbox enrollment and submission/retrieval.
+One local-only domain/policy fixture retained for that work, identifiers in
+IMPLEMENTATION_STATUS.md; no external mail, downloads or package modifications.
+
 ### Whole-source build and installed mail/DNS checkpoint — 2026-09-21
 
 Git archive of 6d76bc266 synchronized into existing Ubuntu ARM64 QEMU guest.

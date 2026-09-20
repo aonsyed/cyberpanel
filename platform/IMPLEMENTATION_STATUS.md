@@ -4,6 +4,32 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+## Mail domain workflow — 2026-09-21 (candidate UI, delivery NOT qualified)
+
+Real installed Chromium/passkey session reproduced Add mail domain HTTP400:
+generic drawer sent domain string/site_id/dns_automation, whereas typed API needs
+a Domain object, resource identity and existing policy. Candidate dedicated form
+creates policy then domain through existing authenticated APIs, retaining exact
+resource IDs/idempotency keys in same-tab sessionStorage for retries. List columns
+now use actual resource-envelope fields. QEMU UI typecheck/build pass; candidate
+assets + installed API returned200 for both creates; fresh list proves one active
+generation1 domain. Browser domain projection and390px dialog checks pass.
+
+Retained local-only fixture for next mailbox/delivery work:
+domain maildomain_692e8126dd484fc496116452abc79709, name qemu-mail.example.invalid;
+policy mailpolicy_692e8126dd484fc496116452abc79709; tenant is existing qemu_owner
+tenant api_089fc286148d25553d38c323e951ced797bb2a77da005faf. Safe fixture metadata
+is guest-only /home/harness/qemu-mail-domain-created.json. No mail sent.
+
+NEXT CONCRETE INTEGRATION FAILURE: native `postmap -q qemu-mail.example.invalid
+socketmap:unix:/run/cyberpanel/mail/postfix.sock:domains` fails: socket absent.
+Config renderer references it, but targeted source search found no socketmap
+listener implementation. Ordinary domains have StaticRoutes=false and are omitted
+from static maps. Do not mistake active API records/service health for delivery.
+Implement the missing native lookup integration; mailbox creation/credential UI,
+authenticated submission/retrieval, DNS automation and DKIM remain unfinished.
+Candidate UI is not installed; installed63 unchanged; guest3.2GiB free.
+
 ## Whole-source and installed service checkpoint — 2026-09-21
 
 Source 6d76bc266: offline QEMU Ubuntu ARM64 `go test -p 2 ./... -count=1`

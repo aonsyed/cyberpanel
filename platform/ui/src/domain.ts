@@ -212,8 +212,8 @@ export const pages: Record<string, PageDefinition> = {
   },
   mail: {
     id:"mail",title:"Mail",description:"Domains, mailboxes, aliases, limits, DKIM, relay, queue, logs, and diagnostics.",resourceKind:"mail.domain",listOperation:"mail.domain.list",
-    createAction:{id:"domain",label:"Add mail domain",operation:"mail.domain.create",mutating:true,fields:[{key:"domain",label:"Domain",type:"hostname",required:true},{key:"site_id",label:"Owning site",type:"text",required:true},{key:"dns_automation",label:"Configure DNS records",type:"boolean",defaultValue:true}]},
-    columns:[{key:"domain",label:"Domain",format:"hostname"},{key:"mailboxes",label:"Mailboxes",format:"number"},{key:"quota_used",label:"Usage",format:"bytes"},{key:"dkim",label:"DKIM",format:"status"},{key:"delivery",label:"Delivery",format:"status"},{key:"health",label:"Health",format:"status"}],
+    createAction:{id:"domain",label:"Add mail domain",operation:"mail.domain.create",mutating:true,assurance:"mfa"},
+    columns:[{key:"spec.name",label:"Domain",format:"hostname"},{key:"spec.policy",label:"Policy",format:"text"},{key:"generation",label:"Generation",format:"number"},{key:"state",label:"State",format:"status"}],
     rowActions:[{id:"mailbox",label:"Add mailbox",operation:"mail.mailbox.create",mutating:true},{id:"aliases",label:"Aliases & routing",operation:"mail.route.list",mutating:false},{id:"diagnose",label:"Diagnose",operation:"mail.diagnostic.run",mutating:true},{id:"delete",label:"Delete",operation:"mail.domain.delete",mutating:true,tone:"critical",assurance:"mfa"}],emptyTitle:"No mail domains",emptyBody:"Add a domain and configure its mailbox and DNS policy."
   },
   mailQueue: {
