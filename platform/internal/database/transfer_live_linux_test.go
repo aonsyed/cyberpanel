@@ -150,6 +150,16 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal("prepare export", err)
 			}
+			// Deliberately stale native preview estimate: receipts must count the
+			// two actual dumped rows, never repeat this estimate as fact.
+			job.Impact.Rows = 0
+			job.Impact = SealTransferImpactPreview(job.Impact)
+			actualArtifact := WorkspaceExportArtifact(job)
+			job.Destination = &actualArtifact
+			job, err = SealTransferJob(job)
+			if err != nil {
+				t.Fatal(err)
+			}
 			preparedPath, err := store.artifactPath(*job.Destination)
 			if err != nil {
 				t.Fatal(err)
@@ -166,6 +176,25 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			receipt, err := coordinator.RunWorkspaceExport(ctx, call, "fixture-user", job)
 			if err != nil {
 				t.Fatalf("native export: %v (exit %d)", err, receipt.ExitCode)
+			}
+			if receipt.RowsProcessed != 2 || receipt.Artifact.Rows != 2 {
+				t.Fatal("export trusted preview row estimate")
+			}
+			limited := job
+			limited.Limits.MaximumRows = 1
+			limitedArtifact := WorkspaceExportArtifact(limited)
+			limited.Destination = &limitedArtifact
+			limited, err = SealTransferJob(limited)
+			if err != nil {
+				t.Fatal(err)
+			}
+			limitedReceipt, limitErr := exportConfigs.executor.ExportWorkspaceDatabase(ctx, WorkspaceExportRequest{Access: exportConfigs.access, Job: limited})
+			if !errors.Is(limitErr, ErrTransferLimit) || limitedReceipt.Artifact != nil {
+				t.Fatal("native export row limit", limitErr)
+			}
+			limitedPath, _ := store.artifactPath(limitedArtifact)
+			if _, err := os.Lstat(limitedPath); !os.IsNotExist(err) {
+				t.Fatal("over-limit artifact published")
 			}
 			replay, err := exportClient.ExportWorkspaceDatabase(ctx, request)
 			if err != nil || replay.Digest != receipt.Digest {

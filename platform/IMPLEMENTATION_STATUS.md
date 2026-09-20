@@ -13,6 +13,17 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Streamed export row accounting (source, not installed): native dump output now
+counts complete INSERT statements under the fixed --skip-extended-insert format,
+ignoring quoted strings/identifiers and comments across arbitrary chunk boundaries.
+Counter uses constant memory, stops at MaximumRows, and supplies progress, receipt
+and artifact row counts. Preview estimates are no longer reported as exported
+facts. QEMU SQL/gzip tests deliberately estimate0 for2 actual rows and verify2;
+limit1 aborts with no published artifact. Ordinary import and isolated verification
+still pass. Full database/execd suites pass; installed55 unchanged. This resolves
+the export row-accounting limitation described below, not general uploaded-SQL
+row estimation or large async-transfer/API/UI/promotion work.
+
 Isolated import verification (source, not installed): private native verifier
 requires a closed loader, reauthorizes the protected source/job/target, enumerates
 actual tables and SHOW CREATE definitions, counts rows directly, checks server

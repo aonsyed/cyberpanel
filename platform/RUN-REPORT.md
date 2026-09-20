@@ -5,6 +5,30 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Streamed native export row accounting — 2026-09-21 local date
+
+Export now counts complete INSERT statements from native mariadb-dump output,
+whose fixed arguments include --skip-extended-insert (one statement per row).
+Lexical state skips comments and quoted identifiers/data, handles escaped quotes
+across chunks, and buffers no row contents. Successful receipts/artifacts use
+actual counted rows; checkpoints expose that count. MaximumRows is enforced while
+streaming; incomplete output or limit failure aborts private artifact publication.
+Preview estimates remain preflight information, not returned exported-row facts.
+
+QEMU native SQL/gzip tests supply an intentionally inaccurate preview of0 rows
+for a2-row dump. Both receipts and artifact descriptors report2, and round-trip
+imports/isolated verification still recover/check the expected two rows. A second
+export with limit1 and estimate0 returns ErrTransferLimit and publishes no artifact.
+Counter tests vary every chunk width from1 to the fixture length, preserving all
+bytes and ignoring INSERT text in comments, strings and quoted identifiers;
+truncated input and explicit row-limit checks pass. Initial test-source escaping
+typo was caught by guest gofmt and corrected before tests. Final QEMU offline/root
+live-enabled database and panel-execd suites both exit0.
+
+Source only; installed55 unchanged. This relies on the fixed native dump format,
+not an arbitrary uploaded-SQL row estimator. Large async export jobs, broader
+objects, upload/API/UI integration, import promotion and recovery remain open.
+
 ### Isolated import native verification — source, 2026-09-20
 
 Verifier uses the existing protected job/target record, requires loader closure,

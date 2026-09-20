@@ -114,11 +114,14 @@ func (backend *LinuxTransferBackend) Export(ctx context.Context, job TransferJob
 		compressed = gzipWriter
 		dumpDestination = gzipWriter
 	}
+	rowCounter := &transferDumpRows{maximum:job.Limits.MaximumRows}
 	rawOutput := newTransferBoundedWriter(dumpDestination, job.Limits.MaximumBytes, func(bytes uint64) error {
-		return checkpoint(TransferStreamProgress{Bytes: bytes, Rows: 0, SafePoint: false})
+		return checkpoint(TransferStreamProgress{Bytes: bytes, Rows: rowCounter.rows, SafePoint: false})
 	})
+	rowCounter.destination=rawOutput
 	_, headerErr := rawOutput.Write([]byte(transferSQLMagic))
-	_, copyErr := io.CopyBuffer(rawOutput, stdout, make([]byte, 64<<10))
+	_, copyErr := io.CopyBuffer(rowCounter, stdout, make([]byte, 64<<10))
+	if copyErr==nil{copyErr=rowCounter.finish()}
 	if headerErr != nil || copyErr != nil { cancel() }
 	if compressed != nil {
 		if closeErr := compressed.Close(); copyErr == nil { copyErr = closeErr }
@@ -127,15 +130,15 @@ func (backend *LinuxTransferBackend) Export(ctx context.Context, job TransferJob
 	if closeErr := writer.Close(); copyErr == nil { copyErr = closeErr }
 	exitCode := transferExitCode(waitErr)
 	receipt := SealTransferProcessReceipt(TransferProcessReceipt{ExitCode: exitCode, Partial: waitErr != nil || headerErr != nil || copyErr != nil,
-		BytesProcessed: artifactOutput.count, RowsProcessed: job.Impact.Rows, StderrDigest: stderr.Digest(), StderrBytes: stderr.Size(), StderrTruncated: stderr.Truncated(), CompletedAt: backend.now().UTC()})
+		BytesProcessed: artifactOutput.count, RowsProcessed: rowCounter.rows, StderrDigest: stderr.Digest(), StderrBytes: stderr.Size(), StderrTruncated: stderr.Truncated(), CompletedAt: backend.now().UTC()})
 	if waitErr != nil || headerErr != nil || copyErr != nil {
 		if errors.Is(headerErr, ErrTransferCancelled) || errors.Is(copyErr, ErrTransferCancelled) || errors.Is(ctx.Err(), context.Canceled) { return receipt, ErrTransferCancelled }
 		if errors.Is(headerErr, ErrTransferLimit) || errors.Is(copyErr, ErrTransferLimit) { return receipt, ErrTransferLimit }
 		return receipt, ErrTransferStale
 	}
-	artifact, err := writer.Commit(ctx, artifactOutput.Digest(), artifactOutput.count, job.Impact.Rows)
+	artifact, err := writer.Commit(ctx, artifactOutput.Digest(), artifactOutput.count, rowCounter.rows)
 	if err != nil { receipt.Partial = true; receipt = SealTransferProcessReceipt(receipt); return receipt, err }
-	if artifact.Validate() != nil || artifact.Identity != *job.Destination || artifact.Digest != artifactOutput.Digest() || artifact.Bytes != artifactOutput.count || artifact.Rows != job.Impact.Rows ||
+	if artifact.Validate() != nil || artifact.Identity != *job.Destination || artifact.Digest != artifactOutput.Digest() || artifact.Bytes != artifactOutput.count || artifact.Rows != rowCounter.rows ||
 		artifact.Format != job.Format || artifact.Compression != job.Compression { receipt.Partial = true; receipt = SealTransferProcessReceipt(receipt); return receipt, ErrTransferInvalid }
 	committed = true
 	receipt.Artifact = &artifact
