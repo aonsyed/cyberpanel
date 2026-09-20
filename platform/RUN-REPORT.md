@@ -5,6 +5,31 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Isolated import native verification — source, 2026-09-20
+
+Verifier uses the existing protected job/target record, requires loader closure,
+and observes actual isolated tables through a closed SQL command set. It hashes
+ordered SHOW CREATE definitions, counts actual rows, records server-reported
+data/index allocation bytes and requires CHECK TABLE QUICK status OK. Table names
+are decoded from HEX metadata and safely backtick-escaped, including embedded
+backticks. Unknown object types/engines, malformed output and bounds/declared-row
+mismatches fail closed. Successful proofs are persisted in the protected record;
+reverification first clears the previous proof so failure cannot leave it usable.
+
+QEMU native SQL and gzip import tests reject verification with an active loader,
+then verify the imported two rows and nonzero reported allocation after cleanup.
+Renaming to a table containing a backtick still verifies and changes schema digest.
+Adding a third row makes verification fail; protected state is closed with no
+retained proof. Exact temporary database/account/config cleanup still passes.
+Final QEMU offline/root live-enabled database and panel-execd suites exit0.
+
+Not deployed; installed55 unchanged. This proof is health/schema/count evidence,
+not source-content equality or promotion authorization. Size is native metadata,
+not exact filesystem usage/quota. Promotion needs fencing and fresh revalidation.
+Current export descriptors still carry preview-estimated rows; streamed row
+accounting must replace that before general export→import qualification. Full
+object coverage, upload/API/UI integration and crash recovery remain unfinished.
+
 ### Installed literal-grant replacement — 2026-09-20
 
 Installed55 `qemu-grants-3.1.54`, rollback54. Manifest

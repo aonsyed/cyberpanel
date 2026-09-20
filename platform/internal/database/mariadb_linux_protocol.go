@@ -62,6 +62,10 @@ const (
 	sqlKillWriterSession
 	sqlStopWriterReplication
 	sqlObserveDataDirectory
+	sqlObserveImportTables
+	sqlObserveImportSchema
+	sqlCountImportRows
+	sqlCheckImportTable
 )
 
 type principalMutation struct {
@@ -250,6 +254,18 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 	case sqlObserveDataDirectory:
 		if len(values) != 0 { return "", ErrInvalidCommand }
 		return "SELECT @@datadir;\n", nil
+	case sqlObserveImportTables:
+		database,ok:=oneValue[Database](values)
+		if !ok || database.Validate()!=nil{return "",ErrInvalidResource}
+		return "SELECT HEX(TABLE_NAME),TABLE_TYPE,COALESCE(ENGINE,''),COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0) FROM information_schema.TABLES WHERE TABLE_SCHEMA='"+database.Name.String()+"' ORDER BY BINARY TABLE_NAME;\n",nil
+	case sqlObserveImportSchema,sqlCountImportRows,sqlCheckImportTable:
+		table,ok:=oneValue[isolatedTransferTable](values);if !ok{return "",ErrInvalidResource}
+		name,err:=isolatedTableSQL(table);if err!=nil{return "",err}
+		switch statement{
+		case sqlObserveImportSchema:return "SHOW CREATE TABLE "+name+";\n",nil
+		case sqlCountImportRows:return "SELECT COUNT(*) FROM "+name+";\n",nil
+		default:return "CHECK TABLE "+name+" QUICK;\n",nil
+		}
 	case sqlCreateDatabase:
 		database, ok := oneValue[Database](values)
 		if !ok || database.Validate() != nil {

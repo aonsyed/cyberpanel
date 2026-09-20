@@ -13,6 +13,19 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Isolated import verification (source, not installed): private native verifier
+requires a closed loader, reauthorizes the protected source/job/target, enumerates
+actual tables and SHOW CREATE definitions, counts rows directly, checks server
+reported allocation sizes and requires native CHECK TABLE status OK. It persists
+a verified record only after bounds/declared row-count checks. Any recheck first
+invalidates the previous proof. QEMU SQL/gzip native imports verify, quoted table
+identifiers work, and inserting an extra row causes rejection with stale proof
+removed. Database/execd suites pass; installed55 unchanged. This is NOT promotion
+or API/UI completion. Current exports still declare preview-estimated rows: exact
+streamed export row accounting is needed before broad import/export qualification.
+Allocation size comes from native metadata, not a hard native disk quota. Views/
+routines/triggers/events, promotion fencing and crash recovery remain pending.
+
 LATEST INSTALLED: signed55 `qemu-grants-3.1.54`, rollback54. Manifest
 `73da2a34415c5c379e44475c9bf70c4ee909195520780f07a4b50d8ebaea6e00`, receipt
 `2274cfe905433db87b532f722b46998ef135e0048d6e504217900990f5a54226`.

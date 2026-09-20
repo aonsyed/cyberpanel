@@ -16,10 +16,11 @@ import (
 // Root-only native building blocks for the transfer catalog. No broker operation
 // exposes these yet; callers must enforce transfer authorization and admission.
 type isolatedTransferRecord struct {
-	Job      TransferJob              `json:"job"`
-	Target   Database                 `json:"target"`
-	Isolated IsolatedTransferDatabase `json:"isolated"`
-	State    string                   `json:"state"`
+	Verification *TransferVerification    `json:"verification,omitempty"`
+	Job          TransferJob              `json:"job"`
+	Target       Database                 `json:"target"`
+	Isolated     IsolatedTransferDatabase `json:"isolated"`
+	State        string                   `json:"state"`
 }
 
 func (executor *LinuxMariaDBExecutor) transferImportSource(job TransferJob) (Database, error) {
@@ -279,7 +280,7 @@ func (executor *LinuxMariaDBExecutor) discardTransferImport(ctx context.Context,
 	if record.State == "creating" {
 		return ErrAmbiguous
 	}
-	if record.State != "allocated" && record.State != "closed" && record.State != "discarding" {
+	if record.State != "allocated" && record.State != "closed" && record.State != "verified" && record.State != "discarding" {
 		return ErrConflict
 	}
 	ctx, release, err := executor.beginWriterMutation(ctx)

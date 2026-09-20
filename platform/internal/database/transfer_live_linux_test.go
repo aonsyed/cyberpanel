@@ -277,6 +277,9 @@ func verifyIsolatedNativeImport(t *testing.T, ctx context.Context, executor *Lin
 	if err := executor.discardTransferImport(ctx, job, isolated); !errors.Is(err, ErrConflict) {
 		t.Fatal("active import could be discarded", err)
 	}
+	if _, err := executor.verifyTransferImport(ctx, job, isolated); !errors.Is(err, ErrConflict) {
+		t.Fatal("active loader verified", err)
+	}
 	source, err := executor.transferImportSource(job)
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +309,31 @@ func verifyIsolatedNativeImport(t *testing.T, ctx context.Context, executor *Lin
 	got, err := query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+isolated.Name.String()+"`.sample ORDER BY id;")
 	if err != nil || got != "1:transfer round trip:0001FF\n2:NULL:NULL" {
 		t.Fatal("isolated import contents differ", err)
+	}
+	verification, err := executor.verifyTransferImport(ctx, job, isolated)
+	if err != nil || verification.Validate(job, isolated) != nil || verification.RowCount != 2 || verification.Bytes == 0 {
+		t.Fatal("native isolated verification", err)
+	}
+	stored, err := executor.loadTransferImport(job, isolated)
+	if err != nil || stored.State != "verified" || stored.Verification == nil || stored.Verification.Digest != verification.Digest {
+		t.Fatal("verification not persisted", err)
+	}
+	if _, err = query(ctx, "RENAME TABLE `"+isolated.Name.String()+"`.sample TO `"+isolated.Name.String()+"`.`qemu``quoted`;"); err != nil {
+		t.Fatal(err)
+	}
+	quotedVerification, err := executor.verifyTransferImport(ctx, job, isolated)
+	if err != nil || quotedVerification.RowCount != 2 || quotedVerification.SchemaDigest == verification.SchemaDigest {
+		t.Fatal("quoted table verification", err)
+	}
+	if _, err = query(ctx, "INSERT INTO `"+isolated.Name.String()+"`.`qemu``quoted` VALUES(3,'unexpected',NULL);"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = executor.verifyTransferImport(ctx, job, isolated); err == nil {
+		t.Fatal("changed row count verified")
+	}
+	stored, err = executor.loadTransferImport(job, isolated)
+	if err != nil || stored.State != "closed" || stored.Verification != nil {
+		t.Fatal("stale verification retained", err)
 	}
 	if err = executor.discardTransferImport(ctx, job, isolated); err != nil {
 		t.Fatal("discard", err)
