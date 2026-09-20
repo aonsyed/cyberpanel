@@ -26,7 +26,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=full
-ProtectHome=true
+# Hide home trees while restoring only the rootless runtime's declared state.
+ProtectHome=tmpfs
+BindPaths=/run/user
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true

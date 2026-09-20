@@ -29,7 +29,7 @@ SystemCallFilter=@system-service
 CapabilityBoundingSet=
 AmbientCapabilities=
 ReadOnlyPaths=/etc/cyberpanel
-InaccessiblePaths=/var/lib/cyberpanel/control /var/lib/cyberpanel-auth /var/lib/cyberpanel/siteops /run/docker.sock /var/run/docker.sock
+InaccessiblePaths=/var/lib/cyberpanel/control /var/lib/cyberpanel-auth /var/lib/cyberpanel/siteops -/run/docker.sock -/var/run/docker.sock
 UMask=0077
 
 [Install]

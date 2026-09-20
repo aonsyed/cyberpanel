@@ -51,9 +51,16 @@ Sequence 19 installs the engine-edition loader fix. Startup next exposed malware
 socket initialization before siteops established shared-directory ownership;
 that order is fixed and deployed in sequence 20. Actual startup next required
 private native web config permissions; an installer reconciliation hook now
-prepares these and passed an actual idempotent QEMU test. Publish this updated
-panel hook together with the prepared WP-CLI package: the executor now reaches
-application admission but `/usr/bin/wp` is missing. Its restart loop is stopped.
+prepares these and passed an actual idempotent QEMU test. Sequence 21 installs
+that hook and WP-CLI 2.12.0; actual reconciliation and WP-CLI invocation passed.
+Sequence 22 restores /run/user inside the executor's ProtectHome namespace while
+keeping home trees hidden; the executor runs, with mutation admission closed
+until core schema initialization. Sequence 23 fixes core/gateway sandbox startup
+on Podman nodes without a Docker socket. Actual core startup now reaches its
+audit credential loader, which rejects systemd's root:root/0440 credential ACL
+mask. The source secret is 0600 and credential mount is read-only tmpfs; validate
+the credential access boundary before a scoped loader fix. Core restart loop is
+stopped. Executor mutation readiness and core/gateway startup are not yet proven.
 Continue startup and API/browser qualification. OLS remains held stopped until
 managed configuration is ready.
 The existing guest disk was safely expanded to 40 GiB, removing the repeated

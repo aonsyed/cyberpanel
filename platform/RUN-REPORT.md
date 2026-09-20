@@ -5,6 +5,52 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### WP-CLI installed; executor namespace repaired — 2026-09-20
+
+Provisioned a separate QEMU-only release authority `qemu-runtime-20260920`,
+bounded to sequences 21–40 and expiry 2026-09-26T18:51:37Z. Existing trust and
+retained releases remain intact; private signing material stays inside QEMU.
+Sequence 21 `qemu-runtime-3.1.20` installed the native web-authority hook and
+WP-CLI package. Actual signed `reconcile-services` passed; installed
+`wp --info` reported WP-CLI 2.12.0 and PHP 8.3.6. Bundle SHA-256
+`e88e1236ee85db98e6cfe657f101e28189983e047b84c74b9ffc1801544c26b0`;
+manifest `e0c15354210502a420c2846b4044b183cbc7d0c14ff2b837dfe100a40e016a45`;
+receipt `37dfacc3043542770c8f81faf48342aaea5a43679b49b5bca9603e23b045d11d`.
+
+Executor startup then failed creating `/run/user/992`: ProtectHome hid the
+explicitly writable rootless runtime path. Changed to ProtectHome=tmpfs with
+BindPaths=/run/user. A real systemd namespace probe confirmed /home/harness and
+/root/.ssh remained hidden while creating an empty temporary directory under
+/run/user succeeded; that probe directory was removed. Unit verification passed
+(vendor OLS unit still warns about legacy PID path and KillMode=none).
+Sequence 22 `qemu-namespace-3.1.21` installed this unit and reconciliation passed.
+Bundle SHA-256 `6de243c919d89a6c22f950500f1da518821171b24aa2e52b24e3c3af4a5ff94c`;
+manifest `3b965c19dacc93f8ab71f1990f57a9b4c4f825879fecf3cba3b599aaa0ab7462`;
+receipt `76e6b5a375564b006ba2d60348adb617e97af77d2ee6d638b16e165718cc41c2`.
+Executor now runs, but mutation admission remains closed: the not-yet-started
+core owns the missing reboot_admission_gate schema. Updater socket remains absent.
+
+First actual core launch failed systemd mount setup (226/NAMESPACE) because
+/run/docker.sock does not exist on this Podman node. Core/gateway unit changes
+make only Docker socket exclusions optional, matching the provider unit;
+existing sockets remain inaccessible. Qualification continues below. No download
+occurred; these are Ubuntu ARM64 startup results, not full product certification.
+
+Sequence 23 `qemu-core-3.1.22` committed the optional Docker socket exclusions.
+Bundle SHA-256 `5e04d05da169b713f00d1e2f14a506b9af2693f36127b753528109e7209bb299`;
+manifest `996fd61d25003ea4bbc3aa31b9630c628fd53a22da0b051af20dba396dc08249`;
+receipt `230806f284ae64c3cfe801d3665f0d450e8c532625734b712430f0e913a838cc`.
+The installer initially rejected the harness-owned bundle, then accepted it
+after root ownership and 0600 were applied. Signed reconciliation passed.
+Actual core launch now passes mount namespacing and fails its audit credential
+mode check. Root source secret is 0600; a real systemd LoadCredential probe
+running as UID 999/GID 988 exposes the credential root:root/0440 in a
+root:root/0550 service credential directory, on read-only nosuid/nodev/noexec
+tmpfs. Existing readCoreFile rejects all group mode bits, including the ACL mask
+used by systemd credentials. No validation weakening was applied. Core restart
+loop is stopped. Next: validate the actual credential access boundary and fix
+only that loader path, then resume installed core/gateway/API qualification.
+
 ### Corrected executor deployed; native web authority bootstrap verified — 2026-09-20
 
 Signed sequence 20 `qemu-executor-3.1.19` committed with the corrected listener
