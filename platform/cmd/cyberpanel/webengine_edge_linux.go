@@ -15,6 +15,7 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
+	"github.com/aonsyed/cyberpanel/platform/internal/noderelease"
 	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/management"
@@ -173,7 +174,29 @@ func (edge *webEngineEdge) CreatePHPProfile(ctx context.Context, call apiserver.
 	memory:=payload.MemoryBytes;if memory==0{memory=256<<20};upload:=memory/4;if upload>64<<20{upload=64<<20};profile,err:=edge.service.CreatePHPProfile(ctx,management.PHPProfileCommand{CommandID:call.CommandID,Profile:management.PHPProfile{ID:payload.Name,Version:payload.Version,Extensions:append([]string(nil),payload.Extensions...),MemoryLimitBytes:memory,UploadLimitBytes:upload,BodyLimitBytes:upload,RequestTimeout:300*time.Second,MaxConnections:8,MaxChildren:8},ExpectedGeneration:call.ExpectedGeneration,Fence:call.ExpectedGeneration+1,CommitAuthorizationDigest:webEngineAuthorizationDigest(call)});if err!=nil{return apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection]{},err};projection:=apiserver.WebEnginePHPProfileProjection{ID:profile.ID,Name:profile.ID,Version:profile.Version,Extensions:append([]string(nil),profile.Extensions...),MemoryBytes:profile.MemoryLimitBytes,State:"active",Generation:profile.Generation};return apiserver.EdgeMutation[apiserver.WebEnginePHPProfileProjection]{OperationID:webEngineEffectID(call.CommandID,"php",profile.ID),State:"active",Generation:profile.Generation,Resource:projection},nil
 }
 
-func webEngineExecutableDigest(path string)(string,error){info,err:=os.Lstat(path);if err!=nil||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Mode().Perm()&0o111==0||info.Mode().Perm()&0o022!=0{return "",management.ErrInvalid};metadata,ok:=info.Sys().(*syscall.Stat_t);if !ok||metadata.Uid!=0{return "",management.ErrInvalid};file,err:=os.Open(path);if err!=nil{return "",err};hash:=sha256.New();_,copyErr:=io.Copy(hash,io.LimitReader(file,1<<30+1));closeErr:=file.Close();if copyErr!=nil||closeErr!=nil{return "",errors.Join(copyErr,closeErr)};return hex.EncodeToString(hash.Sum(nil)),nil}
+func webEngineExecutableDigest(path string) (string, error) {
+	if path == "/usr/local/libexec/cyberpanel/panel-execd" {
+		resolved, err := noderelease.ResolveExecutorPath(path)
+		if err != nil { return "", err }
+		path = resolved
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0111 == 0 || info.Mode().Perm()&0022 != 0 {
+		return "", management.ErrInvalid
+	}
+	metadata, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || metadata.Uid != 0 { return "", management.ErrInvalid }
+	file, err := os.Open(path)
+	if err != nil { return "", err }
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) { return "", management.ErrInvalid }
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(file, (1<<30)+1))
+	if err != nil { return "", err }
+	if n == 0 || n > 1<<30 { return "", management.ErrInvalid }
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
 
 func webEngineProjection(installation management.Installation, tuning management.GlobalTuning) apiserver.WebEngineProjection {
 	licenseState := string(installation.License.State)

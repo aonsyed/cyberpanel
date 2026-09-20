@@ -5,6 +5,38 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed executor digest resolved through managed release — 2026-09-20
+
+The real executor path is a root-owned link through node-current into the
+immutable release root. The core digest helper previously rejected that link.
+Added a fixed executor-path resolver reusing the existing managed-config
+activation/ancestor validation, with executable rather than config mode limits.
+The digest helper checks opened-file identity and rejects empty/oversize input.
+Unrelated symlinks remain rejected; config mode requirements are unchanged.
+
+Root QEMU fixture checks passed for managed config/executable resolution,
+writable executable rejection, arbitrary links, wrong generation, writable
+ancestors, linked payload and credential rejection. The actual installed
+executor digest matched independently read binary bytes. Both affected package
+suites passed uncached as harness (root-only cases separately run above).
+
+Signed sequence 25 `qemu-digest-3.1.24` committed; reconciliation passed.
+Bundle SHA-256 `5f46c98fb0bb88ef7d62a0e09a0a28dc8a230f78e60d666d11bf58a8f1df5c67`;
+manifest `56b3992fc4393b1c5a7cfc22b369162f41466b59864954db9682173486eb0d84`;
+receipt `9ff5eb8acd36dadf7a74feef713f1d071e4e4bcb37d657211b1920250a7b7827`.
+Actual core now passes database executor digest and fails loading webmail session
+authority. Its separate mail loader rejects group mode bits on systemd
+credentials, as does the campaign unsubscribe loader immediately downstream.
+Apply the already-proven credential boundary consistently to these consumers;
+do not relax arbitrary secret files. Core restart loop is stopped.
+
+Offloaded the four sequence 21–24 bundle archives to the host run directory
+`current-ubuntu-arm64-20260919-smoke`, verified all four SHA-256 values against
+the recorded release evidence, then removed only those four guest /var/tmp
+copies (about 1.9 GiB). They are recoverable from those host copies. Retained
+installed generations, trust, journals and rollback state are untouched.
+Core/gateway readiness, API/UI and full matrix qualification remain incomplete.
+
 ### Core systemd audit credential accepted safely — 2026-09-20
 
 The audit loader now recognizes the exact systemd credential boundary only at

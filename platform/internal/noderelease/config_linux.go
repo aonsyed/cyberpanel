@@ -36,6 +36,19 @@ func ResolveUIRoot(path string) (string, error) {
 }
 
 func resolveConfigPath(path, configRoot, active, releases string) (string, error) {
+	return resolveManagedPath(path, configRoot, active, releases, 0644)
+}
+
+// ResolveExecutorPath pins the fixed privileged executor to its root-managed
+// immutable release. The caller must validate and hash the opened executable.
+func ResolveExecutorPath(path string) (string, error) {
+	if path != "/usr/local/libexec/cyberpanel/panel-execd" {
+		return "", ErrInvalid
+	}
+	return resolveManagedPath(path, "/usr/local/libexec/cyberpanel", ActiveRelease, ReleaseRoot, 0755)
+}
+
+func resolveManagedPath(path, configRoot, active, releases string, maximumMode os.FileMode) (string, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return "", ErrInvalid
 	}
@@ -78,7 +91,7 @@ func resolveConfigPath(path, configRoot, active, releases string) (string, error
 	if err != nil || !info.Mode().IsRegular() {
 		return "", ErrIntegrity
 	}
-	if err := requireRootOwned(info, 0644, false); err != nil {
+	if err := requireRootOwned(info, maximumMode, false); err != nil {
 		return "", err
 	}
 	return resolved, nil

@@ -60,9 +60,12 @@ on Podman nodes without a Docker socket. Actual core startup now reaches its
 audit credential loader. Sequence 24 fixes that fixed-path check using the exact
 root/service-user ACL and read-only tmpfs boundary; real systemd credential and
 negative permission checks passed. Actual core now reaches domain assembly and
-fails the database executor executable digest (the helper rejects symlinks;
-investigate signed installed executable resolution next). Core restart loop is
-stopped. Guest free space is 4.4 GiB. Executor mutation readiness and
+passes the database executor digest after sequence 25 adds validated managed
+release resolution. Actual startup next fails the webmail credential loader;
+both webmail session and campaign unsubscribe loaders reject systemd credential
+ACL mask bits. Reuse the proven private credential boundary for these fixed
+consumers next. Core restart loop is stopped. Four verified sequence 21–24
+archives were moved to host storage, freeing about 1.9 GiB. Executor readiness and
 core/gateway startup are not yet proven.
 Continue startup and API/browser qualification. OLS remains held stopped until
 managed configuration is ready.
