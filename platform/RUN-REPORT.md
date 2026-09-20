@@ -4904,3 +4904,26 @@ guest Go/cache paths, `go test -p 2 ./internal/database ./internal/apiserver
 ./cmd/cyberpanel ./cmd/panel-execd -count=1` passed all four packages. No installed
 daemon upgrade is claimed. Fixtures clean their own temporary data; no user
 artifacts or old unidentifiable staging directories were removed.
+# Installed63 grouped database release — 2026-09-21
+
+QEMU Ubuntu ARM64 signed release qemu-database-transfer-3.1.62 sequence63 committed.
+Source a48a4c83e; core/gateway/execd built offline and UI typecheck/build passed.
+Actual process binary hashes match assembly: core
+9cbc01c3981d79b03066959cd9b4855ced22fddc536b38fd0c13163269d6fb2a,
+gateway99fad41d19b630cd4726e859a22ed64cf19f4aeccf4dd6e7827c435628f05f16,
+execdc1015620aa42875e9139ca741bf0859c0c593c753a83c65523ed774d8906d558.
+UI index-DGPgYFsL.css/panel-CGMuzc93.js installed. All services running, NRestarts0.
+
+Real Chromium using installed assets/API: passkey login200, console issue201,
+metadata/query200, forbidden mutation400, successful follow-up query and390px
+layout; SQL/gzip export prepare200/run201/download200, expected fixture bytes and
+full SHA256 passed. First attempt had no fixture table after earlier cleanup;
+recreated the small native fixture, reran successfully, then dropped that table.
+This verifies local installed export; external enrollment/browser remains pending.
+
+Manifest db95ffcb6727508a37e5ea6f57e766bfba2268ac8386dfed5d3e3243ea7a6c55;
+receipt8fdc9e4e0c4d9e3cedcdef203040a49bacbf5f75cff63131dba1811d6d7facb1;
+bundleSHA256d6b83abce7a6583fd417223dfe1165e9acd0846e0c0c6a8a53af81b6b17769d0.
+Retained bundle only in ignored host .work/qemu; exact guest duplicate removed
+after matching hashes/committed receipt. Installer prune-staging completed;
+guest4.0GiB free. Existing native packages unchanged, no downloads or vendor builds.

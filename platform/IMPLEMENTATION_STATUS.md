@@ -11,6 +11,31 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Current recovery point — 2026-09-21 (installed63 committed)
+
+Release qemu-database-transfer-3.1.62, sequence63, includes source a48a4c83e:
+external TLS exports, abandoned incoming retention, native mapping replay and
+recovery-dialog error cleanup. QEMU rebuilt core/gateway/execd and UI offline;
+actual running `/proc/<pid>/exe` paths/hashes match assembled binaries. All three
+services active/running with zero restarts. Real installed passkey login, console
+session/query, rejected mutation, 390px layout and SQL/gzip browser downloads
+(expected text/NULL/BLOB fixture and SHA256) pass. Initial download assertion
+failed because the already-cleaned fixture table was absent, not a product error;
+recreated it, passed, and removed the fixture table again.
+
+Manifest db95ffcb6727508a37e5ea6f57e766bfba2268ac8386dfed5d3e3243ea7a6c55;
+receipt 8fdc9e4e0c4d9e3cedcdef203040a49bacbf5f75cff63131dba1811d6d7facb1;
+bundle d6b83abce7a6583fd417223dfe1165e9acd0846e0c0c6a8a53af81b6b17769d0.
+Guest duplicate bundle removed after matching retained ignored host copy; native
+prune-staging completed. Guest4.0GiB free. No downloads or native package changes:
+OLS/ols-modsecurity1.9.2-1+noble, existing custom CRS4.29.0-2 unchanged.
+
+Limits: external export is source/coordinator/broker/native qualified, not yet
+installed external enrollment→browser qualified. Crash cleanup is native QEMU
+process-tested but not separately induced through the installed maintenance timer.
+Tenant mutual-TLS credentials, replacement imports and broader parity remain open.
+Below source-only entries are historical and are now included in installed63.
+
 ## Abandoned transfer cleanup — 2026-09-21 (source, not deployed)
 
 Transfer writers now persist retention metadata before payload bytes and hold a
