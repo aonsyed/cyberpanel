@@ -5,6 +5,41 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Magento source and dependency preparation — 2026-09-20
+
+Fetched [Magento Open Source 2.4.9](https://github.com/magento/magento2/releases/tag/2.4.9)
+inside Ubuntu ARM64 QEMU. The annotated tag is
+`614a428f70fcef830b02d37f633fedf273eeb667`, targeting commit
+`755e34dd689021c5165db9d35ecff74f7dc51527`; GitHub reports the tag unsigned.
+Source tar SHA-256: `004020ded235e108f752b93193fb713461eb32e39ae3411681f1a9fe429aa9ad`.
+Guest source: `/home/harness/magento-2.4.9-release-source`.
+Native Composer/bcmath/soap packages required 1,042 kB; Composer installed 148
+production dependencies as the unprivileged harness user without private
+repository credentials. These are application dependencies, not OS images or
+Go toolchains.
+
+The actual upstream Composer requirements exposed missing FTP, Hash and Iconv
+extensions in our Magento contract. Added them and verified the contract against
+the real source manifest in QEMU; the focused checks, uncached apps suite and
+core/application-release builds passed.
+
+The upstream lock was stale and reported 42 security advisories in 14 packages.
+Preserved it at `/home/harness/magento-2.4.9-upstream.lock`, SHA-256
+`700cb5371fb0e7f1c5c962b0cf14c21789b8deaec5043b2e38c2c5a9803a79b7`.
+Updated dependencies within the unchanged upstream Composer constraints. The
+candidate lock SHA-256 is
+`5ce48925faebf8bb1236f00e25d17df25ea920083c07bf2c97192298e49d66d6`.
+The new audit has an empty advisory list, but exits 4 with four abandoned
+packages: laminas-config, laminas-json, laminas-loader and laminas-text.
+No audit bypass was enabled, and a clean audit is not claimed.
+
+`composer check-platform-reqs --no-dev`, `bin/magento --version` (2.4.9), and
+`setup:install --help` passed. The real CLI exposes the existing adapter's
+OpenSearch options. This is a dependency-updated test candidate, not an unchanged
+upstream distribution or a certified install; actual search-backed installation,
+application lifecycle checks, prepared artifact/recipe and release integration
+remain outstanding. Composer logs remain in `/home/harness/magento-2.4.9-*.log`.
+
 ### PrestaShop real install and prepared Joomla archive — 2026-09-20
 
 Downloaded the [official PrestaShop Classic 9.1.5-5.0 distribution](https://github.com/PrestaShopCorp/prestashop-classic/releases/tag/9.1.5-5.0)

@@ -394,7 +394,7 @@ func CertifiedProductContracts() map[ApplicationKind]ProductContract {
 		},
 		ApplicationMagento: {
 			Kind: ApplicationMagento, DisplayName: "Magento Open Source", DefaultStorage: StorageManagedRelease,
-			PHPVersions: []string{"8.2", "8.3", "8.4"}, PHPExtensions: []string{"bcmath", "ctype", "curl", "dom", "fileinfo", "filter", "gd", "intl", "mbstring", "openssl", "pdo_mysql", "simplexml", "soap", "sockets", "sodium", "xsl", "zip"}, DatabaseKinds: []string{"mariadb", "mysql"},
+			PHPVersions: []string{"8.2", "8.3", "8.4"}, PHPExtensions: []string{"bcmath", "ctype", "curl", "dom", "fileinfo", "filter", "ftp", "gd", "hash", "iconv", "intl", "mbstring", "openssl", "pdo_mysql", "simplexml", "soap", "sockets", "sodium", "xsl", "zip"}, DatabaseKinds: []string{"mariadb", "mysql"},
 			MutableStores: []MutableStore{{Name: "media", Path: MustRelativePath("pub/media"), Required: true, BackedUp: true}, {Name: "generated", Path: MustRelativePath("generated"), BackedUp: false}, {Name: "var", Path: MustRelativePath("var"), BackedUp: false}},
 			InstallProbes: append(web("/"), ProbeDefinition{Name: "indexer", Kind: ProbeBackground, Timeout: 5 * time.Minute, Required: true}), UpdateProbes: append(web("/"), ProbeDefinition{Name: "indexer", Kind: ProbeBackground, Timeout: 5 * time.Minute, Required: true}), BackupComponents: []string{"release", "media", "database", "environment_configuration"}, Lifecycle: full,
 		},
