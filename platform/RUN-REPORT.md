@@ -5,6 +5,43 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Offline loopback fixed; native release sequence 16 committed — 2026-09-20
+
+The package runner now creates its isolated network namespace on a disposable
+locked OS thread, enables only its private loopback with an ioctl, and runs the
+existing fixed package command there. The locked goroutine exits without
+unlocking, so Go destroys that thread rather than returning altered namespace
+state to the runtime pool. No external interface, route, shell or new executable
+allowlist entry is added. Package subprocesses explicitly use noninteractive
+debconf. Non-package commands keep their existing execution path.
+
+The real root-QEMU regression initially failed because the namespace contained
+only a down loopback. After the fix, three invocations verified only an active
+loopback, external UDP connect returning ENETUNREACH, and unchanged caller-thread
+namespace. The observation uses `/proc/thread-self/ns/net` because namespaces
+are per-thread; `/proc/self/ns/net` names the thread-group leader, not necessarily
+the calling Go task. The uncached node-release suite passed with root-safe
+TMPDIR=/root, and the installer was rebuilt in QEMU.
+
+Retrying the actual signed release reconciled the prior staged journal and
+successfully installed/configured the native packages, including Postfix's real
+newaliases step. Installed sequence is now 16, `qemu-native-3.1.15`; journal
+`install-671a5a5b1a126f7bd041a3504b5faf5cda0a4323e8435ff9f678e44b7291fb55`
+is committed at 2026-09-20T04:19:40Z. `dpkg --audit` returned no findings; explicit
+package queries confirmed Postfix, Dovecot, Rspamd, PowerDNS, OpenDKIM, Redis and
+ClamAV daemon installed. All four existing panel authority services are active.
+Postfix, PowerDNS, Rspamd and freshclam remain inactive under the QEMU policy-rc.d
+fixture pending real configuration. No mail/DNS functional claim is made yet.
+
+The retry command subsequently reported ENOSPC while redundantly staging its
+bundle after successful reconciliation. Fresh status inspection, an explicit
+reconcile returning no pending operations, and package/service checks established
+the committed state; the command's exit code alone was not treated as success.
+The old sequence-15 signed bundle was copied to the host run directory, its
+SHA-256 matched on both ends, and only the guest duplicate was removed. Installed
+and retained generations remain untouched. Guest free space is about 603 MB.
+Core/gateway/execd activation and full live API/UI qualification remain pending.
+
 ### Native package admission fixed; isolated Postfix setup blocker reproduced — 2026-09-20
 
 Real native bundle assembly exposed rejection of Debian `Architecture: all`.

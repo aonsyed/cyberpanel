@@ -1827,12 +1827,16 @@ func runFixedMode(ctx context.Context, path string, isolateNetwork bool, argumen
 	command := exec.CommandContext(ctx, path, arguments...)
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "SYSTEMD_PAGER="}
 	if isolateNetwork {
-		command.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWNET}
+		command.Env = append(command.Env, "DEBIAN_FRONTEND=noninteractive", "DEBCONF_NONINTERACTIVE_SEEN=true")
 	}
 	var output boundedOutput
 	command.Stdout = &output
 	command.Stderr = &output
-	err = command.Run()
+	if isolateNetwork {
+		err = runInOfflineNetwork(command.Run)
+	} else {
+		err = command.Run()
+	}
 	if output.exceeded {
 		return output.String(), fmt.Errorf("%w: %s output exceeded the 16 MiB limit", ErrIntegrity, filepath.Base(path))
 	}

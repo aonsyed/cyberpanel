@@ -43,7 +43,10 @@ assembled from all five signed PHP inputs and signed n8n/Hermes candidate
 recipes. Signed outer node release sequence 15 now installs that component;
 the installed binary completed authority/catalog initialization, receipt replay
 and secret bootstrap. Core/gateway/execd installation and full API/browser
-qualification remain pending. Native Ubuntu rootless Podman rejects AppArmor profiles despite
+qualification remain pending. Native release sequence 16 is now committed: real
+mail/DNS prerequisites installed, dpkg audit clean, external services held stopped
+pending configuration. The offline package runner now supplies isolated active
+loopback; Postfix setup passed without external networking. Native Ubuntu rootless Podman rejects AppArmor profiles despite
 kernel AppArmor being active; preserve the MAC requirement and resolve that
 runtime limitation before declaring container integration operational. Exact
 artifact hashes, evidence and remaining limits are in `RUN-REPORT.md`.
