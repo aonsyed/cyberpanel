@@ -42,8 +42,12 @@ Latest release checkpoint (2026-09-20): the real ARM64 panel component is
 assembled from all five signed PHP inputs and signed n8n/Hermes candidate
 recipes. Signed outer node release sequence 15 now installs that component;
 the installed binary completed authority/catalog initialization, receipt replay
-and secret bootstrap. Core/gateway/execd installation and full API/browser
-qualification remain pending. Native release sequence 16 is now committed: real
+and secret bootstrap. Sequence 17 now installs core/gateway/execd binaries,
+units and configs. Real executor startup fails because OpenLiteSpeed is not yet
+installed (`/usr/local/lsws/conf` missing); its restart loop was stopped. Install
+the real web/PHP stack next, then continue startup and API/browser qualification.
+The existing guest disk was safely expanded to 40 GiB, removing the repeated
+staging-space constraint. Native release sequence 16 installed real
 mail/DNS prerequisites installed, dpkg audit clean, external services held stopped
 pending configuration. The offline package runner now supplies isolated active
 loopback; Postfix setup passed without external networking. Native Ubuntu rootless Podman rejects AppArmor profiles despite

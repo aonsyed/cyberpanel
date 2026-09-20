@@ -5,6 +5,44 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Service binaries/units installed; web-engine prerequisite identified — 2026-09-20
+
+Expanded the existing Ubuntu ARM64 qcow2 from 24 GiB to 40 GiB after a clean guest
+shutdown and confirmed QEMU process exit. Reused the existing backing image,
+overlay and resume script. Cloud-init grew the root partition/filesystem at boot;
+explicit growpart/resize2fs checks reported already grown. The root filesystem
+is now 38 GiB with approximately 15 GiB free after the next release installation.
+The installed release and four authority services survived the reboot. No image
+or toolchain download occurred. Native mail/DNS/ClamAV units were stopped and
+disabled pending configuration, including clamav-daemon.socket; freshclam had
+no journal entries in this boot. policy-rc.d alone does not prevent boot activation.
+
+Signed sequence 17, `qemu-services-3.1.16`, committed successfully with 82 artifacts
+and 483,614,963 payload bytes. It adds the previously QEMU-built executor/gateway
+binaries, packaged executor/core/gateway units, packaged core/loopback-gateway
+configs, and installer-owned OpenLiteSpeed edition selection.
+
+- Bundle: `/var/tmp/panel-services-3.1.16.tar`, SHA-256
+  `6ec81cbe498bb28649b1360cb3e738aee063332ee9c975942cc791a7eed5750e`.
+- Manifest: `045a434c3e63dfabb86eedc371b2ef6e2c46d7e845e13096832ae6dd3169da09`.
+- Receipt: `ca6cf58c642390b6e80b224e063f2632bff88cffe50fb7733cf40f4a69a84a67`.
+
+Only the existing four authority services are qualified by this bundle's probes;
+the new units were installed for actual startup qualification. Starting the real
+executor failed with systemd 226/NAMESPACE: `/usr/local/lsws/conf` is missing.
+Stopped its restart loop. OpenLiteSpeed/LSPHP are not installed in this guest and
+apt currently has no candidate. Do not hide that dependency with a dummy directory
+or weaken the unit's filesystem protections. Core/gateway remain unstarted.
+
+Confirmed the vendor's repository installation path at
+https://docs.openlitespeed.org/installation/repo/ and downloaded its setup script
+to `/home/harness/litespeed-repository-setup.sh` for inspection only; it was NOT
+executed. It identifies the Debian repository and two public signing-key URLs
+under `rpms.litespeedtech.com/debian/`. Next: obtain/verify those repository inputs
+over HTTPS with scoped apt trust, collect real ARM64 OpenLiteSpeed/LSPHP packages,
+then continue the signed installation/startup path. The engine-edition reader's
+handling of installer-managed config links also needs qualification at startup.
+
 ### Offline loopback fixed; native release sequence 16 committed — 2026-09-20
 
 The package runner now creates its isolated network namespace on a disposable
