@@ -71,8 +71,13 @@ now remains closed on a PowerDNS native configuration generation conflict.
 The native file is verified pristine against dpkg and PowerDNS is inactive.
 A new read-only preflight passes the real QEMU startup regression: config
 conflicts now reject before acquiring execution leases. Updated executor is
-built but not deployed. Resolve installer config adoption with a recoverable
-backup and durable failed-effect recovery without bypassing admission, changing
+built but not deployed. Installer adoption is now implemented: it checks pristine
+package bytes, requires PowerDNS inactive, preserves a root-only SHA-256-named
+backup and publishes the fixed managed link. Actual Ubuntu QEMU adoption/replay
+and rejection fixtures passed; RPM remains unverified. Candidate panel binary is
+built but not deployed. The test prepared the actual QEMU config; PowerDNS stays
+inactive and generations remain empty. Resolve durable failed-effect recovery
+before deploying both fixes, without bypassing admission, changing
 request identity, or deleting receipts. Core restart loop is stopped. Guest has 2.0 GiB
 free; safely recover storage before more bundles. Verified sequence 21–27
 archives were moved to host storage, freeing about 1.9 GiB. Executor readiness and

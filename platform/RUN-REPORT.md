@@ -5,6 +5,38 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Pristine native PowerDNS configuration adoption implemented — 2026-09-20
+
+Installer service reconciliation now adopts only the fixed native PowerDNS
+conffile when its bytes match the installed package's local conffile digest.
+Ubuntu uses dpkg's record; Alma uses RPM's config-file record. PowerDNS must be
+inactive. Root-owned non-writable ancestors, regular singly linked source and
+non-writable source permissions are required. Modified files are rejected.
+The original bytes are preserved as a root:root 0600 SHA-256-named backup,
+verified before atomically installing the managed link and syncing its parent.
+An already-correct root-owned managed link replays without rewriting anything.
+Adoption runs before installer receipt replay so native reinstalls are checked.
+
+Root QEMU fixture tests passed for valid adoption and rejection of modified
+content, unsafe permissions, wrong existing backup and foreign staging link;
+rejection leaves original bytes intact. The actual Ubuntu package adoption test
+ran twice successfully and verified the backup against the original bytes.
+Actual link: /etc/powerdns/pdns.conf ->
+/var/lib/cyberpanel/powerdns/current/pdns/pdns.conf.
+Backup: /etc/powerdns/pdns.conf.cyberpanel-vendor-3d41154e93c96acee3cf10d5eb9b28f15de5a0a76e4a7273e7632bedfee74bb3,
+root:root 0600, SHA-256
+`3d41154e93c96acee3cf10d5eb9b28f15de5a0a76e4a7273e7632bedfee74bb3`.
+PowerDNS remains inactive; its managed staging/generations directories are empty.
+No native config bytes were discarded and no execution receipt was changed.
+
+Command package suite and panel build passed in QEMU. Candidate binary:
+/home/harness/bin/cyberpanel-dns-adoption. This hook and the previous executor
+preflight are not yet signed/deployed; the actual test prepared this QEMU node.
+RPM adoption is implemented but not yet live-Alma verified. Next: recover the
+existing ambiguous startup execution with evidence, preserving request identity
+and journal history; then deploy both fixes and qualify native DNS activation.
+Guest free space remains 2.0 GiB; avoid another oversized staging cycle.
+
 ### Reject unmanaged PowerDNS config before execution admission — 2026-09-20
 
 Confirmed /etc/powerdns/pdns.conf is the unmodified native package conffile:
