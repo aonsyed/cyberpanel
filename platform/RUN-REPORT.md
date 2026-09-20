@@ -4321,3 +4321,33 @@ initial unprivileged invocation could not read root-owned cache entries; no
 source change or permission broadening was needed. SHA256 values for all five
 changed Go source/test files match between the worktree and the guest. Guest
 free space is 3.4 GiB; host 222 GiB. Git objects remain approximately 494 MiB.
+# Database import core-state projection — 2026-09-21
+
+Added Coordinator.PromoteDatabaseTransfer and SQLRepository promotion receipt
+storage. The coordinator checks current database ownership/site/instance and
+generation, calls the existing broker, validates its native proof, then advances
+the control.db resource generation/status/proof together with the job-bound
+receipt in one transaction. Existing names, quotas and unrelated specifications
+are retained. Conflicting receipts and generation jumps are rejected. A failed
+projection returns the verified native receipt plus ErrAmbiguous for explicit
+recovery, never success.
+
+Extended the existing real MariaDB SQL/gzip QEMU test to use the production
+coordinator, broker and real SQLite repository. An injected SQLite trigger
+fails receipt insertion AFTER the resource update. The test confirms that
+neither the generation update nor receipt survives, retries with the original
+durable native proof, checks generation 2/healthy status/matching proof, reopens
+SQLite and proves replay does not invoke the executor. Both native data and
+exact promotion receipts still match. This is specific failure-window evidence,
+not a claim of complete process/power-loss recovery.
+
+QEMU only, existing Ubuntu ARM64 guest:
+
+`sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/database ./cmd/cyberpanel ./cmd/panel-execd ./internal/apiserver -count=1`
+
+All four passed. `go build -p 2 ./cmd/cyberpanel ./cmd/panel-execd ./cmd/paneld`
+also passed with the same root/offline environment. Changed source SHA256s match
+between host and guest. Guest free space: 3.3 GiB. No downloads, extra guests,
+vendor component changes or binary artifacts committed. Installed55 unchanged.
+Transfer-service/catalog/authorization, upload/API/UI, replacement and general
+crash recovery remain unfinished; this is not installed import qualification.

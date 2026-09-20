@@ -61,7 +61,7 @@ func (repository *SQLRepository) Bootstrap(ctx context.Context) error {
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil { return err }
 	defer transaction.Rollback()
-	for _, statement := range []string{createResourcesTable, createPhysicalNameIndex, createOperationsTable} {
+	for _, statement := range []string{createResourcesTable, createPhysicalNameIndex, createOperationsTable, createTransferPromotionsTable} {
 		if _, err := transaction.ExecContext(ctx, statement); err != nil { return err }
 	}
 	return transaction.Commit()

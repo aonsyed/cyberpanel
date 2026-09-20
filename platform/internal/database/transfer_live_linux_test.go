@@ -425,11 +425,85 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 		t.Fatal(err)
 	}
 	request.Action = "promote"
-	promotionResult, err := client.ExecuteTransferImport(ctx, request)
-	if err != nil || promotionResult.Promotion == nil || promotionResult.Promotion.Validate(job, isolated) != nil {
-		t.Fatal("native promotion", err)
+	controlPath := filepath.Join(t.TempDir(), "import-control.db")
+	openControl := func() (*sql.DB, *SQLRepository) {
+		t.Helper()
+		control, err := sql.Open("sqlite", controlPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		control.SetMaxOpenConns(1)
+		t.Cleanup(func() { control.Close() })
+		repository, err := NewSQLRepository(control)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = repository.Bootstrap(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return control, repository
 	}
-	promoted := *promotionResult.Promotion
+	control, repository := openControl()
+	coreLive := live
+	coreLive.Status = readyStatus(coreLive.Generation)
+	if err = repository.EnsureBootstrapResources(ctx, coreLive); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := NewCoordinator(repository, client, SystemClock{})
+	// Fail after the resource UPDATE, while inserting its receipt: both changes
+	// must roll back together, while the native promotion remains durable.
+	if _, err = control.ExecContext(ctx, `CREATE TRIGGER reject_import_projection BEFORE INSERT ON panel_database_transfer_promotions BEGIN SELECT RAISE(ABORT,'injected projection failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	failedProjection, err := coordinator.PromoteDatabaseTransfer(ctx, request)
+	if !errors.Is(err, ErrAmbiguous) || failedProjection.Validate(job, isolated) != nil {
+		t.Fatal("projection failure lost native receipt", err)
+	}
+	var coreGeneration, receipts int
+	if err = control.QueryRowContext(ctx, `SELECT generation FROM panel_database_resources WHERE kind=? AND resource_id=?`, string(KindDatabase), live.ID.String()).Scan(&coreGeneration); err != nil || coreGeneration != 1 {
+		t.Fatal("failed projection changed core generation", err)
+	}
+	if err = control.QueryRowContext(ctx, `SELECT COUNT(*) FROM panel_database_transfer_promotions`).Scan(&receipts); err != nil || receipts != 0 {
+		t.Fatal("failed projection published receipt", err)
+	}
+	if _, err = control.ExecContext(ctx, `DROP TRIGGER reject_import_projection`); err != nil {
+		t.Fatal(err)
+	}
+	promoted, err := coordinator.PromoteDatabaseTransfer(ctx, request)
+	if err != nil || promoted != failedProjection {
+		t.Fatal("projection recovery changed native receipt", err)
+	}
+	envelope, err := repository.LoadResource(ctx, KindDatabase, live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, err := transferProjectionDatabase(envelope, job)
+	if err != nil || projected.Generation != 2 || projected.Name != live.Name || projected.Status.ObservedGeneration != 2 || projected.Status.ProofDigest != promoted.ProofDigest {
+		t.Fatal("core promotion projection mismatch", err)
+	}
+	if err = control.Close(); err != nil {
+		t.Fatal(err)
+	}
+	control, repository = openControl()
+	// A persisted panel receipt must replay without another executor call.
+	coordinator = NewCoordinator(repository, noTransferReplayExecutor{}, SystemClock{})
+	coreReplay, err := coordinator.PromoteDatabaseTransfer(ctx, request)
+	if err != nil || coreReplay != promoted {
+		t.Fatal("core promotion replay after reopen", err)
+	}
+	if err = control.QueryRowContext(ctx, `SELECT COUNT(*) FROM panel_database_transfer_promotions`).Scan(&receipts); err != nil || receipts != 1 {
+		t.Fatal("duplicate promotion record", err)
+	}
+	wrongPromotion := promoted
+	wrongPromotion.TargetGeneration++
+	if err = repository.RecordTransferPromotion(ctx, job, isolated, wrongPromotion); err == nil {
+		t.Fatal("wrong promotion generation accepted")
+	}
+	wrongPromotion = promoted
+	wrongPromotion.ProofDigest = transferDigest([]byte("not-the-original-proof"))
+	if err = repository.RecordTransferPromotion(ctx, job, isolated, wrongPromotion); err == nil {
+		t.Fatal("conflicting promotion receipt accepted")
+	}
 	value, err = query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+live.Name.String()+"`.sample ORDER BY id;")
 	if err != nil || value != "1:transfer round trip:0001FF\n2:NULL:NULL" {
 		t.Fatal("promoted data differs", err)
@@ -450,6 +524,12 @@ func verifyEmptyNativePromotion(t *testing.T, ctx context.Context, executor *Lin
 	if err != nil || value != "0" {
 		t.Fatal("empty isolated schema retained", err)
 	}
+}
+
+type noTransferReplayExecutor struct{ MariaDBExecutor }
+
+func (noTransferReplayExecutor) ExecuteTransferImport(context.Context, TransferImportRequest) (TransferImportResult, error) {
+	return TransferImportResult{}, errors.New("unexpected native replay")
 }
 
 func checkTransferImportProtocol(t *testing.T, request TransferImportRequest) {

@@ -13,6 +13,20 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Import core projection (2026-09-21, source only): Coordinator now joins the
+broker promotion receipt to control.db. Database generation/status/proof and
+the immutable job-bound promotion receipt commit in one SQLite transaction.
+Same-job retries finish from durable native evidence; completed core receipts
+replay after reopening SQLite without invoking the executor. QEMU SQL/gzip
+round trips now drive this coordinator path and inject a receipt-insert failure
+after the resource update to prove rollback and retry. Four affected suites and
+three production command builds pass. Installed55 remains unchanged. Next:
+transfer-service/catalog and actor-authorization wiring, upload/API/UI. Preserve
+ErrAmbiguous from promotion/projection in TransferService; a valid native
+promotion receipt plus a failed core projection must not become an ordinary
+failed import or trigger destructive cleanup. General crash recovery remains
+unqualified; this proves the specific native-success/core-write-failure window.
+
 Import broker integration (2026-09-21, source only): authenticated core now has
 closed allocate/load/verify/promote/discard commands over the existing database
 broker. Source exports are bound by their complete job-derived identity to the
