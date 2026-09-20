@@ -5,6 +5,46 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Site creation: layout, persisted PHP profile and executor sandbox — 2026-09-20
+
+Candidate AppShell explicitly places main content in grid column2. The previous
+layout blocked the Create site button beneath the fixed sidebar. QEMU-built static
+assets, served through the browser harness with real installed45 API/authentication,
+passed desktop1280/1920/1024, collapsed navigation and mobile390 form interaction.
+This does not claim the candidate UI is installed in the signed release.
+
+The subsequent real site-create request returned500. Its journal lost PHPProfile
+across save/reopen; added serialization in both directions. A real FileJournal
+regression failed forPHP82/83/84 before the fix and passes afterward, including
+resume validation. Offline QEMU `go test -p 2 ./internal/hosting/... -count=1`
+passed again; host/guest source hashes match for provisioning.go and AppShell.vue.
+
+Native identity creation failed opening /etc/.pwd.lock with EROFS. Inspection of
+the actual executor mount namespace confirmed /etc ro with ProtectSystem=full.
+A bounded transient strict-sandbox experiment succeeded. Source changes only
+ProtectSystem to strict, retaining explicit ReadWritePaths and other controls.
+Applied the same setting to the real QEMU executor through runtime override
+91-qemu-filesystem.conf: service active, admission ready, /etc rw, /usr/bin ro;
+the bounded identity diagnostic in its mount namespace exits0. No native vendor
+builds, patches or downloads. Other executor operations remain to be exercised
+under this stricter sandbox before packaging; signed45 is unchanged.
+
+Restarting executor also restarted dependent core, which failed its admission
+bootstrap with SQLITE_BUSY. Core's existing QEMU Restart=no override left it down;
+an explicit start succeeded and gateway readiness returned ready. First browser
+recheck timed out at login while core was down. This startup contention is an
+additional unresolved integration issue, not a vendor defect.
+
+Site creation is NOT successful yet. Original command
+api_3acd4deffa2846226cbfa3f178446b780642ef6b0db8b3b3 is ambiguous, no hosting_sites
+row exists, registry remains allocated, outer ensure_identity admission is fenced.
+The exact allocated Unix identity exists following the diagnostic; no site root or
+PHP pool success is claimed. A bounded fixture repair restored only its omitted
+PHPProfile from the matching accepted request after checking all steps were empty.
+No journals or admission rows were reset/deleted. Recover this original effect
+with observed evidence rather than submitting another site. Temporary diagnostic
+source/binary remain guest-only; no generated artifacts added to Git.
+
 ### Managed customer creation and reauthentication — 2026-09-20
 
 Tenant creation503 traced to the real audit boundary. A small identity-only test

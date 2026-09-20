@@ -841,6 +841,7 @@ type diskReceipt struct {
 	Generation uint64 `json:"generation"`
 	Lifecycle site.Lifecycle `json:"lifecycle"`
 	Withdraw bool `json:"withdraw"`
+	PHPProfile site.PHPProfile `json:"php_profile"`
 	RuntimeKey RuntimeKey `json:"runtime_key"`
 	Phase ProvisioningPhase `json:"phase"`
 	Action ProvisioningAction `json:"action"`
@@ -855,7 +856,7 @@ func diskFromReceipt(receipt ProvisioningReceipt) diskReceipt {
 	return diskReceipt{
 		EffectKey: receipt.EffectKey, TenantID: receipt.Scope.TenantID.String(), SiteID: receipt.Scope.SiteID.String(),
 		ProjectionDigest: receipt.ProjectionDigest, Generation: receipt.Generation, Lifecycle: receipt.Lifecycle,
-		Withdraw: receipt.Withdraw, RuntimeKey: receipt.RuntimeKey, Phase: receipt.Phase, Action: receipt.Action,
+		Withdraw: receipt.Withdraw, PHPProfile: receipt.PHPProfile, RuntimeKey: receipt.RuntimeKey, Phase: receipt.Phase, Action: receipt.Action,
 		Identity: receipt.Identity, Directories: receipt.Directories, Pool: receipt.Pool,
 		Health: receipt.Health, LifecycleMutation: receipt.LifecycleMutation,
 	}
@@ -869,7 +870,7 @@ func (disk diskReceipt) toReceipt() (ProvisioningReceipt, error) {
 	return ProvisioningReceipt{
 		EffectKey: disk.EffectKey, Scope: service.CommandScope{TenantID: tenantID, SiteID: siteID},
 		ProjectionDigest: disk.ProjectionDigest, Generation: disk.Generation, Lifecycle: disk.Lifecycle,
-		Withdraw: disk.Withdraw, RuntimeKey: disk.RuntimeKey, Phase: disk.Phase, Action: disk.Action,
+		Withdraw: disk.Withdraw, PHPProfile: disk.PHPProfile, RuntimeKey: disk.RuntimeKey, Phase: disk.Phase, Action: disk.Action,
 		Identity: disk.Identity, Directories: disk.Directories, Pool: disk.Pool,
 		Health: disk.Health, LifecycleMutation: disk.LifecycleMutation,
 	}, nil

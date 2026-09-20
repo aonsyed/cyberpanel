@@ -6,6 +6,29 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest site checkpoint: candidate UI fixes shell-main placement in column2.
+QEMU browser checks passed at1280/1920/1024, collapsed navigation and390 mobile;
+candidate static assets only, real installed45 API/authentication. Site submission
+then returned500. File journal omitted PHPProfile; source now retains it, with
+real save/reopen/resume regressions forPHP82/83/84. QEMU hosting suites pass.
+Actual executor /etc was read-only under ProtectSystem=full despite its allowance.
+Source now uses ProtectSystem=strict. Live native unit override
+/run/systemd/system/panel-execd.service.d/91-qemu-filesystem.conf proves /etc rw,
+/usr/bin ro, active executor and successful bounded identity check. This is our
+service sandbox fix, not a vendor change. These fixes are NOT in signed45 yet.
+Original site command api_3acd4deffa2846226cbfa3f178446b780642ef6b0db8b3b3 remains
+ambiguous, hosting_sites empty. Do NOT repeat --site with a new idempotency key.
+Its allocated Unix identity now exists; registry remains allocated and outer
+siteops/ensure_identity admission remains ambiguous. Next: evidence-based recovery
+of that original effect; no lease/journal deletion or forced reset. One exact
+empty-step test receipt was repaired with PHPProfile from its matching accepted
+request; installed45 would omit it again on save, so deploy source fix before
+resuming full provisioning. Guest2.1GiB free; no new full bundle/downloads.
+Executor restart also restarted dependent core; simultaneous admission startup
+hit SQLITE_BUSY and core stopped (test override Restart=no). Explicit core start
+restored live gateway readiness. Startup contention/retry remains unresolved.
+Earlier checkpoints below are historical and superseded where noted.
+
 Latest: signed45 qemu-tenant-3.1.44 installed; current45/rollback44. Tenant create
 503 reproduced as unsupported audit `prepared` outcome and audit SQL write while
 holding the same DB transaction. Creation now durably records a PREPARED intent

@@ -25,7 +25,7 @@ KillMode=mixed
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
-ProtectSystem=full
+ProtectSystem=strict
 # Hide home trees while restoring only the rootless runtime's declared state.
 ProtectHome=tmpfs
 BindPaths=/run/user
