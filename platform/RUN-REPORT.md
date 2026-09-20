@@ -4699,3 +4699,22 @@ at the catalog seam; installed HTTP disconnect behavior is not yet qualified.
 No native operation is retried by this fix. No downloads/vendor changes; source
 change is not yet in installed59. Cancellation API, queued cancellation lifecycle,
 crash recovery and replacement remain pending.
+
+## 2026-09-21 — queued cancellation and import cancel API
+
+Real SQLite QEMU regression reproduced cancellation returning success while
+leaving a job queued/generation1. Queued cancellation now commits cancelled state,
+terminal progress and immutable receipt atomically, with no native execution or
+mutation. Cancellation finalizes lifecycle attempt1; it does not fabricate a
+process receipt. Live jobs still honor cancellation only at safe checkpoints.
+
+QEMU tests passed: queued termination, stale request refusal, cancelled claim
+refusal, receipt-insert failure rollback, running-job continuation through an
+unsafe checkpoint then cancellation at the safe checkpoint. Database suite with
+CYBERPANEL_QEMU_LIVE_TRANSFER=1 passed. Added site-scoped/MFA-required mutating
+database.import.cancel using existing service authorization and generation checks.
+Actual HTTP test server exercises the contract with fixture auth/domain: valid
+invocation, invalid body, missing site, anonymous, denied and low-assurance cases.
+API/core/gateway suites passed after correcting the test envelope's idempotency
+field location. No installed API cancellation or UI qualification claimed.
+Installed59 unchanged; no downloads, vendor changes or binary artifacts.

@@ -11,6 +11,20 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Import cancellation — 2026-09-21 (source verified, not deployed)
+
+Added `database.import.cancel` (manage permission, MFA, active owned site, job
+generation CAS, normal mutation idempotency). Queued cancellation now atomically
+records terminal status/progress/receipt; no native process is run. Its first
+lifecycle attempt is finalized as cancelled_before_execution with no mutation.
+Running cancellation remains a request honored at safe checkpoints. QEMU real
+SQLite regression reproduced the formerly stuck queued job, then passed after
+fix. Receipt insertion failure rolls back the entire cancellation; stale requests
+and execution of cancelled jobs are rejected. HTTP fixture tests exercise the
+new route and auth/input refusals. Database (live-native flag), API, core and
+gateway suites pass. Installed59 unchanged; cancellation UI and installed API
+qualification remain pending, as do crash recovery and replacement.
+
 ## Import disconnect recovery — 2026-09-21 (source verified, not deployed)
 
 Fixed terminal receipt/audit persistence using the cancelled request context.

@@ -256,12 +256,23 @@ func (repository *SQLiteTransferRepository) CheckpointTransfer(ctx context.Conte
 
 func (repository *SQLiteTransferRepository) RequestTransferCancellation(ctx context.Context, jobID ResourceID, expectedGeneration uint64, now time.Time) error {
 	if jobID.IsZero() || expectedGeneration == 0 || now.IsZero() { return ErrTransferInvalid }
-	result, err := repository.db.ExecContext(ctx, `UPDATE database_transfer_state_v1 SET cancel_requested=1,updated_at=? WHERE job_id=? AND generation=? AND status NOT IN ('completed','failed','cancelled','ambiguous')`,
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil { return err }
+	defer transaction.Rollback()
+	state, err := loadTransferState(ctx, transaction, jobID)
+	if err != nil { return err }
+	if state.Generation != expectedGeneration || IsTransferTerminal(state.Status) { return ErrTransferStale }
+	if now.Before(state.Progress.UpdatedAt) { return ErrTransferInvalid }
+	if state.Status == TransferQueued {
+		if err = cancelQueuedTransfer(ctx, transaction, state, now); err != nil { return err }
+		return transaction.Commit()
+	}
+	result, err := transaction.ExecContext(ctx, `UPDATE database_transfer_state_v1 SET cancel_requested=1,updated_at=? WHERE job_id=? AND generation=? AND status NOT IN ('completed','failed','cancelled','ambiguous')`,
 		formatTransferTime(now), jobID.String(), expectedGeneration)
 	if err != nil { return err }
 	affected, _ := result.RowsAffected()
 	if affected != 1 { return ErrTransferStale }
-	return nil
+	return transaction.Commit()
 }
 
 func (repository *SQLiteTransferRepository) CompleteTransfer(ctx context.Context, lease TransferLease, receipt TransferReceipt) error {
