@@ -421,7 +421,7 @@ func (host *LinuxPowerDNSHost) probe(ctx context.Context, generation string) (Po
 		ObservedAt:   host.now(),
 	}
 	activeOutput, activeErr := runPowerDNSProcess(ctx, host.profile.systemctl, "is-active", "--quiet", host.profile.unit)
-	pingOutput, pingErr := runPowerDNSProcess(ctx, host.profile.pdnsControl, "ping")
+	pingOutput, pingErr := runPowerDNSProcess(ctx, host.profile.pdnsControl, "rping")
 	pingValid := pingErr == nil && strings.EqualFold(strings.TrimSpace(string(pingOutput)), "PONG")
 	if !pingValid && pingErr == nil {
 		pingErr = ErrPowerDNSIntegrity

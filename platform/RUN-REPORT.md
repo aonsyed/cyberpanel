@@ -5,6 +5,48 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed native DNS startup and executor admission verified — 2026-09-20
+
+Sequence 30 `qemu-pdns-access-3.1.29` deployed the scoped database ACL/config
+credential work and recovery for the exact retained immutable SQLite generation.
+Recovery verifies the desired rendering and every manifest artifact, rejects
+other generations/staging/current links/live services, and preserves the original
+effect identity and archived attempts. Actual QEMU tests accepted the retained
+generation and rejected a different desired generation and a staging marker.
+
+Installer reconciliation now adopts only the default active systemd-resolved
+stub setup: preserves the original link target in a root-only backup, switches
+clients to the live upstream resolv.conf, and disables only the stub listener.
+Custom resolver links/settings are rejected. Actual handoff/replay, outbound
+lookup and absence of TCP/UDP stub listeners on port 53 passed in QEMU.
+All four affected package suites and both binary builds passed in QEMU.
+
+Sequence 30 started real PowerDNS on IPv4/IPv6 TCP/UDP port 53, but the panel
+probe incorrectly called `pdns_control ping` (unsupported). The native health
+regression failed before the fix and passed with `rping`, returning PONG.
+Sequence 31 `qemu-pdns-health-3.1.30` deploys that executor fix. The installed
+reconciliation hook passed, PowerDNS remains active with the intended current
+generation, and executor mutation admission is ready, including after an
+additional executor restart. Read-only SQL inspection confirms the original
+powerdns/startup_configuration effect completed at epoch 0 with three archived
+recovery attempts. No journal row was deleted or re-keyed. A real unconfigured
+DNS query returns REFUSED; managed-zone/DNSSEC/transfer qualification is pending.
+
+| Sequence | Bundle SHA-256 | Manifest | Receipt |
+| --- | --- | --- | --- |
+| 30 | 89e97f72ae1404041ee4f6a404f299c23499f06cf363478baad72387a69712ea | 247a4da2f876b9103679c7b611b499f41773d46737fab0f09c2c349cab8e7e7e | e298c5238e5458077bee1b9813df2e37a02f915950165e492dc950ee2e316e36 |
+| 31 | 2e9d13a7e738753084d34ec526e2dcd75f0205eb21e383c288fb291a3809f272 | c771681015d2d4b2ebd32c78bc608c6e7570601ad33672bcd9e09b8e6b149e37 | 2a198e540b6301a0561119a1725a03233ffdcdc5ab5d038e8d004674c18271ef |
+
+Sequence 30 archive was checksum-verified on the host before removing its guest
+copy. Cleared only the disposable Go build cache, preserving installed releases,
+modules, VM disk and journals. Guest free space after sequence 31 is 5.4 GiB.
+
+Core now gets past executor admission and fails at Dovecot OAuth activation with
+`mail resource generation conflict`. Its restart loop was stopped. Native mail
+configs are still regular files and the managed mail store has no current link;
+investigate that binding boundary next. Core/gateway/API/UI, native mail, managed
+web and full current-revision OS/architecture matrix remain incomplete.
+
 ### Native DNS config and live database access proven together — 2026-09-20
 
 Implemented named-user POSIX ACLs for the fixed pdns UID: execute-only access

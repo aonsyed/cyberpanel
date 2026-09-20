@@ -38,6 +38,19 @@ into fewer files does not bypass the line limits.
 
 ## Current position
 
+Newest checkpoint (2026-09-20, sequences 30–31): installed PowerDNS now runs on
+normal IPv4/IPv6 TCP/UDP port 53; the real `rping` health probe passes. Executor
+mutation admission is ready and survives executor restart. The startup effect
+is completed at epoch 0 with three archived attempts, preserving its identity.
+Native ACL/config credentials and exact-retained-generation recovery are deployed.
+Default Ubuntu resolver handoff/replay preserves outbound DNS and frees port 53;
+custom configurations are not overwritten. Core now fails at Dovecot OAuth
+activation (`mail resource generation conflict`); its loop is stopped. Native
+mail configuration binding is the next concrete blocker. Gateway/API/UI and
+managed-zone/full-matrix qualification remain pending. Guest free space is
+5.4 GiB after clearing disposable Go build cache; no installed state was deleted.
+The chronological checkpoints below describe earlier states, not current readiness.
+
 Latest release checkpoint (2026-09-20): the real ARM64 panel component is
 assembled from all five signed PHP inputs and signed n8n/Hermes candidate
 recipes. Signed outer node release sequence 15 now installs that component;

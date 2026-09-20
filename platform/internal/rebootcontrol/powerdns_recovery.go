@@ -9,7 +9,8 @@ const executionRecoverySchema = `CREATE TABLE IF NOT EXISTS reboot_execution_rec
  recovered_at TEXT NOT NULL,PRIMARY KEY(effect_id,attempt_token))`
 
 // RecoverUnappliedPowerDNSStartup is available only to the local startup
-// reconciler after it proves the daemon inactive and its managed store empty.
+// reconciler after it proves the daemon inactive with no active generation and
+// either an empty store or only the verified exact immutable desired generation.
 // Evidence is computed by that trusted native observer, never read from an RPC.
 // Ordinary admission still refuses every ambiguous effect. Recovery preserves
 // the exact binding/epoch and archives the prior attempt in the same transaction.

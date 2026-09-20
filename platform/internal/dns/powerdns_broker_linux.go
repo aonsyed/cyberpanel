@@ -951,7 +951,7 @@ func (server *PowerDNSDaemonServer) ReconcileStartup(ctx context.Context, admiss
 		if recovery, ok := admission.(interface {
 			RecoverUnappliedPowerDNSStartup(context.Context, rebootcontrol.ExecutionBinding, string) (rebootcontrol.ExecutionLease, error)
 		}); ok {
-			evidence, observeErr := server.Host.unappliedStartupEvidence(ctx, digest)
+			evidence, observeErr := server.Host.unappliedStartupEvidence(ctx, snapshot)
 			if observeErr != nil { return errors.Join(err, observeErr) }
 			lease, err = recovery.RecoverUnappliedPowerDNSStartup(ctx, binding, evidence)
 		}

@@ -92,6 +92,9 @@ func reconcileDNSAuthority() error {
 		}
 	}
 	if found {
+		if err := reconcileDefaultResolved(); err != nil {
+			return err
+		}
 		return installPowerDNSCredentialUnit()
 	}
 	return nil

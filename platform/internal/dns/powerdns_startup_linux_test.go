@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/daemoncfg"
@@ -15,6 +17,21 @@ import (
 
 type forbiddenStartupAdmission struct{ calls int }
 
+func TestQEMUPowerDNSNativeHealthProbe(t *testing.T) {
+	if os.Getenv("CYBERPANEL_QEMU_PDNS_RUNNING") != "1" {
+		t.Skip("requires running native PowerDNS in QEMU")
+	}
+	profile, err := profileForPowerDNS(PowerDNSUbuntuNoble)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &LinuxPowerDNSHost{profile: profile}
+	receipt, err := host.probe(context.Background(), "qemu-native-health")
+	if err != nil || !receipt.Success || !receipt.Healthy {
+		t.Fatalf("native PowerDNS health probe: %v", err)
+	}
+}
+
 func (admission *forbiddenStartupAdmission) AdmitExecution(context.Context, rebootcontrol.ExecutionBinding) (rebootcontrol.ExecutionLease, error) {
 	admission.calls++
 	return rebootcontrol.ExecutionLease{}, errors.New("unexpected execution lease")
@@ -22,7 +39,7 @@ func (admission *forbiddenStartupAdmission) AdmitExecution(context.Context, rebo
 
 func TestQEMUPowerDNSUnappliedStartupEvidence(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_NODE_RELEASE") != "1" {
-		t.Skip("requires inactive QEMU PowerDNS and empty managed store")
+		t.Skip("requires inactive QEMU PowerDNS and recoverable managed store")
 	}
 	profile, err := profileForPowerDNS(PowerDNSUbuntuNoble)
 	if err != nil {
@@ -33,18 +50,35 @@ func TestQEMUPowerDNSUnappliedStartupEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	host := &LinuxPowerDNSHost{Store: store, profile: profile}
-	digest := rebootcontrol.ExecutionDigest(LocalPowerDNSConfigSnapshot(1))
-	proof, err := host.unappliedStartupEvidence(context.Background(), digest)
+	group, err := user.LookupGroup("pdns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gid, err := strconv.ParseUint(group.Gid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &LinuxPowerDNSHost{Store: store, profile: profile, Ownership: PowerDNSOwnership{PDNSGID: uint32(gid)}, ControlDatabaseFingerprint: LocalPowerDNSControlFingerprint()}
+	snapshot := LocalPowerDNSConfigSnapshot(1)
+	proof, err := host.unappliedStartupEvidence(context.Background(), snapshot)
 	if err != nil || !powerDNSSHA256(proof) {
 		t.Fatal("actual unapplied state rejected", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(PowerDNSConfigurationRoot, "generations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) > 0 {
+		if _, err := host.unappliedStartupEvidence(context.Background(), LocalPowerDNSConfigSnapshot(2)); !errors.Is(err, ErrPowerDNSAmbiguous) {
+			t.Fatal("different desired generation was treated as unapplied", err)
+		}
 	}
 	marker, err := os.MkdirTemp(filepath.Join(PowerDNSConfigurationRoot, "staging"), "recovery-proof-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(marker)
-	if _, err := host.unappliedStartupEvidence(context.Background(), digest); !errors.Is(err, ErrPowerDNSAmbiguous) {
+	if _, err := host.unappliedStartupEvidence(context.Background(), snapshot); !errors.Is(err, ErrPowerDNSAmbiguous) {
 		t.Fatal("staged work was treated as unapplied", err)
 	}
 }
