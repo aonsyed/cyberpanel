@@ -11,6 +11,16 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Recovery dialog error cleanup — 2026-09-21 (source, not deployed)
+
+Both import dialogs now clear the original request failure on confirmed completed
+status, and a late error from the old run request cannot overwrite that success.
+QEMU real Chromium drove complete upload/export-backed dialogs with fixture API:
+8 cases, both1440/390px and failures before/after recovery completion, all passed
+with no stale alert/overflow/browser errors. UI typecheck/build passed. Temporary
+guest Vite process/files removed. Installed62 unchanged; include this four-line
+UI correction with the next grouped release, not another standalone bundle.
+
 ## Current recovery point — 2026-09-21 (installed62 committed)
 
 Installed job recovery qualified through actual panel UI/API, native MariaDB and

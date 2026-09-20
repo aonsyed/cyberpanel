@@ -4840,3 +4840,16 @@ This establishes receipt-failure/core-restart recovery with verified native proo
 not arbitrary native-operation crashes. Parent dialog's original request error
 can remain beside recovered success (UI polish still pending). Other parity work
 and broader target matrix remain open.
+
+## 2026-09-21 — recovered dialog status wins over stale request errors
+
+Four-line source correction in upload/export-backed dialogs: confirmed completion
+clears prior failure; later rejection of the original run cannot replace it with
+an uncertain outcome. QEMU real Chromium drove both full dialogs, not just the
+shared status component, through preparation/typed confirmation/run failure and
+recovery. Eight fixture-API cases passed (2 dialogs × 2 widths1440/390 × early/late
+original failure). Error visible before recovery when applicable, absent after
+confirmed completion, no recovery button/overflow/browser errors. QEMU UI
+typecheck/build passed; existing chunk-size warning remains. Temporary guest
+Vite server and fixture files removed; ignored host harness retained. Installed62
+unchanged, no new bundle/download/vendor changes. Include in next grouped release.

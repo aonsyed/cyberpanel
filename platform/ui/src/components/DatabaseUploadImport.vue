@@ -97,7 +97,7 @@ async function run(): Promise<void> {
     const response = await api.invoke<{ status: string }>("database.import.run", { ...scope(), payload: { job: job.value }, ...requestIdentity() });
     status.value = response.result.status;
     if (status.value === "completed") emit("complete");
-  } catch (error) { status.value = "Outcome not confirmed. Check status before taking further action."; report(error); }
+  } catch (error) { if (status.value !== "completed") { status.value = "Outcome not confirmed. Check status before taking further action."; report(error); } }
   finally { busy.value = false; }
 }
 function close(): void { if (!busy.value && !monitoring.value) emit("close"); }
@@ -126,7 +126,7 @@ onBeforeUnmount(() => { controller.abort(); window.removeEventListener("keydown"
           <input id="upload-import-confirmation" v-model="confirmation" class="input" autocomplete="off" :disabled="busy" required>
           <button type="submit" class="button button-primary" :disabled="busy || confirmation !== String(resource.name)">Import uploaded SQL</button>
         </form>
-        <DatabaseImportStatus v-if="submitted" :tenant-id="tenantId" :site-id="String(resource.site_id)" :job-id="job.id" :running="busy" :status="status" @busy="monitoring=$event" @complete="emit('complete')" />
+        <DatabaseImportStatus v-if="submitted" :tenant-id="tenantId" :site-id="String(resource.site_id)" :job-id="job.id" :running="busy" :status="status" @busy="monitoring=$event" @complete="failure='';status='completed';emit('complete')" />
       </template>
       <button v-if="(file || intent) && !submitted" type="button" class="button" :disabled="busy" @click="startOver">Start over</button>
       <p v-if="failure" role="alert" class="upload-error">{{ failure }}</p>

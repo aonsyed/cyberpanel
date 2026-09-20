@@ -64,7 +64,7 @@ async function run(): Promise<void> {
       ...scope(), expectedGeneration: job.value.database_generation, payload: { job: job.value }, idempotencyKey: crypto.randomUUID()
     });
     status.value = response.result.status;
-  } catch (error) { status.value = "Outcome not confirmed. Check status before taking further action."; report(error); }
+  } catch (error) { if (status.value !== "completed") { status.value = "Outcome not confirmed. Check status before taking further action."; report(error); } }
   finally { setBusy(false); }
 }
 onBeforeUnmount(() => { controller.abort(); emit("busy", false); });
@@ -95,7 +95,7 @@ onBeforeUnmount(() => { controller.abort(); emit("busy", false); });
         <button type="submit" class="button button-primary" :disabled="loading || confirmedName !== target?.name">Import into empty database</button>
         <button type="button" class="button" :disabled="loading" @click="job=null;confirmedName=''">Change destination</button>
       </form>
-      <DatabaseImportStatus v-if="submitted" :tenant-id="tenantId" :site-id="String(source.site_id)" :job-id="job.id" :running="pending" :status="status" @busy="setMonitoring" />
+      <DatabaseImportStatus v-if="submitted" :tenant-id="tenantId" :site-id="String(source.site_id)" :job-id="job.id" :running="pending" :status="status" @busy="setMonitoring" @complete="failure='';status='completed'" />
     </template>
     <p v-if="failure" role="alert" class="import-error">{{ failure }}</p>
   </section>
