@@ -182,8 +182,12 @@ func bootstrapMalwareWorkerTrust(secretRoot string)([]string,error){
 // exists only so a fresh OLS/LSE listener never starts with a dangling key
 // reference before the first tenant certificate is deployed.
 func bootstrapDefaultWebCertificate()([]string,error){
-	root:="/var/lib/cyberpanel/certificates";generationParent:=filepath.Join(root,"generations","webengine","preview-default");consumerRoot:=filepath.Join(root,"consumers","webengine","preview-default");current:=filepath.Join(consumerRoot,"current")
-	for _,directory:=range []struct{path string;mode os.FileMode}{{root,0711},{filepath.Join(root,"generations"),0711},{filepath.Join(root,"generations","webengine"),0711},{generationParent,0711},{filepath.Join(root,"consumers"),0711},{filepath.Join(root,"consumers","webengine"),0711},{consumerRoot,0750}}{if err:=ensureOwnedDirectory(directory.path,directory.mode,0,0);err!=nil{return nil,err}}
+	return bootstrapDefaultCertificate("webengine","preview-default")
+}
+
+func bootstrapDefaultCertificate(consumer,slot string)([]string,error){
+	root:="/var/lib/cyberpanel/certificates";generationParent:=filepath.Join(root,"generations",consumer,slot);consumerRoot:=filepath.Join(root,"consumers",consumer,slot);current:=filepath.Join(consumerRoot,"current")
+	for _,directory:=range []struct{path string;mode os.FileMode}{{root,0711},{filepath.Join(root,"generations"),0711},{filepath.Join(root,"generations",consumer),0711},{generationParent,0711},{filepath.Join(root,"consumers"),0711},{filepath.Join(root,"consumers",consumer),0711},{consumerRoot,0750}}{if err:=ensureOwnedDirectory(directory.path,directory.mode,0,0);err!=nil{return nil,err}}
 	if paths,found,err:=existingDefaultWebCertificate(current,generationParent);err!=nil{return nil,err}else if found{return paths,nil}
 	key,err:=ecdsa.GenerateKey(elliptic.P256(),rand.Reader);if err!=nil{return nil,err}
 	maximum:=new(big.Int).Lsh(big.NewInt(1),128);serial,err:=rand.Int(rand.Reader,maximum);if err!=nil||serial.Sign()==0{if err==nil{err=errors.New("zero certificate serial")};return nil,err}

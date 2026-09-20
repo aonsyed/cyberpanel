@@ -38,6 +38,18 @@ into fewer files does not bypass the line limits.
 
 ## Current position
 
+Current candidates (2026-09-20, not yet signed/deployed) fix native Dovecot syntax,
+provision a separate self-signed mail TLS fallback, include ManageSieve/Sieve
+prerequisites, repair Redis/ClamAV native validation and generate OpenDKIM's
+loopback TrustedHosts file. Native parser/positive-negative tests and four affected
+suites pass; core/executor candidates are built. The next confirmed blocker is
+daemon access: _rspamd cannot read its config through the root:root mail store.
+Keep root-only mutation authority and qualify scoped native config/key access
+before another deployment. Sequence 32 is still installed; core/mail are stopped,
+DNS and executor admission active. Guest free space is 4.2 GiB. The 100-artifact
+draft mail-validation-prereqs-spec.json has the two matching Sieve packages but
+still needs the next sequence/version (33 / 3.1.32). See the latest RUN-REPORT.
+
 Sequence 32 (2026-09-20) now deploys verified Ubuntu mail-default adoption and
 the dedicated mail Redis config/unit boundary. Real Redis unit/socket and access
 checks pass in QEMU; native mail binding reconciliation passes. Core gets as far

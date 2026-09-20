@@ -74,6 +74,9 @@ func reconcileMailAuthority() error {
 	}
 	if !needsAdoption {
 		if found {
+			if err := bootstrapDefaultMailCertificate(); err != nil {
+				return err
+			}
 			return installMailRedisUnit()
 		}
 		return nil
@@ -92,6 +95,9 @@ func reconcileMailAuthority() error {
 				return err
 			}
 		}
+	}
+	if err := bootstrapDefaultMailCertificate(); err != nil {
+		return err
 	}
 	return installMailRedisUnit()
 }

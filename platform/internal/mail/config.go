@@ -31,6 +31,7 @@ const (
 	ArtifactOpenDKIM               ArtifactRole = "opendkim"
 	ArtifactOpenDKIMKeyTable       ArtifactRole = "opendkim_key_table"
 	ArtifactOpenDKIMSigningTable   ArtifactRole = "opendkim_signing_table"
+	ArtifactOpenDKIMTrustedHosts   ArtifactRole = "opendkim_trusted_hosts"
 	ArtifactRedis                  ArtifactRole = "redis"
 	ArtifactClamAV                 ArtifactRole = "clamav"
 )
@@ -94,6 +95,7 @@ func (ConfigRenderer) Render(snapshot ConfigSnapshot) (ConfigGeneration, error) 
 		artifact(ArtifactOpenDKIM, "opendkim/opendkim.conf", 0640, renderOpenDKIM()),
 		artifact(ArtifactOpenDKIMKeyTable, "opendkim/KeyTable", 0640, renderKeyTable(normalized)),
 		artifact(ArtifactOpenDKIMSigningTable, "opendkim/SigningTable", 0640, renderSigningTable(normalized)),
+		artifact(ArtifactOpenDKIMTrustedHosts, "opendkim/TrustedHosts", 0640, renderOpenDKIMTrustedHosts()),
 		artifact(ArtifactRedis, "redis/redis.conf", 0640, renderMailRedis()),
 		artifact(ArtifactClamAV, "clamav/clamd.conf", 0640, renderClamAV(normalized)),
 	}
@@ -459,7 +461,77 @@ func renderPostfixStaticAliases(snapshot ConfigSnapshot) []byte {
 }
 func renderDovecot(snapshot ConfigSnapshot) []byte {
 	var out bytes.Buffer
-	fmt.Fprintf(&out, "protocols = imap lmtp sieve\nlisten = *, ::\nmail_home = /var/lib/cyberpanel/mailboxes/%%d/%%n\nmail_location = maildir:~/Maildir\nfirst_valid_uid = 200000\nlast_valid_uid = 299999\nssl = required\nssl_cert = </var/lib/cyberpanel/mail/tls/default/fullchain.pem\nssl_key = </var/lib/cyberpanel/mail/tls/default/private.key\nauth_mechanisms = plain login oauthbearer\nauth_cache_size = 0\ndisable_plaintext_auth = yes\nauth_master_user_separator = *\npassdb { driver = passwd-file; master = yes; mechanisms = plain login; args = /etc/cyberpanel/secrets/mail-webmail-master; result_success = continue }\npassdb { driver = oauth2; mechanisms = oauthbearer; args = /var/lib/cyberpanel/mail/current/dovecot/oauth2.conf }\npassdb { driver = passwd-file; mechanisms = plain login; args = scheme=ARGON2ID /run/cyberpanel/mail/dovecot-users }\nuserdb { driver = passwd-file; args = /run/cyberpanel/mail/dovecot-users }\nservice auth { unix_listener /var/spool/postfix/private/auth { mode = 0660; user = postfix; group = postfix } }\nservice lmtp { unix_listener /var/spool/postfix/private/dovecot-lmtp { mode = 0600; user = postfix; group = postfix } }\nservice managesieve-login { inet_listener sieve { port = 0 } unix_listener /run/dovecot/cyberpanel-managesieve { mode = 0600; user = cyberpanel; group = cyberpanel } }\nprotocol imap { mail_plugins = quota imap_quota }\nprotocol lmtp { mail_plugins = quota sieve }\nplugin { quota = count:User quota; quota_rule = *:storage=0; sieve = file:~/sieve; active=~/.dovecot.sieve }\npostmaster_address = %s\n", snapshot.Postmaster)
+	fmt.Fprintf(&out, `protocols = imap lmtp sieve
+listen = *, ::
+mail_home = /var/lib/cyberpanel/mailboxes/%%d/%%n
+mail_location = maildir:~/Maildir
+first_valid_uid = 200000
+last_valid_uid = 299999
+ssl = required
+ssl_cert = </var/lib/cyberpanel/mail/tls/default/fullchain.pem
+ssl_key = </var/lib/cyberpanel/mail/tls/default/private.key
+auth_mechanisms = plain login oauthbearer
+auth_cache_size = 0
+disable_plaintext_auth = yes
+auth_master_user_separator = *
+passdb {
+  driver = passwd-file
+  master = yes
+  mechanisms = plain login
+  args = /etc/cyberpanel/secrets/mail-webmail-master
+  result_success = continue
+}
+passdb {
+  driver = oauth2
+  mechanisms = oauthbearer
+  args = /var/lib/cyberpanel/mail/current/dovecot/oauth2.conf
+}
+passdb {
+  driver = passwd-file
+  mechanisms = plain login
+  args = scheme=ARGON2ID /run/cyberpanel/mail/dovecot-users
+}
+userdb {
+  driver = passwd-file
+  args = /run/cyberpanel/mail/dovecot-users
+}
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0660
+    user = postfix
+    group = postfix
+  }
+}
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+}
+service managesieve-login {
+  inet_listener sieve {
+    port = 0
+  }
+  unix_listener /run/dovecot/cyberpanel-managesieve {
+    mode = 0600
+    user = cyberpanel
+    group = cyberpanel
+  }
+}
+protocol imap {
+  mail_plugins = quota imap_quota
+}
+protocol lmtp {
+  mail_plugins = quota sieve
+}
+plugin {
+  quota = count:User quota
+  quota_rule = *:storage=0
+  sieve = file:~/sieve;active=~/.dovecot.sieve
+}
+postmaster_address = %s
+`, snapshot.Postmaster)
 	return out.Bytes()
 }
 func renderDovecotOAuth() []byte {
@@ -482,8 +554,9 @@ func renderClamAV(snapshot ConfigSnapshot) []byte {
 	return []byte("LocalSocket /run/clamd/cyberpanel.sock\nLocalSocketMode 0660\nFixStaleSocket yes\nUser clamav\nDatabaseDirectory /var/lib/clamav\nLogSyslog yes\nLogTime yes\nForeground yes\nDetectPUA yes\nHeuristicAlerts yes\nScanMail yes\nScanArchive yes\nStreamMaxLength 268435456\nMaxFileSize 268435456\nMaxScanSize 536870912\n")
 }
 func renderOpenDKIM() []byte {
-	return []byte("Mode sv\nCanonicalization relaxed/simple\nSocket local:/run/opendkim/opendkim.sock\nUserID opendkim:opendkim\nUMask 007\nKeyTable file:/var/lib/cyberpanel/mail/current/opendkim/KeyTable\nSigningTable refile:/var/lib/cyberpanel/mail/current/opendkim/SigningTable\nExternalIgnoreList refile:/var/lib/cyberpanel/mail/trusted-hosts\nInternalHosts refile:/var/lib/cyberpanel/mail/trusted-hosts\n")
+	return []byte("Mode sv\nCanonicalization relaxed/simple\nSocket local:/run/opendkim/opendkim.sock\nUserID opendkim:opendkim\nUMask 007\nKeyTable file:/var/lib/cyberpanel/mail/current/opendkim/KeyTable\nSigningTable refile:/var/lib/cyberpanel/mail/current/opendkim/SigningTable\nExternalIgnoreList refile:/var/lib/cyberpanel/mail/current/opendkim/TrustedHosts\nInternalHosts refile:/var/lib/cyberpanel/mail/current/opendkim/TrustedHosts\n")
 }
+func renderOpenDKIMTrustedHosts() []byte { return []byte("127.0.0.1\n::1\nlocalhost\n") }
 func renderKeyTable(snapshot ConfigSnapshot) []byte {
 	var out bytes.Buffer
 	for _, projection := range snapshot.Domains {

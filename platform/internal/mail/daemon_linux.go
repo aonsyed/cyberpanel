@@ -473,7 +473,7 @@ func (host *LinuxMailHost) storeArtifacts(ctx context.Context, generation Config
 			gid = host.Ownership.DovecotGID
 		case ArtifactRspamd, ArtifactRspamdRedis, ArtifactRspamdAntivirus:
 			gid = host.Ownership.RspamdGID
-		case ArtifactOpenDKIM, ArtifactOpenDKIMKeyTable, ArtifactOpenDKIMSigningTable:
+		case ArtifactOpenDKIM, ArtifactOpenDKIMKeyTable, ArtifactOpenDKIMSigningTable, ArtifactOpenDKIMTrustedHosts:
 			gid = host.Ownership.OpenDKIMGID
 		case ArtifactRedis:
 			gid = host.Ownership.RedisGID
@@ -643,7 +643,7 @@ func wipeMailArtifacts(artifacts []daemoncfg.Artifact) {
 }
 func (host *LinuxMailHost) validateGeneration(ctx context.Context, id string) (string, error) {
 	root := filepath.Join(MailConfigurationRoot, "generations", id)
-	commands := [][]string{{host.profile.postfix, "-c", filepath.Join(root, "postfix"), "check"}, {host.profile.doveconf, "-c", filepath.Join(root, "dovecot/dovecot.conf"), "-n"}, {host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/worker-controller.inc")}, {host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/redis.conf")}, {host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/antivirus.conf")}, {host.profile.opendkim, "-n", "-x", filepath.Join(root, "opendkim/opendkim.conf")}, {host.profile.redisServer, filepath.Join(root, "redis/redis.conf"), "--test-memory", "2"}, {host.profile.clamd, "--config-file=" + filepath.Join(root, "clamav/clamd.conf"), "--config-test"}}
+	commands := [][]string{{host.profile.postfix, "-c", filepath.Join(root, "postfix"), "check"}, {host.profile.doveconf, "-c", filepath.Join(root, "dovecot/dovecot.conf"), "-n"}, {host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/worker-controller.inc")}, {host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/redis.conf")}, {host.profile.rspamadm, "configtest", "-c", filepath.Join(root, "rspamd/antivirus.conf")}, {host.profile.opendkim, "-n", "-x", filepath.Join(root, "opendkim/opendkim.conf")}}
 	evidence := []string{}
 	for _, command := range commands {
 		output, err := runMailProcess(ctx, command[0], command[1:]...)
@@ -652,7 +652,14 @@ func (host *LinuxMailHost) validateGeneration(ctx context.Context, id string) (s
 			return digestMailEvidence(evidence...), err
 		}
 	}
-	return digestMailEvidence(evidence...), nil
+	redisEvidence, err := host.validateRedisConfig(ctx, filepath.Join(root, "redis/redis.conf"))
+	evidence = append(evidence, redisEvidence)
+	if err != nil {
+		return digestMailEvidence(evidence...), err
+	}
+	clamEvidence, err := validateClamAVConfig(ctx, filepath.Join(root, "clamav"))
+	evidence = append(evidence, clamEvidence)
+	return digestMailEvidence(evidence...), err
 }
 func (host *LinuxMailHost) reloadAll(ctx context.Context) (string, error) {
 	evidence := []string{}
@@ -752,7 +759,7 @@ func runMailProcessLimit(ctx context.Context, limit int, executable string, argu
 }
 func validMailExecutable(executable string) bool {
 	switch executable {
-	case "/usr/bin/systemctl", "/usr/sbin/postfix", "/usr/sbin/postqueue", "/usr/sbin/postsuper", "/usr/bin/doveconf", "/usr/bin/rspamadm", "/usr/sbin/opendkim", "/usr/bin/redis-server", "/usr/bin/redis-cli", "/usr/sbin/clamd":
+	case "/usr/bin/systemctl", "/usr/sbin/postfix", "/usr/sbin/postqueue", "/usr/sbin/postsuper", "/usr/bin/doveconf", "/usr/bin/rspamadm", "/usr/sbin/opendkim", "/usr/bin/redis-server", "/usr/bin/redis-cli", "/usr/sbin/clamd", "/usr/bin/clamconf":
 		return true
 	}
 	return false

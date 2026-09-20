@@ -5,6 +5,67 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native mail configuration checks repaired and verified — 2026-09-20
+
+The installed Dovecot failure was reproduced by a native renderer regression:
+doveconf exited 89 with `Garbage after '{'`. Replaced one-line passdb, userdb,
+service, protocol and plugin blocks with native multiline syntax. The next
+native check exposed missing Sieve/ManageSieve packages. Downloaded only the two
+matching Ubuntu ARM64 packages (420 KB total), version
+`1:2.3.21+dfsg1-2ubuntu6.5`, and installed them inside QEMU with service restarts
+blocked by policy-rc.d. dpkg audit is clean. Ubuntu's Sieve package selection now
+names dovecot-managesieved, whose declared dependency includes the exact matching
+dovecot-sieve package. The package mapping regression passes.
+
+Mail's configured default TLS paths did not exist. Reused the existing immutable
+bootstrap certificate mechanism with a separate mail/default namespace and key,
+then installed the fixed mail TLS binding. Actual QEMU tests verify a valid
+self-signed key pair, a public key distinct from the web fallback, root-only
+0440 key permissions and stable replay. This is an explicitly untrusted local
+fallback, not a publicly trusted mail identity. Native doveconf now accepts the
+actual rendered configuration with these real mail TLS paths and required TLS.
+
+Fixed two invalid native validation commands. Redis does not accept
+`redis-server config --test-memory 2` as a config check; ClamAV has no
+`--config-test`. Redis validation now starts a bounded, private, Unix-socket-only
+process with persistence disabled and a temporary data directory, checks PONG,
+then kills/reaps it and removes only that temporary directory. The installed
+mail instance/data are not opened. ClamAV validation uses clamconf and rejects
+explicit parse errors even when its exit code is zero. Native QEMU tests accept
+valid rendered configs and reject unknown directives for both daemons.
+
+OpenDKIM's native check also exposed an unprovisioned trusted-hosts path. Its
+loopback-only TrustedHosts file is now part of the same immutable generation,
+with the OpenDKIM artifact ownership, and both config references select it.
+Native OpenDKIM parsing with the rendered config/tables passes. Direct Postfix
+validation and Rspamd snippet parsing had already completed (with warnings).
+
+Uncached mail/install/core/executor suites passed, and both candidate binaries
+built inside QEMU as /home/harness/bin/cyberpanel-mail-validation and
+/home/harness/bin/panel-execd-mail-validation. Use sudo for builds against the
+shared guest GOCACHE: a non-root compile encountered root-owned cache entries;
+the same targeted test passed when run as root. No product code change was
+needed for that tooling ownership issue.
+
+No new signed release was deployed: first fix native daemon access. A direct
+_rspamd read of its retained redis.conf is denied. Actual mail root and
+generations directories are root:root 0750, generation root 0555, and role
+directories root:root 0550. Preserve root-only mutation authority while allowing
+only each native service to traverse/read its own artifacts; do not make all
+mail configuration public. The new fallback TLS key is also root-only, so qualify
+native Postfix key access as part of this boundary. Installed sequence 32 remains
+active; core and mail remain stopped, while DNS and executor admission are active.
+
+The next draft release spec is
+/home/harness/panel-node-d14f9440b/mail-validation-prereqs-spec.json (100 artifacts),
+with both downloaded packages copied into source/native-packages. It still has
+the old sequence/version: advance to sequence 33 / version 3.1.32 only when the
+next candidate is ready. No OS image or Go archive was downloaded.
+Sequence 32 archive was checksum-verified on the host before removing only its
+guest /var/tmp copy. Installed releases/journals remain intact; guest free space
+is 4.2 GiB. Native mail delivery and full core/gateway/API/UI/matrix qualification
+remain incomplete.
+
 ### Native mail adoption and dedicated Redis qualified — 2026-09-20
 
 Implemented installer-only adoption of five Ubuntu mail defaults. Dovecot and
