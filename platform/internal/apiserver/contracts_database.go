@@ -43,11 +43,12 @@ func registerDatabaseContracts(registry *Registry)error{
 		{Name:"database.upgrade.request",Permission:identity.MustPermission("database:admin"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &DatabaseUpgradePayload{}},ResolveScope:installationScope},
 	}
 	for _,operation:=range append(tenantOperations,nodeOperations...){if err:=register(registry,operation);err!=nil{return err}}
-	return nil
+	return registerDatabaseExportContracts(registry)
 }
 
 func bindDatabase(registry *Registry,services DomainServices)error{
 	if services.Database==nil{return nil}
+	if err:=bindDatabaseExportContracts(registry,services);err!=nil{return err}
 	bind:=func(name string,builder func(Invocation,any)(database.Command,error))error{return registry.Bind(name,func(ctx context.Context,invocation Invocation,payload any)(OperationResult,error){command,err:=builder(invocation,payload);if err!=nil{return OperationResult{},err};receipt,err:=services.Database.Handle(ctx,command);if err!=nil{return OperationResult{},mapDomainError(err)};return OperationResult{Status:http.StatusOK,Value:receipt},nil})}
 	tenantHeader:=func(invocation Invocation,capability database.Capability)(database.CommandHeader,error){tenant,err:=site.NewTenantID(invocation.Request.TenantID);if err!=nil{return database.CommandHeader{},ErrInvalidRequest};return database.CommandHeader{CommandID:commandID(invocation),Actor:database.Actor{TenantID:tenant,Capability:capability},TenantID:tenant},nil}
 	if err:=bind("database.database.create",func(inv Invocation,value any)(database.Command,error){header,err:=tenantHeader(inv,database.CapabilityTenantManage);if err!=nil{return nil,err};payload:=value.(*DatabaseCreatePayload);payload.Database.Metadata.TenantID=header.TenantID;payload.Database.Metadata.Generation=1;return database.CreateDatabase{Header:header,Database:payload.Database},nil});err!=nil{return err}

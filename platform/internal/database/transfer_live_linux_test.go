@@ -115,8 +115,26 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			}
 			exportConfigs := liveWorkspaceExportFixture(t, ctx, prefix, job, source, query)
 			exportClient := liveExportBroker(t, ctx, exportConfigs.executor)
+			coordinator := NewCoordinator(liveExportRepository{executor: exportConfigs.executor}, exportClient, liveExportClock{})
+			call := WorkspaceCall{TenantID: tenant, SiteID: siteID, SessionID: exportConfigs.access.SessionID, SessionGeneration: exportConfigs.access.SessionGeneration}
+			job, err = coordinator.PrepareWorkspaceExport(ctx, call, "fixture-user", "prepare-"+string(compression), WorkspaceExportOptions{Compression: compression, Selection: TransferSelection{Schema: true, Data: true}})
+			if err != nil {
+				t.Fatal("prepare export", err)
+			}
+			preparedPath, err := store.artifactPath(*job.Destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(preparedPath); err != nil {
+					t.Error(err)
+				}
+			})
 			request := WorkspaceExportRequest{Access: exportConfigs.access, Job: job}
-			receipt, err := exportClient.ExportWorkspaceDatabase(ctx, request)
+			if _, err = coordinator.RunWorkspaceExport(ctx, call, "different-actor", job); err == nil {
+				t.Fatal("different actor accepted")
+			}
+			receipt, err := coordinator.RunWorkspaceExport(ctx, call, "fixture-user", job)
 			if err != nil {
 				t.Fatalf("native export: %v (exit %d)", err, receipt.ExitCode)
 			}
@@ -168,6 +186,9 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 				t.Fatal("caller-selected artifact destination accepted")
 			}
 			verifyLiveExportDownload(t, ctx, exportClient, exportConfigs.executor, request, *receipt.Artifact)
+			if _, err = coordinator.DownloadWorkspaceExport(ctx, call, "fixture-user", job, *receipt.Artifact, 0, 97); err != nil {
+				t.Fatal("coordinator download", err)
+			}
 			job.Direction, job.Source, job.Destination = TransferImport, receipt.Artifact, nil
 			job, err = SealTransferJob(job)
 			if err != nil {
@@ -189,6 +210,39 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+type liveExportClock struct{}
+
+func (liveExportClock) Now() time.Time { return time.Now() }
+
+// Read-only domain repository fixture joins the same real protected resources
+// used by the root broker. SQL domain persistence is qualified separately.
+type liveExportRepository struct {
+	Repository
+	executor *LinuxMariaDBExecutor
+}
+
+func (repository liveExportRepository) LoadResource(ctx context.Context, kind ResourceKind, id ResourceID) (ResourceEnvelope, error) {
+	var resource Resource
+	var directory string
+	switch kind {
+	case KindConsoleSession:
+		resource = &DatabaseWorkspaceSession{}
+		directory = "sessions"
+	case KindDatabase:
+		resource = &Database{}
+		directory = "databases"
+	case KindPrincipal:
+		resource = &DatabasePrincipal{}
+		directory = "principals"
+	default:
+		return ResourceEnvelope{}, ErrInvalidResource
+	}
+	if err := repository.executor.readResource(directory, id, resource); err != nil {
+		return ResourceEnvelope{}, err
+	}
+	return EncodeResource(resource)
 }
 
 // This private QEMU socket uses a fixture peer authorizer. Framing, dispatch,

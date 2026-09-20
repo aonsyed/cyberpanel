@@ -3737,6 +3737,47 @@ After verification, the AlmaLinux ARM64 and both AMD64 guests were shut down.
 Their overlays and logs are retained. Ubuntu ARM64 remains running on loopback
 SSH port 22193 for the next installed-release work; its temporary Vite server
 is stopped. No base images or evidence were deleted.
+# Export coordinator, API and console UI — 2026-09-20
+
+Implemented coordinator preparation from authorized workspace metadata, sealed
+job construction, actor-bound execution and freshly authorized downloads. Added
+MFA/database:console, site-scoped export_prepare/export/export_download API
+contracts; only export is mutating. Access coordinates and actor are derived
+server-side, not accepted as WorkspaceAccess payloads. Preparation returns the
+complete job so execution retries keep the same specification/timestamps.
+Console UI supports SQL/gzip downloads, bounded reads, progress/error states,
+chunk and assembled SHA256 validation before save, abort on close and Blob URL
+cleanup. It explicitly excludes routines/triggers/events for now.
+
+QEMU Ubuntu ARM64 verification:
+- Go: `CYBERPANEL_QEMU_LIVE_TRANSFER=1` with root `TMPDIR=/root`, cached/offline Go,
+  `go test -p 2 ./internal/database ./internal/apiserver ./cmd/cyberpanel
+  ./cmd/panel-execd -count=1` passed. Native round trip now includes coordinator
+  preparation/actor checks/execution/download, real broker and MariaDB. Its domain
+  repository reads the protected fixture resources; domain SQL persistence and
+  production secret delivery remain separate qualifications.
+- Real Core.Handler HTTP preparation endpoint: 200 with correct server-derived
+  actor/site/tenant/generation; malformed compression, unknown access/tenant
+  payload fields and missing generation give 400; anonymous 401 and authorization
+  denial 403. Identity/signature verifier and domain execution are explicit
+  fixtures. The other two API contracts' binding/auth/mutation policy is checked;
+  installed HTTP export/download have not yet been exercised.
+- Guest `npm run typecheck` and `npm run build` passed. Vite reports a 537.99kB
+  JavaScript chunk warning, not a build failure.
+- Real guest Chromium, candidate compiled UI: both SQL/gzip downloads contain
+  expected fixture bytes and filenames; incorrect full-artifact digest produces
+  an alert and no download; 390px layout passes. The three export API responses
+  are MOCKED, explicitly logged as such. Existing password/passkey login, console
+  issue/metadata/query and mutation-denial/recovery calls remain real installed51
+  traffic. Harness: ignored `.work/qemu/qemu-passkey.cjs --console-fresh
+  --candidate-ui --export-ui-fixture`; no new native resources or packages.
+
+No installed-release claim: signed51 is unchanged. Next required proof is the
+connected installed UI/API/native-export flow. Ordinary workspace caps remain
+1MiB/30s/1000 estimated rows; native row receipts currently use preview estimates.
+Large async transfers, production import, retention collection, full object
+parity and the full matrix remain unfinished. No host testing/downloads occurred.
+
 # Authorized export downloads through the broker — 2026-09-20
 
 Added typed `workspace_export_read` client/server/executor support. Each read

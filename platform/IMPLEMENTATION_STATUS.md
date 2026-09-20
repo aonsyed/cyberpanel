@@ -6,6 +6,23 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+EXPORT API/UI SOURCE CONNECTED: coordinator prepares sealed jobs from current
+workspace/database metadata and derives access again for execution/download.
+Added MFA/database:console site-scoped export_prepare, export (mutating with
+idempotency), and export_download contracts. Caller cannot supply WorkspaceAccess;
+tenant/site/generation/actor come from the authenticated invocation/session.
+Console UI offers SQL/gzip, downloads bounded chunks, checks chunk + full SHA256
+before saving, and shows progress/errors. QEMU native coordinator→broker→MariaDB
+round trip passes; HTTP prepare policy/scope/negative checks pass with explicit
+auth/domain fixtures. Candidate Chromium UI SQL/gzip downloads, corrupted-digest
+denial and 390px layout pass with MOCK export responses; existing login/console
+queries remain live. UI typecheck/build pass (538kB chunk warning remains).
+NEXT: install and verify the connected API/UI against real exports; installed51
+is unchanged. Workspace caps currently inherit existing console limits (normal
+session 1MiB/30s/1000 estimated rows); larger async jobs are still required. Native
+row accounting is presently based on preview estimates. Production import,
+retention collection, routines/triggers/events and wider matrix remain pending.
+
 DATABASE EXPORT DOWNLOAD PROGRESS: added workspace_export_read broker operation
 with <=256KiB chunks, exact descriptor/offset/length/EOF/digest binding, and fresh
 protected session/database/principal/instance authorization for EVERY read.
