@@ -5,6 +5,34 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Core systemd audit credential accepted safely — 2026-09-20
+
+The audit loader now recognizes the exact systemd credential boundary only at
+its fixed audit credential path. It requires root:root, a singly linked regular
+0440 file, read-only tmpfs, and the exact ACL granting read to root and the
+current non-root service UID with owning group/other denied. The root-owned
+0550 parent must carry the equivalent traversal ACL. Ordinary secrets retain
+their owner-only permission requirement. No key bytes were printed.
+
+QEMU command package tests passed uncached. A compiled test run by a real
+systemd LoadCredential unit as cyberpanel passed the actual credential check
+and rejected a different UID and unexpected permission requirement. An ordinary
+0440 secret was rejected and an owner-only fixture accepted. An initial test
+launch from private /home/harness was denied execution; the same test binary
+was installed root-owned in /var/tmp for the service run.
+
+Signed sequence 24 `qemu-credential-3.1.23` committed and its installed service
+reconciliation hook passed. Bundle SHA-256
+`59bcb470accb4615dbfd9da1bb7097974c528c784d3040e32e4d6f4cd60bdc05`;
+manifest `a30dbb2130ce6e08db35275199cc1591555a5df25ff006963f3630facebecb48`;
+receipt `b8f9d364ed3a66f343a19354347ff8ba8aa8fad0eed52b21e34fc1a71cff10a3`.
+Actual core startup now passes audit credential loading and reaches domain
+assembly, failing `digest database executor: webengine management: invalid value`.
+The digest helper currently rejects symlinks at the installed executor path;
+investigate its signed-release binding next. Core restart loop is stopped.
+Guest root has 4.4 GiB free; avoid unnecessary retained release duplication.
+Core/gateway/API/UI and full matrix qualification remain incomplete.
+
 ### WP-CLI installed; executor namespace repaired — 2026-09-20
 
 Provisioned a separate QEMU-only release authority `qemu-runtime-20260920`,

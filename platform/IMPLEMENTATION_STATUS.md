@@ -57,10 +57,13 @@ Sequence 22 restores /run/user inside the executor's ProtectHome namespace while
 keeping home trees hidden; the executor runs, with mutation admission closed
 until core schema initialization. Sequence 23 fixes core/gateway sandbox startup
 on Podman nodes without a Docker socket. Actual core startup now reaches its
-audit credential loader, which rejects systemd's root:root/0440 credential ACL
-mask. The source secret is 0600 and credential mount is read-only tmpfs; validate
-the credential access boundary before a scoped loader fix. Core restart loop is
-stopped. Executor mutation readiness and core/gateway startup are not yet proven.
+audit credential loader. Sequence 24 fixes that fixed-path check using the exact
+root/service-user ACL and read-only tmpfs boundary; real systemd credential and
+negative permission checks passed. Actual core now reaches domain assembly and
+fails the database executor executable digest (the helper rejects symlinks;
+investigate signed installed executable resolution next). Core restart loop is
+stopped. Guest free space is 4.4 GiB. Executor mutation readiness and
+core/gateway startup are not yet proven.
 Continue startup and API/browser qualification. OLS remains held stopped until
 managed configuration is ready.
 The existing guest disk was safely expanded to 40 GiB, removing the repeated

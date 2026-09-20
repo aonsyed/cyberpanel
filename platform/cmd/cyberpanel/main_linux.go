@@ -220,8 +220,8 @@ func readCoreFile(path string, maximum int64, secret bool) ([]byte,error) {
 	if !filepath.IsAbs(path)||filepath.Clean(path)!=path||maximum<=0{return nil,errors.New("unsafe core file path")}
 	before,err:=os.Lstat(path);if err!=nil{return nil,err}
 	if !before.Mode().IsRegular()||before.Mode()&os.ModeSymlink!=0||before.Size()<=0||before.Size()>maximum||before.Mode().Perm()&0002!=0{return nil,errors.New("unsafe core file")}
-	if secret&&before.Mode().Perm()&0077!=0{return nil,errors.New("core secret is accessible to another account")}
 	file,err:=os.Open(path);if err!=nil{return nil,err};defer file.Close();opened,err:=file.Stat();if err!=nil||!os.SameFile(before,opened){return nil,errors.New("core file changed while opening")}
+	if secret&&opened.Mode().Perm()&0077!=0&&(path!=auditCredentialPath||!privateSystemdCredential(file)){return nil,errors.New("core secret is accessible to another account")}
 	content,err:=io.ReadAll(io.LimitReader(file,maximum+1));if err!=nil||int64(len(content))>maximum{wipeBytes(content);return nil,errors.New("core file exceeds limit")};return content,nil
 }
 
