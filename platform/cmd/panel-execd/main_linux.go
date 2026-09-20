@@ -220,7 +220,7 @@ func main() {
 	defer malwareListener.Close()
 	server := &siteops.Server{Authorizer: policy, Handler: executor, Admission: mutationAdmission, MaximumConcurrent: 128}
 	installedEdition := webengine.Edition(edition)
-	configurationStore, err := fsstore.New(webEngineConfigurationRoot, installedEdition)
+	configurationStore, err := fsstore.NewWithHealth(webEngineConfigurationRoot, installedEdition, "/var/lib/cyberpanel/site-health/activation")
 	if err != nil {
 		log.Fatalf("open web-engine configuration store: %v", err)
 	}

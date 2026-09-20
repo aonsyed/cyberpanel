@@ -63,6 +63,16 @@ func reconcileWebWorker() error {
 	if err := provisionSystemWebContent(); err != nil {
 		return err
 	}
+	// Additive drop-in preserves the already installed authority definition.
+	const healthUnit = "[Service]\nReadOnlyPaths=/var/lib/cyberpanel/site-health\n"
+	const healthPath = directory + "/51-cyberpanel-health.conf"
+	if _, err := ensureOwnedFile(healthPath, 0644, 0, 0, []byte(healthUnit)); err != nil {
+		return err
+	}
+	healthData, err := os.ReadFile(healthPath)
+	if err != nil || string(healthData) != healthUnit {
+		return errors.New("web health protection differs from managed definition")
+	}
 	return exec.CommandContext(ctx, "/usr/bin/systemctl", "daemon-reload").Run()
 }
 
@@ -84,6 +94,7 @@ func provisionSystemWebContent() error {
 		"/usr/local/lsws/panel/system/maintenance", "/usr/local/lsws/panel/system/suspended",
 		"/var/lib/cyberpanel/site-health/system-default",
 		"/var/lib/cyberpanel/site-health/system-default/g1",
+		"/var/lib/cyberpanel/site-health/activation",
 	} {
 		if err := trustedDNSAncestors(filepath.Dir(directory)); err != nil {
 			return err

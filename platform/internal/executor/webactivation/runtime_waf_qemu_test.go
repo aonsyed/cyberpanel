@@ -14,6 +14,10 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/lswsruntime"
 )
 
 func runQEMUWAFHTTP(t *testing.T, master, digest string) {
@@ -33,6 +37,10 @@ func runQEMUWAFHTTP(t *testing.T, master, digest string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
+	healthSource := fixtureRoot
+	if os.Getenv("CYBERPANEL_QEMU_PERSISTENT_HEALTH") == "1" {
+		healthSource = "/var/lib/cyberpanel/site-health/activation/g1"
+	}
 	output, err := exec.CommandContext(ctx, "/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--collect",
 		"--property=PrivateNetwork=yes", "--property=PrivateTmp=yes",
 		"--property=TemporaryFileSystem=/run",
@@ -40,7 +48,7 @@ func runQEMUWAFHTTP(t *testing.T, master, digest string) {
 		"--property=CapabilityBoundingSet=~CAP_SYS_ADMIN", "--property=KillMode=control-group",
 		"--property=RuntimeMaxSec=30s", "--property=TimeoutStopSec=5s",
 		"--property=BindReadOnlyPaths="+master+":/usr/local/lsws/conf/httpd_config.conf",
-		"--property=BindReadOnlyPaths="+fixtureRoot+":/var/lib/cyberpanel/site-health/system-default/g1",
+		"--property=BindReadOnlyPaths="+healthSource+":/var/lib/cyberpanel/site-health/activation/g1",
 		"--property=BindReadOnlyPaths="+fixtureRoot+":/var/lib/cyberpanel/acme/http-01",
 		"--setenv=CYBERPANEL_QEMU_WAF_HTTP_CHILD=1",
 		"--setenv=CYBERPANEL_QEMU_HEALTH_DIGEST="+digest,
@@ -133,6 +141,21 @@ func TestQEMUWebWAFHTTPChild(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	t.Run("production-health-probe", func(t *testing.T) {
+		transport := NewLoopbackTransport()
+		defer transport.CloseIdleConnections()
+		hostname, err := webengine.ParseHostname("default.invalid")
+		if err != nil {
+			t.Fatal(err)
+		}
+		probe, err := lswsruntime.NewHTTPProbe(transport, lswsruntime.HTTPProbeConfig{Port: 80, Hostname: hostname, PathToken: "activation"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := probe.Check(ctx, activation.Receipt{Edition: webengine.EditionOpenLiteSpeed, Digest: os.Getenv("CYBERPANEL_QEMU_HEALTH_DIGEST")}); err != nil {
+			t.Fatal(err)
+		}
+	})
 	oversizedJSON := `{"message":"` + strings.Repeat("a", 13107200) + `"}`
 	for _, fixture := range []struct {
 		name, method, target, contentType, body string

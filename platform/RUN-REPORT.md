@@ -5,6 +5,38 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed persistent web health proof — 2026-09-20
+
+Implemented a root-owned, atomically written activation proof for each web
+snapshot. Confirmed proofs cannot be replaced by a different candidate at the
+same snapshot; earlier proofs survive rollback. Both edition renderers reference
+the snapshot-specific path. Installer provisions the tree and an additive
+read-only service mount; executor uses the production proof writer.
+
+QEMU tests cover snapshot advancement, rollback retention, conflicting reuse,
+unsafe modes and symlinks. Actual vendor HTTP serves the persistent proof, and
+the production loopback health client passes. The full WAF fixture remains red
+only on three vendor oversized-body cases (19/22 cases pass); no vendor patch.
+
+Installed signed sequence38 `qemu-web-health-3.1.37`, manifest
+`62c1c02d06a9bb6337eddd7c8421e3f544f0b46131f981fa8ba1bf93dbe6bf61`, receipt
+`4ba75587a8da89857aefca88906c594e7956b70d9322a12f16fd5614329fe8a4`.
+The existing QEMU mail-config restore prerequisite was followed by the installed
+reconcile-services hook. Vendor package installation had changed the existing
+WAF policy owner to lsadm; SHA256 remained
+`48bced536ba267183280d79d0afe70b0cc236fd1cf9c82fec15d8ee42106a186`.
+Restored root ownership of that exact policy, then reconciliation passed.
+This manual step means unattended upgrade replay remains unqualified.
+
+Released the QEMU-only OLS startup hold. Core activated OLS and passed its health
+check. Independent HTTP GET to `/.well-known/panel-health/activation` with Host
+`default.invalid` returns `panel-health-v1
+98515aa557ad729626e3ec2119b46d0b6e1b6f401cf7184866afc7b5267865b4` (one line).
+The persistent proof is root-owned0444. OLS, Postfix, Dovecot and Rspamd are active.
+Core now exits at `connect exact site-preview route helper: site preview
+destination denied`; no UI/API completion claim. Journals preserved. Guest has
+4.4GiB free; no images, native source builds or downloads were started.
+
 ### Health/ACME contexts and immutable vhost revisions — 2026-09-20
 
 Live vendor QEMU requests reproduced403 for existing health and ACME challenge

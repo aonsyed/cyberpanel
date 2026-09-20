@@ -31,11 +31,13 @@ const (
 )
 
 type Store struct {
-	root     *os.Root
-	rootPath string
-	edition  webengine.Edition
-	master   string
-	vhost    string
+	health       *os.Root
+	healthWriter func(context.Context, manifest) error
+	root         *os.Root
+	rootPath     string
+	edition      webengine.Edition
+	master       string
+	vhost        string
 }
 
 type manifest struct {
@@ -137,7 +139,11 @@ func (s *Store) Close() error {
 	if s == nil || s.root == nil {
 		return nil
 	}
-	return s.root.Close()
+	var healthErr error
+	if s.health != nil {
+		healthErr = s.health.Close()
+	}
+	return errors.Join(s.root.Close(), healthErr)
 }
 
 func (s *Store) Stage(ctx context.Context, generation native.ConfigGeneration) (activation.Receipt, error) {
@@ -218,6 +224,11 @@ func (s *Store) SwapMaster(ctx context.Context, receipt activation.Receipt) erro
 	}
 	if sealed.Digest != receipt.Digest {
 		return errors.New("generation receipt changed while resolving")
+	}
+	if s.healthWriter != nil {
+		if err := s.healthWriter(ctx, sealed); err != nil {
+			return err
+		}
 	}
 	return s.replace(s.master, master)
 }

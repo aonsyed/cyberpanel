@@ -316,7 +316,7 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 	output.WriteString("  type static\n  location /var/lib/cyberpanel/acme/http-01\n  allowBrowse 1\n  autoIndex 0\n  addDefaultCharset off\n  rewrite {\n    enable 0\n  }\n}\n\n")
 	output.WriteString("context /.well-known/panel-health/ {\n")
 	output.WriteString("  type static\n  location ")
-	output.WriteString(native.HealthDocumentRoot(site))
+	output.WriteString(native.HealthDocumentRoot(request.Snapshot.Generation))
 	output.WriteString("\n  allowBrowse 1\n  autoIndex 0\n  addDefaultCharset off\n  rewrite {\n    enable 0\n  }\n}\n\n")
 
 	switch {

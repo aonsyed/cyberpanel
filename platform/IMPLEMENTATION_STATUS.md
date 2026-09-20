@@ -6,6 +6,17 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest installed checkpoint: signed sequence38 qemu-web-health-3.1.37 is
+committed in QEMU. Persistent root-owned health proofs are keyed by web snapshot,
+retain rollback proofs and reject confirmed-generation reuse. Installed vendor
+OLS is ACTIVE; live HTTP returns exact proof98515aa557ad729626e3ec2119b46d0b6e1b6f401cf7184866afc7b5267865b4.
+Core passed initial web activation and now fails at the site-preview route helper:
+`site preview destination denied`. Mail services are active again. Reinstall
+required the existing manual reconciliation hook and restoring root ownership
+of the byte-identical WAF policy after vendor package ownership repair; automatic
+installer replay is NOT qualified. No native source builds or downloads.
+Earlier health-provisioning and inactive-OLS notes below are superseded.
+
 Latest routing/storage checkpoint: fixed allowBrowse0 denying health and ACME
 files; both renderers now allow files with autoIndex0. Vendor QEMU serves exact
 test proof bytes; directory requests404. New vhosts use content-hashed paths so

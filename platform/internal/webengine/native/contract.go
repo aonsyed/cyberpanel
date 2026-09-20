@@ -62,11 +62,10 @@ type SiteRuntime struct {
 	RootGeneration uint64
 }
 
-// HealthDocumentRoot is the immutable, root-owned attestation directory for a
-// candidate site generation. Tenant-writable content is never used to prove
-// engine activation.
-func HealthDocumentRoot(site SiteRuntime) string {
-	return "/var/lib/cyberpanel/site-health/" + string(site.SiteKey) + "/g" + strconv.FormatUint(site.RootGeneration, 10)
+// HealthDocumentRoot follows the web snapshot, not a site's filesystem
+// generation: unrelated web changes must not overwrite the running proof.
+func HealthDocumentRoot(snapshot uint64) string {
+	return "/var/lib/cyberpanel/site-health/activation/g" + strconv.FormatUint(snapshot, 10)
 }
 
 type LSAPIPool struct {

@@ -315,7 +315,7 @@ func renderVirtualHost(request native.RenderRequest, index renderIndex, applicat
 	output.WriteString("    </context>\n    <context>\n")
 	writeElement(&output, 3, "type", "static")
 	writeElement(&output, 3, "uri", "/.well-known/panel-health/")
-	writeElement(&output, 3, "location", native.HealthDocumentRoot(site))
+	writeElement(&output, 3, "location", native.HealthDocumentRoot(request.Snapshot.Generation))
 	writeElement(&output, 3, "allowBrowse", "1")
 	writeElement(&output, 3, "autoIndex", "0")
 	output.WriteString("    </context>\n")

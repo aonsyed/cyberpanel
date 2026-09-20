@@ -34,7 +34,7 @@ func TestQEMUInitialWebParser(t *testing.T) {
 	if err := (FixedRunner{}).CheckStopped(ctx); err != nil {
 		t.Fatal(err)
 	}
-	store, err := fsstore.New("/usr/local/lsws/conf", webengine.EditionOpenLiteSpeed)
+	store, err := fsstore.NewWithHealth("/usr/local/lsws/conf", webengine.EditionOpenLiteSpeed, "/var/lib/cyberpanel/site-health/activation")
 	if err != nil {
 		t.Fatal(err)
 	}
