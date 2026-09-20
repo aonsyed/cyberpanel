@@ -4681,3 +4681,21 @@ cyberpanel-waf-crs 4.29.0-2. No replacement package was found in inspected local
 apt archive/harness paths. This is source qualification, not deployment or proof
 of distro CRS installation. Installed59 unchanged; no downloads, custom builds,
 new workers or binary artifacts. Guest free space remains 7.1GiB.
+
+## 2026-09-21 — durable import outcome after caller disconnect
+
+QEMU regression initially failed: cancellation after successful native-promotion
+fixture left no SQLite receipt; cancellation with uncertain promotion returned
+context cancelled instead of preserving the ambiguous outcome. Fixed
+TransferService.finishTransfer to detach only receipt/audit finalization, with
+a 10-second timeout. Existing lease/generation fencing remains enforced.
+
+QEMU Ubuntu ARM64: database/apiserver suites passed with live-transfer flag.
+Explicit verbose native round trip passed SQL/gzip ordinary/BOM input, and all
+eight promotion outcome cases passed, including both disconnect regressions.
+Tests verify actual SQLite receipt persistence, ambiguous job refusal to restart,
+and terminal audit with a live bounded context. The disconnect itself is injected
+at the catalog seam; installed HTTP disconnect behavior is not yet qualified.
+No native operation is retried by this fix. No downloads/vendor changes; source
+change is not yet in installed59. Cancellation API, queued cancellation lifecycle,
+crash recovery and replacement remain pending.

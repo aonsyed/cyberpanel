@@ -11,6 +11,18 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Import disconnect recovery — 2026-09-21 (source verified, not deployed)
+
+Fixed terminal receipt/audit persistence using the cancelled request context.
+Final-state recording now gets a detached 10-second context; native execution
+is not extended or retried. QEMU real SQLite reproduction failed before fix for
+disconnect after promotion and during uncertain promotion; both now persist the
+correct outcome. Terminal audit checks require a live bounded context. Database
+and API suites and native SQL/gzip round trips pass. Controlled-disconnect tests
+use catalog/backend fixtures with real SQLite, not an installed HTTP disconnect.
+Installed59 unchanged. Broader crash recovery, cancellation API and replacement
+remain unfinished.
+
 ## Native CRS follow-up — 2026-09-21 (source verified, not deployed)
 
 Source already has no custom CRS manifest/package requirement. Extended installed

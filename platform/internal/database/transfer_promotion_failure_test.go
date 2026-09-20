@@ -20,6 +20,7 @@ type promotionFailureCatalog struct {
 	promotion    TransferPromotion
 	err          error
 	discarded    int
+	cancel       context.CancelFunc
 }
 
 func (c *promotionFailureCatalog) LoadTransferDatabase(context.Context, site.TenantID, site.SiteID, ResourceID) (Database, error) {
@@ -32,6 +33,9 @@ func (c *promotionFailureCatalog) VerifyIsolatedTransferDatabase(context.Context
 	return c.verification, nil
 }
 func (c *promotionFailureCatalog) PromoteIsolatedTransferDatabase(context.Context, TransferJob, Database, IsolatedTransferDatabase, TransferRestorePoint) (TransferPromotion, error) {
+	if c.cancel != nil {
+		c.cancel()
+	}
 	return c.promotion, c.err
 }
 func (c *promotionFailureCatalog) DiscardIsolatedTransferDatabase(context.Context, TransferJob, IsolatedTransferDatabase) error {
@@ -42,6 +46,22 @@ func (c *promotionFailureCatalog) DiscardIsolatedTransferDatabase(context.Contex
 type promotionFailureBackend struct {
 	TransferBackend
 	process TransferProcessReceipt
+}
+
+type promotionOutcomeAudit struct {
+	t        *testing.T
+	terminal bool
+}
+
+func (audit *promotionOutcomeAudit) RecordDatabaseTransfer(ctx context.Context, record TransferAuditRecord) error {
+	if record.Outcome == "transfer_completed" || record.Outcome == "transfer_ambiguous" || record.Outcome == "transfer_failed" || record.Outcome == "transfer_cancelled" {
+		audit.terminal = true
+		deadline, ok := ctx.Deadline()
+		if ctx.Err() != nil || !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 10*time.Second {
+			audit.t.Fatal("terminal audit must have a live bounded context")
+		}
+	}
+	return record.Validate()
 }
 
 func (b promotionFailureBackend) Import(_ context.Context, _ TransferJob, _ SQLIdentifier, checkpoint TransferCheckpoint) (TransferProcessReceipt, error) {
@@ -65,9 +85,12 @@ func TestTransferServicePreservesUncertainPromotion(t *testing.T) {
 		{"source_not_proven_preserved", ErrUnavailable, false, false, TransferAmbiguous, 0},
 		{"definite_pre_promotion_conflict", ErrConflict, false, true, TransferFailed, 1},
 		{"success", nil, true, true, TransferCompleted, 0},
+		{"disconnect_after_promotion", nil, true, true, TransferCompleted, 0},
+		{"disconnect_uncertain_promotion", ErrAmbiguous, false, false, TransferAmbiguous, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			now := time.Now().UTC()
 			id := func(raw string) ResourceID {
 				value, err := NewResourceID(raw)
@@ -109,7 +132,11 @@ func TestTransferServicePreservesUncertainPromotion(t *testing.T) {
 				t.Fatal(err)
 			}
 			catalog := &promotionFailureCatalog{database: database, isolated: isolated, verification: verification, promotion: promotion, err: test.err}
-			service := TransferService{repository: repository, catalog: catalog, backend: promotionFailureBackend{process: process}, authorizer: transferHistoryPolicy{}, audit: transferHistoryPolicy{}, now: time.Now}
+			if test.name == "disconnect_after_promotion" || test.name == "disconnect_uncertain_promotion" {
+				catalog.cancel = cancel
+			}
+			audit := &promotionOutcomeAudit{t: t}
+			service := TransferService{repository: repository, catalog: catalog, backend: promotionFailureBackend{process: process}, authorizer: transferHistoryPolicy{}, audit: audit, now: time.Now}
 			receipt, err := service.Run(ctx, "owner", "worker", job.ID, state.Generation, time.Minute)
 			if receipt.Status != test.status || catalog.discarded != test.discarded {
 				t.Fatalf("status=%s discard=%d error=%v; want status=%s discard=%d", receipt.Status, catalog.discarded, err, test.status, test.discarded)
@@ -117,16 +144,19 @@ func TestTransferServicePreservesUncertainPromotion(t *testing.T) {
 			if test.status == TransferAmbiguous && (!errors.Is(err, ErrAmbiguous) || receipt.ResumeClass != TransferResumeNotSafe || !receipt.MutationPossible || receipt.PromotionDigest != promotion.ProofDigest || receipt.VerificationDigest != verification.Digest) {
 				t.Fatal("uncertain promotion lost its recovery evidence", err)
 			}
-			stored, loadErr := repository.LatestTransferReceipt(ctx, job.ID)
+			stored, loadErr := repository.LatestTransferReceipt(context.Background(), job.ID)
 			if loadErr != nil || stored.Digest != receipt.Digest {
 				t.Fatal("promotion outcome not durable", loadErr)
 			}
+			if !audit.terminal {
+				t.Fatal("terminal outcome not audited")
+			}
 			if test.status == TransferAmbiguous {
-				current, err := repository.LoadTransfer(ctx, job.ID)
+				current, err := repository.LoadTransfer(context.Background(), job.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err = repository.ClaimTransfer(ctx, job.ID, "another-worker", current.Generation, time.Now().UTC(), time.Minute); err == nil {
+				if _, err = repository.ClaimTransfer(context.Background(), job.ID, "another-worker", current.Generation, time.Now().UTC(), time.Minute); err == nil {
 					t.Fatal("ambiguous promotion could restart import")
 				}
 			}

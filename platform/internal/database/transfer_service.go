@@ -357,6 +357,10 @@ func (service TransferService) phaseCheckpoint(ctx context.Context, job Transfer
 
 func (service TransferService) finishTransfer(ctx context.Context, authorization TransferAuthorizationRequest, job TransferJob, lease TransferLease, process *TransferProcessReceipt,
 	verification *TransferVerification, promotion *TransferPromotion, operationErr error) (TransferReceipt, error) {
+	// Native effects may already have completed when the caller disconnects.
+	// Preserve the fenced outcome and audit without extending native execution.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	status, code, mutation, sourcePreserved := TransferCompleted, "", false, true
 	if operationErr != nil {
 		status, code = TransferFailed, "transfer_failed"
