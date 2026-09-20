@@ -1668,11 +1668,19 @@ func verifyPackageInventory(ctx context.Context, path string, manager PackageMan
 		if member != rawMember || strings.ContainsRune(member, '\x00') {
 			return ErrIntegrity
 		}
-		if forbiddenPackageMember(member) {
+		if forbiddenPackageMember(member) && !privateCertificateDirectoryInventory(line, manager) {
 			return fmt.Errorf("%w: OS package contains protected host path %s", ErrIntegrity, member)
 		}
 	}
 	return nil
+}
+
+// Debian's ssl-cert ships this empty 0700 directory, not private material.
+// Do not generalize the exception to files, symlinks, descendants or RPM's
+// path-only inventory, which cannot establish type/ownership/mode.
+func privateCertificateDirectoryInventory(line string, manager PackageManager) bool {
+	fields := strings.Fields(line)
+	return manager == PackageDPKG && len(fields) == 6 && fields[0] == "drwx------" && fields[1] == "root/root" && fields[2] == "0" && fields[5] == "./etc/ssl/private/"
 }
 
 func forbiddenPackageMember(path string) bool {

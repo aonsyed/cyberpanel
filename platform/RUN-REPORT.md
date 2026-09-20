@@ -5,6 +5,45 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Native package admission fixed; isolated Postfix setup blocker reproduced — 2026-09-20
+
+Real native bundle assembly exposed rejection of Debian `Architecture: all`.
+Added a regression across all four target tuples: it failed in Ubuntu ARM64 QEMU
+for all four architecture-independent cases before the fix. Metadata admission
+now accepts the target's native architecture or its manager-specific independent
+value (`all` for dpkg, `noarch` for rpm), retaining wrong-manager/wrong-CPU
+rejections. The uncached node-release suite passed after the change.
+
+The real installer then rejected Ubuntu ssl-cert's empty root-owned 0700
+`/etc/ssl/private/` directory as private material. The inventory check now admits
+only that exact dpkg directory record (directory type, root/root, zero bytes,
+0700). Files, symlinks, descendants, wider permissions, other owners and RPM's
+path-only inventory remain rejected; focused regressions and the package suite
+passed. Real bundle admission progressed beyond this check.
+
+Candidate sequence 16 `qemu-native-3.1.15` contains 74 artifacts / 441,987,616
+payload bytes, including 45 native inputs in apt's configuration order:
+bundle SHA-256 `d705febff5e5f5f6a3915ac2bf16826126b2626e56bd0187f04444596a5bd4a6`,
+manifest `8f45c8db7724320284c18d91f51104a51c4da475216f5e1d7d010bbc7950d6e4`.
+It is retained at `/var/tmp/panel-native-3.1.15.tar`. Assembly used the patched
+node-release binary; apply used the patched panel-node-install binary.
+
+Installation is **not complete**. It stopped configuring Postfix: `newaliases:
+fatal: could not find any active network interfaces`. Direct reproduction using
+`unshare --net /usr/bin/newaliases` produced the same error. The isolated network
+namespace has loopback down. Installer child environment also lacks an explicit
+noninteractive debconf frontend. Next work is the offline package runner, without
+restoring external networking or changing package payloads. Postfix is currently
+half-configured; some preceding dependencies installed. The candidate journal
+remains staged; installed sequence is still 15, `qemu-apps-d14f9440b`.
+
+A QEMU-only root-owned `/usr/sbin/policy-rc.d` returning 101 was installed after
+confirming no previous file existed, to prevent package-script daemon starts.
+Postfix, PowerDNS, Rspamd and freshclam were checked inactive. Keep this guard
+until native configuration/activation is ready; remove only this known fixture
+afterward. Guest free space is approximately 261 MB after staged/retained release
+materialization, so offload verified scratch bundles before another build/copy.
+
 ### Remaining service binaries and native package inputs prepared — 2026-09-20
 
 Built the current executor and gateway in Ubuntu ARM64 QEMU from the same

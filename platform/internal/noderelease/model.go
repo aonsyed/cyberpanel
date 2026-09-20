@@ -176,15 +176,17 @@ func (metadata PackageMetadata) validate(target Target) error {
 	}
 	expectedManager := PackageDPKG
 	expectedArchitecture := string(target.Architecture)
+	independentArchitecture := "all"
 	if target.Distribution == DistributionAlma {
 		expectedManager = PackageRPM
+		independentArchitecture = "noarch"
 		if target.Architecture == ArchitectureAMD64 {
 			expectedArchitecture = "x86_64"
 		} else {
 			expectedArchitecture = "aarch64"
 		}
 	}
-	if metadata.Manager != expectedManager || metadata.Architecture != expectedArchitecture {
+	if metadata.Manager != expectedManager || (metadata.Architecture != expectedArchitecture && metadata.Architecture != independentArchitecture) {
 		return ErrUnsupported
 	}
 	return nil
