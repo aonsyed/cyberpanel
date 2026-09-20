@@ -5,6 +5,18 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Peer inspector product-installer integration — 2026-09-20
+
+The closed product catalog now requires the inspector executable in the existing
+executor artifact, its root-owned systemd unit, and its required service. Slot
+activation starts it before the secret broker; uninstall and failed fresh-install
+cleanup stop it. No additional artifact category or broker capability was added.
+Ubuntu ARM64 QEMU passed the installer mapping and missing-helper rejection tests,
+uncached installer/secrets/node-release suites, and `go build ./cmd/...` with
+`GOPROXY=off`. Both installed helper and broker remained active. These checks do
+not claim a complete product-catalog fresh install: the installed signed fixture
+still contains the four previously recorded daemons rather than the full panel.
+
 ### Approved privileged peer inspector — 2026-09-20
 
 The user approved the separate inspection helper while keeping the broker on its
