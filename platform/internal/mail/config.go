@@ -228,7 +228,7 @@ func (projector RepositorySnapshotProjector) ProjectMail(ctx context.Context, re
 	}
 	mailboxes := make(map[string][]Mailbox)
 	for _, envelope := range resources[ResourceMailbox] {
-		if envelope.State == StateDeleted {
+		if envelope.State == StateDeleted || envelope.State == StateSuspended {
 			continue
 		}
 		var value Mailbox
@@ -240,7 +240,7 @@ func (projector RepositorySnapshotProjector) ProjectMail(ctx context.Context, re
 	}
 	aliases := make(map[string][]Alias)
 	for _, envelope := range resources[ResourceAlias] {
-		if envelope.State == StateDeleted {
+		if envelope.State == StateDeleted || envelope.State == StateSuspended {
 			continue
 		}
 		var value Alias
@@ -252,7 +252,7 @@ func (projector RepositorySnapshotProjector) ProjectMail(ctx context.Context, re
 	}
 	snapshot := ConfigSnapshot{NodeID: projector.NodeID, Generation: request.Generation, Hostname: projector.Hostname, Postmaster: projector.Postmaster, MessageSizeBytes: projector.MessageSizeBytes}
 	for _, envelope := range resources[ResourceDomain] {
-		if envelope.State == StateDeleted {
+		if envelope.State == StateDeleted || envelope.State == StateSuspended {
 			continue
 		}
 		var domain Domain
@@ -303,7 +303,7 @@ func validateSnapshot(snapshot ConfigSnapshot) error {
 		}
 		mailboxes := map[MailboxID]struct{}{}
 		for _, mailbox := range projection.Mailboxes {
-			if mailbox.Domain != projection.Domain.ID || mailbox.ID == "" || mailbox.Local == "" || strings.ContainsAny(mailbox.Local, "@\x00\r\n") || mailbox.QuotaBytes == 0 {
+			if mailbox.Domain != projection.Domain.ID || mailbox.ID == "" || !validLocalPart(mailbox.Local) || mailbox.QuotaBytes == 0 {
 				return fmt.Errorf("%w: mailbox", ErrInvalidCommand)
 			}
 			if _, ok := mailboxes[mailbox.ID]; ok {
@@ -315,11 +315,16 @@ func validateSnapshot(snapshot ConfigSnapshot) error {
 			if alias.Domain != projection.Domain.ID || alias.ID == "" || len(alias.Targets) == 0 {
 				return fmt.Errorf("%w: alias", ErrInvalidCommand)
 			}
-			if ValidateAddress(alias.Source) != nil {
+			if ValidateAddress(alias.Source) != nil || strings.TrimSpace(string(alias.Source)) != string(alias.Source) {
 				return fmt.Errorf("%w: alias source", ErrInvalidCommand)
 			}
 			if _, err := NormalizeAddresses(alias.Targets); err != nil {
 				return err
+			}
+			for _, target := range alias.Targets {
+				if strings.TrimSpace(string(target)) != string(target) {
+					return fmt.Errorf("%w: alias target whitespace", ErrInvalidCommand)
+				}
 			}
 			if alias.Capability == CapabilityPipe && !validOpaque(alias.PipeRef) {
 				return fmt.Errorf("%w: pipe handler", ErrInvalidCommand)
@@ -363,9 +368,9 @@ func renderPostfixMain(snapshot ConfigSnapshot) []byte {
 	line("smtpd_sasl_path", "private/auth")
 	line("smtpd_sasl_auth_enable", "yes")
 	line("smtpd_recipient_restrictions", "permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination, check_policy_service unix:private/cyberpanel-policy")
-	line("virtual_mailbox_domains", "texthash:/var/lib/cyberpanel/mail/current/postfix/static_domains.map, socketmap:unix:/run/cyberpanel/mail/postfix.sock:domains")
-	line("virtual_mailbox_maps", "texthash:/var/lib/cyberpanel/mail/current/postfix/static_mailboxes.map, socketmap:unix:/run/cyberpanel/mail/postfix.sock:mailboxes")
-	line("virtual_alias_maps", "texthash:/var/lib/cyberpanel/mail/current/postfix/static_aliases.map, socketmap:unix:/run/cyberpanel/mail/postfix.sock:aliases")
+	line("virtual_mailbox_domains", "texthash:/var/lib/cyberpanel/mail/current/postfix/static_domains.map")
+	line("virtual_mailbox_maps", "texthash:/var/lib/cyberpanel/mail/current/postfix/static_mailboxes.map")
+	line("virtual_alias_maps", "texthash:/var/lib/cyberpanel/mail/current/postfix/static_aliases.map")
 	line("virtual_transport", "lmtp:unix:private/dovecot-lmtp")
 	line("message_size_limit", strconv.FormatUint(snapshot.MessageSizeBytes, 10))
 	line("smtp_sender_dependent_authentication", "yes")
@@ -455,18 +460,13 @@ func renderPostfixRelayTLSPolicy(snapshot ConfigSnapshot) []byte {
 func renderPostfixStaticDomains(snapshot ConfigSnapshot) []byte {
 	var out bytes.Buffer
 	for _, projection := range snapshot.Domains {
-		if projection.Domain.StaticRoutes {
-			fmt.Fprintf(&out, "%s OK\n", projection.Domain.Name)
-		}
+		fmt.Fprintf(&out, "%s OK\n", projection.Domain.Name)
 	}
 	return out.Bytes()
 }
 func renderPostfixStaticMailboxes(snapshot ConfigSnapshot) []byte {
 	var out bytes.Buffer
 	for _, projection := range snapshot.Domains {
-		if !projection.Domain.StaticRoutes {
-			continue
-		}
 		for _, mailbox := range projection.Mailboxes {
 			if mailbox.Enabled {
 				fmt.Fprintf(&out, "%s@%s %s/%s/Maildir/\n", mailbox.Local, projection.Domain.Name, projection.Domain.Name, mailbox.Local)
@@ -478,9 +478,6 @@ func renderPostfixStaticMailboxes(snapshot ConfigSnapshot) []byte {
 func renderPostfixStaticAliases(snapshot ConfigSnapshot) []byte {
 	var out bytes.Buffer
 	for _, projection := range snapshot.Domains {
-		if !projection.Domain.StaticRoutes {
-			continue
-		}
 		for _, alias := range projection.Aliases {
 			targets := make([]string, len(alias.Targets))
 			for index := range alias.Targets {
