@@ -6,6 +6,24 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+LATEST DATABASE CHECK (2026-09-20): installed46 UI created qemu_ui46 and principal
+qemu_user46, both201; native MariaDB confirms charset/collation and actual principal
+login/create/insert/select. Ungranted UPDATE and mysql.user access denied1142.
+Temporary query table dropped. DB/principal remain small guest-only fixtures;
+password exists only in guest0600 fixture, never source/Git/tool output.
+Found Open console400: UI sent no usable session. Implemented server-derived
+session from tenant/database/generation and a ready granted principal; principal
+options projected by name, credential reference stays server-side. Added console
+UI with schema/query results, expiry, bounded queries, error recovery and mobile.
+QEMU candidate core+gateway+UI: console201, metadata200, SELECT DATABASE()200 and
+expected name rendered; mutation rejected400, subsequent SELECT200,390px layout
+passes. Go affected suites, tenant/site/instance/disabled/no-grant/generation and
+replay regression pass; UI typecheck/build pass. Console currently uses existing
+read-only workspace API; writable SQL/import/export parity is NOT claimed.
+Candidate needed normal slot layout/signed recipe companions and matched gateway
+contracts. Removed temporary service overrides after testing; signed46 restored.
+These console and prior WAF changes still need a signed release deployment.
+
 CURRENT SOURCE CHANGE (not deployed): removed packaging/native/build-waf-crs.sh.
 WAF asset evidence now inventories installed root-owned CRS files directly;
 it no longer requires the cyberpanel-waf-crs package's runtime.sha256. Root-owned

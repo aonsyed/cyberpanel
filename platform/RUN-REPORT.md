@@ -5,6 +5,53 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Database UI/native grants and console repair — 2026-09-20
+
+Installed signed46, actual browser password+passkey session:
+`database.database.create_managed`201 for qemu_ui46 (64MiB quota), listing200 and
+row visible; native MariaDB confirms utf8mb4/utf8mb4_unicode_ci.
+`database.principal.create_managed`201 for qemu_user46 with select/insert/create/drop
+only; UI clears password after submit. The secret is random and remains solely in
+a guest0600 fixture, not source/Git/log output. Actual socket login as that principal
+created a temporary table, inserted and read expected data. UPDATE and SELECT from
+mysql.user both failed with native ERROR1142. Temporary table dropped in finally;
+database/principal retained for subsequent workflow qualification.
+
+Real Open console reproduced400: generic UI submitted an empty session object.
+Replaced that edge with a typed selected-principal request. Server derives tenant,
+database/site, generation, existing credential reference, bounded limits and a
+15-minute session. Principal selection is restricted to ready grants on that DB;
+cross-tenant/site/instance, disabled/missing-grant and stale-generation requests
+are rejected. Session replay preserves ID and expiry. Public projection contains
+no credential material. The SQL repository closes its cursor before subsequent
+loads, supporting the single-connection control database.
+
+New UI opens that session and uses existing scoped workspace metadata/query APIs.
+It displays tables/views, escaped tabular results, truncation, expiration and errors.
+Changing principal resets the opening idempotency key; retries retain it. Requests
+are aborted when closing. Existing workspace API is read-only; this is not a claim
+of complete phpMyAdmin-style SQL write/import/export parity.
+
+QEMU-only validation: database/apiserver/cyberpanel Go suites pass; added
+TestManagedConsoleBindsDatabasePrincipalAndTenant passes all seven variants plus
+expiry-preserving replay using a real single-connection SQLite repository. UI
+typecheck/build pass (existing >500kB chunk warning retained). Candidate core and
+gateway were built in QEMU, UI served from QEMU dist through the existing browser
+fixture. Initial candidate placement outside a supported slot failed packaged
+recipe validation; moved to a supported root-owned QEMU slot with unchanged signed
+recipe companions, without weakening validation. Updating only core also exposed
+the gateway's old request contract; matching candidate gateway resolved it.
+
+Actual browser on matched candidates: console201, metadata200, query200 with
+qemu_ui46 rendered. Disallowed DELETE400 and visible error, then successful SELECT200.
+390px mobile query/close interactions and no horizontal console overflow pass.
+Temporary service overrides removed afterward; installed signed46 restored.
+All four services active and gateway readiness200 after restoration. Removed only
+the two generated candidate binaries and copied recipe companions after checking
+no process executes that slot; empty slot directories removed. These temporary
+artifacts are reproducible from source and installed signed recipes.
+No release certification/deployment claim. No downloads/vendor builds/new workers.
+
 ### Installed mapping discovery and real UI trash — 2026-09-20
 
 Removed the compiled-in ModSecurity release directory from generated initial and

@@ -5,6 +5,7 @@ import type { APIClient } from "../api";
 import type { ActionDefinition, PageDefinition } from "../domain";
 import { sessionStore } from "../store";
 import ActionDrawer from "./ActionDrawer.vue";
+import DatabaseConsole from "./DatabaseConsole.vue";
 import DataTable from "./DataTable.vue";
 
 const props = defineProps<{ definition: PageDefinition }>();
@@ -125,7 +126,8 @@ function isRecord(value: unknown): value is Record<string, unknown> { return Boo
       <footer v-if="nextCursor || previousCursors.length" class="pagination"><button class="button button-small" type="button" :disabled="!previousCursors.length" @click="previousPage">Previous</button><span class="mono">CURSOR PAGE {{ previousCursors.length + 1 }}</span><button class="button button-small" type="button" :disabled="!nextCursor" @click="nextPage">Next</button></footer>
     </template>
 
-    <ActionDrawer v-if="activeAction" :action="activeAction" :tenant-id="activeTenantID" :resource="activeResource" :expected-generation="Number(activeResource?.generation || 0)" @close="activeAction=null;activeResource=null" @complete="complete"/>
+    <DatabaseConsole v-if="activeAction?.operation === 'database.console.issue' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null"/>
+    <ActionDrawer v-else-if="activeAction" :action="activeAction" :tenant-id="activeTenantID" :resource="activeResource" :expected-generation="Number(activeResource?.generation || 0)" @close="activeAction=null;activeResource=null" @complete="complete"/>
   </main>
 </template>
 

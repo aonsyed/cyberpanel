@@ -171,6 +171,7 @@ type HostingAccessPolicyPayload struct {
 }
 
 type DatabaseProjection struct {
+	ConsolePrincipals []DatabasePrincipalOption `json:"console_principals"`
 	ID         string    `json:"id"`
 	SiteID     string    `json:"site_id"`
 	Name       string    `json:"name"`
@@ -1367,7 +1368,7 @@ func registerConsoleEdgeContracts(registry *Registry) error {
 		consoleOperation("database.database.list", "database:manage", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeTenantListScope),
 		consoleOperation("database.database.create_managed", "database:create", password, true, func() any { return &DatabaseCreateManagedPayload{} }, validateDatabaseCreateManaged, edgeTenantCreateScope),
 		consoleOperation("database.principal.create_managed", "database:manage", password, true, func() any { return &DatabasePrincipalCreateManagedPayload{} }, validateDatabasePrincipalCreateManaged, edgeTenantExistingMutationScope),
-		consoleOperation("database.console.issue", "database:console", mfa, true, func() any { return &DatabaseConsolePayload{} }, nil, edgeTenantExistingMutationScope),
+		consoleOperation("database.console.issue", "database:console", mfa, true, func() any { return &DatabaseConsoleIssuePayload{} }, validateDatabaseConsoleIssue, edgeTenantExistingMutationScope),
 		consoleOperation("database.instance.list", "database:admin", password, false, func() any { return &EdgePagePayload{} }, validateEdgePage, edgeInstallationListScope),
 		consoleOperation("database.instance.health", "database:admin", password, false, func() any { return &EmptyPayload{} }, nil, edgeInstallationResourceReadScope),
 		consoleOperation("database.instance.network.configure", "database:admin", phishingResistant, true, func() any { return &DatabaseNetworkConfigureManagedPayload{} }, validateDatabaseNetworkConfigureManaged, edgeInstallationExistingMutationScope),
@@ -2548,16 +2549,7 @@ func bindConsoleEdgeContracts(registry *Registry, services DomainServices) error
 			return edgeOperationResult(http.StatusCreated, result), nil
 		}); err != nil { return err }
 	}
-	if services.Database != nil {
-		if err := registry.Bind("database.console.issue", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
-			tenant, err := site.NewTenantID(inv.Request.TenantID); if err != nil { return OperationResult{}, ErrInvalidRequest }
-			payload := value.(*DatabaseConsolePayload); payload.Session.Metadata.TenantID = tenant; payload.Session.Metadata.Generation = 1
-			if payload.Session.ExpiresAt.IsZero() { payload.Session.ExpiresAt = time.Now().UTC().Add(15*time.Minute) }
-			header := database.CommandHeader{CommandID:commandID(inv), Actor:database.Actor{TenantID:tenant, Capability:database.CapabilityTenantConsole}, TenantID:tenant}
-			receipt, err := services.Database.Handle(ctx, database.OpenConsoleSession{Header:header, Session:payload.Session}); if err != nil { return OperationResult{}, mapDomainError(err) }
-			return OperationResult{Status:http.StatusCreated, Value:receipt}, nil
-		}); err != nil { return err }
-	}
+	if err := bindManagedDatabaseConsole(registry, services); err != nil { return err }
 	if services.AccessEdge != nil {
 		if err := registry.Bind("access.credential.list", func(ctx context.Context, inv Invocation, value any) (OperationResult, error) {
 			result, err := services.AccessEdge.ListCredentials(ctx, edgeCall(inv), *value.(*EdgePagePayload)); if err != nil { return OperationResult{}, mapDomainError(err) }

@@ -29,6 +29,7 @@ type databaseEdgeRepository interface {
 	ListDatabases(context.Context, site.TenantID, string, uint16) ([]database.Database, string, uint64, error)
 	ListDatabaseInstances(context.Context, string, uint16) ([]database.DatabaseInstance, string, uint64, error)
 	DatabasePrincipalCount(context.Context, site.TenantID, database.ResourceID) (uint64, error)
+	ListDatabasePrincipals(context.Context, site.TenantID, database.ResourceID) ([]database.DatabasePrincipal, error)
 	LoadResource(context.Context, database.ResourceKind, database.ResourceID) (database.ResourceEnvelope, error)
 }
 
@@ -80,7 +81,13 @@ func (edge *databaseEdge) ListDatabases(ctx context.Context, call apiserver.Edge
 		if countErr != nil {
 			return apiserver.EdgePage[apiserver.DatabaseProjection]{}, countErr
 		}
-		items = append(items, apiserver.DatabaseProjection{ID: value.ID.String(), SiteID: value.SiteID.String(), Name: value.Name.String(), Instance: value.InstanceID.String(), Principals: principals, Status: string(value.Status.Lifecycle), Generation: value.Generation})
+		available, err := edge.repository.ListDatabasePrincipals(ctx, tenant, value.ID)
+		if err != nil { return apiserver.EdgePage[apiserver.DatabaseProjection]{}, err }
+		options := make([]apiserver.DatabasePrincipalOption, 0, len(available))
+		for _, principal := range available {
+			if principal.SiteID == value.SiteID && principal.InstanceID == value.InstanceID { options = append(options, apiserver.DatabasePrincipalOption{Label:principal.Name.String(), Value:principal.ID.String()}) }
+		}
+		items = append(items, apiserver.DatabaseProjection{ID: value.ID.String(), SiteID: value.SiteID.String(), Name: value.Name.String(), Instance: value.InstanceID.String(), Principals: principals, ConsolePrincipals:options, Status: string(value.Status.Lifecycle), Generation: value.Generation})
 	}
 	return apiserver.EdgePage[apiserver.DatabaseProjection]{Items: items, NextCursor: next, Total: total}, nil
 }
