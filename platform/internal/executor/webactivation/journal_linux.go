@@ -87,16 +87,18 @@ func (journal *Journal) Complete(request Request, response Response) error {
 	defer journal.mu.Unlock()
 	record, found := journal.state.Records[request.EffectID]
 	if !found || record.RequestDigest != request.Digest() { return ErrInvalidRequest }
-	if record.State == "completed" {
+	if err := response.Validate(request, response.CompletedAt); err != nil { return err }
+	if record.State == "completed" && !retryableInitial(request, record) {
 		if record.Receipt != response.Receipt || record.ErrorCode != response.ErrorCode || !record.CompletedAt.Equal(response.CompletedAt) { return ErrInvalidResponse }
 		return nil
 	}
+	previous := record
 	record.State = "completed"
 	record.Receipt = response.Receipt
 	record.ErrorCode = response.ErrorCode
 	record.CompletedAt = response.CompletedAt.UTC()
 	journal.state.Records[request.EffectID] = record
-	if err := journal.persist(); err != nil { journal.state.Records[request.EffectID] = journalRecord{EffectID: request.EffectID, ExpectedDigest: request.ExpectedDigest, RequestDigest: request.Digest(), State: "pending", StartedAt: record.StartedAt}; return err }
+	if err := journal.persist(); err != nil { journal.state.Records[request.EffectID] = previous; return err }
 	return nil
 }
 

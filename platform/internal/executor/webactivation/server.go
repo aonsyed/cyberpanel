@@ -59,7 +59,7 @@ func (server *Server) serveConnection(connection net.Conn) {
 	defer cancel()
 	if server.Admission==nil{return}
 	binding:=rebootcontrol.ExecutionBinding{Boundary:"webactivation",Method:"activate",EffectID:request.EffectID,RequestDigest:request.Digest(),Caller:"authenticated-panel-core",Resource:"local:webengine"}
-	lease,err:=server.Admission.AdmitExecution(ctx,binding);if err!=nil{return}
+	lease,err:=server.admitActivation(ctx,request,binding);if err!=nil{return}
 	if len(lease.Cached)!=0 {
 		var cached Response
 		if json.Unmarshal(lease.Cached,&cached)==nil && cached.Validate(request,time.Now().UTC())==nil{_=writeFrame(connection,cached)};return

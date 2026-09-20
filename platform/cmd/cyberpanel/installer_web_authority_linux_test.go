@@ -23,7 +23,7 @@ func TestQEMUWebEngineAuthority(t *testing.T) {
 		if err = reconcileWebEngineAuthority(); err != nil {
 			t.Fatal(err)
 		}
-		for path, mode := range map[string]os.FileMode{"/usr/local/lsws/conf": 0700, master: 0600} {
+		for path, mode := range map[string]os.FileMode{"/usr/local/lsws/conf": 0700, "/usr/local/lsws/conf/vhosts": 0700, master: 0600} {
 			info, err := os.Lstat(path)
 			if err != nil {
 				t.Fatal(err)

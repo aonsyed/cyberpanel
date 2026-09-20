@@ -5,6 +5,55 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Sequence 37 and first-activation recovery — 2026-09-20
+
+Installed signed `qemu-web-bootstrap-3.1.36` (sequence 37), manifest
+`807b186ab045a2f03d7d1742bbd63eabd6de496f52a034ff35c146ad3b61f637`,
+receipt `7641be5a5a2b34c2b94cc02428b3b1d48e23e468995a9ac09f7b993d7a82d587`.
+Hook applied; dpkg audit clean. Includes mail recovery, initial web activation
+and exact first-request retry. Reboot admission archives the previous ambiguous
+attempt; binding, epoch, drain gate and lease fences remain enforced. Ordinary
+configuration mutations and successful receipts cannot use this retry path.
+Active SQL leases and running unconfirmed candidates still fail closed; this is
+not complete arbitrary crash recovery.
+
+Native core startup recovered all five mail services, then failed staging under
+the vendor-owned 0755 `conf/vhosts` parent. The installed-authority regression
+failed on that exact path. The fix transfers only that parent using a no-follow
+directory FD; native regression passed and applied the repair in QEMU. This
+installer fix is not yet signed/deployed. Retrying the same installed-core
+request then staged the candidate and created the durable vendor backup, without
+deleting journals or inventing a fresh operation ID. Native validation still
+failed, the original master was restored, and no current receipt was confirmed.
+
+Added explicit native `TestQEMUInitialWebParser`, gated by the sealed candidate
+digest in `CYBERPANEL_QEMU_WEB_CANDIDATE`. It verifies/switches a snapshot-one
+candidate, runs real `lshttpd -t`, and restores the vendor master. Candidate
+`8ad3d376ea58e4300415c4ef80bbe4d4365f48950ec85a829ec8a089a5ff6e2b`
+currently fails with exit 1 and no stdout/stderr. The parser's own log at
+`/tmp/lshttpd/testconf` identifies the exact failure:
+`Invalid User Name((null)) or Group Name((null))!` Both renderers omit the server
+worker identity. Next fix must provision/render an appropriate unprivileged
+identity, not run workers as root. System-default content/health directories
+are also absent and remain a later startup prerequisite, not yet qualified.
+
+Diagnostic incident: `lshttpd -h` unexpectedly started the vendor server (not a
+help switch). Stopped with `lswsctrl stop`; checked no OLS processes/listeners
+remained. Startup recursively changed config metadata to lsadm:0750/0640.
+Restored the three known generated subtrees and fixed parents to their original
+root-private metadata, preserving content. The native parser test subsequently
+verified the sealed candidate and restored its master. Upstream confirms an
+unconditional startup `fixConfDirsPermission()` call:
+https://github.com/litespeedtech/openlitespeed/blob/master/src/main/httpserver.cpp
+Managed startup must prevent that rewrite, not weaken private-store checks.
+Stopped-process proof also needs to cover processes outside the systemd unit.
+
+QEMU suites pass: webactivation, rebootcontrol, activation/fsstore, cyberpanel
+and panel-execd. Explicit native parser gate remains RED. Core/OLS remain
+unqualified; QEMU service hold restored, executor and mail active. Guest free
+7.0 GiB; host free 244 GiB; Git pack 485.74 MiB. No image downloads, binaries or
+bundles added to Git. Retained sequence-37 bundle is guest-only (~485 MiB).
+
 ### First web activation implementation candidate — 2026-09-20
 
 Reproduced the first-activation gap in QEMU: the activator rejected snapshot one

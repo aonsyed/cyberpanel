@@ -4,6 +4,21 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+Latest installed checkpoint (2026-09-20): signed sequence 37 now includes mail
+recovery, initial web activation and scoped broker/admission retry. Same request
+advanced after fixing vendor-owned `conf/vhosts` (installer fix native-tested,
+not yet signed). Core still fails initial native parser validation; no web
+current receipt. Explicit `TestQEMUInitialWebParser` remains red: native log
+`/tmp/lshttpd/testconf` reports missing User/Group. Ordinary affected-package
+suites pass. Next: provision/render unprivileged server worker identity and
+system-default material, prevent OLS startup from
+rewriting config ownership, strengthen stopped-process proof beyond systemd.
+Do not run `lshttpd -h`: it starts the daemon. Accidental diagnostic startup was
+stopped; generated config metadata restored and sealed bytes reverified. OLS
+hold restored. Mail/executor active; host 244 GiB free, Git pack ~486 MiB, guest
+7 GiB free. Full core/API/UI/mail-delivery and cross-platform qualification
+remain incomplete. Detailed evidence is at the top of RUN-REPORT.md.
+
 Latest source candidate (2026-09-20): first web activation is wired from the
 SQL node-config journal through verified rendering to a snapshot-one-only
 bootstrap. Durable vendor backup, native validation/start, live digest proof,

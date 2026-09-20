@@ -45,6 +45,25 @@ func reconcileWebEngineAuthority() error {
 	if err = syscall.Fchmod(dir, 0700); err != nil {
 		return err
 	}
+	// Managed vhosts live beneath this vendor-created parent. Transfer only
+	// the parent; never recursively rewrite vendor or tenant configuration.
+	if err = syscall.Mkdirat(dir, "vhosts", 0700); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return err
+	}
+	vhosts, err := syscall.Openat(dir, "vhosts", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(vhosts)
+	if err = syscall.Fchown(vhosts, 0, 0); err != nil {
+		return err
+	}
+	if err = syscall.Fchmod(vhosts, 0700); err != nil {
+		return err
+	}
+	if err = syscall.Fsync(vhosts); err != nil {
+		return err
+	}
 	fd, err := syscall.Openat(dir, master, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return err

@@ -49,7 +49,7 @@ func (broker *Broker) Execute(ctx context.Context, request Request) (Response, e
 
 	record, existing, err := broker.journal.Begin(request, now)
 	if err != nil { return Response{}, err }
-	if existing {
+	if existing && !retryableInitial(request, record) {
 		if record.State == "completed" {
 			return Response{Version: ProtocolVersion, EffectID: record.EffectID, ExpectedDigest: request.ExpectedDigest, Receipt: record.Receipt, ErrorCode: record.ErrorCode, CompletedAt: record.CompletedAt}, nil
 		}
@@ -61,6 +61,15 @@ func (broker *Broker) Execute(ctx context.Context, request Request) (Response, e
 	response := broker.apply(ctx, request)
 	if err = broker.journal.Complete(request, response); err != nil { return Response{}, err }
 	return response, nil
+}
+
+// Only first activation can re-enter its stopped-engine/backup guards after an
+// interrupted attempt. Never replay ordinary ambiguous replacements or a
+// terminal receipt. The request digest binds retries to exactly the same input.
+func retryableInitial(request Request, record journalRecord) bool {
+	return request.Render.Snapshot.Generation == 1 && record.RequestDigest == request.Digest() &&
+		(record.State == "pending" || (record.State == "completed" && record.ErrorCode == "outcome_unknown" &&
+			record.Receipt.Status == activation.Ambiguous && record.Receipt.PreviousDigest == ""))
 }
 
 func (broker *Broker) apply(ctx context.Context, request Request) Response {
