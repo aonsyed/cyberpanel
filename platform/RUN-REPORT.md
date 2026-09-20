@@ -5,6 +5,86 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Replacement recovery and first persisted active site — 2026-09-20
+
+Added restored-generation recovery for exact ambiguous replacement attempts.
+Broker requires rollback-restored evidence, matching request/candidate/previous
+digests, confirmed current receipt with verified master, and exact live previous
+health response. SQL admission keeps epoch/drain/lease guards and archives the
+old lease. Broker rechecks proof before applying and archives the complete prior
+receipt to an immutable0600 recovery file before advancing the live journal;
+existing journal schema remains compatible. Wrong master, unconfirmed state,
+store verification failure, wrong live digest,404, missing restoration, pending
+attempt and changed request regressions all reject. QEMU webactivation,
+rebootcontrol and panel-execd suites pass.
+
+Rebuilt/deployed QEMU candidate executor containing reload/probe/recovery changes.
+Original service diagnostic --complete returned create=applied and
+activation=applied. Read-only SQLite verifies both original commands confirmed,
+one hosting_sites row, final generation2; native site health HTTP returns digest
+70d2d2befb8795563b58bfe34730d7779c3d04fc88f3e547b5ad3ace22a52129.
+Full prior receipt is retained in webengine-activation/recovery-b4d4db007bede2bb82a9f04535291d4cc1fd88b453b143a7454fefbb6f043118.json.
+This resumed the original production service path, NOT a successful replay of
+the browser create API; no second create request, receipt deletion or DB reset.
+
+An actual tenant-owned0640 PHP fixture at g2/releases/current/public/
+qemu-panel-smoke.php returns403. Namei shows0750 tenant-group-only traversal from
+generation root downward; renderer's web workers use cyberpanel-web and no public
+ACL is installed. Native serving is NOT qualified. Fix controlled public-tree
+traversal/read access, keeping private/session/config isolation, then recheck.
+Fixture remains only in ignored host/guest test locations pending that check.
+Signed45 unchanged, temporary candidate executor and gateway fixture remain.
+Fresh real browser password/passkey login succeeded; hosting.site.list returned200
+and the original customer hostname is visible in the UI (candidate static assets,
+real installed backend). This visibility does not qualify the failing PHP request.
+
+### Vendor-context reload verified; rollback probe corrected — 2026-09-20
+
+Rebuilt/restarted the existing QEMU candidate executor with systemd reload mapping.
+The ignored diagnostic's --reload calls actual FixedRunner, executed inside the
+real executor mount namespace; exit0. No vendor files modified. Core and gateway
+were explicitly restarted afterward. Current signed release remains45.
+
+Native HTTP to default.invalid /.well-known/panel-health/activation returned
+panel-health-v1 98515aa557ad729626e3ec2119b46d0b6e1b6f401cf7184866afc7b5267865b4,
+exactly matching the confirmed on-disk current receipt. The new tenant hostname
+returned404 under that previous generation. This exposed the rollback probe's
+dependence on a newly added candidate route. Production composition always has
+binding/system-default; probe selection now prefers that permanent binding.
+Standalone consumers without it retain their prior route selection.
+
+QEMU TestProbePrefersPermanentSystemBindingForRollback failed selecting the new
+tenant before the change, then passed with the system binding and fallback case.
+Uncached webactivation, lswsruntime, activation and fsstore suites pass. Probe
+selection is source-only until the next candidate build. Actual tenant-route
+serving remains an independent delivery requirement, not proved by system health.
+Replacement activation recovery and final site persistence are still pending.
+
+### Native reload integration failure isolated — 2026-09-20
+
+Extended the ignored guest-only diagnostic to reconstruct the original accepted
+CreateSite command through production hosting service, SQL repository, catalog,
+controller, provisioner and activation broker. Same command ID/scope/input;
+repository validates its digest. It does not bypass receipts or create a new site.
+The operation remains ambiguous at web activation: candidate5cef48be... had
+ReloadRequested=true, CandidateProbed=false, RollbackRestored=true and
+RollbackReloaded=false, previous confirmed digest98515aa5....
+
+Directly reproduced the closed native reload invocation inside the actual executor
+mount namespace. Vendor lswsctrl reported read-only lsrestart.log and could not
+see its PID file because the executor uses PrivateTmp. This is our integration
+error. FixedRunner now asks systemd to reload fixed lsws.service; its vendor
+ExecReload runs in the web-server service context. No vendor script, module,
+version or package changed. The exact systemctl invocation from the executor
+namespace succeeded and lshttpd remained active. Uncached QEMU webactivation,
+lswsruntime, activation and fsstore suites passed. Running candidate executor
+still needs rebuild with this mapping; full site activation remains unqualified.
+
+Existing activation recovery only handles stopped initial installation. The
+recorded replacement failure must be recovered from verified current/master/live
+previous-generation evidence, retaining the old attempt. No receipt reset or
+relabeling was performed. Hosting command and final site row remain unresolved.
+
 ### Original site effect recovered to prepared — 2026-09-20
 
 Implemented a narrow initial-identity recovery path between siteops and execution

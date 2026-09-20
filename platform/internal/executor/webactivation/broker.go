@@ -49,7 +49,12 @@ func (broker *Broker) Execute(ctx context.Context, request Request) (Response, e
 
 	record, existing, err := broker.journal.Begin(request, now)
 	if err != nil { return Response{}, err }
-	if existing && !retryableInitial(request, record) {
+	restored := existing && retryableRestored(request,record)
+	if restored {
+		if _,err = broker.restoredRecoveryEvidence(ctx,request,record); err != nil { return Response{},err }
+		if err = broker.journal.archiveAttempt(record); err != nil { return Response{},err }
+	}
+	if existing && !retryableInitial(request, record) && !restored {
 		if record.State == "completed" {
 			return Response{Version: ProtocolVersion, EffectID: record.EffectID, ExpectedDigest: request.ExpectedDigest, Receipt: record.Receipt, ErrorCode: record.ErrorCode, CompletedAt: record.CompletedAt}, nil
 		}
@@ -127,7 +132,13 @@ func deriveProbeConfiguration(render native.RenderRequest) (lswsruntime.HTTPProb
 	listeners := append([]webengine.Listener(nil), render.Desired.Engine.Listeners...)
 	sort.Slice(listeners, func(left, right int) bool { return listeners[left].Ref < listeners[right].Ref })
 	bindings := append([]webengine.WebBindingSpec(nil), render.Desired.Bindings...)
-	sort.Slice(bindings, func(left, right int) bool { return bindings[left].Ref < bindings[right].Ref })
+	// Composition retains this binding across generations. A newly added
+	// tenant hostname cannot prove the previous generation during rollback.
+	sort.Slice(bindings, func(left, right int) bool {
+		if bindings[left].Ref == "binding/system-default" { return bindings[right].Ref != "binding/system-default" }
+		if bindings[right].Ref == "binding/system-default" { return false }
+		return bindings[left].Ref < bindings[right].Ref
+	})
 	for _, listener := range listeners {
 		if listener.TLSMode != webengine.TLSModeClear || !hasLoopbackReachableIPv4(listener.Addresses) { continue }
 		for _, binding := range bindings {

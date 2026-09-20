@@ -25,7 +25,10 @@ func (FixedRunner) Run(ctx context.Context, program string, arguments ...string)
 	if ctx == nil || program != lswsControlPath || len(arguments) != 1 || arguments[0] != "reload" {
 		return errors.New("unregistered web-engine runtime invocation")
 	}
-	return exec.CommandContext(ctx, lswsControlPath, "reload").Run()
+	// Run the vendor's ExecReload in its own service context. Directly
+	// launching lswsctrl inherits our private /tmp and read-only filesystem,
+	// hiding its PID file and preventing its native log writes.
+	return exec.CommandContext(ctx, "/usr/bin/systemctl", "reload", "lsws.service").Run()
 }
 
 func (FixedRunner) CheckStopped(ctx context.Context) error {

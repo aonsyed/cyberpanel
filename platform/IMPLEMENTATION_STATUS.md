@@ -6,6 +6,49 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest SITE PERSISTED checkpoint: guarded restored-generation activation recovery
+implemented and QEMU candidate executor deployed. Requires exact completed ambiguous
+replacement with rollback restored, matching confirmed master/current and live
+previous-generation health. SQL old lease preserved; full prior activation receipt
+archived in recovery-b4d4db007bede2bb82a9f04535291d4cc1fd88b453b143a7454fefbb6f043118.json.
+Original create AND original _active command now applied/confirmed via production
+service diagnostic, one hosting_sites row, generation2. No new create request.
+Live tenant health returns70d2d2befb8795563b58bfe34730d7779c3d04fc88f3e547b5ad3ace22a52129.
+Actual PHP fixture returns403: native cyberpanel-web cannot traverse tenant-owned
+0750 roots/releases/current/public; no public ACL exists. Next fix panel-managed
+public-tree access without exposing private PHP/session/config trees or weakening
+tenant isolation, then rerun real PHP/static/UI workflows. Do NOT call serving done.
+Ignored fixture qemu-panel-smoke.php is present in guest site g2 public tree and
+host .work/qemu; remove after verification. Candidate overrides remain; signed45
+unchanged. Core/gateway explicitly restarted after executor update.
+
+Latest reload/probe checkpoint: candidate executor rebuilt and restarted with
+systemd reload mapping. Guest diagnostic --reload invokes actual FixedRunner in
+the real executor mount namespace: exit0. Native default.invalid health route
+returns exact confirmed98515aa557ad729626e3ec2119b46d0b6e1b6f401cf7184866afc7b5267865b4,
+matching .panel-state/current. New tenant health hostname returns404 under that
+previous generation, exposing an independent rollback-probe bug: selected first
+tenant binding instead of permanent system binding. Source now prefers
+binding/system-default; QEMU regression failed before/passes after, four affected
+suites pass. Probe change NOT in running candidate yet. Next: guarded replacement
+activation recovery using matching restored master/current and live stable health
+proof, not stopped-first-install recovery. Site still not finalized.
+
+Latest activation checkpoint: guest diagnostic --complete reconstructs the exact
+original CreateSite command (same commandID/scope/input; repository validates
+digest) through production service/catalog/controller and native brokers. Create
+remains ambiguous: candidate5cef48be... restored previous98515aa5... on disk but
+both reload attempts failed. Root cause reproduced in actual executor namespace:
+direct lswsctrl cannot write native logs (ro filesystem) and cannot see native PID
+(PrivateTmp). Source FixedRunner now maps the closed reload request to systemctl
+reload lsws.service, leaving vendor ExecReload/script untouched. Exact systemctl
+call from executor namespace succeeds; OLS active, four affected QEMU suites pass.
+New mapping NOT yet built into running candidate executor. Next rebuild it and
+recover replacement activation only after proving the prior generation is live;
+existing recovery supports initial/stopped activation only. Do not delete receipts.
+Original activation effect wa-82aa3834aa8e5880bed68672101109eb5a584c5912ebfb8c9fc4210427d2016a.
+No successful site-create UI/API or serving-site claim yet.
+
 Latest recovery checkpoint: original site effect is now PREPARED through the real
 QEMU executor protocol. Initial identity attempt2 completed, directories and PHP83
 LSAPI pool completed atgeneration1; native pool service active/running. Outer

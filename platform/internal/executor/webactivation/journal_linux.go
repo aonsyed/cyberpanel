@@ -88,7 +88,7 @@ func (journal *Journal) Complete(request Request, response Response) error {
 	record, found := journal.state.Records[request.EffectID]
 	if !found || record.RequestDigest != request.Digest() { return ErrInvalidRequest }
 	if err := response.Validate(request, response.CompletedAt); err != nil { return err }
-	if record.State == "completed" && !retryableInitial(request, record) {
+	if record.State == "completed" && !retryableInitial(request, record) && !retryableRestored(request, record) {
 		if record.Receipt != response.Receipt || record.ErrorCode != response.ErrorCode || !record.CompletedAt.Equal(response.CompletedAt) { return ErrInvalidResponse }
 		return nil
 	}
