@@ -11,6 +11,34 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Current recovery point — 2026-09-21 (installed61 committed)
+
+Import status/cancellation controls are wired into upload and export-backed import
+dialogs and remain usable while run is in flight. Fresh status generation is used
+for cancellation; terminal jobs cannot be cancelled, cancellation_requested is
+not displayed as completed cancellation, and ambiguous outcomes prohibit retry.
+QEMU browser component checks passed at1440/390px. Installed61 real SQL/gzip file
+uploads cancelled during native streaming, returned cancel200 AND run200/cancelled,
+rendered final status, and preserved empty destination schemas. Found/fixed normal
+safe cancellation incorrectly becoming HTTP500. Actual generation-race409 was
+observed in installed60; no server-side retry bypass was added. Initial aborted
+fixture ended failed with source preserved; its evidence remains.
+
+QEMU SQLite receipts and actor/tenant audit records confirm cancellation, and no
+promotion was recorded. Five disposable native databases and verified payloads
+removed; only .upload-lock remains in upload store. Tests/typecheck/build all in
+QEMU, no downloads/native dependency changes/new workers. Installed61 manifest
+bae97e346bae9d1ace8b1683c28dcc3961537a2ff28c204c74de41f7f173f584;
+actual core/gateway/execd executables verified in that release, services active.
+Release qemu-import-cancel-3.1.60, receipt
+24acb7089f68faaaafc79441e26e4db7601b68eb61ff82ecf39c37c532c1e7e5.
+Ignored host bundle retained, duplicate guest bundle removed; guest5.7GiB free.
+Installed61 includes CRS inventory and detached final-state recording fixes.
+Export-backed dialog uses the same controls but its installed cancellation flow
+has not been separately exercised. Remaining: replacement/restorepoints, broader
+SQL objects, long-running/crash recovery, native distro CRS replacement, current
+OS/architecture matrix and broader panel journeys. Full parity is not complete.
+
 ## Import cancellation — 2026-09-21 (source verified, not deployed)
 
 Added `database.import.cancel` (manage permission, MFA, active owned site, job

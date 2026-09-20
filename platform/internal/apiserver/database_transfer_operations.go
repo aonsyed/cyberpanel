@@ -158,7 +158,13 @@ func (operations *DatabaseTransferOperations) RunDatabaseImport(ctx context.Cont
 	if err != nil {
 		return database.TransferReceipt{}, err
 	}
-	return service.Run(ctx, inv.Actor.PrincipalID.String(), "api-import-"+inv.Request.RequestID, job.ID, state.Generation, 2*time.Minute)
+	receipt, err := service.Run(ctx, inv.Actor.PrincipalID.String(), "api-import-"+inv.Request.RequestID, job.ID, state.Generation, 2*time.Minute)
+	// A safe-point cancellation with a persisted terminal receipt is a normal
+	// job outcome, not an HTTP server failure. Do not suppress persistence errors.
+	if errors.Is(err, database.ErrTransferCancelled) && receipt.Status == database.TransferCancelled && receipt.Validate(job) == nil {
+		return receipt, nil
+	}
+	return receipt, err
 }
 
 func (operations *DatabaseTransferOperations) InspectDatabaseImport(ctx context.Context, inv Invocation, id database.ResourceID) (database.TransferJobState, error) {

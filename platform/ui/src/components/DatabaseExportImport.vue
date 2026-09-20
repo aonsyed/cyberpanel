@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, ref } from "vue";
 import type { APIClient } from "../api";
+import DatabaseImportStatus from "./DatabaseImportStatus.vue";
 
 const props = defineProps<{ tenantId?: string | undefined; source: Record<string, unknown>; artifact: Record<string, unknown>; disabled?: boolean }>();
 const emit = defineEmits<{ busy: [value: boolean] }>();
@@ -11,6 +12,7 @@ const destinations = ref<Destination[]>([]);
 const selected = ref("");
 const confirmedName = ref("");
 const pending = ref(false);
+const monitoring = ref(false);
 const loading = computed(() => pending.value || props.disabled);
 const loaded = ref(false);
 const failure = ref("");
@@ -20,7 +22,8 @@ const status = ref("");
 const target = computed(() => destinations.value.find(item => item.id === selected.value));
 const controller = new AbortController();
 const scope = () => ({ tenantId: props.tenantId, resourceId: String(props.source.site_id), signal: controller.signal });
-function setBusy(value: boolean): void { pending.value = value; emit("busy", value); }
+function setBusy(value: boolean): void { pending.value = value; emit("busy", value || monitoring.value); }
+function setMonitoring(value: boolean): void { monitoring.value = value; emit("busy", value || pending.value); }
 function report(error: unknown): void { failure.value = error instanceof Error ? error.message : "Import request failed."; }
 async function loadDestinations(): Promise<void> {
   if (loading.value || job.value) return;
@@ -64,15 +67,6 @@ async function run(): Promise<void> {
   } catch (error) { status.value = "Outcome not confirmed. Check status before taking further action."; report(error); }
   finally { setBusy(false); }
 }
-async function inspect(): Promise<void> {
-  if (loading.value || !job.value || !submitted.value) return;
-  setBusy(true); failure.value = "";
-  try {
-    const response = await api.invoke<{ status: string }>("database.import.inspect", { ...scope(), payload: { job_id: job.value.id } });
-    status.value = response.result.status;
-  } catch (error) { report(error); }
-  finally { setBusy(false); }
-}
 onBeforeUnmount(() => { controller.abort(); emit("busy", false); });
 </script>
 
@@ -101,8 +95,7 @@ onBeforeUnmount(() => { controller.abort(); emit("busy", false); });
         <button type="submit" class="button button-primary" :disabled="loading || confirmedName !== target?.name">Import into empty database</button>
         <button type="button" class="button" :disabled="loading" @click="job=null;confirmedName=''">Change destination</button>
       </form>
-      <p v-if="status" role="status">{{ status === 'completed' ? 'Import completed and verified.' : status }}</p>
-      <button v-if="submitted" type="button" class="button" :disabled="loading" @click="inspect">Check import status</button>
+      <DatabaseImportStatus v-if="submitted" :tenant-id="tenantId" :site-id="String(source.site_id)" :job-id="job.id" :running="pending" :status="status" @busy="setMonitoring" />
     </template>
     <p v-if="failure" role="alert" class="import-error">{{ failure }}</p>
   </section>

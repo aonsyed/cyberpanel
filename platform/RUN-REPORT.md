@@ -4718,3 +4718,43 @@ invocation, invalid body, missing site, anonymous, denied and low-assurance case
 API/core/gateway suites passed after correcting the test envelope's idempotency
 field location. No installed API cancellation or UI qualification claimed.
 Installed59 unchanged; no downloads, vendor changes or binary artifacts.
+
+## 2026-09-21 — installed import cancellation UI, releases60/61
+
+Shared DatabaseImportStatus controls in file/export-backed import dialogs allow
+inspection/cancellation while the main run request is busy. Read-before-cancel
+uses current job generation. Terminal statuses disable cancellation; requested
+does not mean cancelled; ambiguity explicitly prohibits retry. Job checks have
+their own busy/close guard. QEMU UI typecheck/build passed (existing large-chunk
+warning). Real Chromium component QA at1440/390px covered running cancellation,
+generation binding, terminal refusal, stale error, ambiguity and overflow; API
+was a fixture for this isolated component check.
+
+Installed60 then exercised the real file-upload flow. Immediate cancellation hit
+generation409 as the job advanced; harness disconnection produced a durable
+failed receipt with source preserved. Later SQL/gzip cancellation during native
+SLEEP streaming succeeded but run returned500. Fixed API handling to return the
+validated cancelled receipt only for ErrTransferCancelled, without suppressing
+persistence errors. QEMU API/core tests passed and installed61 included the fix.
+
+Installed61 actual passkey/MFA browser, no candidate assets or API fixtures:
+SQL1440px and gzip390px uploaded in multiple chunks, SHA verification and typed
+confirmation passed; wrong-site status403 and lost-begin response replay retained.
+Native streaming was observed before cancel. Cancel200, run200/cancelled, automatic
+inspect200 and final cancelled UI passed for both. Native destination schemas
+remained empty. Immutable receipts, cancel/execute actor+tenant audit, and absence
+of promotion records independently checked in real SQLite. Both cancelled test
+destinations and the prior three disposable test databases removed through API;
+native schema count for all five is0. Their verified uploaded payload/descriptor
+directories removed, retaining audit/jobs/intents. Upload root only .upload-lock.
+
+Installed61 release qemu-import-cancel-3.1.60 committed. Manifest
+bae97e346bae9d1ace8b1683c28dcc3961537a2ff28c204c74de41f7f173f584;
+receipt24acb7089f68faaaafc79441e26e4db7601b68eb61ff82ecf39c37c532c1e7e5;
+bundle SHA4affa38b532e2adbd4d6998ddbaccbe1d6b30127d6c4df3ca98ada1a1eb2e8bd.
+Actual core/gateway/execd /proc executables all in that release, services active.
+Host ignored bundle checksum matched guest; redundant guest60/61 bundles removed.
+Temporary guest Vite server stopped and its two fixture files removed; ignored
+host QA harness retained. Guest5.7GiB free. No vendor builds/downloads/new workers.
+Source export-backed cancellation wiring is shared but that installed workflow
+was not separately driven. Broader recovery and full panel parity remain pending.

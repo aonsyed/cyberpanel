@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { inject, onBeforeUnmount, onMounted, ref } from "vue";
 import type { APIClient } from "../api";
+import DatabaseImportStatus from "./DatabaseImportStatus.vue";
 
 const props = defineProps<{ tenantId?: string | undefined; resource: Record<string, unknown> }>();
 const emit = defineEmits<{ close: []; complete: [] }>();
@@ -12,6 +13,7 @@ type Job = { id: string; database_generation: number; [key: string]: unknown };
 const file = ref<File | null>(null);
 const input = ref<HTMLInputElement | null>(null);
 const busy = ref(false);
+const monitoring = ref(false);
 const failure = ref("");
 const progress = ref("");
 const intent = ref<Intent | null>(null);
@@ -98,17 +100,7 @@ async function run(): Promise<void> {
   } catch (error) { status.value = "Outcome not confirmed. Check status before taking further action."; report(error); }
   finally { busy.value = false; }
 }
-async function inspect(): Promise<void> {
-  if (busy.value || !job.value || !submitted.value) return;
-  busy.value = true; failure.value = "";
-  try {
-    const response = await api.invoke<{ status: string }>("database.import.inspect", { ...scope(), expectedGeneration: 0, payload: { job_id: job.value.id } });
-    status.value = response.result.status;
-    if (status.value === "completed") emit("complete");
-  } catch (error) { report(error); }
-  finally { busy.value = false; }
-}
-function close(): void { if (!busy.value) emit("close"); }
+function close(): void { if (!busy.value && !monitoring.value) emit("close"); }
 function keydown(event: KeyboardEvent): void { if (event.key === "Escape") close(); }
 onMounted(() => window.addEventListener("keydown", keydown));
 onBeforeUnmount(() => { controller.abort(); window.removeEventListener("keydown", keydown); });
@@ -117,7 +109,7 @@ onBeforeUnmount(() => { controller.abort(); window.removeEventListener("keydown"
 <template>
   <div class="upload-layer" @mousedown.self="close">
     <aside class="upload-dialog" role="dialog" aria-modal="true" aria-label="Import SQL file">
-      <header><h2>Import into {{ resource.name }}</h2><button type="button" class="button" :disabled="busy" @click="close">Close</button></header>
+      <header><h2>Import into {{ resource.name }}</h2><button type="button" class="button" :disabled="busy || monitoring" @click="close">Close</button></header>
       <p>SQL or gzip, up to 64 MiB. The destination must be empty. Existing tables are never replaced. Data is loaded into an isolated database and verified before promotion.</p>
       <p>Use a table-only dump; routines, triggers, events and views are not supported by this import path yet. Incomplete uploads expire after one hour.</p>
       <form v-if="!job" @submit.prevent="upload">
@@ -134,8 +126,7 @@ onBeforeUnmount(() => { controller.abort(); window.removeEventListener("keydown"
           <input id="upload-import-confirmation" v-model="confirmation" class="input" autocomplete="off" :disabled="busy" required>
           <button type="submit" class="button button-primary" :disabled="busy || confirmation !== String(resource.name)">Import uploaded SQL</button>
         </form>
-        <p v-if="status" role="status">{{ status === 'completed' ? 'Import completed and verified.' : status }}</p>
-        <button v-if="submitted" type="button" class="button" :disabled="busy" @click="inspect">Check import status</button>
+        <DatabaseImportStatus v-if="submitted" :tenant-id="tenantId" :site-id="String(resource.site_id)" :job-id="job.id" :running="busy" :status="status" @busy="monitoring=$event" @complete="emit('complete')" />
       </template>
       <button v-if="(file || intent) && !submitted" type="button" class="button" :disabled="busy" @click="startOver">Start over</button>
       <p v-if="failure" role="alert" class="upload-error">{{ failure }}</p>
