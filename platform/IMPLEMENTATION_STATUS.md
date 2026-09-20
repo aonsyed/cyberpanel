@@ -11,6 +11,18 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Replacement-import constraint — 2026-09-21
+
+QEMU native MariaDB probe ruled out holding BACKUP STAGE BLOCK_DDL on the
+connection that performs promotion: START/BLOCK_DDL succeeded, but RENAME TABLE
+returned ERROR4145, "Can't execute the command as you have a BACKUP STAGE active".
+Connection exit released the lock; both probe schemas were dropped. Do not repeat
+this as an implementation candidate or claim it provides a working replacement
+fence. Replacement still needs a scoped writer/schema strategy and durable restore
+point. Existing backup site-service stopping is not a database-client fence.
+DeleteAfterSuccess remains unimplemented; do not delete uploaded source bytes
+merely from a successful native move before resolving retry/recovery semantics.
+
 ## Current recovery point — 2026-09-21 (installed63 committed)
 
 Release qemu-database-transfer-3.1.62, sequence63, includes source a48a4c83e:

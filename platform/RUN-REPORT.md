@@ -4927,3 +4927,12 @@ bundleSHA256d6b83abce7a6583fd417223dfe1165e9acd0846e0c0c6a8a53af81b6b17769d0.
 Retained bundle only in ignored host .work/qemu; exact guest duplicate removed
 after matching hashes/committed receipt. Installer prune-staging completed;
 guest4.0GiB free. Existing native packages unchanged, no downloads or vendor builds.
+# Replacement promotion native lock probe — 2026-09-21
+
+Read/DDL experiment in the existing Ubuntu ARM64 QEMU guest, using unmodified
+native MariaDB. Created two disposable schemas and one populated table; on one
+connection ran BACKUP STAGE START, BACKUP STAGE BLOCK_DDL, then RENAME TABLE across
+the schemas. MariaDB refused the rename with ERROR4145: active BACKUP STAGE.
+This invalidates same-connection backup-stage locking as the promotion mechanism.
+The process exited, releasing the lock, and both created schemas were dropped.
+No panel source behavior, installed package, or release changed in this probe.
