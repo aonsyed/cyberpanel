@@ -4,15 +4,17 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
-Latest checkpoint (2026-09-20): native mail ACL isolation and ClamAV actual
-clean/EICAR scanning pass in Ubuntu ARM64 QEMU, shipped in signed sequence 33.
-Executor native validation additionally needed AF_NETLINK and preservation of
-its already-bounded CAP_SETUID; both source fixes pass native sandbox checks.
-OpenDKIM's missing PID-file directive is fixed and its actual vendor-unit startup
-test passes. These latest unit/renderer fixes are not yet signed/deployed.
-Core and end-to-end mail are NOT qualified. Host disk is critical; complete guest
-sequence-33 bundle remains intact after removing a failed partial host transfer.
-See RUN-REPORT for evidence and unfinished fresh-install signature provisioning.
+Latest checkpoint (2026-09-20): signed sequence 34 includes source `53322d734`:
+native mail ACL isolation, ClamAV scan boundary, executor sandbox and OpenDKIM
+PID-file fixes. All six native mail services start. Actual TLS IMAP CAPABILITY
+and LOGOUT pass; SMTP TLS stalls because generated master.cf lacks proxymap
+and other internal services. Core passes mail initialization but fails web-engine
+installation inspection (not found); stopped its restart loop. Reboot exposed
+PowerDNS cold-start recovery probing an inactive daemon; manually started pdns
+and restarted executor, not yet a cold-boot fix. Core/full mail are NOT qualified.
+Disk reclamation is enabled on the existing QEMU overlay and trimmed ~2 GiB;
+compressing host archives losslessly. Complete sequence-33/34 bundles remain in
+the guest. See RUN-REPORT for hashes, native evidence and remaining requirements.
 
 The user's latest direction supersedes the earlier code-first testing deferral.
 Close and verify the existing scope now. Run builds and tests only inside QEMU

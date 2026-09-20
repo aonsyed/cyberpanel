@@ -5,6 +5,40 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Signed native mail startup advances to protocol checks — 2026-09-20
+
+Source `53322d734` built and tested entirely inside Ubuntu ARM64 QEMU. Signed
+sequence 34 (`qemu-mail-sandbox-3.1.33`) committed and installed reconciliation
+returned applied; dpkg audit clean after installation. Bundle SHA256
+`fed3126820db37bbeae5d428b1b7f76db86d4464f08d29a188e10a53599dea95`;
+manifest `30aea625096a49df72b4b366be5ff457b59c403317598c864512f29846fe9d9a`;
+receipt `1e7c98b9059f5c3ced19956d11ccc5d819f2197a9e267a9ae4ca2db1f5cd11b2`.
+Installed executor unit includes AF_NETLINK and ambient CAP_SETUID without a
+temporary override. All mail validators complete and the six native services
+(Postfix, Dovecot, Rspamd, OpenDKIM, ClamAV, dedicated Redis) are active.
+Actual listeners include SMTP 25/587/465 and IMAP 143/993 on IPv4 and IPv6.
+TLS IMAP CAPABILITY and LOGOUT completed against Dovecot using the explicitly
+self-signed fallback certificate. This does not qualify mailbox authentication
+or message delivery. SMTP TLS did NOT complete: native journal identifies
+missing `private/proxymap`, consistent with missing internal service entries in
+the generated Postfix master.cf. Fix that renderer before claiming mail works.
+
+Core now advances past mail initialization and fails at web-engine installation
+inspection (`webengine management: not found`). Core is stopped to prevent its
+restart loop. The disk-reclamation reboot also exposed a PowerDNS cold-start
+gap: executor recovery probes the retained generation while native pdns is
+stopped. Starting pdns and restarting executor restored service. This manual
+recovery is not a verified cold-boot fix; preserve it as a pending requirement.
+
+Enabled `discard=unmap` in the existing QEMU resume script, powered off cleanly,
+confirmed the old VM exited, resumed the same overlay, and trimmed guest free
+space. Host available space rose from about 298 MiB to 2.4 GiB without deleting
+VM data. Existing signed host tar archives are being losslessly gzip-compressed;
+the original `panel-node-d14f9440b.tar` SHA256 after decompression remains
+`bf43e24ed7fcece988782fd652a9280eff21bf4ab126e98bf4094b2b00beb41b`.
+Sequence-33 and sequence-34 complete bundles remain in the guest. Disk remains
+tight; do not add another release before reclaiming safe artifact/cache space.
+
 ### Native mail access, scan boundary and executor sandbox — 2026-09-20
 
 Added root-controlled POSIX ACL grants for the six native mail identities:
