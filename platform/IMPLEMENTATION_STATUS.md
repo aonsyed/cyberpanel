@@ -11,6 +11,32 @@ CyberPanel installation model. No custom OLS, LSQUIC or ModSecurity builds,
 forks, patches or product version pins. Panel configuration/service integration
 and QEMU qualification remain our responsibility; inventory is not a version pin.
 
+## Current recovery point — 2026-09-21 (installed62 committed)
+
+Installed job recovery qualified through actual panel UI/API, native MariaDB and
+SQLite for ordinary SQL1440px and gzip390px. A job-specific SQLite trigger rejects
+only its completed receipt after native/core promotion. UI observes promoting;
+recovery while lease live returns409. Trigger removed, core killed with SIGKILL
+and automatically restarted, actual remaining119-second lease allowed to expire
+without editing timestamps. Recovery then returns200/completed; UI updates,
+native text/NULL/BLOB values match, immutable receipt and scoped recovery audit
+verified. Both disposable databases deleted via API and native absence checked;
+verified upload payloads removed, store only .upload-lock. This proves recovery
+across receipt-write failure and core restart, NOT every native-move crash window.
+
+Release qemu-import-recovery-3.1.61, sequence62, manifest
+c98e86aaea81cc6c00c54664c076d52a02cce02959418024345a7888112c0561,
+receipt3fa91805eeaa33b8ac74cfa732dd4656c53bd879b10819d2fa0c9a113840c81a.
+Actual core/gateway/execd /proc paths verified in release, all active after tests.
+Ignored host bundle SHA5aaca96841038240bf3820052e0e43bfdd86b140f77226c984eeb71bc74ad34c
+matches guest; duplicate guest bundle removed. Guest4.8GiB free, host220GiB,
+Git objects about498MiB. No downloads/vendor changes/new workers. Known UI polish:
+the parent dialog can retain the original failed-request alert beside the later
+successful recovery status; clear it on confirmed completion in the next UI edit.
+Remaining: unverified native-move interruption, replacement/restorepoints, broader
+SQL objects/long jobs, distro CRS replacement, current four-target matrix and
+remaining panel journeys. Full parity is not complete.
+
 ## Job promotion recovery — 2026-09-21 (source, not deployed)
 
 Added closed native recover command returning executor-owned process/verification/

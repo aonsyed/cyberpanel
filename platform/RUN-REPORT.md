@@ -4808,3 +4808,35 @@ Installed61 unchanged; no bundle/download/vendor change/new workers. Temporary
 guest Vite process and fixture files removed; guest5.4GiB free. Still pending:
 installed recovery UI/API, killed-daemon/restart proof, and uncertain native move
 without durable verified-success evidence. Full panel parity remains incomplete.
+
+## 2026-09-21 — installed62 recovery across actual core SIGKILL/restart
+
+Built all three binaries in QEMU and assembled/installed signed62. Installed
+qemu-import-recovery-3.1.61 manifest
+c98e86aaea81cc6c00c54664c076d52a02cce02959418024345a7888112c0561;
+receipt3fa91805eeaa33b8ac74cfa732dd4656c53bd879b10819d2fa0c9a113840c81a;
+bundle SHA5aaca96841038240bf3820052e0e43bfdd86b140f77226c984eeb71bc74ad34c.
+Installer state committed. Actual core/gateway/execd executable paths matched
+release before and after fault testing; services active. Bundle retained only in
+ignored host storage after checksum match; duplicate guest copy removed.
+
+Actual installed browser passkey/MFA, no candidate assets/API fixtures. SQL at
+1440px and gzip390px: real multi-chunk upload, lost-begin response replay, typed
+confirmation, wrong-site403. Per-job SQLite trigger rejected completed receipt
+after native/core promotion; run500 and inspection200/promoting observed. Trigger
+removed after checking promotion persisted and terminal receipt absent. Immediate
+recovery409 confirmed live-lease protection. SIGKILL sent to panel-core main
+process, systemd automatic restart confirmed new PID/NRestarts. Waited actual
+119-second remaining lease each time; no timestamp editing/test clock. Recovery
+then200/completed and real UI completion rendered; native exact text/NULL/BLOB
+values verified, completed receipt and correct actor/tenant recovery audit checked.
+
+Both disposable database deletions applied through API at generation2; control
+records deleted generation3 and native schema count0. Each uploaded descriptor and
+payload SHA checked before removing its two-file directory; upload store now only
+.upload-lock. Both scoped fault triggers removed. Guest4.8GiB free, host220GiB;
+Git objects about498MiB. No downloads/new workers/vendor builds or Git binaries.
+This establishes receipt-failure/core-restart recovery with verified native proof,
+not arbitrary native-operation crashes. Parent dialog's original request error
+can remain beside recovered success (UI polish still pending). Other parity work
+and broader target matrix remain open.
