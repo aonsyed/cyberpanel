@@ -6,36 +6,45 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
-LATEST RECOVERY POINT (supersedes deployment statements below): installed signed47
-qemu-console-3.1.46, current47/rollback46; core/gateway/execd/OLS active. Manifest
-ca9b077af51054c2c147ed1f1930771e07707bbe12bd99bf34df7074c3f018ee;
-receipt0ad2a5aac192b58452cf6bb7a179f25491bfefd28107427415250422dcedf099.
-Installer package-replay fix, console UI/backend and unpinned WAF mapping are now
-deployed. Mail manifest and WAF root:root0600 survived unchanged. Removed stale
-guest-only Restart=no diagnostic override after core hit executor socket startup
-race; restarted core with normal Restart=on-failure. Unattended upgrade NOT proven.
-Actual installed browser console.issue201 but metadata/query500: principal secret
-is bound to old executor12dd0aad...; installed executor0cbfaac2... differs. Native
-MariaDB password/grants still work. Earlier candidate console check kept old
-executor and therefore did NOT cover this upgrade failure.
+LATEST RECOVERY POINT (supersedes deployment statements below): installed signed49
+qemu-activation-3.1.48, current49/rollback48. Manifest
+26aa0129bda6bf61e0b3e7f072dea7a50d3d30e112625b35ecf3cd4b895dd6ee;
+receiptcac220e70339346bfaef0ecd5a8fc05d8fa91d85ec1c0944b8f16316dd6da5d4.
+Core/gateway/execd/broker all verified executing installed49 paths. Core/gateway/
+broker active, Result=success,NRestarts=0. No candidate broker override or binary;
+gateway localhost HTTPS/passkey fixture remains. Real installed UI password and
+passkey login200, database.list200, console.issue201, metadata/query200; correct
+database rendered, mutation rejected400, recovery query200,390px layout PASS.
+Mail manifest and WAF root:root0600 unchanged. This specific Ubuntu ARM64 upgrade
+needed NO manual recovery; full install/upgrade/rollback matrix remains pending.
 
-SOURCE FIX IN PROGRESS: root-only management RebindConsumer preserves material,
-permits only executable digest changes, requires exact prior version/binding,
-creates a new authenticated version, supports bounded lost-response replay and
-forward-version rollback. QEMU secrets suite passes, including actual broker
-grant/delivery plus framed management tests and14 negative variants. Non-root,
-tenant/account/origin/resource/generation/operation/adapter/purpose retargeting,
-stale bindings, revoked/tampered records and invalid/same digests rejected.
-NOT deployed and NOT yet called by signed installer. Next: connect authenticated
-release transition/recovery to broker; account for consumers coupling logical
-credential generation to secret version (notably HA replication), then rerun
-installed browser workflow. Do not manually re-enroll fixture password or weaken
-executable identity to hide failure.
+Credential fix: root-only signed consumer-release authorization, NOT secret
+rewriting during upgrades. Version-sensitive consumers retain original version/
+binding; existing principal remains version1, binding1ff23cac..., original anchor
+12dd0aad... approved for installed executor0cbfaac2.... Root installer pairs exact
+binary destinations from verified retained/current manifests; broker atomically
+records bounded transitions and rejects stale/conflicting replays. Tenant,
+adapter, operation and live process identity checks remain. Broker grants AND
+delivery recheck authority; pre-upgrade grants cannot deliver to retired binary.
+Tests cover unchanged credential/material, chaining, rollback, stale/non-root and
+cross-audience denial, transactional failure without partial authority. Existing
+explicit RebindConsumer primitive remains, but is NOT the release upgrade path.
 
-Storage: obsolete guest release44 and redundant guest bundles46/47 removed only
-after verified ignored host archives; current47/rollback46 retained. Recoverable
-archives under main repo .work/qemu; guest currently2.2GiB free. No new downloads,
-workers, third-party builds or committed binary artifacts.
+Signed48 committed with frontend failure: repeated provider restarts exhausted
+core start limit; recovered manually. Fixed installer: quiesce frontends once,
+probe providers in dependency order, authorize after broker readiness, then probe
+signed execd/core/gateway even when old manifest service list omitted them. Signed49
+verifies that fix without manual starts. QEMU secrets/noderelease/architecture
+suites and installer build pass. `/home/harness/bin/panel-node-install-native`
+is updated; system bootstrap installer path has NOT been updated/qualified.
+Remaining next: installed rollback/failure recovery (especially old brokers that
+predate authority mapping), ordinary native CRS path qualification, writable SQL/
+import/export parity, broader service journeys and current four-target matrix.
+
+Storage: obsolete guest releases28/29/30/45 and47 removed after verified ignored
+host archives; redundant48/49 bundles and candidate binaries removed. Current49/
+rollback48 retained. Archives under main repo .work/qemu are recoverable; no
+downloads, workers, third-party builds or committed binary artifacts.
 
 LATEST INSTALLER FIX (source, not deployed): native offline package phase now
 skips EXACT already-configured packages instead of rerunning every postinst on

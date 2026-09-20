@@ -79,6 +79,7 @@ type EffectRecord struct {
 }
 
 type Journal struct {
+	ConsumerPredecessor *InstalledRelease `json:"consumer_predecessor,omitempty"`
 	SchemaVersion  uint16            `json:"schema_version"`
 	OperationID    string            `json:"operation_id"`
 	ManifestDigest string            `json:"manifest_digest"`
@@ -243,6 +244,7 @@ func (installer *Installer) Apply(ctx context.Context, bundlePath string) (Insta
 			if stateErr == nil {
 				previous := state.Active
 				journal.Previous = &previous
+				journal.ConsumerPredecessor = state.Previous
 			}
 			if err = saveJournal(journal); err != nil {
 				return err
@@ -962,12 +964,18 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 	if _, err = runSystemctl(ctx, "daemon-reload"); err != nil {
 		return installer.rollbackLocked(ctx, journal, trust, err)
 	}
-	for _, service := range manifest.Services {
+	if err = quiescePanelFrontends(ctx, manifest); err != nil {
+		return installer.rollbackLocked(ctx, journal, trust, err)
+	}
+	for _, service := range activationServiceOrder(manifest) {
 		execute, err := beginEffect(journal, "service_probe", service.Unit, installer.now())
 		if err != nil {
 			return InstallReceipt{}, err
 		}
 		if !execute {
+			if service.Unit == "panel-secretd.service" {
+				if err = installer.transitionSecretConsumers(ctx, journal, trust, false); err != nil { return installer.rollbackLocked(ctx, journal, trust, err) }
+			}
 			continue
 		}
 		evidence, probeErr := activateAndProbeService(ctx, service)
@@ -976,6 +984,9 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 		}
 		if err = completeEffect(journal, "service_probe", service.Unit, evidence, installer.now()); err != nil {
 			return InstallReceipt{}, err
+		}
+		if service.Unit == "panel-secretd.service" {
+			if err = installer.transitionSecretConsumers(ctx, journal, trust, false); err != nil { return installer.rollbackLocked(ctx, journal, trust, err) }
 		}
 	}
 	activeDigest, err = observeActiveRelease()
@@ -1047,6 +1058,13 @@ func (installer *Installer) rollbackLocked(ctx context.Context, journal *Journal
 	if err := updateJournal(journal, installer.now()); err != nil {
 		return InstallReceipt{}, errors.Join(cause, err)
 	}
+	if err := installer.transitionSecretConsumers(ctx, journal, trust, true); err != nil {
+		return installer.markRecovery(journal, "secret_consumer_rollback_failed")
+	}
+	// Stop dependents before their providers, without repeated restart cascades.
+	if _, candidate, err := loadRetainedEnvelopeWithoutTime(journal.Candidate, trust); err == nil {
+		if err = quiescePanelFrontends(ctx, candidate); err != nil { return installer.markRecovery(journal, "candidate_frontend_stop_failed") }
+	}
 	for _, service := range journal.Candidate.Services {
 		if err := stopService(ctx, service.Unit); err != nil {
 			return installer.markRecovery(journal, "candidate_service_stop_failed")
@@ -1094,7 +1112,7 @@ func (installer *Installer) rollbackLocked(ctx context.Context, journal *Journal
 		if _, err = runSystemctl(ctx, "daemon-reload"); err != nil {
 			return installer.markRecovery(journal, "previous_systemd_reload_failed")
 		}
-		for _, service := range previousManifest.Services {
+		for _, service := range activationServiceOrder(previousManifest) {
 			if _, err = activateAndProbeService(ctx, service); err != nil {
 				return installer.markRecovery(journal, "previous_service_probe_failed")
 			}
@@ -1331,6 +1349,9 @@ func updateJournal(journal *Journal, now time.Time) error {
 }
 
 func validateJournal(journal Journal) error {
+	if journal.ConsumerPredecessor != nil && (journal.Previous == nil || validateInstalledRelease(*journal.ConsumerPredecessor) != nil || journal.ConsumerPredecessor.Target.Key() != journal.Previous.Target.Key() || journal.ConsumerPredecessor.Sequence >= journal.Previous.Sequence) {
+		return ErrIntegrity
+	}
 	if journal.SchemaVersion != ManifestSchema || !identifier.MatchString(journal.OperationID) || !validDigest(journal.ManifestDigest) ||
 		journal.OperationID != operationID(journal.ManifestDigest) || journal.Candidate.ManifestDigest != journal.ManifestDigest ||
 		validateInstalledRelease(journal.Candidate) != nil || journal.Generation == 0 || !canonicalTime(journal.CreatedAt) ||

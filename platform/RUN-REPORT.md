@@ -5,6 +5,59 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Signed consumer authority and frontend activation verified — 2026-09-20
+
+Signed49 `qemu-activation-3.1.48` installed, rollback48 retained. Manifest
+`26aa0129bda6bf61e0b3e7f072dea7a50d3d30e112625b35ecf3cd4b895dd6ee`;
+receipt `cac220e70339346bfaef0ecd5a8fc05d8fa91d85ec1c0944b8f16316dd6da5d4`.
+All four core/gateway/execd/secretd process executable paths resolve into49.
+Core/gateway/broker active with Result=success,NRestarts=0. Candidate broker
+override removed before signed deployment; candidate binaries subsequently removed.
+Gateway's guest-only localhost TLS/passkey configuration fixture remains.
+
+Implemented root-only release-authority transitions in the protected broker DB.
+Unlike the prior explicit credential-rebinding primitive, panel upgrades do not
+rewrite secret versions/bindings/material. The installer verifies retained signed
+manifests and artifact trees, pairs binary destinations, durably authorizes the
+replacement, and reverses authority on rollback. Broker transition batch is atomic;
+changed or stale replays and non-root requests rejected. Delivery rechecks current
+authority so an old unconsumed grant cannot bypass executable retirement. Existing
+tenant, adapter, purpose, operation and process identity validation retained.
+Installed principal remains active version1 and original binding digest
+`1ff23cac43f83986652be2690e9df44d996f04bfa8510619534206a1cda86b38`;
+old anchor12dd0aad... now authorizes actual executor0cbfaac2.... No password reset.
+
+QEMU candidate and then installed49 real Chromium checks:
+password/passkey login200; database.list200; console.issue201; metadata200;
+SELECT DATABASE()200 with correct displayed result; mutation400; subsequent
+valid query200;390px mobile interaction passes. No candidate static interception.
+Mail config manifest check has no mismatches; WAF remains root:root0600.
+
+Signed48 first exposed a separate failure: alphabetical repeated broker restarts
+caused core socket-start races and start-limit-hit while an incomplete service
+probe list still allowed commit. Recovered48 manually, then fixed installer to
+quiesce core/gateway once, order provider probes, authorize after broker readiness,
+and include shipped execd/core/gateway probes without changing signed manifests.
+Signed49 applied with NO manual recovery and then passed the installed checks.
+QEMU `go test -p 2 ./internal/secrets ./internal/noderelease -count=1` and earlier
+architecture/installer checks pass. New tests exercise real broker grant/delivery,
+unchanged metadata/material, chained upgrades and rollback, denied old/unrelated
+consumers, tenant/adapter/operation checks, non-root management, conflict/replay,
+SQL-trigger-injected transaction failure, exact signed role pairing and service
+ordering. Installed rollback/failure-injection and four-target qualification are
+still pending; older brokers lack the new authority table support. The bootstrap
+installer at its system path was not replaced; the tested native harness installer
+was rebuilt. Do not equate this checkpoint with complete product parity.
+
+Disk cleanup: archived obsolete releases28/29/30/45 to ignored host
+`obsolete-releases-28-30-45.tar.gz`, SHA256
+`88bdb37dd8bbdd42856d732afa3227e6d0dac32ce9e4d055e399f1d2bf91f664`;
+gzip/manifest checks passed before exact locked process-map-checked guest removal.
+Obsolete47 removed against verified retained bundle47. Bundles48/49 also archived
+with SHA256 verification before redundant guest copies were removed. Current49/
+rollback48 preserved. Temporary candidate binaries removed after process checks.
+No third-party builds, downloads, native dependency pins or Git binary artifacts.
+
 ### Signed47 and credential release-binding regression — 2026-09-20
 
 Installed qemu-console-3.1.46, current47/rollback46. Manifest

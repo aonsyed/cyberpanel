@@ -28,11 +28,13 @@ const (
 	ManagementProvisionPasswordPair ManagementAction = "provision_password_pair"
 	ManagementRotate ManagementAction = "rotate"
 	ManagementRebindConsumer ManagementAction = "rebind_consumer"
+	ManagementAuthorizeRelease ManagementAction = "authorize_release"
 	ManagementRevoke ManagementAction = "revoke"
 	ManagementProvisionMalwareApproval ManagementAction = "provision_malware_approval"
 )
 
 type ManagementRequest struct {
+	ReleaseTransition *ConsumerReleaseTransition `json:"release_transition,omitempty"`
 	Version         uint32          `json:"version"`
 	RequestID       string          `json:"request_id"`
 	Action          ManagementAction `json:"action"`
@@ -48,6 +50,13 @@ type ManagementRequest struct {
 }
 
 func (request ManagementRequest) Validate(now time.Time) error {
+	if request.Action == ManagementAuthorizeRelease {
+		if request.Version != ManagementProtocolVersion || !validManagementRequestID(request.RequestID) || request.SecretID != "" || request.OwnerTenantID != "" || request.Purpose != "" || digestJSON(request.Audience) != digestJSON(AudienceBinding{}) || request.ExpectedVersion != 0 || request.ExpectedBindingDigest != "" || len(request.Material) != 0 || request.PasswordReplica != nil || !request.Deadline.After(now) || request.Deadline.After(now.Add(2*time.Minute)) || request.ReleaseTransition == nil {
+			return ErrInvalid
+		}
+		return request.ReleaseTransition.Validate()
+	}
+	if request.ReleaseTransition != nil { return ErrInvalid }
 	if request.Version != ManagementProtocolVersion || !validManagementRequestID(request.RequestID) || !request.SecretID.Valid() || !request.OwnerTenantID.Valid() || !validPurpose(request.Purpose) || request.Audience.Validate() != nil || len(request.Material) > ManagementMaximumMaterial || request.Deadline.IsZero() || !request.Deadline.After(now) || request.Deadline.After(now.Add(2*time.Minute)) {
 		return ErrInvalid
 	}
@@ -99,6 +108,10 @@ func (response ManagementResponse) Validate(request ManagementRequest) error {
 		if response.Metadata.ID != "" || response.ReplicaMetadata != nil || len(response.PublicKey) != 0 || !validMaterialFailure(response.FailureCode) {
 			return ErrInvalid
 		}
+		return nil
+	}
+	if request.Action == ManagementAuthorizeRelease {
+		if digestJSON(response.Metadata) != digestJSON(Metadata{}) || response.ReplicaMetadata != nil || len(response.PublicKey) != 0 { return ErrInvalid }
 		return nil
 	}
 	if request.Action == ManagementProvisionPasswordPair { return validatePasswordPairResponse(request, response) }
@@ -348,7 +361,9 @@ func (server *ManagementServer) serve(connection net.Conn) {
 	defer cancel()
 	response := ManagementResponse{Version: ManagementProtocolVersion, RequestID: request.RequestID, SecretID: request.SecretID}
 	var metadata Metadata
-	if request.Purpose == PurposeMalwareApproval && peer.UID != 0 {
+	if request.Action == ManagementAuthorizeRelease {
+		if peer.UID != 0 { err = ErrForbidden } else { err = server.Broker.authorizeRelease(ctx, *request.ReleaseTransition) }
+	} else if request.Purpose == PurposeMalwareApproval && peer.UID != 0 {
 		err = ErrForbidden
 	} else if request.Action == ManagementRebindConsumer {
 		if peer.UID != 0 {
