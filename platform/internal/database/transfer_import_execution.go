@@ -21,10 +21,13 @@ type BrokerImportExecution struct {
 }
 
 func NewBrokerImportExecution(coordinator Coordinator, job TransferJob) (*BrokerImportExecution, error) {
-	if job.ExportSource == nil {
+	if job.ExportSource == nil && job.UploadSource == nil {
 		return nil, ErrTransferInvalid
 	}
-	source := *job.ExportSource
+	var source TransferJob
+	if job.ExportSource != nil {
+		source = *job.ExportSource
+	}
 	request := TransferImportRequest{Action: "allocate", Job: job, SourceExport: source}
 	executor, ok := coordinator.executor.(TransferImportExecutor)
 	if !ok || coordinator.repository == nil || request.validate() != nil {

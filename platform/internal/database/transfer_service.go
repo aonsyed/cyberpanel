@@ -137,7 +137,8 @@ type TransferVerification struct {
 func (verification TransferVerification) Validate(job TransferJob, isolated IsolatedTransferDatabase) error {
 	if verification.IsolatedToken != isolated.Token || !validSHA256(verification.SchemaDigest) || verification.RowCount > job.Limits.MaximumRows || verification.Bytes > job.Limits.MaximumBytes ||
 		!validSHA256(verification.IntegrityDigest) || verification.Health != HealthHealthy || verification.VerifiedAt.IsZero() || !validSHA256(verification.Digest) || transferVerificationDigest(verification) != verification.Digest { return ErrTransferInvalid }
-	if job.Source != nil && verification.RowCount != job.Source.Rows { return ErrTransferInvalid }
+	if job.Source != nil && job.UploadSource == nil && verification.RowCount != job.Source.Rows { return ErrTransferInvalid }
+	if job.UploadSource != nil && !validTransferUploadSource(job) { return ErrTransferInvalid }
 	return nil
 }
 

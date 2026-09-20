@@ -153,6 +153,7 @@ type TransferJob struct {
 	// Panel-export imports retain their source authority in the immutable job
 	// document so a worker can reconstruct execution after process restart.
 	ExportSource *TransferJob `json:"export_source,omitempty"`
+	UploadSource *TransferUploadIntent `json:"upload_source,omitempty"`
 	ID                  ResourceID                  `json:"id"`
 	IdempotencyKey      string                      `json:"idempotency_key"`
 	TenantID            site.TenantID               `json:"tenant_id"`
@@ -179,6 +180,7 @@ type TransferJob struct {
 }
 
 func (job TransferJob) Validate() error {
+	if job.UploadSource!=nil && (job.Direction!=TransferImport || job.ExportSource!=nil || !validTransferUploadSource(job)) { return ErrTransferInvalid }
 	if job.ExportSource!=nil && (job.Direction!=TransferImport || job.ExportSource.Direction!=TransferExport || job.ExportSource.ExportSource!=nil) { return ErrTransferInvalid }
 	if job.ID.IsZero() || !validTransferIdentifier(job.IdempotencyKey) || job.TenantID.String() == "" || job.SiteID.String() == "" || job.DatabaseID.IsZero() || job.DatabaseGeneration == 0 ||
 		job.InstanceID.IsZero() || job.Format != TransferFormatSQL || !validTransferCompression(job.Compression) || job.Selection.Validate() != nil || job.Limits.Validate() != nil ||

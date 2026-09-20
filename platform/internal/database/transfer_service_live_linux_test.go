@@ -3,14 +3,17 @@
 package database
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func verifyServiceNativeImport(t *testing.T, ctx context.Context, executor *LinuxMariaDBExecutor, client *BrokerClient, sourceExport, job TransferJob, query func(context.Context, string) (string, error)) {
+func verifyServiceNativeImport(t *testing.T, ctx context.Context, executor *LinuxMariaDBExecutor, client *BrokerClient, sourceExport, job TransferJob, query func(context.Context, string) (string, error), uploaded ...bool) {
 	t.Helper()
 	live, err := executor.transferImportSource(job)
 	if err != nil {
@@ -24,6 +27,62 @@ func verifyServiceNativeImport(t *testing.T, ctx context.Context, executor *Linu
 	job.CreatedBy = "owner"
 	job.ExportSource = &sourceExport
 	job.CreatedAt = time.Now().UTC()
+	if len(uploaded) > 0 && uploaded[0] {
+		live.ID, _ = NewResourceID("uploaded-" + job.ID.String())
+		live.Name, _ = ParseSQLIdentifier("cpup" + job.Digest[:24])
+		job.ID, _ = NewResourceID("uploaded-" + job.ID.String())
+		job.IdempotencyKey = "uploaded-" + job.IdempotencyKey
+		job.DatabaseID = live.ID
+		data := []byte("CREATE TABLE sample(id INT PRIMARY KEY,body TEXT,raw_bytes BLOB) ENGINE=InnoDB;\nINSERT INTO sample VALUES(1,'transfer round trip',0x0001FF),(2,NULL,NULL);\n")
+		if job.Compression == TransferCompressionGzip {
+			var compressed bytes.Buffer
+			writer := gzip.NewWriter(&compressed)
+			if _, err = writer.Write(data); err != nil {
+				t.Fatal(err)
+			}
+			if err = writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			data = compressed.Bytes()
+		}
+		intent, sealErr := SealTransferUploadIntent(TransferUploadIntent{ID: job.ID, TenantID: job.TenantID, SiteID: job.SiteID, DatabaseID: job.DatabaseID, DatabaseGeneration: job.DatabaseGeneration, CreatedBy: job.CreatedBy, Compression: job.Compression, Bytes: uint64(len(data)), PayloadDigest: transferDigest(data), CreatedAt: job.CreatedAt, ExpiresAt: job.Retention.RetainUntil})
+		if sealErr != nil {
+			t.Fatal(sealErr)
+		}
+		store, storeErr := NewLinuxTransferUploadStore(transferUploadRoot, time.Now)
+		if storeErr != nil {
+			t.Fatal(storeErr)
+		}
+		artifactPath, _ := store.artifacts.artifactPath(intent.ArtifactIdentity())
+		t.Cleanup(func() {
+			if e := os.RemoveAll(artifactPath); e != nil {
+				t.Error(e)
+			}
+			if e := os.RemoveAll(filepath.Join(transferUploadRoot, ".upload-"+intent.Digest)); e != nil {
+				t.Error(e)
+			}
+		})
+		if _, err = store.Begin(ctx, intent); err != nil {
+			t.Fatal(err)
+		}
+		for offset := 0; offset < len(data); {
+			end := offset + 31
+			if end > len(data) {
+				end = len(data)
+			}
+			if _, err = store.Append(ctx, intent, uint64(offset), data[offset:end]); err != nil {
+				t.Fatal(err)
+			}
+			offset = end
+		}
+		artifact, finishErr := store.Finish(ctx, intent)
+		if finishErr != nil {
+			t.Fatal(finishErr)
+		}
+		job.Source = &artifact
+		job.ExportSource = nil
+		job.UploadSource = &intent
+	}
 	job.Impact = SealTransferImpactPreview(TransferImpactPreview{DatabaseID: live.ID, DatabaseGeneration: 1, CapturedAt: job.CreatedAt.Add(-time.Second)})
 	job, err = SealTransferJob(job)
 	if err != nil {
@@ -73,12 +132,29 @@ func verifyServiceNativeImport(t *testing.T, ctx context.Context, executor *Linu
 	}
 	unbound := job
 	unbound.ExportSource = nil
+	unbound.UploadSource = nil
 	unbound, err = SealTransferJob(unbound)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = NewBrokerImportExecution(NewCoordinator(repository, client, SystemClock{}), unbound); err == nil {
 		t.Fatal("worker accepted missing durable source binding")
+	}
+	if job.UploadSource != nil {
+		changed := job
+		wrongUpload := *job.UploadSource
+		wrongUpload.DatabaseGeneration++
+		wrongUpload, err = SealTransferUploadIntent(wrongUpload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed.UploadSource = &wrongUpload
+		if _, err = SealTransferJob(changed); err == nil {
+			t.Fatal("upload destination binding changed")
+		}
+		if (TransferImportRequest{Action: "preview", Job: job, SourceExport: sourceExport}).validate() == nil {
+			t.Fatal("mixed uploaded/export source authority accepted")
+		}
 	}
 	for _, nested := range []bool{false, true} {
 		changed := job
@@ -129,7 +205,7 @@ func verifyServiceNativeImport(t *testing.T, ctx context.Context, executor *Linu
 	// Reconstruct execution solely from the durable job, not the caller's
 	// original source-export variable or an in-memory authority map.
 	loaded, err := transfers.LoadTransfer(ctx, job.ID)
-	if err != nil || loaded.Job.ExportSource == nil || loaded.Job.ExportSource.Digest != sourceExport.Digest {
+	if err != nil || job.UploadSource == nil && (loaded.Job.ExportSource == nil || loaded.Job.ExportSource.Digest != sourceExport.Digest) || job.UploadSource != nil && (loaded.Job.UploadSource == nil || loaded.Job.UploadSource.Digest != job.UploadSource.Digest) {
 		t.Fatal("source binding not persisted", err)
 	}
 	execution, err = NewBrokerImportExecution(NewCoordinator(repository, client, SystemClock{}), loaded.Job)
@@ -150,6 +226,9 @@ func verifyServiceNativeImport(t *testing.T, ctx context.Context, executor *Linu
 	current, err := service.Inspect(ctx, "owner", job.ID)
 	if err != nil || current.Status != TransferCompleted {
 		t.Fatal("completed import job unreadable", err)
+	}
+	if job.UploadSource != nil && (job.Source.Rows != 0 || current.Progress.RowsProcessed != 2) {
+		t.Fatal("uploaded SQL did not replace unknown row estimate with native measured count")
 	}
 	stored, err := service.InspectReceipt(ctx, "owner", job.ID)
 	if err != nil || stored.Digest != receipt.Digest {

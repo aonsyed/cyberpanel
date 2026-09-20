@@ -270,6 +270,7 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			verifyIsolatedNativeImport(t, ctx, exportConfigs.executor, store, job, query)
 			verifyEmptyNativePromotion(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query)
 			verifyServiceNativeImport(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query)
+			verifyServiceNativeImport(t, ctx, exportConfigs.executor, exportClient, request.Job, job, query, true)
 		})
 	}
 }

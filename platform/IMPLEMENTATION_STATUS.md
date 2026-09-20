@@ -13,6 +13,26 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — 2026-09-21 (installed58 committed)
 
+Upload source/storage/native execution implemented in source after installed58:
+TransferUploadIntent seals tenant/site/destination generation/actor, SQL/gzip,
+size/hash and expiry. Root-private upload storage supports256KiB chunks up to
+64MiB, restart/resume, identical chunk replay, final SHA256 publication and
+discard. It bounds32 pending uploads, reclaims verified expired pending data on
+new admission, checks2GiB reserve and rejects unsafe files/changed replay/gaps.
+UploadSource is mutually exclusive with ExportSource in immutable jobs; native
+import reads its separate protected artifact store and measures unknown SQL row
+counts before promotion. Real uploaded ordinary SQL/gzip→broker→isolated import
+→native verification/promotion→SQLite projection round trips pass in QEMU.
+
+Four affected packages pass; added destination-generation/mixed-authority and
+measured-row assertions pass. Installed58 is unchanged. NEXT: authenticated
+broker upload dispatch and API begin/chunk/finish/discard, per-scope admission,
+prepare/run upload binding and file-picker UI; do not claim uploaded files are
+available to users yet. Periodic upload artifact retention also needs wiring.
+Removed12 obsolete committed install staging directories only; active/previous
+release trees, journals and failure evidence retained. Guest8.1GiB free after
+tests. No vendor changes/downloads/new workers or host project execution.
+
 Export-backed import UI is installed and qualified: after a verified download,
 choose another ready database on the same site, check the destination, type its
 name to confirm, run import and inspect status. Wrong confirmation disables

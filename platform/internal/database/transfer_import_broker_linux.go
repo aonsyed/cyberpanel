@@ -73,7 +73,11 @@ func (executor *LinuxMariaDBExecutor) ExecuteTransferImport(ctx context.Context,
 }
 
 func (executor *LinuxMariaDBExecutor) importArtifactStore(ctx context.Context, job TransferJob) (*LinuxTransferArtifactStore, error) {
-	store, err := NewLinuxTransferArtifactStore(workspaceExportRoot, MaximumTransferBytes, executor.now)
+	root := workspaceExportRoot
+	if job.UploadSource != nil {
+		root = transferUploadRoot
+	}
+	store, err := NewLinuxTransferArtifactStore(root, MaximumTransferBytes, executor.now)
 	if err != nil {
 		return nil, err
 	}

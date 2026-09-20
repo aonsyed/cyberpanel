@@ -4529,3 +4529,44 @@ host bundle retained. Installer prune-staging succeeded for active/previous
 releases; older historical staging remains. Guest2.7GiB free. No downloads,
 vendor changes, new workers or committed binaries. File-upload ingestion,
 replacement, long-running jobs and full parity qualification remain unfinished.
+
+### Uploaded SQL/gzip storage and native import path — 2026-09-21
+
+Implemented sealed TransferUploadIntent and root-private LinuxTransferUploadStore.
+Intent includes destination tenant/site/database/generation, actor, compression,
+expected bytes/SHA256 and bounded expiry; its digest binds integrity, not API
+authorization. Every eventual API request still requires authorization. Chunks
+are bounded256KiB; file size64MiB. Flocked storage supports fresh-process resume,
+identical replay, offset/gap checks, fsync and final digest publication into the
+existing immutable artifact store. Symlinks/hardlinks/unsafe modes are rejected.
+Admission preserves2GiB disk reserve, bounds32 pending uploads and reclaims
+verified expired pending directories. Discard removes unfinished data only.
+
+Immutable jobs now accept UploadSource separately from ExportSource. Native
+import selects the dedicated protected upload artifact store. Uploaded row count
+is unknown until native verification; it is measured and limited rather than
+trusted from the browser. Existing export row-count equality remains enforced.
+
+Existing QEMU Ubuntu ARM64, offline/root execution:
+`CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off GOTOOLCHAIN=local go test -p 2 ./internal/database ./internal/apiserver ./cmd/cyberpanel ./cmd/panel-execd -count=1`
+All four packages passed. Storage tests cover SQL/gzip, reconstruct/resume,
+partial finish, chunk and finish replay, changed replay, gaps, checksum failure,
+tenant/actor/generation changes, expiry, symlink/hardlink/modes, partial-chunk
+ambiguity, cancellation, size bounds,32-upload capacity, expiry reclamation and
+discard replay. Native suite now uploads ordinary SQL/gzip in31-byte chunks,
+loads through the real import broker/service into an isolated MariaDB database,
+verifies text/NULL/BLOB data, promotes, persists jobs/projection and cleans up.
+Final focused native rerun also verifies mixed export/upload authority rejection,
+destination-generation binding and measured progress row count2 versus unknown
+source estimate0. Identity/audit authorizers in these native tests remain fixtures;
+this is NOT installed browser-upload qualification.
+
+Disk preparation: inspected installed active/previous digests and all journal
+states; removed12 individually named obsolete staging trees with committed
+journals, excluding active/previous and rolled-back evidence. Reclaimed about
+5.8GiB; installed release trees and journals retained. Deleted extractions are
+not in trash; original release bundles are retained separately where archived.
+Guest8.1GiB free after tests; installed58 services active and unchanged.
+No downloads/vendor builds/pins/patches, new workers or host tests.
+Remaining: upload broker dispatch/HTTP authorization and per-scope admission,
+prepare/run API support, periodic retention and browser file-picker integration.
