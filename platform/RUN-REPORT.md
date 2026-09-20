@@ -5,6 +5,47 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Shared systemd credential boundary for mail keys — 2026-09-20
+
+Moved the proven private credential validator into the existing secrets package,
+so audit, webmail-session and campaign-unsubscribe loaders apply the same exact
+root/service-user ACL and read-only tmpfs checks. The mail entry points retain
+their fixed paths and 32-byte requirement; opened-file identity and bounded reads
+now prevent path replacement or oversized reads. Ordinary group-readable files,
+arbitrary public loader paths, symlink credentials and wrong-size keys fail.
+
+QEMU command/mail/secrets package suites passed uncached. Actual systemd units
+running as cyberpanel loaded both real mail credentials successfully; the shared
+validator accepted the actual audit credential and rejected wrong UID/permission
+expectations. No secret bytes were printed. All build/test execution was in QEMU.
+
+Signed sequence 26 `qemu-mail-credential-3.1.25` committed; hook reconciliation
+passed. Bundle SHA-256
+`ef4eb72634f48f985e3f954e5c18b7c532071e761a375ead84ab35f72c5dc1e8`;
+manifest `9442dece161377d594b952ed82a3da3060c8c5123e15c7087795fefe98b32954`;
+receipt `b3f5a3c90db8e46b21d9b89b12b76cf0cd1371cbb74711c9f1ee62c21a34cddd`.
+Installed core passed webmail credential loading and next failed creating
+/var/lib/cyberpanel/webmail on its read-only filesystem. The core unit now declares
+only that additional StateDirectory (0700) and writable path. Qualification of
+that unit follows; this is not yet full startup or product certification.
+
+Signed sequence 27 `qemu-webmail-state-3.1.26` committed and reconciliation
+passed. Bundle SHA-256
+`b64083293cdde597eff16574e264e478796f9188a5a489af5f7e6dd245258755`;
+manifest `2521d08a1fc8e0a5fd63277c06ab08e782e77d340d45758ba7d4922e6081031b`;
+receipt `bf95520b170ecd6c6fa5f58ab7435acd056340110adebc1e165862c7f829280b`.
+Unit verification passed with the previously recorded vendor OLS warnings.
+Installed core created both webmail and blobs directories as UID 999/GID 988,
+0700, then failed `activate Dovecot OAuth passdb: mail resource generation conflict`.
+Core was stopped. Restarted executor once to check whether core bootstrap had
+created its admission schema: it still reports missing reboot_admission_gate
+and keeps mutations closed. Code confirms mail activation occurs around line
+275 of domain_services_linux.go, before assembleRebootControlLinuxEdge around
+line 814 creates the admission gate. Executor startup recovery currently stops
+retrying on missing-schema errors. Next fix must resolve this startup ordering
+and readiness dependency without allowing pre-recovery mutations. Do not create
+schema manually from root or disable admission. Full startup remains unproven.
+
 ### Installed executor digest resolved through managed release — 2026-09-20
 
 The real executor path is a root-owned link through node-current into the

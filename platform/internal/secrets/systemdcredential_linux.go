@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package secrets
 
 import (
 	"encoding/binary"
@@ -10,10 +10,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// systemd's per-service credentials use a named-user ACL. Its mask appears
+// PrivateSystemdCredential validates systemd's per-service named-user ACL. Its mask appears
 // as group read permission even though the owning group has no access.
 // Ordinary secret files must never inherit this exception.
-func privateSystemdCredential(file *os.File) bool {
+// Callers must separately constrain the allowed credential path and size.
+func PrivateSystemdCredential(file *os.File) bool {
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0440 {
 		return false

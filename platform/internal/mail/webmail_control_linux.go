@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 )
 
 const MailSessionCredentialPath = "/run/credentials/panel-core.service/webmail-session.key"
@@ -38,8 +39,22 @@ func NewLocalWebmailService(key []byte, audience string, serverName string, stor
 
 func LoadMailSessionCredential(path string) ([]byte,error) {
 	if path != MailSessionCredentialPath { return nil, ErrInvalidCommand }
-	info,err:=os.Lstat(path);if err!=nil{return nil,err};if !info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0||info.Size()!=32||info.Mode().Perm()&0077!=0{return nil,ErrUnauthorized}
-	content,err:=os.ReadFile(path);if err!=nil{return nil,err};if len(content)!=32{wipeMailBytes(content);return nil,ErrUnauthorized};return content,nil
+	return loadCoreMailCredential(path)
+}
+
+func loadCoreMailCredential(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil { return nil, err }
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() != 32 { return nil, ErrUnauthorized }
+	file, err := os.Open(path)
+	if err != nil { return nil, err }
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) { return nil, ErrUnauthorized }
+	if opened.Mode().Perm()&0077 != 0 && !secrets.PrivateSystemdCredential(file) { return nil, ErrUnauthorized }
+	content, err := io.ReadAll(io.LimitReader(file, 33))
+	if err != nil || len(content) != 32 { wipeMailBytes(content); return nil, ErrUnauthorized }
+	return content, nil
 }
 
 type EscapingHTMLSanitizer struct{}

@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
@@ -155,22 +154,7 @@ func LoadCampaignUnsubscribeCredential(path string) ([]byte, error) {
 	if path != CampaignUnsubscribeCredentialPath {
 		return nil, ErrInvalidCommand
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 || info.Size() != 32 {
-		return nil, ErrUnauthorized
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	if len(content) != 32 {
-		wipeMailBytes(content)
-		return nil, ErrUnauthorized
-	}
-	return content, nil
+	return loadCoreMailCredential(path)
 }
 
 var _ MarketingSender = (*LocalCampaignSender)(nil)

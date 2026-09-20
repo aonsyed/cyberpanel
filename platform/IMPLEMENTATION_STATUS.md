@@ -61,10 +61,14 @@ audit credential loader. Sequence 24 fixes that fixed-path check using the exact
 root/service-user ACL and read-only tmpfs boundary; real systemd credential and
 negative permission checks passed. Actual core now reaches domain assembly and
 passes the database executor digest after sequence 25 adds validated managed
-release resolution. Actual startup next fails the webmail credential loader;
-both webmail session and campaign unsubscribe loaders reject systemd credential
-ACL mask bits. Reuse the proven private credential boundary for these fixed
-consumers next. Core restart loop is stopped. Four verified sequence 21–24
+release resolution. Sequence 26 shares the verified private credential boundary
+with webmail/campaign loaders; actual QEMU credential checks passed. Sequence 27
+declares webmail state; actual directories are cyberpanel-owned 0700. Startup
+now hits a dependency cycle: mail activation precedes core admission-schema
+initialization, while executor mutations require that schema and successful
+recovery. One executor restart confirmed the schema is still missing. Fix core
+initialization ordering and fail-closed recovery/readiness, not a root schema
+workaround. Core restart loop is stopped. Four verified sequence 21–24
 archives were moved to host storage, freeing about 1.9 GiB. Executor readiness and
 core/gateway startup are not yet proven.
 Continue startup and API/browser qualification. OLS remains held stopped until

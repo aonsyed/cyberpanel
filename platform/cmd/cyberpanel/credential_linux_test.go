@@ -3,6 +3,7 @@
 package main
 
 import (
+	"github.com/aonsyed/cyberpanel/platform/internal/secrets"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,7 +28,7 @@ func TestCoreOrdinaryGroupReadableSecretRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if privateSystemdCredential(f) {
+	if secrets.PrivateSystemdCredential(f) {
 		t.Fatal("accepted ordinary file as systemd credential")
 	}
 }
@@ -42,13 +43,7 @@ func TestActualSystemdCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if !privateSystemdCredential(f) {
+	if !secrets.PrivateSystemdCredential(f) {
 		t.Fatal("rejected actual private systemd credential")
-	}
-	if credentialACL(int(f.Fd()), uint32(os.Geteuid())+1, 4) {
-		t.Fatal("accepted credential ACL for another account")
-	}
-	if credentialACL(int(f.Fd()), uint32(os.Geteuid()), 6) {
-		t.Fatal("accepted unexpected credential permissions")
 	}
 }
