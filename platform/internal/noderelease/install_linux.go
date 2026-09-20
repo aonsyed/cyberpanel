@@ -1771,6 +1771,7 @@ func installOfflinePackages(ctx context.Context, root string, artifacts []Artifa
 	if target.Distribution == DistributionAlma {
 		path, arguments = "/usr/bin/rpm", []string{"-U", "--replacepkgs", "--oldpackage"}
 	}
+	baseArguments := len(arguments)
 	// Verify every input before any package mutation. Native package managers
 	// need the whole pending set to resolve cycles such as LSPHP/opcache.
 	for _, artifact := range artifacts {
@@ -1778,10 +1779,18 @@ func installOfflinePackages(ctx context.Context, root string, artifacts []Artifa
 		if err := verifyPackageMetadata(ctx, packagePath, artifact, target); err != nil {
 			return nil, err
 		}
-		arguments = append(arguments, packagePath)
+		// A panel-only upgrade must not replay native maintainer scripts against
+		// managed service configurations. Evidence requires the exact installed
+		// version/architecture and (on dpkg) a fully configured, healthy state.
+		// Missing, changed or partially configured packages stay in the batch.
+		if _, err := installedPackageEvidence(ctx, artifact); err != nil {
+			arguments = append(arguments, packagePath)
+		}
 	}
-	if _, err := runOfflineFixed(ctx, path, arguments...); err != nil {
-		return nil, err
+	if len(arguments) > baseArguments {
+		if _, err := runOfflineFixed(ctx, path, arguments...); err != nil {
+			return nil, err
+		}
 	}
 	for _, artifact := range artifacts {
 		value, err := installedPackageEvidence(ctx, artifact)

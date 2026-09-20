@@ -5,6 +5,32 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Panel-only upgrade no longer reinstalls unchanged native packages — 2026-09-20
+
+Identified a concrete cause of repeated package-maintainer configuration changes:
+`installOfflinePackages` always ran dpkg/rpm over the entire release package set,
+including already configured identical versions. It now verifies all supplied
+package metadata/inventories as before, selects only packages lacking exact
+installed version/architecture/completion evidence, runs the remaining batch
+once (if any), then verifies final evidence for every package. Pending cycles
+still enter one batch. Dpkg's `installed ok` requirement remains mandatory;
+unpacked/broken packages do not count as satisfied.
+
+QEMU-only, real native dpkg regression
+`CYBERPANEL_QEMU_PACKAGE_REPLAY=1 go test -p 2 ./internal/noderelease -run TestQEMUOfflinePackageReplay -count=1 -v`:
+before fix FAIL `maintainer script ran 2 times, want 1`; after fix PASS. The
+test builds a tiny disposable panel-owned text package, not third-party software.
+It proves first install, unchanged replay without postinst execution, actual
+upgrade, downgrade, recovery after dpkg --unpack, and no mutation when a later
+input's metadata fails validation. Package and counter purged on both red/green
+runs; filesystem/package-manager checks confirm cleanup. Full noderelease suite
+also passes. Existing core/gateway/execd/OLS remain active, guest2.5GiB free.
+
+Not yet in the installed bootstrap installer. Rebuild it before the next signed
+release. This addresses panel-only upgrades; safe conffile handling when native
+packages genuinely change and full unattended release qualification remain open.
+No vendor changes/downloads or product version pin added.
+
 ### Database UI/native grants and console repair — 2026-09-20
 
 Installed signed46, actual browser password+passkey session:

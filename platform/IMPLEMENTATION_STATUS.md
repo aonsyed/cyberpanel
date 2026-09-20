@@ -6,6 +6,20 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+LATEST INSTALLER FIX (source, not deployed): native offline package phase now
+skips EXACT already-configured packages instead of rerunning every postinst on
+each panel-only update. All package input metadata/inventories still verified
+before any mutation; missing/different/partial packages remain one native batch;
+post-state evidence checked for every artifact. Real QEMU dpkg fixture reproduced
+postinst counter2 on unchanged replay before fix; passes after fix (counter1).
+Upgrade, downgrade, unpacked-package recovery and all-input preflight pass too.
+Entire noderelease suite passes. Tiny panel-owned fixture package/counter cleaned;
+no vendor package/source rebuilds. This prevents needless conffile changes during
+panel-only upgrades, NOT proof of safe actual native-package upgrades. Rebuild
+panel-node-install-native with this fix before next signed release. Signed46 still
+running; console/WAF changes also await that release. Guest2.5GiB free: reclaim
+obsolete artifacts with current46/rollback45 preserved BEFORE another bundle.
+
 LATEST DATABASE CHECK (2026-09-20): installed46 UI created qemu_ui46 and principal
 qemu_user46, both201; native MariaDB confirms charset/collation and actual principal
 login/create/insert/select. Ungranted UPDATE and mysql.user access denied1142.
