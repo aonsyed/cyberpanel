@@ -5,6 +5,46 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Corrected executor deployed; native web authority bootstrap verified — 2026-09-20
+
+Signed sequence 20 `qemu-executor-3.1.19` committed with the corrected listener
+order. Bundle `/var/tmp/panel-executor-3.1.19.tar` SHA-256
+`aca74b78ccc945f44abbc2e96f14bf7bbd3d2b2db3812c44950bafd33d96a353`;
+manifest `773b9559446032ab506b89ed7a94c0959b246a830b3cd8a09796087648680865`;
+receipt `be9efe294f6fcd757f6bca6187c16c501453eb0e960add7cbe974939c2ba49c2`.
+Actual startup passed malware/siteops socket setup and then correctly rejected
+the vendor web configuration directory's public mode instead of required 0700.
+
+Added root installer service-reconciliation preparation for the fixed native
+configuration boundary: selects the master from the installed engine edition,
+validates root-owned non-writable ancestors, opens the config directory without
+following symlinks, transfers it to root:root/0700, and opens the master relative
+to its directory descriptor without following symlinks. The master must be a
+single-link regular file; it becomes root:root/0600. Contents are not rewritten.
+This runs before reconciliation receipt replay, since package reinstalls can
+restore vendor ownership/modes. Runtime private-store checks are unchanged.
+
+The actual root-QEMU test applied this preparation twice, verified ownership and
+modes, checked unchanged master SHA-256, and opened the real fsstore successfully.
+The panel build passed. The updated hook binary exists at
+`/home/harness/bin/cyberpanel-web-authority` but is not yet signed/deployed.
+The test prepared the actual QEMU config; restarting the deployed executor then
+passed web-store setup and reached application runtime admission, failing because
+`/usr/bin/wp` is absent. It also reports the product updater socket unavailable.
+Executor was stopped; full startup is not yet achieved.
+
+Reused existing verified WP-CLI 2.12.0 PHAR, SHA-256
+`ce34ddd838f7351d6759068d09793f26755463b4a4610a5a5c0a97b68220d85c`.
+Built a QEMU-native `cyberpanel-wp-cli` 2.12.0-1 architecture-all package carrying
+those unchanged bytes at `/usr/bin/wp`. Inspected final archive ownership/modes:
+root:root directories 0755 and executable 0755. Candidate
+`/home/harness/cyberpanel-wp-cli_2.12.0-1_all.deb`, SHA-256
+`815388401cfb99a791ac87b316f1448271d12837ef6eece52d697adb1e3f306c`.
+It is not installed yet. No new download occurred. Next signed release must
+include this package and the updated panel hook; the current QEMU signing trust
+range ends at sequence 20, so provision a new bounded QEMU release authority
+before that publication rather than bypassing sequence enforcement.
+
 ### Service identities provisioned; executor runtime ordering fixed — 2026-09-20
 
 Invoked the existing installer LinuxHost.EnsureIdentity in QEMU for the missing

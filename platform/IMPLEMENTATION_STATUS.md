@@ -49,8 +49,11 @@ vendor binaries/modules execute. Real executor startup next requires the missing
 container service identity/home, now provisioned through the existing installer.
 Sequence 19 installs the engine-edition loader fix. Startup next exposed malware
 socket initialization before siteops established shared-directory ownership;
-that order is fixed and both real listeners passed a QEMU probe, but the new
-executor binary still needs signed publication. Its restart loop is stopped.
+that order is fixed and deployed in sequence 20. Actual startup next required
+private native web config permissions; an installer reconciliation hook now
+prepares these and passed an actual idempotent QEMU test. Publish this updated
+panel hook together with the prepared WP-CLI package: the executor now reaches
+application admission but `/usr/bin/wp` is missing. Its restart loop is stopped.
 Continue startup and API/browser qualification. OLS remains held stopped until
 managed configuration is ready.
 The existing guest disk was safely expanded to 40 GiB, removing the repeated
