@@ -329,7 +329,10 @@ func (service TransferService) Run(ctx context.Context, actor, workerID string, 
 	}
 	promotion, promoteErr := service.catalog.PromoteIsolatedTransferDatabase(bounded, state.Job, database, isolated, point)
 	if promoteErr != nil || promotion.Validate(state.Job, isolated) != nil {
-		if !promotion.SourcePreserved { discard = false; return service.finishTransfer(ctx, authorization, state.Job, lease, &process, &verification, &promotion, ErrAmbiguous) }
+		// Preserved source data does not mean promotion never happened. A
+		// successful native move followed by a failed core projection needs
+		// receipt recovery, not cleanup or another stream into the database.
+		if errors.Is(promoteErr, ErrAmbiguous) || promotion.Promoted || !promotion.SourcePreserved { discard = false; return service.finishTransfer(ctx, authorization, state.Job, lease, &process, &verification, &promotion, ErrAmbiguous) }
 		return service.finishTransfer(ctx, authorization, state.Job, lease, &process, &verification, &promotion, ErrTransferStale)
 	}
 	discard = false

@@ -13,6 +13,17 @@ and QEMU qualification remain our responsibility; inventory is not a version pin
 
 ## Current recovery point — installed export fix, 2026-09-20
 
+Transfer promotion failure handling (2026-09-21, source only): fixed Run so a
+reported native promotion or ErrAmbiguous is preserved as ambiguous even when
+SourcePreserved is true. No discard and no automatic restart; verification and
+promotion digests remain in the durable receipt. A definite pre-promotion
+conflict still fails with isolated cleanup. Real-SQLite QEMU service regression
+first reproduced three incorrect failed+discard outcomes, then all six cases
+passed, together with native SQL/gzip integration and four affected suites.
+Core build passed in QEMU; its temporary binary was removed. Next remains
+production transfer-service/catalog/actor-authority wiring and upload/API/UI;
+native/core projection recovery exists but transfer-job recovery is not wired.
+
 Import core projection (2026-09-21, source only): Coordinator now joins the
 broker promotion receipt to control.db. Database generation/status/proof and
 the immutable job-bound promotion receipt commit in one SQLite transaction.

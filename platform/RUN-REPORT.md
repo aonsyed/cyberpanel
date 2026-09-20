@@ -4351,3 +4351,30 @@ between host and guest. Guest free space: 3.3 GiB. No downloads, extra guests,
 vendor component changes or binary artifacts committed. Installed55 unchanged.
 Transfer-service/catalog/authorization, upload/API/UI, replacement and general
 crash recovery remain unfinished; this is not installed import qualification.
+# Transfer service promotion ambiguity — 2026-09-21
+
+Fixed TransferService.Run's promotion-error branch: SourcePreserved means the
+previous data was preserved, not that no promotion occurred. ErrAmbiguous or a
+reported promotion now prevents isolated cleanup and persists an ambiguous,
+non-restartable receipt with native verification/promotion digests. Definite
+pre-promotion failure still permits cleanup.
+
+`TestTransferServicePreservesUncertainPromotion` runs real SQLite job creation,
+lease claiming, streaming/verification/promotion checkpoints, terminal receipt
+persistence and rejected re-claim. Native effects and authorization/audit are
+fixtures here; this test makes no native or UI claim. Before the fix, three
+cases reproduced `status=failed discard=1` instead of ambiguous/no-discard.
+Afterward all six cases passed: successful-native/failed-projection, explicit
+ambiguity despite source preservation, promotion reported alongside an error,
+unproven source preservation, definite pre-promotion conflict, and success.
+
+QEMU-only verification in the existing Ubuntu ARM64 guest:
+
+`sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/database ./cmd/cyberpanel ./cmd/panel-execd ./internal/apiserver -count=1`
+
+All four packages passed, including the existing native SQL/gzip broker and
+core-projection round trips. Core command build passed with the same offline
+QEMU environment; the temporary `/home/harness/platform/cyberpanel` binary was
+removed immediately afterward. Both changed Go files have matching host/guest
+SHA256 values. Installed55 remains unchanged. Production service wiring,
+transfer-job recovery, uploads/API/UI and broader parity remain incomplete.
