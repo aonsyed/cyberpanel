@@ -35,6 +35,12 @@ product contract; each must support Ubuntu 24.04 and AlmaLinux 9 on amd64 and
 arm64 with both OpenLiteSpeed and LiteSpeed Enterprise. Declaring this matrix
 does not prove the product was tested on it.
 
+Prepared PHP archives must contain one top-level directory, since runtime
+extraction removes that directory. Preserve file timestamps or normalize them
+to the actual release timestamp, not Unix time zero: PrestaShop's module loader
+treats zero-mtime module files as absent. Hash and sign the prepared tar bytes,
+not the original ZIP; its artifact URL must identify those same prepared bytes.
+
 ## PHP envelope version 2
 
 The former self-referential format is rejected, not silently migrated.

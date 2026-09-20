@@ -5,6 +5,38 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### PrestaShop real install and prepared Joomla archive — 2026-09-20
+
+Downloaded the [official PrestaShop Classic 9.1.5-5.0 distribution](https://github.com/PrestaShopCorp/prestashop-classic/releases/tag/9.1.5-5.0)
+inside Ubuntu ARM64 QEMU: 121,756,566 bytes, SHA-256
+`37140cb77c03acf61b832f76893cd8fe1e304b0fc14fa5485cfea4a7bfaf3a72`, matching
+the published GitHub asset digest. Its nested `prestashop.zip` contains the
+installable product. `--help` is not a help-only switch in this installer; that
+initial probe attempted its default database connection and failed without access.
+A fresh extraction was used for packaging, not that probe's modified directory.
+
+The first real install failed because our prepared tar used epoch-zero mtimes.
+PrestaShop's `ModuleRepository` requires positive mtimes and rejected all bundled
+modules. Rebuilt from pristine input using the official release timestamp
+`2026-08-18T09:10:33Z`. The corrected guest artifact
+`/home/harness/prestashop-9.1.5-rooted-v2.tar.gz` is 110,050,448 bytes, SHA-256
+`ae05affbdcc14d131c678325c664b7bd8f6c136fa6b6dcc0c517910daad10a14`.
+The earlier `prestashop-9.1.5-rooted.tar.gz` must not be packaged.
+
+`TestQEMURealPrestaShopInstallation` passed in 40.57 seconds with bundled modules
+enabled, native PHP 8.3, MariaDB, and the production argument-bootstrap code.
+It checks the prepared digest, generated configuration and administrator record,
+then removes the isolated database/principal/files. No module bypass or upstream
+code patch was used. The uncached apps suite also passed. This does not certify
+the installed panel, LSPHP/OLS/LSE path, browser login or later app lifecycles.
+
+Joomla's prepared single-root archive now passes production archive validation:
+guest `/home/harness/joomla-6.1.3-rooted.tar.gz`, 28,938,128 bytes, SHA-256
+`af8baac671deb19649f38236f53428d501b69e39e39ac5e23f3010c9623b6320`.
+Prepared artifacts still need matching signed recipes and actual release URLs.
+Magento and container recipe/image inputs remain outstanding. No OS image or
+Go toolchain was downloaded.
+
 ### Real Joomla and Mautic installations — 2026-09-20
 
 Ubuntu ARM64 QEMU now passes actual Joomla 6.1.3 and Mautic 7.2.0 installations

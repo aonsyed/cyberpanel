@@ -92,3 +92,12 @@ func TestQEMURealMauticArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestQEMURealJoomlaArchive(t *testing.T) {
+	if os.Getenv("CYBERPANEL_QEMU_REAL_APP_ARCHIVES") != "1" {
+		t.Skip("requires verified QEMU release inputs")
+	}
+	if err := validatePinnedApplicationArchive("/home/harness/joomla-6.1.3-rooted.tar.gz"); err != nil {
+		t.Fatal(err)
+	}
+}
