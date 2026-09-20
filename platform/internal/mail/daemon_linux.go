@@ -131,6 +131,27 @@ type mailProfile struct {
 }
 type mailBinding struct{ link, target string }
 
+// ReconcileNativeMailBindings belongs to the privileged installer boundary:
+// the runtime executor may see /etc read-only and must not broaden that mount.
+func ReconcileNativeMailBindings(ctx context.Context, platform LinuxMailPlatform) error {
+	if ctx == nil || os.Geteuid() != 0 {
+		return ErrInvalidCommand
+	}
+	profile, err := profileForMail(platform)
+	if err != nil {
+		return err
+	}
+	for _, binding := range profile.bindings {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := ensureMailBinding(binding); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func profileForMail(platform LinuxMailPlatform) (mailProfile, error) {
 	base := mailProfile{systemctl: "/usr/bin/systemctl", postfix: "/usr/sbin/postfix", postqueue: "/usr/sbin/postqueue", postsuper: "/usr/sbin/postsuper", doveconf: "/usr/bin/doveconf", rspamadm: "/usr/bin/rspamadm", opendkim: "/usr/sbin/opendkim", redisServer: "/usr/bin/redis-server", redisCLI: "/usr/bin/redis-cli", clamd: "/usr/sbin/clamd", units: map[MailService]string{ServicePostfix: "postfix.service", ServiceDovecot: "dovecot.service", ServiceRspamd: "rspamd.service", ServiceOpenDKIM: "opendkim.service"}, bindings: []mailBinding{{"/etc/postfix/main.cf", MailConfigurationRoot + "/current/postfix/main.cf"}, {"/etc/postfix/master.cf", MailConfigurationRoot + "/current/postfix/master.cf"}, {"/etc/postfix/tls_sni.map", MailConfigurationRoot + "/current/postfix/tls_sni.map"}, {"/etc/dovecot/dovecot.conf", MailConfigurationRoot + "/current/dovecot/dovecot.conf"}, {"/etc/rspamd/local.d/worker-controller.inc", MailConfigurationRoot + "/current/rspamd/worker-controller.inc"}, {"/etc/rspamd/local.d/redis.conf", MailConfigurationRoot + "/current/rspamd/redis.conf"}, {"/etc/rspamd/local.d/antivirus.conf", MailConfigurationRoot + "/current/rspamd/antivirus.conf"}, {"/etc/opendkim.conf", MailConfigurationRoot + "/current/opendkim/opendkim.conf"}, {"/etc/opendkim/KeyTable", MailConfigurationRoot + "/current/opendkim/KeyTable"}, {"/etc/opendkim/SigningTable", MailConfigurationRoot + "/current/opendkim/SigningTable"}}}
 	switch platform {

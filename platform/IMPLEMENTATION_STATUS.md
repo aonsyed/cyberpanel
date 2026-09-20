@@ -4,7 +4,18 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
-Latest candidate checkpoint (2026-09-20): Postfix internal services, scoped milter
+Latest installed checkpoint (2026-09-20): signed sequence 35 / `6ba18450a` now
+passes actual installed SMTPS 465 and STARTTLS 25/587, including AUTH visibility
+before/after TLS. All six mail services and their milter startup hooks are healthy.
+Creating the new Rspamd link exposed executor /etc being read-only; the native
+installer test established it. Source now reconciles fixed bindings in the
+installer (replay verified), preserving the runtime sandbox; that final installer
+wiring still awaits a signed release. Core gets past mail and fails at the
+missing engine catalog/bootstrap configuration. Runtime Restart=no limits core
+qualification to one attempt. No mailbox auth/message-delivery/API/UI completion
+claim. See RUN-REPORT for signed hashes and exact limits.
+
+Previous candidate checkpoint: Postfix internal services, scoped milter
 socket grants and Rspamd Unix milter binding now pass native SMTPS and STARTTLS
 on 465/25/587, plaintext AUTH denial, and unprivileged socket-access denial.
 Installed edition inspection now accepts only the strict signed-release link.

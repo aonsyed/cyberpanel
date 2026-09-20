@@ -5,6 +5,42 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Signed SMTP protocol qualification and installer-owned bindings — 2026-09-20
+
+Signed sequence 35 (`qemu-mail-smtp-3.1.34`, source `6ba18450a`) committed;
+installed reconciliation returned applied and dpkg audit is clean. Bundle SHA256
+`cee471150568d519161bd978a56b57cb5dcc538e40bc947a5484b5732c547ead`;
+manifest `25a606a2dae61db42f9c37829168ed74c3df6dd10bedc5b4772a7b78957ff03d`;
+receipt `74d170a69a527b4a3125c0a87567a8bcb3aa396002647c0f5b2873a77cb21522`.
+
+Installed startup initially failed creating the new Rspamd link. A targeted
+syscall trace reproduced `symlinkat(...worker-proxy.inc) = EROFS`; inspecting
+the actual executor mount namespace confirmed `/etc` is read-only despite its
+broad ReadWritePaths entry. Kept that sandbox intact. Added installer-owned
+reconciliation of all fixed native mail bindings and invoked it from the mail
+runtime installer setup. The native binding test created the missing fixed link;
+the installer setup/replay test then passed twice. Those latest installer-source
+changes still await the next signed release; the QEMU binding was established
+by the explicit native installer test, not the sequence-35 hook alone.
+
+After that repair, all six installed mail services start and both installed
+milter ExecStartPost helpers exit 0. `TestQEMUInstalledSMTP` (no temporary config
+or daemon replacement) passes against installed SMTPS 465 and STARTTLS 25/587,
+including plaintext AUTH denial and post-TLS AUTH advertisement. Full mail and
+installer package suites pass with installed-SMTP/binding checks enabled.
+This is protocol startup qualification, NOT successful mailbox authentication,
+DKIM/antivirus delivery or end-to-end message delivery.
+
+Core advances past mail and fails web-engine management inspection; the signed
+engine catalog and initial activated native web configuration remain missing.
+The runtime-only `/run/systemd/system/panel-core.service.d/90-qemu-once.conf`
+sets Restart=no during qualification, preventing failure loops. Core is failed/
+stopped; do not mistake native mail health for core/API/UI readiness.
+
+The storage guard's first remote preflight consumed a piped source archive.
+Corrected it to `ssh -n`, then repeated source transfer with `set -e` and reran
+the affected tests. The run that printed a tar error is not source verification.
+
 ### Native SMTP and installed-edition regressions — 2026-09-20
 
 The rendered Postfix master.cf omitted internal services, reproducing a native

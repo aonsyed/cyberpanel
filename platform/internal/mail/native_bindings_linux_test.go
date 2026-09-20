@@ -3,6 +3,7 @@
 package mail
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,9 @@ import (
 func TestQEMUNativeMailBindings(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_MAIL_BINDINGS") != "1" {
 		t.Skip("explicit native mail binding reconciliation in QEMU")
+	}
+	if err := ReconcileNativeMailBindings(context.Background(), MailUbuntuNoble); err != nil {
+		t.Fatal("installer binding reconciliation", err)
 	}
 	profile, err := profileForMail(MailUbuntuNoble)
 	if err != nil {

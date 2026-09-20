@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/mail"
 )
 
 const mailClamAVPolicy = `# CyberPanel: read only ClamAV's immutable config and use its scan socket.
@@ -19,6 +21,9 @@ const mailClamAVPolicy = `# CyberPanel: read only ClamAV's immutable config and 
 `
 
 func installMailRuntimeUnits() error {
+	if err := mail.ReconcileNativeMailBindings(context.Background(), mail.MailUbuntuNoble); err != nil {
+		return err
+	}
 	if err := installMailRedisUnit(); err != nil {
 		return err
 	}

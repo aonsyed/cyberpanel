@@ -15,6 +15,21 @@ import (
 	"time"
 )
 
+func TestQEMUMailInstallerBindings(t *testing.T) {
+	if os.Getenv("CYBERPANEL_QEMU_MAIL_BINDINGS") != "1" {
+		t.Skip("explicit QEMU installer mail binding reconciliation")
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := installMailRuntimeUnits(); err != nil {
+			t.Fatal("installer runtime bindings", err)
+		}
+	}
+	target, err := os.Readlink("/etc/rspamd/override.d/worker-proxy.inc")
+	if err != nil || target != "/var/lib/cyberpanel/mail/current/rspamd/worker-proxy.inc" {
+		t.Fatal("managed milter binding", target, err)
+	}
+}
+
 func TestQEMUMailClamAVNative(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_MAIL_CLAM") != "1" {
 		t.Skip("explicit QEMU ClamAV service qualification")

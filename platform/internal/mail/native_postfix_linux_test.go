@@ -82,6 +82,23 @@ func TestQEMUPostfixRenderedSMTP(t *testing.T) {
 	if output, err := exec.Command("/usr/sbin/postfix", "-c", directory, "start").CombinedOutput(); err != nil {
 		t.Fatalf("start rendered Postfix: %v %s", err, output)
 	}
+	assertNativeSMTP(t)
+}
+
+func TestQEMUInstalledSMTP(t *testing.T) {
+	if os.Getenv("CYBERPANEL_QEMU_INSTALLED_SMTP") != "1" {
+		t.Skip("requires installed native mail services")
+	}
+	for _, service := range []string{"postfix", "dovecot", "rspamd", "opendkim", "clamav-daemon", "redis-server@cyberpanel-mail"} {
+		if err := exec.Command("/usr/bin/systemctl", "is-active", "--quiet", service).Run(); err != nil {
+			t.Fatal(service, err)
+		}
+	}
+	assertNativeSMTP(t)
+}
+
+func assertNativeSMTP(t *testing.T) {
+	t.Helper()
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	// The installer intentionally supplies an untrusted bootstrap certificate.
 	connection, err := tls.DialWithDialer(dialer, "tcp", "127.0.0.1:465", &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true})
