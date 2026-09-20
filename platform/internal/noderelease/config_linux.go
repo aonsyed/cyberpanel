@@ -48,6 +48,15 @@ func ResolveExecutorPath(path string) (string, error) {
 	return resolveManagedPath(path, "/usr/local/libexec/cyberpanel", ActiveRelease, ReleaseRoot, 0755)
 }
 
+// ResolveSitePreviewHelperPath admits only the two packaged preview helpers.
+// As with the executor, callers must validate the resolved executable itself.
+func ResolveSitePreviewHelperPath(path string) (string, error) {
+	if path != "/usr/local/libexec/cyberpanel/cyberpanel-sitepreview-route" && path != "/usr/local/libexec/cyberpanel/cyberpanel-sitepreview-chromium" {
+		return "", ErrInvalid
+	}
+	return resolveManagedPath(path, "/usr/local/libexec/cyberpanel", ActiveRelease, ReleaseRoot, 0755)
+}
+
 func resolveManagedPath(path, configRoot, active, releases string, maximumMode os.FileMode) (string, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return "", ErrInvalid

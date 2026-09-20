@@ -1,11 +1,35 @@
 package noderelease
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestPackagedExecutorHelpersAreReleaseDestinations(t *testing.T) {
+	data, err := os.ReadFile("../../packaging/artifacts/panel-execd.bundle.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle struct {
+		Binaries []struct {
+			InstallPath string `json:"install_path"`
+		} `json:"members"`
+	}
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Binaries) == 0 {
+		t.Fatal("empty helper bundle")
+	}
+	for _, binary := range bundle.Binaries {
+		if !allowedDestination(ArtifactBinary, binary.InstallPath) || forbiddenReleasePath(binary.InstallPath) {
+			t.Errorf("packaged helper cannot be installed by signed release: %s", binary.InstallPath)
+		}
+	}
+}
 
 func TestAbsentReleaseStatePreservesNotExist(t *testing.T) {
 	_, err := readRootOwnedFile(filepath.Join(t.TempDir(), "installed.json"), 1<<20, 0600)

@@ -6,6 +6,17 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+Latest checkpoint: sequence39 qemu-preview-3.1.38 installed. Both missing preview
+helpers are now in the signed release at /usr/local/libexec/cyberpanel, matching
+the installer's existing binary boundary. Helper resolution pins the managed
+release; arbitrary links remain rejected. Actual installed constructor tests
+PASS as cyberpanel. Startup passes preview and reaches API registration:
+`api: conflict: duplicate operation identity.tenant.list`. Identity and console
+contracts duplicate list/create/suspend with different payloads; consolidate
+without weakening duplicate detection or losing tenant-management requirements.
+OLS remains active; core failed with Restart=no. QEMU has approximately3.2GiB
+free. Removed redundant sequence37 tar only; installed rollback copies retained.
+
 Latest installed checkpoint: signed sequence38 qemu-web-health-3.1.37 is
 committed in QEMU. Persistent root-owned health proofs are keyed by web snapshot,
 retain rollback proofs and reject confirmed-generation reuse. Installed vendor

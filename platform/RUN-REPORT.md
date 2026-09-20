@@ -5,6 +5,38 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed site-preview helpers — 2026-09-20
+
+Reproduced startup failure: route/chromium helper executables absent, while the
+route directory had correct service ownership and0700. Package definition also
+specified /usr/libexec paths outside the signed installer's allowed destination
+boundary. Aligned both helpers to /usr/local/libexec/cyberpanel and added a
+package-definition regression covering all executor-bundle member destinations.
+
+Preview validation now resolves only its two fixed installer-managed executable
+paths, then checks regular file/root owner/executable bits/non-writability/no
+hardlinks/no set-ID. Invocation uses the resolved generation, not the public
+activation link. Chromium's self-reexec check matches that resolved path.
+Existing release-root/ancestor/link checks remain in force.
+
+QEMU noderelease/sitepreview/cyberpanel suites pass, and all three changed
+binaries build offline. Installed signed sequence39 qemu-preview-3.1.38:
+bundle `659881ccf665fa8731e79d040a298a53c43aba2e59af5cd6b333fccd06e28eba`,
+manifest `04e6744344a9507bbd3f389bb777a4ddd60f8435fd32a70cf9760ccbe822ed55`,
+receipt `069b70da1a09c06883a206b1fdefd6e6da21fd84d7ba083966a3c3491f021cd8`.
+Same documented mail restore/WAF ownership/reconciliation prerequisites applied.
+The installed-helper QEMU test passes as cyberpanel (both managed symlinks and
+both constructors). Initial test execution from /home/harness was denied by
+directory traversal permissions; rerun from a temporary public executable path
+passed and that temporary file was removed. No screenshot execution claim.
+
+Core now passes site-preview assembly and fails at registry construction with
+`duplicate operation identity.tenant.list`. Identity and console contracts both
+declare list/create/suspend with differing payload types; requires consolidation,
+not disabling the duplicate check. OLS is active; core remains failed without a
+restart loop. Removed redundant485MiB sequence37 bundle; installed rollback
+release remains. Guest free space approximately3.2GiB. No downloads/native builds.
+
 ### Installed persistent web health proof — 2026-09-20
 
 Implemented a root-owned, atomically written activation proof for each web

@@ -28,6 +28,7 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/webactivation"
 	hostingservice "github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
+	"github.com/aonsyed/cyberpanel/platform/internal/noderelease"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/catalog"
@@ -40,8 +41,8 @@ import (
 const (
 	DefaultLinuxRouteRoot       = "/var/lib/cyberpanel/sitepreview/routes"
 	DefaultLinuxArtifactRoot    = "/var/lib/cyberpanel/sitepreview/artifacts"
-	DefaultLinuxRouteHelper     = "/usr/libexec/cyberpanel-sitepreview-route"
-	DefaultLinuxChromiumHelper  = "/usr/libexec/cyberpanel-sitepreview-chromium"
+	DefaultLinuxRouteHelper     = "/usr/local/libexec/cyberpanel/cyberpanel-sitepreview-route"
+	DefaultLinuxChromiumHelper  = "/usr/local/libexec/cyberpanel/cyberpanel-sitepreview-chromium"
 	linuxAdapterProtocolVersion = uint16(1)
 	linuxChromeIsolateArgument  = "--cyberpanel-sitepreview-isolate"
 	linuxUnshareExecutable      = "/usr/bin/unshare"
@@ -358,7 +359,11 @@ func invokeFixedHelper(ctx context.Context, helper string, request any, response
 		return ErrInvalid
 	}
 	output := &limitedBuffer{maximum: maximum}
-	command := exec.CommandContext(ctx, helper)
+	resolved, err := resolveRootHelper(helper)
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, resolved)
 	command.Stdin = bytes.NewReader(encoded)
 	command.Stdout = output
 	command.Stderr = io.Discard
@@ -393,21 +398,30 @@ func (buffer *limitedBuffer) Write(content []byte) (int, error) {
 }
 
 func validateRootHelper(path string) error {
+	_, err := resolveRootHelper(path)
+	return err
+}
+
+func resolveRootHelper(path string) (string, error) {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || (path != DefaultLinuxRouteHelper && path != DefaultLinuxChromiumHelper) {
-		return ErrPolicyDenied
+		return "", ErrPolicyDenied
 	}
-	info, err := os.Lstat(path)
+	resolved, err := noderelease.ResolveSitePreviewHelperPath(path)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
-		return ErrPolicyDenied
+	info, err := os.Lstat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Mode().Perm()&0111 == 0 || info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+		return "", ErrPolicyDenied
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != 0 {
-		return ErrPolicyDenied
+	if !ok || stat.Uid != 0 || stat.Nlink != 1 {
+		return "", ErrPolicyDenied
 	}
-	return nil
+	return resolved, nil
 }
 
 func ensureLinuxPrivateDirectory(path string) error {
@@ -962,7 +976,8 @@ func runChromeInNamespaces(ctx context.Context, request linuxChromeHelperRequest
 		return receipt, ErrPolicyDenied
 	}
 	executable, err := os.Executable()
-	if err != nil || executable != DefaultLinuxChromiumHelper || validateRootHelper(executable) != nil {
+	expected, resolveErr := resolveRootHelper(DefaultLinuxChromiumHelper)
+	if err != nil || resolveErr != nil || executable != expected {
 		return receipt, ErrPolicyDenied
 	}
 	hostUser, err := os.Readlink("/proc/self/ns/user")
