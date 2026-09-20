@@ -167,6 +167,7 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 			if _, err = exportClient.ExportWorkspaceDatabase(ctx, wrongRequest); err == nil {
 				t.Fatal("caller-selected artifact destination accepted")
 			}
+			verifyLiveExportDownload(t, ctx, exportClient, exportConfigs.executor, request, *receipt.Artifact)
 			job.Direction, job.Source, job.Destination = TransferImport, receipt.Artifact, nil
 			job, err = SealTransferJob(job)
 			if err != nil {
@@ -233,7 +234,70 @@ func liveExportBroker(t *testing.T, ctx context.Context, executor *LinuxMariaDBE
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		var count int
+		if err := db.QueryRow("SELECT count(*) FROM reboot_execution_effects WHERE method='workspace_export_read'").Scan(&count); err != nil || count != 0 {
+			t.Error("download bytes must not enter mutation journal", count, err)
+		}
+	})
 	return client
+}
+
+func verifyLiveExportDownload(t *testing.T, ctx context.Context, client *BrokerClient, executor *LinuxMariaDBExecutor, export WorkspaceExportRequest, artifact TransferArtifactDescriptor) {
+	t.Helper()
+	request := WorkspaceExportReadRequest{Export: export, Artifact: artifact, Length: 97}
+	var downloaded []byte
+	for {
+		chunk, err := client.ReadWorkspaceExport(ctx, request)
+		if err != nil {
+			t.Fatal("download", err)
+		}
+		if !chunk.matches(request) {
+			t.Fatal("invalid download response")
+		}
+		downloaded = append(downloaded, chunk.Data...)
+		request.Offset += uint64(len(chunk.Data))
+		if chunk.EOF {
+			break
+		}
+	}
+	if uint64(len(downloaded)) != artifact.Bytes || transferDigest(downloaded) != artifact.Digest {
+		t.Fatal("download differs from exported bytes")
+	}
+	chunk, err := client.ReadWorkspaceExport(ctx, request)
+	if err != nil || !chunk.EOF || len(chunk.Data) != 0 {
+		t.Fatal("EOF range", err)
+	}
+	request.Offset = 0
+	for _, variant := range []string{"offset", "length", "digest", "expiry"} {
+		bad := request
+		switch variant {
+		case "offset":
+			bad.Offset = artifact.Bytes + 1
+		case "length":
+			bad.Length = MaximumExportChunkBytes + 1
+		case "digest":
+			bad.Artifact.Digest = strings.Repeat("0", 64)
+		case "expiry":
+			bad.Export.Access.ExpiresAt = time.Now().Add(-time.Second)
+		}
+		if _, err := client.ReadWorkspaceExport(ctx, bad); err == nil {
+			t.Fatal("invalid download accepted", variant)
+		}
+	}
+	var session DatabaseWorkspaceSession
+	if err = executor.readResource("sessions", export.Access.SessionID, &session); err != nil {
+		t.Fatal(err)
+	}
+	old := session
+	session.Status.Lifecycle = LifecycleDeleted
+	if err = executor.writeResource("sessions", session.ID, session); err != nil {
+		t.Fatal(err)
+	}
+	defer executor.writeResource("sessions", old.ID, old)
+	if _, err = client.ReadWorkspaceExport(ctx, request); err == nil {
+		t.Fatal("revoked session can still download")
+	}
 }
 
 // Only the secret delivery is in-memory. The export configuration resolver,

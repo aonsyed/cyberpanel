@@ -31,32 +31,51 @@ func (configs *LinuxWorkspaceExportConfigs) TransferClientConfig(ctx context.Con
 		return TransferClientConfigDescriptor{}, ErrUnauthorized
 	}
 	executor, access := configs.executor, configs.access
-	if access.validate(executor.now().UTC()) != nil || job.TenantID != access.TenantID || job.SiteID != access.SiteID || job.DatabaseID != access.DatabaseID || job.DatabaseGeneration != access.DatabaseGeneration || job.Limits.MaximumBytes > access.Limits.MaxResultBytes || job.Limits.MaximumRows > uint64(access.Limits.MaxRows) || job.Limits.MaximumDuration > access.Limits.StatementTimeout {
-		return TransferClientConfigDescriptor{}, ErrUnauthorized
-	}
-	if err := ctx.Err(); err != nil {
-		return TransferClientConfigDescriptor{}, err
-	}
-	// Join protected resources under the same lock as executor mutations.
-	executor.mu.Lock()
-	session, database, principal, instance, err := executor.workspaceResources(ctx, access)
-	executor.mu.Unlock()
+	session, database, principal, err := executor.authorizeWorkspaceExport(ctx, access, job)
 	if err != nil {
 		return TransferClientConfigDescriptor{}, err
 	}
-	if database.Name != name || database.InstanceID != job.InstanceID || instance.Placement != PlacementLocal || !workspaceReady(session.Metadata) || !workspaceReady(database.Metadata) || !workspaceReady(principal.Metadata) || !workspaceReady(instance.Metadata) {
+	if database.Name != name {
 		return TransferClientConfigDescriptor{}, ErrUnauthorized
 	}
 	releaseSlot, err := executor.acquireWorkspace(session)
 	if err != nil {
 		return TransferClientConfigDescriptor{}, err
 	}
+	return configs.writeClientConfig(ctx, job, session, principal, name, releaseSlot)
+}
+
+func (executor *LinuxMariaDBExecutor) authorizeWorkspaceExport(ctx context.Context, access WorkspaceAccess, job TransferJob) (DatabaseWorkspaceSession, Database, DatabasePrincipal, error) {
+	if executor == nil || executor.now == nil || os.Geteuid() != 0 || ctx == nil || job.Validate() != nil || job.Direction != TransferExport {
+		return DatabaseWorkspaceSession{}, Database{}, DatabasePrincipal{}, ErrUnauthorized
+	}
+	if access.validate(executor.now().UTC()) != nil || job.TenantID != access.TenantID || job.SiteID != access.SiteID || job.DatabaseID != access.DatabaseID || job.DatabaseGeneration != access.DatabaseGeneration || job.Limits.MaximumBytes > access.Limits.MaxResultBytes || job.Limits.MaximumRows > uint64(access.Limits.MaxRows) || job.Limits.MaximumDuration > access.Limits.StatementTimeout {
+		return DatabaseWorkspaceSession{}, Database{}, DatabasePrincipal{}, ErrUnauthorized
+	}
+	if err := ctx.Err(); err != nil {
+		return DatabaseWorkspaceSession{}, Database{}, DatabasePrincipal{}, err
+	}
+	// Join protected resources under the same lock as executor mutations.
+	executor.mu.Lock()
+	session, database, principal, instance, err := executor.workspaceResources(ctx, access)
+	executor.mu.Unlock()
+	if err != nil {
+		return session, database, principal, err
+	}
+	if database.InstanceID != job.InstanceID || instance.Placement != PlacementLocal || !workspaceReady(session.Metadata) || !workspaceReady(database.Metadata) || !workspaceReady(principal.Metadata) || !workspaceReady(instance.Metadata) {
+		return session, database, principal, ErrUnauthorized
+	}
+	return session, database, principal, nil
+}
+
+func (configs *LinuxWorkspaceExportConfigs) writeClientConfig(ctx context.Context, job TransferJob, session DatabaseWorkspaceSession, principal DatabasePrincipal, name SQLIdentifier, releaseSlot func()) (TransferClientConfigDescriptor, error) {
 	keep := false
 	defer func() {
 		if !keep {
 			releaseSlot()
 		}
 	}()
+	executor, access := configs.executor, configs.access
 	bounded, cancel := context.WithDeadline(ctx, access.ExpiresAt)
 	defer cancel()
 	password, err := executor.secrets.PrincipalPassword(bounded, session.SessionSecretRef, principal.ID, session.TenantID.String(), session.SiteID.String())

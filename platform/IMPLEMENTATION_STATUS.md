@@ -6,6 +6,16 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Native dependency ownership boundary — user correction 2026-09-20
 
+DATABASE EXPORT DOWNLOAD PROGRESS: added workspace_export_read broker operation
+with <=256KiB chunks, exact descriptor/offset/length/EOF/digest binding, and fresh
+protected session/database/principal/instance authorization for EVERY read.
+Read-only path neither issues credentials nor journals dump bytes. QEMU private
+Unix broker downloads reconstruct both SQL/gzip exports with exact SHA256; EOF,
+bad bounds/digest/expiry and revoked-session denial pass. All database/core/execd
+package tests pass. Source only, installed51 unchanged. Next is core/API/UI wiring
+for these export/download methods, plus production import, async large exports,
+retention cleanup and broader qualification. The overall goal remains incomplete.
+
 DATABASE EXPORT BROKER PROGRESS: closed workspace_export client/server operation
 now calls the real Linux executor/session credential provider/native dump and
 publishes artifacts under protected database/transfers storage. Destination is

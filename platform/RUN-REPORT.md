@@ -3737,6 +3737,34 @@ After verification, the AlmaLinux ARM64 and both AMD64 guests were shut down.
 Their overlays and logs are retained. Ubuntu ARM64 remains running on loopback
 SSH port 22193 for the next installed-release work; its temporary Vite server
 is stopped. No base images or evidence were deleted.
+# Authorized export downloads through the broker — 2026-09-20
+
+Added typed `workspace_export_read` client/server/executor support. Each read
+reauthorizes current protected session/database/principal/instance state and
+acquires a bounded session slot. It accepts only the exact job-bound artifact
+descriptor and an in-range offset with 1..256KiB length, seeks the immutable
+artifact, and returns exact data length, EOF and a chunk digest. It does not issue
+credentials, initialize missing storage or journal download bytes. Consumers
+must verify the full assembled artifact digest, not just individual chunks.
+Export credential resolution shares the same protected-resource authorization.
+
+QEMU Ubuntu ARM64 actual private Unix broker tests download the plain SQL and
+gzip artifacts in 97-byte chunks and match assembled size/SHA256 against the
+export receipt. Explicit EOF reads, out-of-range/oversized requests, mismatched
+artifact digest, expiry and session revocation are checked. The SQLite admission
+store contains zero workspace_export_read rows after download. Existing broker
+export/replay, native import and scoped-account denial checks continue to pass.
+Peer authentication, export secret delivery and root import credentials retain
+the fixture limitations recorded below; production API/UI is not yet connected.
+
+Guest gofmt plus `sudo env CYBERPANEL_QEMU_LIVE_TRANSFER=1 TMPDIR=/root
+GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOPROXY=off
+GOTOOLCHAIN=local /home/harness/go/bin/go test -p 2 ./internal/database
+./cmd/cyberpanel ./cmd/panel-execd -count=1` passed all three packages, exit 0.
+All fixtures clean up. No host tests, downloads, native dependency changes or
+deployment. Core/API/UI, large async transfers, production import and retention
+collection remain pending; full functional parity is not claimed.
+
 # Native export through the executor broker — 2026-09-20
 
 Added a closed `workspace_export` broker operation, typed client and Linux
