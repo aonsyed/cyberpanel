@@ -591,7 +591,7 @@ func (runtime *LinuxApplicationRuntime) installCertifiedApplicationPayload(ctx c
 	switch execution.Definition.Kind {
 	case ApplicationJoomla:
 		entry = "installation/joomla.php"
-		prefix := "cp_" + linuxApplicationDigest([]byte(execution.Installation))[:8] + "_"
+		prefix := "cp" + linuxApplicationDigest([]byte(execution.Installation))[:8] + "_"
 		arguments = []string{"install", "--site-name=" + execution.Title, "--admin-user=" + execution.Administrator.DisplayName, "--admin-username=" + execution.Administrator.Username, "--admin-password=" + administratorSecret, "--admin-email=" + execution.Administrator.Email, "--db-type=mysqli", "--db-host=" + host, "--db-user=" + execution.Database.PrincipalName, "--db-pass=" + databaseSecret, "--db-name=" + execution.Database.DatabaseName, "--db-prefix=" + prefix, "--no-interaction"}
 	case ApplicationPrestaShop:
 		entry = "install/index_cli.php"
