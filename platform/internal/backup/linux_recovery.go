@@ -45,6 +45,9 @@ func (host *LinuxBackupHost) ReconcileRestore(ctx context.Context, plan RestoreP
 		return proof, ErrBackupAmbiguous
 	}
 	if state.Promoted {
+		if !state.Frozen && !isSHA256(state.HealthDigest) {
+			return proof, ErrBackupAmbiguous
+		}
 		if state.TargetGeneration == "" || receipt.TargetGeneration != "" && receipt.TargetGeneration != state.TargetGeneration {
 			return proof, ErrBackupConflict
 		}
@@ -87,6 +90,7 @@ func (host *LinuxBackupHost) ReconcileRestore(ctx context.Context, plan RestoreP
 	proof.Watermark = state.Watermark
 	proof.FirstWriteAt = state.FirstWriteAt
 	proof.Frozen = state.Frozen
+	proof.HealthDigest = state.HealthDigest
 	proof.Digest = linuxBackupDigest("recovery", state.PlanDigest, string(proof.Phase), state.Fingerprint, state.CompletedReleaseIdentity)
 	return proof, nil
 }

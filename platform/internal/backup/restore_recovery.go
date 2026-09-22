@@ -16,6 +16,7 @@ type RestoreRecoveryProof struct {
 	FirstWriteAt     *time.Time   `json:"first_write_at,omitempty"`
 	Frozen           bool         `json:"frozen"`
 	Digest           string       `json:"digest"`
+	HealthDigest     string       `json:"health_digest,omitempty"`
 }
 type RestoreRecoveryTarget interface {
 	ReconcileRestore(context.Context, RestorePlanSpec, RestoreReceipt) (RestoreRecoveryProof, error)
@@ -73,6 +74,18 @@ func (c RestoreCoordinator) recoverCompleted(ctx context.Context, plan RestorePl
 		if receipt.Phase == RestoreRollingBack {
 			return c.Rollback(ctx, plan, receipt)
 		}
+		if proof.Frozen {
+			health, healthErr := c.Safety.VerifyPromotedHealth(ctx, plan, proof.TargetGeneration, string(plan.ID)+":recovery-health")
+			if healthErr != nil || !isSHA256(health) {
+				if healthErr == nil {
+					healthErr = ErrInvalidBackup
+				}
+				rolledBack, rollbackErr := c.Rollback(ctx, plan, receipt)
+				return rolledBack, errors.Join(healthErr, rollbackErr)
+			}
+		} else if !isSHA256(proof.HealthDigest) {
+			return receipt, ErrBackupAmbiguous
+		}
 	}
 	if proof.Frozen {
 		generation := proof.TargetGeneration
@@ -93,6 +106,9 @@ func (c RestoreCoordinator) recoverCompleted(ctx context.Context, plan RestorePl
 		if proof.Frozen {
 			return receipt, ErrBackupAmbiguous
 		}
+	}
+	if proof.Phase == RestoreActive && !isSHA256(proof.HealthDigest) {
+		return receipt, ErrBackupAmbiguous
 	}
 	receipt.Phase = proof.Phase
 	receipt.ProbeDigest = proof.Digest

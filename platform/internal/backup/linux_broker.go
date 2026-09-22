@@ -239,9 +239,9 @@ func (server *LinuxBackupBrokerServer) serveConnection(connection net.Conn) {
 	_ = connection.SetDeadline(request.Deadline)
 	mutation := true
 	switch request.Operation {
-	case LinuxBackupOpenObject, LinuxBackupVerifyCapacity, LinuxBackupVerifyScratch, LinuxBackupVerifyHealth:
+	case LinuxBackupOpenObject, LinuxBackupVerifyCapacity, LinuxBackupVerifyScratch:
 		mutation = false
-	case LinuxBackupCreateViews, LinuxBackupReleaseViews, LinuxBackupCaptureComponent, LinuxBackupCreateScratch, LinuxBackupStageArtifact, LinuxBackupCurrentGeneration, LinuxBackupPromote, LinuxBackupObserveWrites, LinuxBackupRestorePrevious, LinuxBackupQuarantine, LinuxBackupFinalize, LinuxBackupCreateSafety, LinuxBackupFreeze, LinuxBackupUnfreeze, LinuxBackupReconcile:
+	case LinuxBackupCreateViews, LinuxBackupReleaseViews, LinuxBackupCaptureComponent, LinuxBackupCreateScratch, LinuxBackupStageArtifact, LinuxBackupCurrentGeneration, LinuxBackupPromote, LinuxBackupObserveWrites, LinuxBackupRestorePrevious, LinuxBackupQuarantine, LinuxBackupFinalize, LinuxBackupCreateSafety, LinuxBackupFreeze, LinuxBackupUnfreeze, LinuxBackupReconcile, LinuxBackupVerifyHealth:
 	default:
 		return
 	}
@@ -360,6 +360,8 @@ func terminalLinuxBackupResponse(request LinuxBackupRequest, response LinuxBacku
 	switch request.Operation {
 	case LinuxBackupReconcile:
 		return response.Recovery != nil && isSHA256(response.Recovery.Digest) && response.Recovery.Watermark != 0 && (response.Recovery.Phase == RestoreActive || response.Recovery.Phase == RestoreRolledBack)
+	case LinuxBackupVerifyHealth:
+		return isSHA256(response.Value)
 	case LinuxBackupCreateViews:
 		return validateViews(request.Policy, response.Views) == nil
 	case LinuxBackupCaptureComponent:
