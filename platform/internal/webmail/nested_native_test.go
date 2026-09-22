@@ -84,7 +84,11 @@ func TestQEMUNativeContainerAttachments(t *testing.T) {
 		if err != nil || uint64(selected.UIDValidity) != evidence.UIDValidity {
 			t.Fatal("fixture identity changed", err)
 		}
-		stream, size, err := openIMAPPart(client, evidence.UID, part.PartID, part.Size)
+		maximum := part.Size
+		if part.SizeUnknown {
+			maximum = MaximumAttachmentBytes
+		}
+		stream, size, err := openIMAPPart(client, evidence.UID, part.PartID, maximum)
 		if err != nil {
 			t.Fatal("native container section", err)
 		}
@@ -100,7 +104,7 @@ func TestQEMUNativeContainerAttachments(t *testing.T) {
 			}
 		}
 		closeErr := stream.Close()
-		if err != nil || closeErr != nil || !bytes.Equal(actual, expected) || size != part.Size || size != uint64(len(expected)) {
+		if err != nil || closeErr != nil || !bytes.Equal(actual, expected) || !part.SizeUnknown && size != part.Size || size != uint64(len(expected)) {
 			t.Fatal("container exact bytes/size mismatch", part.PartID, err, closeErr, size, part.Size, len(expected))
 		}
 		if index == 0 {

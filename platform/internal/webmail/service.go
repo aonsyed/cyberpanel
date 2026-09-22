@@ -601,14 +601,16 @@ func walkMIMEPart(header textproto.MIMEHeader, body io.Reader, depth int, partID
 			source = body
 		}
 		size, readErr := io.Copy(io.Discard, io.LimitReader(source, MaximumAttachmentBytes+1))
-		// Dovecot's raw multipart section includes the CRLF following its closing delimiter.
-		if strings.HasPrefix(contentType, "multipart/") {
-			size += 2
-		}
 		if readErr != nil || size > MaximumAttachmentBytes {
 			return errors.Join(ErrLimit, readErr)
 		}
-		state.attachments = append(state.attachments, AttachmentReference{PartID: partID, Filename: filename, ContentType: contentType, Size: uint64(size)})
+		// MIME delimiter/epilogue spans do not prove Dovecot's multipart section length.
+		// The bounded download command obtains and verifies the authoritative literal size.
+		sizeUnknown := strings.HasPrefix(contentType, "multipart/")
+		if sizeUnknown {
+			size = 0
+		}
+		state.attachments = append(state.attachments, AttachmentReference{PartID: partID, Filename: filename, ContentType: contentType, Size: uint64(size), SizeUnknown: sizeUnknown})
 		return nil
 	}
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/") {

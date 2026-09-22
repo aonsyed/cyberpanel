@@ -12,6 +12,10 @@ import (
 )
 
 func TestWebmailAttachmentProjectionAndLeaseOwner(t *testing.T) {
+	unknown := apiWebmailRenderedMessage(securewebmail.RenderedMessage{Attachments: []securewebmail.AttachmentReference{{PartID: "3", Filename: "bundle.mime", ContentType: "multipart/mixed; boundary=nested", SizeUnknown: true}}})
+	if len(unknown.Attachments) != 1 || !unknown.Attachments[0].SizeUnknown || unknown.Attachments[0].Size != 0 {
+		t.Fatal("multipart unknown size lost at API boundary")
+	}
 	projected := apiWebmailRenderedMessage(securewebmail.RenderedMessage{Attachments: []securewebmail.AttachmentReference{{PartID: "2", Filename: "proof.bin", ContentType: "application/octet-stream", Size: 4}}})
 	if len(projected.Attachments) != 1 || projected.Attachments[0].PartID != "2" || projected.Attachments[0].Filename != "proof.bin" || projected.Attachments[0].ContentType != "application/octet-stream" || projected.Attachments[0].Size != 4 {
 		t.Fatal("attachment metadata lost at API boundary")

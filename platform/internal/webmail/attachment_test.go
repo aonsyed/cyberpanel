@@ -155,11 +155,31 @@ func TestContainerAttachmentMetadataIsOpaque(t *testing.T) {
 			t.Fatal(err)
 		}
 		expected := uint64(len(test.body))
-		if strings.HasPrefix(test.contentType, "multipart/") {
-			expected += 2
+		unknown := strings.HasPrefix(test.contentType, "multipart/")
+		if unknown {
+			expected = 0
 		}
-		if len(state.attachments) != 1 || state.attachments[0].Size != expected || state.attachments[0].ContentType != test.contentType || state.html != "" || state.plain != "" {
+		if len(state.attachments) != 1 || state.attachments[0].Size != expected || state.attachments[0].SizeUnknown != unknown || state.attachments[0].ContentType != test.contentType || state.html != "" || state.plain != "" {
 			t.Fatal("container bytes/metadata not retained opaquely")
 		}
+	}
+}
+
+func TestMultipartContainerFinalBoundaryVariants(t *testing.T) {
+	for _, suffix := range []string{"", "\r\n", "\r\nepilogue", "\r\nepilogue\r\n"} {
+		body := "--nested\r\nContent-Type: text/plain\r\n\r\ninner\r\n--nested--" + suffix
+		raw := "Content-Type: multipart/mixed; boundary=outer\r\n\r\n--outer\r\nContent-Type: multipart/mixed; boundary=nested\r\nContent-Disposition: attachment; filename=bundle.mime\r\n\r\n" + body + "\r\n--outer--\r\n"
+		message, err := mail.ReadMessage(bufio.NewReader(strings.NewReader(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := &renderedParts{}
+		if err := walkMIME(textproto.MIMEHeader(message.Header), message.Body, 0, state); err != nil {
+			t.Fatal(err)
+		}
+		if len(state.attachments) != 1 || !state.attachments[0].SizeUnknown || state.attachments[0].Size != 0 {
+			t.Fatal("guessed multipart native section size")
+		}
+		t.Logf("suffix %q: local MIME body %d bytes, projected size %d", suffix, len(body), state.attachments[0].Size)
 	}
 }

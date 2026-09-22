@@ -432,6 +432,7 @@ type AttachmentReference struct {
 	Filename    string
 	ContentType string
 	Size        uint64
+	SizeUnknown bool
 }
 
 type MessageReadRequest struct {

@@ -272,6 +272,7 @@ type WebmailAttachmentReference struct {
 	Filename    string `json:"filename"`
 	ContentType string `json:"content_type"`
 	Size        uint64 `json:"size"`
+	SizeUnknown bool   `json:"size_unknown,omitempty"`
 }
 type WebmailRemoteImageResult struct {
 	ContentType    string `json:"content_type"`
@@ -1203,7 +1204,7 @@ func apiWebmailSearchPage(value securewebmail.SearchPage) WebmailSearchPageResul
 func apiWebmailRenderedMessage(value securewebmail.RenderedMessage) WebmailRenderedMessageResult {
 	attachments := make([]WebmailAttachmentReference, len(value.Attachments))
 	for index, attachment := range value.Attachments {
-		attachments[index] = WebmailAttachmentReference{PartID: attachment.PartID, Filename: attachment.Filename, ContentType: attachment.ContentType, Size: attachment.Size}
+		attachments[index] = WebmailAttachmentReference{PartID: attachment.PartID, Filename: attachment.Filename, ContentType: attachment.ContentType, Size: attachment.Size, SizeUnknown: attachment.SizeUnknown}
 	}
 	images := make([]WebmailRemoteImageProjection, len(value.RemoteImages))
 	for index, image := range value.RemoteImages {
