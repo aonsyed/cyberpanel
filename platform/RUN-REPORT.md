@@ -5,6 +5,24 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed82 follow-through and next UI integration
+
+Normal retained79 restore plan restore_e153d3df359db8ab16ce422a93767bf9b64976ffade394e4
+reached active generation14. Worker observed current PHP pool restart, retired pool
+remaining stopped, and actual Joomla HTTP200. Parent inspected pool82.json active
+receipt and subsequent complete Joomla lifecycle evidence. Final Joomla lifecycle
+and preserved snapshot checks are recorded in JOOMLA-VERIFICATION-2026-09-22.md;
+parent inspected actual guest ownership/cleanup/HTTP/admin evidence before integration.
+No full backup DR or all-application completion claim follows.
+
+Discovery8f982b4d1 and vacation UIe40e39b24 integrated but not installed. QEMU
+API/webmail/webmaildata/core suites passed (core1.543s). Exact integrated UI archive
+passed actual APIClient browser-fixture lifecycle, stale-context,403/409/204 checks,
+typecheck and build; logs in /home/harness/lanes/database/vacation-e40e39b24-*.log.
+Parent independently built matching panel-CqgoKpNv.js/index-FTpcul8I.css in QEMU.
+This is fixture-browser evidence, not installed vacation delivery evidence.
+Guest4.3GiB and host192GiB free at this checkpoint; no downloads.
+
 ### Installed82 — source872457aef
 
 Signed qemu-workflow-3.1.81 sequence82 committed:
