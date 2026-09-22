@@ -1027,7 +1027,7 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 		response.Zone.Authority, err = server.Authority.ApplyZone(ctx, request.EffectID, *request.Zone, request.RecordSets, request.TransferPeers)
 		if err == nil {
 			response.Zone.DatabaseCommitted = true
-			response.Zone.Rediscover, err = server.Host.Rediscover(ctx)
+			response.Zone.Rediscover, err = server.Host.RediscoverZone(ctx, request.Zone.Name)
 			response.Zone.Rediscover = completePowerDNSRuntimeReceipt(response.Zone.Rediscover, PowerDNSRediscoverZones, err, response.ObservedAt)
 			var notifyErr error
 			if request.Zone.Mode == ZonePrimary {
@@ -1043,11 +1043,18 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 		deletion := ZoneSpec{ID: request.Delete.ID, TenantID: request.Delete.TenantID, Generation: request.Delete.Generation}
 		if request.Delete.Name != "" {
 			deletion.Name, _ = ParseName(request.Delete.Name)
+		} else {
+			stored, lookupErr := server.Authority.Zone(ctx, deletion.TenantID, deletion.ID)
+			if lookupErr != nil {
+				err = lookupErr
+				break
+			}
+			deletion.Name = stored.Name
 		}
 		response.Zone.Authority, err = server.Authority.DeleteZone(ctx, request.EffectID, deletion)
 		if err == nil {
 			response.Zone.DatabaseCommitted = true
-			response.Zone.Rediscover, err = server.Host.Rediscover(ctx)
+			response.Zone.Rediscover, err = server.Host.RediscoverZone(ctx, deletion.Name)
 			response.Zone.Rediscover = completePowerDNSRuntimeReceipt(response.Zone.Rediscover, PowerDNSRediscoverZones, err, response.ObservedAt)
 			var probeErr error
 			response.Zone.Probe, probeErr = server.Host.Probe(ctx)
@@ -1082,7 +1089,7 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 		response.Zone.Authority, err = server.Authority.ImportRecordSets(ctx, request.EffectID, *request.Zone, request.RecordSets, request.Replace)
 		if err == nil {
 			response.Zone.DatabaseCommitted = true
-			response.Zone.Rediscover, err = server.Host.Rediscover(ctx)
+			response.Zone.Rediscover, err = server.Host.RediscoverZone(ctx, request.Zone.Name)
 			response.Zone.Rediscover = completePowerDNSRuntimeReceipt(response.Zone.Rediscover, PowerDNSRediscoverZones, err, response.ObservedAt)
 			var notifyErr error
 			if request.Zone.Mode == ZonePrimary {

@@ -329,6 +329,19 @@ func (host *LinuxPowerDNSHost) Probe(ctx context.Context) (PowerDNSRuntimeReceip
 // after a secured database commit. The operation has no caller-controlled
 // executable, option, or path surface.
 func (host *LinuxPowerDNSHost) Rediscover(ctx context.Context) (PowerDNSRuntimeReceipt, error) {
+	return host.rediscover(ctx, "")
+}
+
+// RediscoverZone also invalidates cached answers beneath the committed zone.
+// Native rediscover alone discovers domains but does not refresh cached RRsets.
+func (host *LinuxPowerDNSHost) RediscoverZone(ctx context.Context, zone DNSName) (PowerDNSRuntimeReceipt, error) {
+	if !validPowerDNSZoneName(zone) {
+		return PowerDNSRuntimeReceipt{}, ErrInvalidDNS
+	}
+	return host.rediscover(ctx, zone.String()+"$")
+}
+
+func (host *LinuxPowerDNSHost) rediscover(ctx context.Context, purge string) (PowerDNSRuntimeReceipt, error) {
 	if host == nil || ctx == nil {
 		return PowerDNSRuntimeReceipt{}, ErrInvalidDNS
 	}
@@ -345,6 +358,10 @@ func (host *LinuxPowerDNSHost) Rediscover(ctx context.Context) (PowerDNSRuntimeR
 	}
 	output, err := runPowerDNSProcess(ctx, host.profile.pdnsControl, "rediscover")
 	receipt.EvidenceDigest = digestPowerDNSEvidence(string(output), powerDNSErrorText(err))
+	if err == nil && purge != "" {
+		output, err = runPowerDNSProcess(ctx, host.profile.pdnsControl, "purge", purge)
+		receipt.EvidenceDigest = digestPowerDNSEvidence(receipt.EvidenceDigest, string(output), powerDNSErrorText(err))
+	}
 	receipt.Success = err == nil
 	receipt.Healthy = err == nil
 	return receipt, err
