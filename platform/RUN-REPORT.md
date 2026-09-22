@@ -7,6 +7,32 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Resumed workflow checkpoint67 — 2026-09-22
 
+Latest74 qemu-workflow-3.1.73 (source61e40a55e) committed. Manifest
+29875cc903a6bc0aacd1b77b645db886a0fbe4737b23f57459f824af51535940;
+receipt d33c8e1de9f0a2fbd365ed43305df000b03163699373f7fb2b1bedd2b965fddf;
+bundle bb421c43e1be34984ea35af0901efda6d0f3d31648099e66d9adbd8ce222470a.
+All three live hashes equal built artifacts; services/OLS active, HTTPS200.
+Directory-to-directory exchange preserves current as a real directory; candidate
+and previous inode/device identities are journaled and checked on replay/health.
+Restored public ACLs reuse siteops' fd-only named-web-user grants; native proof
+checks cyberpanel-web can read public but not private/root files. Real-directory
+restore/rollback/corruption and affected combined suites pass. Installed final
+UI plan restore_aae5ec78e791664898c70cd9c44c1854fe64951da0feae1f reaches
+active/gen14: exact native HTTP200 marker bytes, text/NULL/BLOB SQL values,
+real current directory, site UID and cyberpanel-web public reads, web private
+read/traverse denial, healthy OLS/core/executor/gateway and panel HTTPS200.
+Parent inspected safe guest installed72.json verified74/apply receipts and
+independently fetched expected marker bytes HTTP200, checked directory type and
+service state. This qualifies explicit fuzzy local files+database normal capture
+and same-site restore on Ubuntu ARM64, NOT encryption/full-DR/other components.
+Original ambiguous/frozen unpromoted plan is preserved and unrecovered; its
+missing scoped pre-write proof remains a release gate. Fixture, verified point
+and recovery evidence retained. All six bounded workers have returned; no child
+workers or downloads. Matching host bundle retained; guest duplicate
+removed and staging pruned. Guest4.5GiB free. Unreferenced old releases52/53 moved
+to checksum-verified host copies before exact guest removal; active/previous and
+app/backup recovery material retained.
+
 Latest73 qemu-workflow-3.1.72 (source0d43c5857) committed. Manifest
 cf03c819822267f9b1b82b78312b0a99b51b13a2df525d08663e8800443432ad;
 receipt d4898a807a165657a9ed7275829b9fdb3fb4930a48492ed60397d41794ad2a52;

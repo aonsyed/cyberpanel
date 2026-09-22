@@ -13,15 +13,15 @@ Goal resumed by user; no change in full parity scope. Six newly authorized worke
 use isolated resume-20260922-{webmail,database,backup,apps,access,dns} worktrees,
 all based on d54ee9ce0. No child delegation, downloads or native-vendor changes.
 Parent integrates and verifies outputs. Shared existing Ubuntu ARM64 QEMU resumed
-without recreating its disk; latest guest4.7GiB free. All execution remains guest-only.
+without recreating its disk; latest guest4.5GiB free. All execution remains guest-only.
 
-Coordination phases: framing complete; fan-out active; aggregate verified commits;
-then report actual results. Native/browser mutations are exclusively scheduled by
+Coordination phases: framing/fan-out/aggregation complete for this bounded batch;
+all six workers returned. Full goal remains active and incomplete. Native/browser mutations are exclusively scheduled by
 parent; separate source trees /home/harness/lanes/<lane>/platform, shared offline
 Go cache. No worker may overwrite /home/harness/platform or install a release.
 Source/module completion is not claimed merely from an assigned task.
 
-CURRENT: signed73, qemu-workflow-3.1.72, source0d43c5857. Actual core/executor/
+CURRENT: signed74, qemu-workflow-3.1.73, source61e40a55e. Actual core/executor/
 gateway process hashes match all three rebuilt artifacts; HTTPS200 and all services
 active. Rebuilt panel-node-install applied72. Affected combined Go suites and the
 unchanged current UI typecheck/build passed in QEMU. RUN-REPORT has exact receipts.
@@ -50,8 +50,12 @@ Qualified installed journeys in this resumption:
   atomic directory-layout correction; native real-directory restore+rollback
   passes.73 new normal plan active with exact files/SQL and site UID access, but
   native HTTP404: allowSymbolLink0 rejects directory-to-symlink switch. Correct
-  directory-to-directory publication is in progress; no OLS policy relaxation.
-  No fully qualified installed restore or ambiguous-plan recovery claim yet.
+  directory-to-directory publication and public-only ACL restoration are now
+  installed74. Actual new UI plan active/gen14, native HTTP200 exact marker,
+  text/NULL/BLOB SQL exact, site/web UID public reads and private denial pass.
+  Parent independently checked HTTP bytes, directory type and healthy services.
+  Normal fuzzy local files+DB same-site restore is qualified; old ambiguous-plan
+  recovery, encryption, full DR and other components remain unqualified.
 
 These are bounded workflows, not full module or product parity. Earlier entries
 below are historical checkpoints; their obsolete NEXT blockers do not supersede
@@ -60,7 +64,7 @@ explicit corrections here and in RUN-REPORT; rough percentages are not re-scored
 
 Disk guard now reserves4GiB before release assembly/application and2GiB before
 builds/tests. Actual guard rejection and guest shell syntax checks passed. Known
-unreferenced obsolete releases15–17,21–27,48/49 are retained as checksum-matching
+unreferenced obsolete releases15–17,21–27,48/49,52/53 are retained as checksum-matching
 host copies before guest removal; active/previous and app recovery snapshots stay.
 
 Database view import is already implemented by 89f46f587; a fresh native run
@@ -79,6 +83,12 @@ stores raw objects. Encryption-domain/credential fields are metadata, not actual
 encryption. Authenticated encryption and wrong-key rejection remain implementation
 work. Backup worker also identified SQL source-name handling unsafe for cross-scope
 restore; preserve fail-closed behavior until safely mapped and verified.
+
+Next work must close existing specification gaps, not re-run these passing flows
+without a relevant change. In particular: safe ambiguous restore recovery and
+encryption; database replacement lifecycle/writer fencing; remaining installed
+app/access/deployment/migration/provider journeys; then multi-node/LSE/target-
+matrix and release security/recovery qualification. No full completion claim.
 
 ## Historical recovery point — 2026-09-21 (installed66; local mailbox delivery qualified)
 
