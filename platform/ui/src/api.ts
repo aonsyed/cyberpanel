@@ -9,7 +9,7 @@ export interface OperationDescription {
 }
 
 export interface CatalogResponse { api_version: string; operations: OperationDescription[] }
-export interface ResponseEnvelope<T> { api_version: string; request_id: string; operation: string; result: T; generation?: number; completed_at: string }
+export interface ResponseEnvelope<T> { api_version: string; request_id: string; operation: string; result: T; generation?: number; completed_at?: string }
 export interface Problem { type: string; title: string; status: number; code: string; detail?: string; request_id?: string; retry_after_seconds?: number }
 
 export class APIProblem extends Error {
@@ -55,6 +55,7 @@ export class APIClient {
     const deliveredCSRF = response.headers.get("X-CSRF-Token");
     if (deliveredCSRF) this.csrfToken = deliveredCSRF;
     if (!response.ok) throw await this.problem(response);
+    if (response.status === 204) return { api_version: "panel.cyberpanel.io/v1", request_id: requestID, operation, result: null as T };
     return await response.json() as ResponseEnvelope<T>;
   }
 
