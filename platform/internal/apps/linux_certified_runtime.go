@@ -270,11 +270,13 @@ func trustedApplicationExecutable(path string) error {
 }
 
 func applicationPHPBinary(runtimeID string) (string, error) {
+	// Installers need the selected package's CLI SAPI. The LSAPI server binary
+	// accepts neither our -d settings nor the auto_prepend_file bootstrap.
 	var binary string
 	switch runtimeID {
-	case "php82": binary = "/usr/local/lsws/lsphp82/bin/lsphp"
-	case "php83": binary = "/usr/local/lsws/lsphp83/bin/lsphp"
-	case "php84": binary = "/usr/local/lsws/lsphp84/bin/lsphp"
+	case "php82": binary = "/usr/local/lsws/lsphp82/bin/php"
+	case "php83": binary = "/usr/local/lsws/lsphp83/bin/php"
+	case "php84": binary = "/usr/local/lsws/lsphp84/bin/php"
 	default: return "", ErrUnsupported
 	}
 	if err := trustedApplicationExecutable(binary); err != nil { return "", err }
