@@ -17,6 +17,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/siteops"
+	"github.com/aonsyed/cyberpanel/platform/internal/hosting/provisioning"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/sqlrepo"
 )
@@ -68,7 +69,9 @@ func(edge *applicationEdge)InstallApplication(ctx context.Context,call apiserver
 	locale:=strings.TrimSpace(payload.Locale);if locale==""{locale="en_US"}
 	timezone:=strings.TrimSpace(payload.Timezone);if timezone==""{timezone="UTC"}
 	title:=strings.TrimSpace(payload.Title);if title==""{title=hostname}
-	request:=apps.InstallRequest{CommandID:apps.CommandID(call.CommandID),TenantID:tenantID,ProjectID:apps.ProjectID(aggregate.ProjectID().String()),SiteID:siteID,SiteUID:scope.SiteUID,SiteGeneration:scope.ResourceGeneration,IsolationProfile:scope.IsolationProfile,InstallationID:installationID,DatabaseInstanceID:apps.DatabaseInstanceID(payload.DatabaseInstanceID),Recipe:reference,CatalogTarget:target,Root:apps.MustRelativePath(""),RuntimeID:string(aggregate.PHPProfile()),CanonicalURL:"https://"+hostname+"/",Administrator:apps.AdministratorBootstrap{Username:payload.AdministratorUsername,Email:payload.AdministratorEmail,DisplayName:payload.AdministratorDisplayName,PasswordRef:apps.SecretRef(apps.ApplicationManagedSecretID("administrator",installationID).String())},Title:title,Locale:locale,Timezone:timezone,ReleaseID:releaseID}
+	spec:=provisioning.RuntimeSpec{}
+	root,err:=applicationServedRoot(spec.ApplicationRoot(),spec.DocumentRoot());if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err}
+	request:=apps.InstallRequest{CommandID:apps.CommandID(call.CommandID),TenantID:tenantID,ProjectID:apps.ProjectID(aggregate.ProjectID().String()),SiteID:siteID,SiteUID:scope.SiteUID,SiteGeneration:scope.ResourceGeneration,IsolationProfile:scope.IsolationProfile,InstallationID:installationID,DatabaseInstanceID:apps.DatabaseInstanceID(payload.DatabaseInstanceID),Recipe:reference,CatalogTarget:target,Root:root,RuntimeID:string(aggregate.PHPProfile()),CanonicalURL:"https://"+hostname+"/",Administrator:apps.AdministratorBootstrap{Username:payload.AdministratorUsername,Email:payload.AdministratorEmail,DisplayName:payload.AdministratorDisplayName,PasswordRef:apps.SecretRef(apps.ApplicationManagedSecretID("administrator",installationID).String())},Title:title,Locale:locale,Timezone:timezone,ReleaseID:releaseID}
 	if len(material.DatabaseClientCertificate)>0 { request.DatabaseClientIdentityRef=apps.SecretRef(apps.ApplicationManagedSecretID("database_tls",installationID).String()) }
 	if err:=request.Validate(edge.now());err!=nil { return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err }
 	administratorSecret,err:=edge.secrets.EnrollAdministratorSecret(ctx,tenantID,siteID,installationID,material.AdministratorPassword)
