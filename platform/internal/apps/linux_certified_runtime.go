@@ -720,6 +720,7 @@ func (runtime *LinuxApplicationRuntime) applyCertifiedApplicationUpdate(ctx cont
 	stage := linuxApplicationScope{binding: shadow.binding, root: stagePath}
 	committed := false
 	defer func() { if !committed { _ = os.RemoveAll(stagePath) } }()
+	if err := preserveCertifiedPublicAccess(currentScope, stage); err != nil { return ExecutionReceipt{}, err }
 	if err := runtime.extractPinnedApplicationArtifact(ctx, stage, execution.Definition.Artifact); err != nil { return ExecutionReceipt{}, err }
 	for _, relative := range certifiedApplicationPreservePaths(current.Kind) {
 		if err := runtime.copyApplicationPath(ctx, shadow, stage, relative, false); err != nil && !errors.Is(err, os.ErrNotExist) { return ExecutionReceipt{}, err }
