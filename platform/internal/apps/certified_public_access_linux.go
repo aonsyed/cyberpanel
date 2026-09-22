@@ -5,6 +5,9 @@ package apps
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"io"
+	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -45,9 +48,14 @@ func preserveCertifiedPublicAccess(current, stage linuxApplicationScope) error {
 	}
 	defer unix.Close(source)
 	var policy []byte
+	missing := 0
 	for _, name := range []string{"system.posix_acl_access", "system.posix_acl_default"} {
 		var value [44]byte
 		n, err := unix.Fgetxattr(source, name, value[:])
+		if errors.Is(err, unix.ENODATA) {
+			missing++
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -55,6 +63,40 @@ func preserveCertifiedPublicAccess(current, stage linuxApplicationScope) error {
 			return ErrPolicyDenied
 		}
 		if policy != nil && !bytes.Equal(policy, value[:]) {
+			return ErrPolicyDenied
+		}
+		policy = append([]byte(nil), value[:]...)
+	}
+	if missing != 0 {
+		if missing != 2 {
+			return ErrPolicyDenied
+		}
+		// A pre-fix failed install can leave an empty managed public root after
+		// normal removal. Recover only from the provisioned parent's exact
+		// traverse-only web policy; never reinterpret populated or foreign data.
+		duplicate, err := unix.Dup(source)
+		if err != nil {
+			return err
+		}
+		directory := os.NewFile(uintptr(duplicate), "empty-public")
+		entries, readErr := directory.ReadDir(1)
+		closeErr := directory.Close()
+		if len(entries) != 0 || !errors.Is(readErr, io.EOF) || closeErr != nil {
+			return ErrPolicyDenied
+		}
+		parent, err := open(filepath.Dir(current.root))
+		if err != nil {
+			return err
+		}
+		var value [44]byte
+		n, aclErr := unix.Fgetxattr(parent, "system.posix_acl_access", value[:])
+		unix.Close(parent)
+		if aclErr != nil || n != len(value) || binary.LittleEndian.Uint16(value[14:]) != 1 {
+			return ErrPolicyDenied
+		}
+		// The public policy differs solely in the named reader's read bit.
+		binary.LittleEndian.PutUint16(value[14:], 5)
+		if !validCertifiedPublicACL(value[:], uint32(webUID)) {
 			return ErrPolicyDenied
 		}
 		policy = append([]byte(nil), value[:]...)
