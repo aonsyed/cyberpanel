@@ -58,7 +58,7 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	dbname := id
 	siteRoot := filepath.Join("/var/lib/cyberpanel/sites", id)
 	generation := filepath.Join(siteRoot, "roots/g1")
-	release := filepath.Join(generation, "releases/original")
+	release := filepath.Join(generation, "releases/current")
 	runtimeRoot := filepath.Join(backup.LinuxBackupRuntimeRoot, id)
 	repoRoot := filepath.Join(DefaultLocalRepositoryRoot, id)
 	registry := filepath.Join("/var/lib/cyberpanel/database/databases", id+".json")
@@ -109,7 +109,6 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	mkdir(filepath.Join(generation, "private"), 0700)
 	write(filepath.Join(release, "index.txt"), "restored site bytes\n", 0640)
 	write(filepath.Join(generation, "private/secret.txt"), "private fixture bytes\n", 0600)
-	must(os.Symlink("original", filepath.Join(generation, "releases/current")))
 	const uid = 62001
 	for _, path := range []string{release, filepath.Join(release, "index.txt"), filepath.Join(generation, "private"), filepath.Join(generation, "private/secret.txt")} {
 		must(os.Chown(path, uid, uid))
@@ -132,8 +131,11 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 		}
 		return binding, nil
 	})}
-	repository, err := OpenLocalRepository(backup.RepositoryID(id), repoRoot)
+	// The fixture combines privileged host and provider in one root process.
+	// Production opens this boundary as panel-core, not as the root broker.
+	repositoryFD, err := syscall.Open(repoRoot, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	must(err)
+	repository := &LocalRepository{ID: backup.RepositoryID(id), Root: repoRoot, rootFD: repositoryFD}
 	defer repository.Close()
 	provider := &LocalProvider{Repositories: map[backup.RepositoryID]*LocalRepository{backup.RepositoryID(id): repository}, Source: host}
 	handle, err := sql.Open("sqlite", filepath.Join(runtimeRoot, "catalog.db"))
@@ -174,6 +176,21 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 		t.Errorf("restored database mismatch: %q", rows)
 	}
 	t.Log("restored native SQL text/NULL/BLOB rows and site/private bytes checked")
+	// Exercise the safety rollback after promotion from a provisioned directory.
+	_, err = host.FreezeTargetWrites(ctx, plan, string(plan.ID)+":rollback-freeze")
+	must(err)
+	rolledBack, err := coordinator.Rollback(ctx, plan, receipt)
+	must(err)
+	if rolledBack.Phase != backup.RestoreRolledBack {
+		t.Fatalf("rollback phase: %s", rolledBack.Phase)
+	}
+	if _, err := os.Stat(filepath.Join(generation, "releases/current/index.txt")); !os.IsNotExist(err) {
+		t.Fatalf("rollback did not restore removed-file safety snapshot: %v", err)
+	}
+	if rows := sqlCommand("SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_SCHEMA='" + dbname + "' AND TABLE_NAME='probe'"); rows != "0" {
+		t.Fatalf("rollback did not restore pre-restore SQL: %q", rows)
+	}
+	t.Log("actual-directory promotion and safety rollback verified")
 	object := run.Manifest.Artifacts[0].Objects[0]
 	blob := filepath.Join(repoRoot, objectPath(object))
 	file, err := os.OpenFile(blob, os.O_WRONLY, 0)
