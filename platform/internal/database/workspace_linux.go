@@ -53,6 +53,7 @@ func (executor *LinuxMariaDBExecutor) BrowseWorkspaceMetadata(ctx context.Contex
 		entries = append(entries, entry)
 	}
 	result := WorkspaceMetadataResult{Database: database.Name, Entries: entries, Truncated: query.Truncated}
+	result.ExportProgramObjectsAbsent = executor.checkExportProgramObjects(bounded, database) == nil
 	if err := validateWorkspaceMetadata(result, access); err != nil {
 		return WorkspaceMetadataResult{}, err
 	}

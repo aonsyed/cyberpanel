@@ -36,6 +36,29 @@ func (config liveTransferConfigs) TransferClientConfig(_ context.Context, job Tr
 	return TransferClientConfigDescriptor{Path: config.path, Token: config.token, Database: name, Direction: job.Direction, ReadOnly: job.Direction == TransferExport, Release: func() error { return nil }}, nil
 }
 
+type liveProgramRaceConfigs struct {
+	*LinuxWorkspaceExportConfigs
+	beforePublication func() error
+}
+
+func (config liveProgramRaceConfigs) TransferClientConfig(ctx context.Context, job TransferJob, name SQLIdentifier) (TransferClientConfigDescriptor, error) {
+	descriptor, err := config.LinuxWorkspaceExportConfigs.TransferClientConfig(ctx, job, name)
+	if err != nil {
+		return descriptor, err
+	}
+	check, calls := descriptor.checkExportSchema, 0
+	descriptor.checkExportSchema = func(ctx context.Context) error {
+		calls++
+		if calls == 2 {
+			if err := config.beforePublication(); err != nil {
+				return err
+			}
+		}
+		return check(ctx)
+	}
+	return descriptor, nil
+}
+
 func TestTransferAtomicRenameEngineBoundary(t *testing.T) {
 	for _, engine := range []string{"InnoDB", "MyISAM", "Aria"} {
 		if !atomicTransferRenameEngine(engine) {
@@ -61,7 +84,17 @@ func TestQEMUTransferNativeRoundTrip(t *testing.T) {
 	}
 }
 
-func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
+func TestQEMUTransferNativeProgramObjects(t *testing.T) {
+	if os.Getenv("CYBERPANEL_QEMU_LIVE_TRANSFER_OBJECTS") != "1" {
+		t.Skip("requires disposable QEMU MariaDB program-object qualification")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("requires root inside QEMU")
+	}
+	testQEMUTransferNativeRoundTrip(t, "InnoDB", true)
+}
+
+func testQEMUTransferNativeRoundTrip(t *testing.T, engine string, programObjects ...bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	random := make([]byte, 8)
@@ -82,6 +115,14 @@ func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
 		defer cancel()
 		if _, err := query(cleanup, "DROP DATABASE IF EXISTS `"+source.String()+"`; DROP DATABASE IF EXISTS `"+target.String()+"`;"); err != nil {
 			t.Error("fixture database cleanup failed")
+		}
+		if len(programObjects) > 0 {
+			remaining, err := query(cleanup, "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME IN ('"+source.String()+"','"+target.String()+"');")
+			if err != nil || remaining != "0" {
+				t.Error("program fixture cleanup incomplete", remaining, err)
+			} else {
+				t.Log("program fixture schemas removed", source.String(), target.String())
+			}
 		}
 	}()
 	if _, err := query(ctx, "CREATE DATABASE `"+source.String()+"`; CREATE DATABASE `"+target.String()+"`; CREATE TABLE `"+source.String()+"`.sample(id INT PRIMARY KEY, body TEXT, raw_bytes BLOB) ENGINE="+engine+"; INSERT INTO `"+source.String()+"`.sample VALUES(1,'transfer round trip',X'0001FF'),(2,NULL,NULL);"); err != nil {
@@ -171,6 +212,41 @@ func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
 			exportClient := liveExportBroker(t, ctx, exportConfigs.executor)
 			coordinator := NewCoordinator(liveExportRepository{executor: exportConfigs.executor}, exportClient, liveExportClock{})
 			call := WorkspaceCall{TenantID: tenant, SiteID: siteID, SessionID: exportConfigs.access.SessionID, SessionGeneration: exportConfigs.access.SessionGeneration}
+			if len(programObjects) > 0 {
+				objects := []struct{ kind, create, drop string }{
+					{"trigger", "CREATE TRIGGER `" + source.String() + "`.sample_insert BEFORE INSERT ON `" + source.String() + "`.sample FOR EACH ROW SET NEW.body=CONCAT('trigger:',NEW.body)", "DROP TRIGGER `" + source.String() + "`.sample_insert"},
+					{"procedure", "CREATE PROCEDURE `" + source.String() + "`.sample_procedure() SQL SECURITY INVOKER SELECT 7", "DROP PROCEDURE `" + source.String() + "`.sample_procedure"},
+					{"function", "CREATE FUNCTION `" + source.String() + "`.sample_function() RETURNS INT DETERMINISTIC SQL SECURITY INVOKER RETURN 7", "DROP FUNCTION `" + source.String() + "`.sample_function"},
+					{"disabled event", "CREATE EVENT `" + source.String() + "`.sample_event ON SCHEDULE EVERY 1 DAY DISABLE DO SET @fixture_event=1", "DROP EVENT `" + source.String() + "`.sample_event"},
+				}
+				for _, object := range objects {
+					if _, err = query(ctx, object.create+";"); err != nil {
+						t.Fatal(object.kind, err)
+					}
+					defer func() { _, _ = query(ctx, object.drop+";") }()
+					_, previewErr := coordinator.PrepareWorkspaceExport(ctx, call, "fixture-user", "unsupported-"+string(compression), WorkspaceExportOptions{Compression: compression, Selection: TransferSelection{Schema: true, Data: true}})
+					if !errors.Is(previewErr, ErrTransferUnsupportedObjects) {
+						t.Fatal("program-object preview accepted", object.kind, previewErr)
+					}
+					denied := job
+					denied.ID = id("blocked-" + strings.ReplaceAll(object.kind, " ", "-") + "-" + string(compression))
+					denied.IdempotencyKey = denied.ID.String()
+					destination := WorkspaceExportArtifact(denied)
+					denied.Destination = &destination
+					denied, err = SealTransferJob(denied)
+					if err != nil {
+						t.Fatal(err)
+					}
+					result, runErr := exportClient.ExportWorkspaceDatabase(ctx, WorkspaceExportRequest{Access: exportConfigs.access, Job: denied})
+					if !errors.Is(runErr, ErrTransferUnsupportedObjects) || result.Artifact != nil {
+						t.Fatal("program-object export accepted", object.kind, runErr)
+					}
+					t.Log("preview and export denied unsupported", object.kind)
+					if _, err = query(ctx, object.drop+";"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			job, err = coordinator.PrepareWorkspaceExport(ctx, call, "fixture-user", "prepare-"+string(compression), WorkspaceExportOptions{Compression: compression, Selection: TransferSelection{Schema: true, Data: true}})
 			if err != nil {
 				t.Fatal("prepare export", err)
@@ -195,6 +271,29 @@ func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
 				}
 			})
 			request := WorkspaceExportRequest{Access: exportConfigs.access, Job: job}
+			if len(programObjects) > 0 {
+				created := false
+				raceConfigs := liveProgramRaceConfigs{LinuxWorkspaceExportConfigs: exportConfigs, beforePublication: func() error {
+					created = true
+					_, err := query(ctx, "CREATE EVENT `"+source.String()+"`.during_dump ON SCHEDULE EVERY 1 DAY DISABLE DO SET @fixture_event=1;")
+					return err
+				}}
+				raced, err := NewLinuxTransferBackend(store, raceConfigs, time.Now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, exportErr := raced.Export(ctx, job, source, func(TransferStreamProgress) error { return nil })
+				if !created || !errors.Is(exportErr, ErrTransferUnsupportedObjects) || result.Artifact != nil {
+					t.Fatal("object created during dump was published", exportErr)
+				}
+				if _, err = os.Lstat(preparedPath); !os.IsNotExist(err) {
+					t.Fatal("rejected dump left published artifact", err)
+				}
+				if _, err = query(ctx, "DROP EVENT `"+source.String()+"`.during_dump;"); err != nil {
+					t.Fatal(err)
+				}
+				t.Log("native object introduced at pre-commit boundary denied artifact publication")
+			}
 			if _, err = coordinator.RunWorkspaceExport(ctx, call, "different-actor", job); err == nil {
 				t.Fatal("different actor accepted")
 			}
@@ -290,6 +389,10 @@ func testQEMUTransferNativeRoundTrip(t *testing.T, engine string) {
 			got, err := query(ctx, "SELECT CONCAT(id,':',COALESCE(body,'NULL'),':',COALESCE(HEX(raw_bytes),'NULL')) FROM `"+target.String()+"`.sample ORDER BY id;")
 			if err != nil || got != "1:transfer round trip:0001FF\n2:NULL:NULL" {
 				t.Fatalf("round trip contents differ: %q %v", got, err)
+			}
+			if len(programObjects) > 0 {
+				t.Log("ordinary table/view native export and exact rows remain supported", compression)
+				return
 			}
 			verifyOrdinaryNativeImports(t, ctx, store, backend, job, target, query, exportConfigs.executor)
 			verifyIsolatedNativeImport(t, ctx, exportConfigs.executor, store, job, query)

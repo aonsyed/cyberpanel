@@ -37,6 +37,7 @@ func (coordinator Coordinator) PrepareWorkspaceExport(ctx context.Context, call 
 	if metadata.Truncated {
 		return TransferJob{}, ErrTransferLimit
 	}
+	if options.Selection.Schema && !metadata.ExportProgramObjectsAbsent { return TransferJob{}, ErrTransferUnsupportedObjects }
 	selected := map[string]bool{}
 	for _, table := range options.Selection.Tables {
 		selected[table.String()] = false

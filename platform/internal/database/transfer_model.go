@@ -16,6 +16,7 @@ var (
 	ErrTransferStale      = errors.New("database transfer state is stale")
 	ErrTransferLimit      = errors.New("database transfer limit exceeded")
 	ErrTransferUnsafeSQL  = errors.New("database transfer contains unsafe SQL")
+	ErrTransferUnsupportedObjects = errors.New("database export cannot preserve routines, triggers, or events, or verify complete schema-object visibility")
 	ErrTransferCancelled  = errors.New("database transfer cancelled at a safe point")
 )
 

@@ -98,6 +98,8 @@ type WorkspaceMetadataResult struct {
 	Database  SQLIdentifier             `json:"database"`
 	Entries   []WorkspaceMetadataEntry  `json:"entries"`
 	Truncated bool                      `json:"truncated"`
+	// True only after a complete privileged catalog proves no omitted program objects.
+	ExportProgramObjectsAbsent bool    `json:"export_program_objects_absent"`
 }
 
 type WorkspaceService interface {

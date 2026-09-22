@@ -384,7 +384,7 @@ func validBrokerRequestID(value string) bool {
 
 func validBrokerFailure(value string) bool {
 	switch value {
-	case "invalid_request", "unauthorized", "not_found", "conflict", "deadline", "unavailable", "internal", "ambiguous", "transfer_limit":
+	case "invalid_request", "unauthorized", "not_found", "conflict", "deadline", "unavailable", "internal", "ambiguous", "transfer_limit", "transfer_unsupported_objects":
 		return true
 	default:
 		return false
@@ -879,6 +879,7 @@ func readDatabaseBrokerFrameLimit(reader io.Reader, target any, maximum uint32) 
 
 func classifyBrokerFailure(err error) string {
 	switch {
+	case errors.Is(err, ErrTransferUnsupportedObjects): return "transfer_unsupported_objects"
 	case errors.Is(err, ErrTransferLimit): return "transfer_limit"
 	case errors.Is(err, ErrTransferCancelled): return "deadline"
 	case errors.Is(err, ErrTransferStale): return "conflict"
@@ -897,6 +898,7 @@ func classifyBrokerFailure(err error) string {
 
 func brokerFailure(code string) error {
 	switch code {
+	case "transfer_unsupported_objects": return ErrTransferUnsupportedObjects
 	case "transfer_limit": return ErrTransferLimit
 	case "invalid_request": return ErrInvalidCommand
 	case "unauthorized": return ErrUnauthorized

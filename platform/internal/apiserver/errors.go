@@ -64,6 +64,8 @@ func classifyError(err error, requestID string) Problem {
 	}
 	var prerequisite *containerApplicationPrerequisiteError
 	if errors.As(err, &prerequisite) { problem.Detail = prerequisite.detail }
+	var exportObjects *databaseExportUnsupportedObjectsError
+	if errors.As(err, &exportObjects) { problem.Detail = exportObjects.Error() }
 	return problem
 }
 
