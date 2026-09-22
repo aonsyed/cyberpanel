@@ -27,6 +27,7 @@ const (
 type ManageSieveCredentials struct {
 	Username string
 	Secret   []byte
+	OAuthBearer bool
 }
 
 type ManageSieveCredentialProvider interface {
@@ -129,6 +130,7 @@ func (adapter *LocalManageSieveAdapter) connect(ctx context.Context, scope Scope
 	if err != nil { return nil, err }
 	defer wipeManageSieveSecret(credentials.Secret)
 	if credentials.Username == "" || len(credentials.Username) > 254 || strings.ContainsAny(credentials.Username, "\x00\r\n") || len(credentials.Secret) == 0 || len(credentials.Secret) > 16<<10 { return nil, ErrInvalid }
+	for _, character := range credentials.Username { if character < 32 || character == 127 { return nil, ErrInvalid } }
 	dialer := net.Dialer{Timeout: adapter.timeout()}
 	connection, err := dialer.DialContext(ctx, "unix", adapter.UnixSocket)
 	if err != nil { return nil, err }
@@ -138,10 +140,19 @@ func (adapter *LocalManageSieveAdapter) connect(ctx context.Context, scope Scope
 	if _, err = client.readResponse(); err != nil { client.close(); return nil, err }
 	capabilities, err := client.capabilities()
 	if err != nil { client.close(); return nil, err }
-	if !capabilities["SIEVE"] || !capabilities["SASL:PLAIN"] { client.close(); return nil, ErrActivation }
+	mechanism := "PLAIN"
+	if credentials.OAuthBearer { mechanism = "OAUTHBEARER" }
+	if !capabilities["SIEVE"] || !capabilities["SASL:"+mechanism] { client.close(); return nil, ErrActivation }
 	authentication := append([]byte{0}, []byte(credentials.Username)...); authentication = append(authentication, 0); authentication = append(authentication, credentials.Secret...)
+	if credentials.OAuthBearer {
+		wipeManageSieveSecret(authentication)
+		if strings.ContainsAny(credentials.Username, "\x01\x7f") { client.close(); return nil, ErrInvalid }
+		username := strings.NewReplacer("=", "=3D", ",", "=2C").Replace(credentials.Username)
+		authentication = append([]byte("n,a="+username+",\x01auth=Bearer "), credentials.Secret...)
+		authentication = append(authentication, 1, 1)
+	}
 	encoded := base64.StdEncoding.EncodeToString(authentication); wipeManageSieveSecret(authentication)
-	_, err = client.command(`AUTHENTICATE "PLAIN" "` + encoded + `"`)
+	_, err = client.command(`AUTHENTICATE "` + mechanism + `" "` + encoded + `"`)
 	if err != nil { client.close(); return nil, ErrUnauthorized }
 	return client, nil
 }
@@ -216,7 +227,17 @@ func (client *manageSieveClient) readResponse() ([]string, error) {
 	for count := 0; count < maximumManageSieveLines; count++ {
 		line, err := client.readLine(); if err != nil { return nil, err }
 		total += len(line); if total > maximumManageSieveResponse { return nil, ErrLimit }
-		if status, statusErr := manageSieveStatus(line); status { return lines, statusErr }
+		if status, statusErr := manageSieveStatus(line); status {
+			// The terminal diagnostic may be a literal, including OK (WARNINGS).
+			// Drain it without treating diagnostic text as another command response.
+			if start:=strings.LastIndex(line," {");start>=0&&strings.HasSuffix(line,"}") {
+				size,parseErr:=strconv.Atoi(line[start+2:len(line)-1])
+				if parseErr!=nil||size<0||size>maximumManageSieveResponse-total {return nil,ErrLimit}
+				body:=make([]byte,size+2);if _,err=io.ReadFull(client.reader,body);err!=nil{return nil,err}
+				if string(body[size:])!="\r\n" {return nil,ErrIntegrity}
+			}
+			return lines, statusErr
+		}
 		lines = append(lines, line)
 	}
 	return nil, ErrLimit

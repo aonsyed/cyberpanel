@@ -299,6 +299,7 @@ func NormalizePreferences(value WebmailPreferences) (WebmailPreferences, error) 
 type CanonicalVacationReference struct {
 	RuleID     maildata.AutoresponderID `json:"rule_id"`
 	Generation uint64                   `json:"generation"`
+	ProgramDigest string `json:"program_digest,omitempty"`
 }
 
 func (value CanonicalVacationReference) Valid() bool {

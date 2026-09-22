@@ -235,10 +235,6 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if auditService == nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize webmail runtime: audit authority is unavailable")
 	}
-	webmailDataService, err := assembleWebmailDataService(ctx, repositories.ControlDB, repositories.MailControl, identityStore, auditService, mailHostname)
-	if err != nil {
-		return apiserver.DomainServices{}, fmt.Errorf("initialize webmail data runtime: %w", err)
-	}
 	webmailRepository, err := securewebmail.NewSQLiteRepository(repositories.ControlDB)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("open secure webmail repository: %w", err)
@@ -272,6 +268,8 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err = bootstrapWebmailDovecotTokens(ctx, repositories.ControlDB); err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("bootstrap Dovecot token bridge: %w", err)
 	}
+	webmailDataService, err := assembleWebmailDataService(ctx, repositories.ControlDB, repositories.MailControl, identityStore, auditService, mailHostname, secureWebmailService, webmailRepository)
+	if err != nil { return apiserver.DomainServices{}, fmt.Errorf("initialize webmail data runtime: %w", err) }
 	if err = serveWebmailTokenInfo(ctx, repositories.ControlDB, repositories.MailControl); err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("start Dovecot token introspection: %w", err)
 	}

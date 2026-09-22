@@ -13,31 +13,41 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/audit"
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
+	securewebmail "github.com/aonsyed/cyberpanel/platform/internal/webmail"
 	"github.com/aonsyed/cyberpanel/platform/internal/webmaildata"
 )
 
 const localManageSieveSocket = "/run/dovecot/cyberpanel-managesieve"
 
 type localManageSieveCredentials struct {
-	directory mail.SQLWebmailDirectory
+	authority  webmailDataAuthority
+	service    *securewebmail.Service
+	repository *securewebmail.SQLiteRepository
+	directory  secureWebmailDirectory
 }
 
 func (provider localManageSieveCredentials) CredentialsForManageSieve(ctx context.Context, scope webmaildata.Scope) (webmaildata.ManageSieveCredentials, error) {
-	if ctx == nil || !scope.Valid() {
+	if ctx == nil || !scope.Valid() || provider.service == nil || provider.repository == nil {
 		return webmaildata.ManageSieveCredentials{}, webmaildata.ErrInvalid
 	}
-	binding, err := provider.directory.ResolveWebmailBinding(ctx, scope.TenantID, mail.MailboxID(scope.MailboxID))
+	if err := provider.authority.authorize(ctx, scope.UserID, scope, identity.AssuranceMFA); err != nil {
+		return webmaildata.ManageSieveCredentials{}, err
+	}
+	principal := securewebmail.Principal{UserID: scope.UserID, SessionID: "managesieve"}
+	binding, err := provider.directory.AuthorizeMailbox(ctx, principal, scope.TenantID, scope.MailboxID)
 	if err != nil {
 		return webmaildata.ManageSieveCredentials{}, err
 	}
-	credential, err := mail.LoadWebmailMasterCredential(mail.WebmailMasterCredentialPath)
+	grant, err := provider.service.IssueGrant(ctx, principal, scope.TenantID, scope.MailboxID, "managesieve")
 	if err != nil {
 		return webmaildata.ManageSieveCredentials{}, err
 	}
-	return webmaildata.ManageSieveCredentials{
-		Username: string(binding.Address) + "*" + credential.Username,
-		Secret:   credential.Secret,
-	}, nil
+	digest := sha256.Sum256([]byte(grant.Token))
+	claims := securewebmail.GrantClaims{TenantID: scope.TenantID, UserID: scope.UserID, SessionID: principal.SessionID, MailboxID: scope.MailboxID, Audience: "cyberpanel-webmail", AuthorizationEpoch: binding.AuthorizationEpoch}
+	if err = provider.repository.ConsumeGrant(ctx, hex.EncodeToString(digest[:]), claims, time.Now().UTC()); err != nil {
+		return webmaildata.ManageSieveCredentials{}, err
+	}
+	return webmaildata.ManageSieveCredentials{Username: binding.AddressLabel, Secret: []byte(grant.Token), OAuthBearer: true}, nil
 }
 
 type webmailDataAuthority struct {
@@ -133,7 +143,7 @@ func (sink webmailDataAudit) RecordWebmailData(ctx context.Context, event webmai
 	return err
 }
 
-func assembleWebmailDataService(ctx context.Context, database *sql.DB, mailStore mail.SQLControlRepository, identityStore *identity.Store, auditService *audit.Service, hostname string) (*webmaildata.Service, error) {
+func assembleWebmailDataService(ctx context.Context, database *sql.DB, mailStore mail.SQLControlRepository, identityStore *identity.Store, auditService *audit.Service, hostname string, grants *securewebmail.Service, grantRepository *securewebmail.SQLiteRepository) (*webmaildata.Service, error) {
 	repository, err := webmaildata.NewSQLiteRepository(database)
 	if err != nil {
 		return nil, err
@@ -147,17 +157,27 @@ func assembleWebmailDataService(ctx context.Context, database *sql.DB, mailStore
 	}
 	directory := mail.SQLWebmailDirectory{Store: mailStore, ServerName: hostname}
 	authority := webmailDataAuthority{authorizer: authorizer, store: identityStore, directory: directory, now: runtimeClock{}.Now}
-	return &webmaildata.Service{
+	service := &webmaildata.Service{
 		Repository: repository,
 		Authorizer: authority,
 		StepUp:     authority,
 		Audit:      webmailDataAudit{writer: auditService.Writer},
 		SieveRuntime: &webmaildata.LocalManageSieveAdapter{
 			UnixSocket:  localManageSieveSocket,
-			Credentials: localManageSieveCredentials{directory: directory},
+			Credentials: localManageSieveCredentials{authority: authority, service: grants, repository: grantRepository, directory: secureWebmailDirectory{store: mailStore}},
 		},
 		Now: runtimeClock{}.Now,
-	}, nil
+	}
+	vacationRepository, err := mail.NewSQLAutoresponderRepository(database)
+	if err != nil {
+		return nil, err
+	}
+	if err = vacationRepository.Bootstrap(ctx); err != nil {
+		return nil, err
+	}
+	vacations := &localVacationLifecycle{repository: vacationRepository, store: mailStore, authority: authority, audit: webmailDataAudit{writer: auditService.Writer}, data: service, native: service.SieveRuntime.(*webmaildata.LocalManageSieveAdapter)}
+	service.Vacations, service.Autoresponders = vacations, vacations
+	return service, nil
 }
 
 var _ webmaildata.ManageSieveCredentialProvider = localManageSieveCredentials{}

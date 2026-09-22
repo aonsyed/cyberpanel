@@ -437,6 +437,10 @@ func (repository *SQLiteRepository) ActiveSieve(ctx context.Context, scope Scope
 }
 
 func (repository *SQLiteRepository) ActivateSieveCAS(ctx context.Context, desired SieveActivation, expectedDigest string) error {
+	if desired.Scope.Valid() && desired.Generation==0 && desired.Digest=="" && validDigest(expectedDigest) {
+		result,err:=repository.db.ExecContext(ctx,`DELETE FROM webmail_sieve_active_v1 WHERE tenant_id=? AND user_id=? AND mailbox_id=? AND digest=?`,desired.Scope.TenantID,desired.Scope.UserID,desired.Scope.MailboxID,expectedDigest)
+		if err!=nil{return err};return requireChanged(result)
+	}
 	if !desired.Scope.Valid() || desired.Generation == 0 || !validDigest(desired.Digest) || desired.UpdatedAt.IsZero() || expectedDigest != "" && !validDigest(expectedDigest) { return ErrInvalid }
 	if expectedDigest == "" {
 		_, err := repository.db.ExecContext(ctx, `INSERT INTO webmail_sieve_active_v1(tenant_id,user_id,mailbox_id,generation,digest,updated_at) VALUES(?,?,?,?,?,?)`, desired.Scope.TenantID, desired.Scope.UserID, desired.Scope.MailboxID, desired.Generation, desired.Digest, dbTime(desired.UpdatedAt))

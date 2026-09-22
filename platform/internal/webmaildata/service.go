@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"sync"
 	"time"
 
 	maildata "github.com/aonsyed/cyberpanel/platform/internal/mail"
@@ -106,6 +107,7 @@ type Repository interface {
 }
 
 type Service struct {
+	sieveLocks [64]sync.Mutex
 	Repository      Repository
 	Authorizer      Authorizer
 	StepUp          StepUpVerifier
@@ -415,6 +417,7 @@ func (service *Service) vacationCall(call Call, request VacationRequest) maildat
 
 func (service *Service) SaveSieveRule(ctx context.Context, call Call, rule SieveRule, expected uint64) (SieveRule, SieveActivation, error) {
 	if err := service.sieveReady(call); err != nil { return SieveRule{}, SieveActivation{}, err }
+	unlock:=service.LockSieveMailbox(call.Scope);defer unlock()
 	rule.Scope = call.Scope; rule.Revision = expected+1; rule.UpdatedAt = service.now()
 	normalized, err := NormalizeSieveRule(rule)
 	if err != nil { return SieveRule{}, SieveActivation{}, err }
@@ -435,6 +438,7 @@ func (service *Service) SaveSieveRule(ctx context.Context, call Call, rule Sieve
 
 func (service *Service) SubmitExpertSieve(ctx context.Context, call Call, text string, expected map[string]uint64) ([]SieveRule, SieveActivation, error) {
 	if err := service.sieveReady(call); err != nil || service.ExpertParser == nil { if err != nil { return nil, SieveActivation{}, err }; return nil, SieveActivation{}, ErrInvalid }
+	unlock:=service.LockSieveMailbox(call.Scope);defer unlock()
 	rules, err := ParseExpertSieve(ctx, service.ExpertParser, call.Scope, text)
 	if err != nil { return nil, SieveActivation{}, err }
 	now := service.now()
@@ -457,6 +461,7 @@ func (service *Service) SubmitExpertSieve(ctx context.Context, call Call, text s
 
 func (service *Service) DeleteSieveRule(ctx context.Context, call Call, id string, expected uint64) (SieveActivation, error) {
 	if err := service.sieveReady(call); err != nil { return SieveActivation{}, err }
+	unlock:=service.LockSieveMailbox(call.Scope);defer unlock()
 	current, err := service.Repository.GetSieveRule(ctx, call.Scope, id)
 	if err != nil { return SieveActivation{}, err }
 	if current.Revision != expected { return SieveActivation{}, ErrConflict }
@@ -483,6 +488,7 @@ func (service *Service) SetSieveRuleEnabled(ctx context.Context, call Call, id s
 
 func (service *Service) ReorderSieveRules(ctx context.Context, call Call, orderedIDs []string, expected map[string]uint64) (SieveActivation, error) {
 	if err := service.sieveReady(call); err != nil { return SieveActivation{}, err }
+	unlock:=service.LockSieveMailbox(call.Scope);defer unlock()
 	rules, err := service.Repository.ListSieveRules(ctx, call.Scope)
 	if err != nil { return SieveActivation{}, err }
 	if len(orderedIDs) != len(rules) || len(orderedIDs) > MaximumSieveRules { return SieveActivation{}, ErrInvalid }
@@ -525,8 +531,13 @@ func (service *Service) activateSieve(ctx context.Context, call Call) (SieveActi
 	if err != nil { return SieveActivation{}, err }
 	program, err := CompileSieveProgram(call.Scope, generation, rules, service.now())
 	if err != nil { return SieveActivation{}, err }
+	return service.activateSieveProgram(ctx, call, program)
+}
+
+func (service *Service) activateSieveProgram(ctx context.Context, call Call, program SieveProgram, expected ...SieveActivation) (SieveActivation, error) {
 	active, err := service.Repository.ActiveSieve(ctx, call.Scope)
 	if err != nil { return SieveActivation{}, err }
+	if len(expected)>0 && (active.Generation!=expected[0].Generation || active.Digest!=expected[0].Digest) { return SieveActivation{}, ErrConflict }
 	if err = service.Repository.StageSieveGeneration(ctx, program); err != nil { return SieveActivation{}, err }
 	stage, err := service.SieveRuntime.Stage(ctx, ManageSieveStageRequest{OperationID: call.OperationID, Program: program})
 	if err != nil || !validStageReceipt(stage, call, program) { return SieveActivation{}, errors.Join(ErrActivation, err) }
@@ -612,6 +623,7 @@ type RestoreRequest struct { Call Call; Reader io.ReadSeeker; Manifest BackupMan
 func (service *Service) RestoreSettingsBackup(ctx context.Context, request RestoreRequest) error {
 	if err := service.ready(request.Call); err != nil || request.Reader == nil || request.Manifest.Schema != "webmail-settings/v1" || request.Manifest.Scope != request.Call.Scope || request.Manifest.Objects < 0 || request.Manifest.Objects > MaximumBackupObjects || request.Manifest.Bytes < 0 || request.Manifest.Bytes > MaximumBackupBytes || !validDigest(request.Manifest.Digest) || !validDigest(request.Manifest.BindingDigest) || request.Manifest.BindingDigest != backupManifestBinding(request.Manifest) || !validDigest(request.Manifest.SourcePreconditions.ContactsGenerationDigest) || !validDigest(request.Manifest.SourcePreconditions.GroupsGenerationDigest) || (request.Manifest.SourcePreconditions.ActiveSieveGeneration == 0) != (request.Manifest.SourcePreconditions.ActiveSieveDigest == "") || request.Manifest.SourcePreconditions.ActiveSieveDigest != "" && !validDigest(request.Manifest.SourcePreconditions.ActiveSieveDigest) || request.Manifest.Counts["identity"] > MaximumIdentities || request.Mode != RestoreCreateOnly && request.Mode != RestoreReconcile && request.Mode != RestoreMigrate { if err != nil { return err }; return ErrInvalid }
 	operation := OperationBackupRestore; if request.Mode == RestoreMigrate { operation = OperationBackupMigrate }
+	unlock:=service.LockSieveMailbox(request.Call.Scope);defer unlock()
 	if err := service.authorize(ctx, request.Call, operation, "manifest", true); err != nil { return err }
 	currentPreconditions, err := service.currentBackupPreconditions(ctx, request.Call.Scope)
 	if err != nil { return err }
@@ -733,6 +745,9 @@ func (service *Service) validateVacation(ctx context.Context, rule SieveRule) er
 	resolved, err := service.Autoresponders.ResolveAutoresponder(ctx, rule.Scope, rule.CanonicalVacation.RuleID, rule.CanonicalVacation.Generation)
 	if err != nil { return err }
 	if resolved.TenantID != rule.Scope.TenantID || string(resolved.MailboxID) != rule.Scope.MailboxID || resolved.ID != rule.CanonicalVacation.RuleID || resolved.Generation != rule.CanonicalVacation.Generation || resolved.State == maildata.AutoresponderDeleted { return ErrIntegrity }
+	program, err := maildata.CompileAutoresponderSieve(resolved)
+	if err != nil || rule.CanonicalVacation.ProgramDigest != "" && rule.CanonicalVacation.ProgramDigest != program.Digest { return ErrIntegrity }
+	rule.CanonicalVacation.ProgramDigest = program.Digest
 	return nil
 }
 

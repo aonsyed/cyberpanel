@@ -559,6 +559,8 @@ plugin {
   quota_vsizes = yes
   quota_rule = *:storage=0
   sieve = file:~/sieve;active=~/.dovecot.sieve
+  sieve_extensions = +vacation-seconds
+  sieve_vacation_min_period = 1h
 }
 postmaster_address = %s
 `, snapshot.Postmaster)
