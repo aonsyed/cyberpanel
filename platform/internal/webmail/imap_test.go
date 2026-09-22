@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -58,7 +59,7 @@ func TestIMAPNegotiatesAuthenticatedCapabilities(t *testing.T) {
 				}
 				finished <- nil
 			}()
-			client, err := dialIMAP(context.Background(), Endpoint{UnixSocket: path, DialTimeout: time.Second, CommandTimeout: time.Second}, strings.Repeat("x", 32))
+			client, err := dialIMAP(context.Background(), Endpoint{UnixSocket: path, DialTimeout: time.Second, CommandTimeout: time.Second, OAuthAuthzID: func(context.Context, string) (string, error) { return "qa@example.invalid", nil }}, strings.Repeat("x", 32))
 			if client != nil {
 				client.stop()
 				client.connection.Close()
@@ -70,6 +71,22 @@ func TestIMAPNegotiatesAuthenticatedCapabilities(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestOAuthBearerAuthzIDEscaping(t *testing.T) {
+	encoded, err := oauthBearerInitialResponse("a=b,c@example.invalid", strings.Repeat("x", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || string(decoded) != "n,a=a=3Db=2Cc@example.invalid,\x01auth=Bearer "+strings.Repeat("x", 32)+"\x01\x01" {
+		t.Fatal("invalid GS2 escaping")
+	}
+	for _, username := range []string{"", "bad\x01@example.invalid", "bad\r\n@example.invalid", "bad\x7f@example.invalid"} {
+		if _, err := oauthBearerInitialResponse(username, strings.Repeat("x", 32)); err == nil {
+			t.Fatal("invalid authzid accepted")
+		}
 	}
 }
 

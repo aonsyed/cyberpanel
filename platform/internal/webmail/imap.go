@@ -32,6 +32,7 @@ type Endpoint struct {
 	TLSServerName string
 	TLSConfig    *tls.Config
 	TLSConfigForConnection func() (*tls.Config, error)
+	OAuthAuthzID func(context.Context, string) (string, error)
 	DialTimeout  time.Duration
 	CommandTimeout time.Duration
 }
@@ -117,7 +118,20 @@ func dialIMAP(ctx context.Context, endpoint Endpoint, bearer string) (*imapClien
 		connection.Close()
 		return nil, ErrUnavailable
 	}
-	encoded := base64.StdEncoding.EncodeToString([]byte("n,,\x01auth=Bearer " + bearer + "\x01\x01"))
+	if endpoint.OAuthAuthzID == nil {
+		client.close()
+		return nil, ErrUnauthorized
+	}
+	username, err := endpoint.OAuthAuthzID(ctx, bearer)
+	if err != nil {
+		client.close()
+		return nil, errors.Join(ErrUnauthorized, err)
+	}
+	encoded, err := oauthBearerInitialResponse(username, bearer)
+	if err != nil {
+		client.close()
+		return nil, err
+	}
 	if _, err = client.command("AUTHENTICATE OAUTHBEARER " + encoded); err != nil {
 		client.stop()
 		connection.Close()
@@ -134,6 +148,14 @@ func dialIMAP(ctx context.Context, endpoint Endpoint, bearer string) (*imapClien
 		return nil, ErrUnavailable
 	}
 	return client, nil
+}
+
+func oauthBearerInitialResponse(username, bearer string) (string, error) {
+	if username == "" || len(username)>320 || strings.IndexFunc(username,func(r rune)bool{return r<32||r==127})>=0 {
+		return "",ErrInvalid
+	}
+	username = strings.NewReplacer("=","=3D",",","=2C").Replace(username)
+	return base64.StdEncoding.EncodeToString([]byte("n,a="+username+",\x01auth=Bearer "+bearer+"\x01\x01")),nil
 }
 
 func hasCapabilities(lines []string, required ...string) bool {

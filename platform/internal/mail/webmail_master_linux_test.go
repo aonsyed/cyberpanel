@@ -10,12 +10,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -76,7 +78,30 @@ func TestQEMUWebmailMasterAuthentication(t *testing.T) {
 	if err := os.Chown(verifierPath, 0, gid); err != nil {
 		t.Fatal(err)
 	}
+	var introspections atomic.Int64
+	oauthListener, err := net.Listen("tcp", "127.0.0.1:18091")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const oauthToken = "qemu-native-oauth-valid-credential-000000000000000000000000000000"
+	oauthServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		introspections.Add(1)
+		if r.Method != "GET" || r.URL.Path != "/tokeninfo" || r.Header.Get("Authorization") != "Bearer "+oauthToken {
+			w.WriteHeader(401)
+			_, _ = w.Write([]byte(`{"active":false}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"active": true, "email": account.Address, "username": account.Address, "scope": "imap"})
+	})}
+	go oauthServer.Serve(oauthListener)
+	defer oauthServer.Close()
+	oauthConfig := strings.ReplaceAll(string(renderDovecotOAuth()), "127.0.0.1:18090", "127.0.0.1:18091")
+	if err := os.WriteFile(filepath.Join(root, "oauth2.conf"), []byte(oauthConfig), 0444); err != nil {
+		t.Fatal(err)
+	}
 	config := string(renderDovecot(ConfigSnapshot{Postmaster: "postmaster@qemu.invalid"}))
+	config = strings.ReplaceAll(config, "/var/lib/cyberpanel/mail/current/dovecot/oauth2.conf", filepath.Join(root, "oauth2.conf"))
 	config = strings.NewReplacer("protocols = imap lmtp sieve", "protocols = imap", "listen = *, ::", "listen = 127.0.0.1", "/var/lib/cyberpanel/mail/current/dovecot/webmail-master", verifierPath, "/run/cyberpanel/mail/dovecot-users", "/var/lib/cyberpanel/mail/current/dovecot/users", "/var/spool/postfix/private/", root+"/", "/run/dovecot/cyberpanel-managesieve", root+"/managesieve").Replace(config)
 	config += "\nbase_dir = " + root + "/run\nservice imap-login {\n inet_listener imap {\n port = 0\n }\n inet_listener imaps {\n port = 19993\n }\n}\n"
 	configPath := filepath.Join(root, "dovecot.conf")
@@ -128,6 +153,47 @@ func TestQEMUWebmailMasterAuthentication(t *testing.T) {
 			if check.allowed {
 				if _, err := client.command("SELECT INBOX"); err != nil {
 					t.Fatal("authenticated INBOX selection failed")
+				}
+			}
+		})
+	}
+	for _, check := range []struct {
+		name, authzid, token string
+		allowed              bool
+	}{
+		{"missing oauth authzid", "", oauthToken, false},
+		{"oauth with authzid", "a=" + account.Address, oauthToken, true},
+		{"wrong oauth", "a=" + account.Address, "qemu-native-oauth-invalid-credential-000000000000000000000000000", false},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", "127.0.0.1:19993", &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			conn.SetDeadline(time.Now().Add(10 * time.Second))
+			reader := bufio.NewReader(conn)
+			if _, err = reader.ReadString('\n'); err != nil {
+				t.Fatal(err)
+			}
+			before := introspections.Load()
+			encoded := base64.StdEncoding.EncodeToString([]byte("n," + check.authzid + ",\x01auth=Bearer " + check.token + "\x01\x01"))
+			_, _ = conn.Write([]byte("A AUTHENTICATE OAUTHBEARER " + encoded + "\r\n"))
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(line, "+ ") {
+					_, _ = conn.Write([]byte("AQ==\r\n"))
+				}
+				if strings.HasPrefix(line, "A ") {
+					allowed := strings.HasPrefix(line, "A OK")
+					t.Logf("HTTP introspections=%d, accepted=%v", introspections.Load()-before, allowed)
+					if allowed != check.allowed {
+						t.Fatal("native OAuth result differs from expected")
+					}
+					break
 				}
 			}
 		})
