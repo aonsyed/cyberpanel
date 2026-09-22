@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -79,15 +80,21 @@ func (c *Cutover) Quiesce(ctx context.Context, migrationID migration.ID, targetP
 	approvalDigest,err:=approvedPlanDigest(approved);if err!=nil{return migration.SourceFence{},err}
 	request:=QuiesceRequest{MigrationID:migrationID,SourceInstallationID:approved.Plan.SourceInstallationID,SiteSourceIDs:append([]string(nil),approved.Plan.SiteSourceIDs...),Mode:approved.Plan.QuiesceMode,ExpectedFence:expectedFence,TargetPlanDigest:targetPlan.DryRunDigest,ApprovalDigest:approvalDigest}
 	observation,err:=c.controller.BeginQuiesce(ctx,request);if err!=nil{return migration.SourceFence{},err}
-	if strings.TrimSpace(observation.HandleID)==""||observation.SourceGeneration==0||observation.ExpiresAt.IsZero()||!observation.ExpiresAt.After(c.clock().UTC())||!isDigest(observation.EvidenceDigest){_ = c.controller.AbortUnbound(ctx,observation.HandleID);return migration.SourceFence{},ErrInvalid}
+	if strings.TrimSpace(observation.HandleID)==""||observation.SourceGeneration==0||observation.ExpiresAt.IsZero()||!observation.ExpiresAt.After(c.clock().UTC())||!isDigest(observation.EvidenceDigest){return migration.SourceFence{},errors.Join(ErrInvalid,c.abortUnbound(ctx,observation.HandleID))}
 	fence:=migration.SourceFence{MigrationID:migrationID,Generation:observation.SourceGeneration,Fence:expectedFence,ExpiresAt:observation.ExpiresAt.UTC()}
 	fence.Digest=cutoverFenceDigest(fence,approved.Plan.TargetPlanDigest,approvalDigest,observation.EvidenceDigest)
-	if err:=c.controller.BindFence(ctx,observation.HandleID,fence);err!=nil{_ = c.controller.AbortUnbound(ctx,observation.HandleID);return migration.SourceFence{},err}
+	if err:=c.controller.BindFence(ctx,observation.HandleID,fence);err!=nil{return migration.SourceFence{},errors.Join(err,c.abortUnbound(ctx,observation.HandleID))}
 	return fence,nil
 }
 
 func (c *Cutover) Unquiesce(ctx context.Context, fence migration.SourceFence) error {
 	command,err:=c.command(ctx,fence,false);if err!=nil{return err};return c.controller.Unquiesce(ctx,command)
+}
+
+func (c *Cutover) abortUnbound(ctx context.Context, handle string) error {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	return c.controller.AbortUnbound(cleanup, handle)
 }
 
 func (c *Cutover) FinalDelta(ctx context.Context, fence migration.SourceFence, base migration.Manifest) (migration.Manifest, error) {

@@ -43,7 +43,8 @@ func (o *Orchestrator) Cutover(ctx context.Context, id ID) (Migration, error) {
 	if migration.Phase == PhaseCommitted {
 		return o.complete(ctx, migration, migration.SourceGeneration)
 	}
-	if migration.Phase != PhaseQuiescing && migration.Phase != PhaseFinalSync && migration.Phase != PhaseCutoverReady && migration.Phase != PhaseCutoverCommitting && migration.Phase != PhaseVerifying {
+	if migration.Phase == PhaseRolledBack { return migration, nil }
+	if migration.Phase != PhaseQuiescing && migration.Phase != PhaseFinalSync && migration.Phase != PhaseCutoverReady && migration.Phase != PhaseCutoverCommitting && migration.Phase != PhaseVerifying && migration.Phase != PhaseRollingBack {
 		return migration, ErrConflict
 	}
 	plan, err := o.repository.Plan(ctx, migration.PlanDigest)
@@ -72,8 +73,13 @@ func (o *Orchestrator) Cutover(ctx context.Context, id ID) (Migration, error) {
 	} else if err := o.repository.Receipt(ctx, id, "source_fence", &fence); err != nil {
 		return migration, err
 	}
-	if fence.MigrationID != id || fence.Fence != migration.Fence || fence.Generation == 0 || !isDigest(fence.Digest) || fence.ExpiresAt.Before(o.clock().UTC()) {
+	if fence.MigrationID != id || fence.Fence != migration.Fence || fence.Generation == 0 || fence.Generation != migration.SourceGeneration || !isDigest(fence.Digest) || (migration.Phase != PhaseRollingBack && fence.ExpiresAt.Before(o.clock().UTC())) {
 		return migration, ErrConflict
+	}
+	if migration.Phase == PhaseRollingBack {
+		var activation ActivationReceipt
+		if err := o.repository.Receipt(ctx, id, "activation", &activation); err != nil { return migration, err }
+		return o.rollbackCutover(ctx, migration, fence, activation)
 	}
 	if migration.Phase == PhaseFinalSync {
 		delta, deltaErr := o.cutover.FinalDelta(ctx, fence, manifest)
@@ -138,12 +144,10 @@ func (o *Orchestrator) Cutover(ctx context.Context, id ID) (Migration, error) {
 	}
 	verification, verifyErr := o.target.VerifyActive(ctx, migration, plan, activation)
 	if verifyErr != nil || !verificationHealthy(verification) {
+		if verifyErr == nil { verifyErr = ErrBlocked }
 		if activation.WriteWatermark == "" {
-			_ = o.target.Deactivate(ctx, activation)
-			_ = o.cutover.RollbackSource(ctx, fence)
-			_, _ = o.repository.Transition(ctx, id, PhaseVerifying, PhaseRollingBack, "pre-write-rollback", fence.Generation)
-			rolled, _ := o.repository.Transition(ctx, id, PhaseRollingBack, PhaseRolledBack, "source-restored", fence.Generation)
-			return rolled, verifyErr
+			rolled, rollbackErr := o.rollbackCutover(ctx, migration, fence, activation)
+			return rolled, errors.Join(verifyErr, rollbackErr)
 		}
 		return migration, o.pause(ctx, migration, "POST_WRITE_VERIFY_FAILED", errors.Join(ErrWriteFrontier, verifyErr))
 	}
@@ -155,6 +159,25 @@ func (o *Orchestrator) Cutover(ctx context.Context, id ID) (Migration, error) {
 		return migration, err
 	}
 	return o.complete(ctx, migration, fence.Generation)
+}
+
+// Persist rollback intent before compensation. Cancellation must not strand
+// an owned fence; failed compensation remains retryable, never a terminal claim.
+func (o *Orchestrator) rollbackCutover(ctx context.Context, value Migration, fence SourceFence, activation ActivationReceipt) (Migration, error) {
+	if activation.MigrationID != value.ID || activation.TargetGeneration == 0 || !isDigest(activation.EvidenceDigest) || fence.MigrationID != value.ID || fence.Generation != value.SourceGeneration || fence.Fence != value.Fence { return value, ErrConflict }
+	if activation.WriteWatermark != "" || value.TargetWriteWatermark != "" { return value, ErrWriteFrontier }
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	var err error
+	if value.Phase == PhaseVerifying {
+		value, err = o.repository.Transition(cleanup, value.ID, PhaseVerifying, PhaseRollingBack, "pre-write-rollback", fence.Generation)
+		if err != nil { return value, err }
+	}
+	if value.Phase != PhaseRollingBack || value.LastCheckpoint != "pre-write-rollback" { return value, ErrConflict }
+	// Never release the source while target deactivation remains unconfirmed.
+	if err = o.target.Deactivate(cleanup, activation); err != nil { return value, err }
+	if err = o.cutover.RollbackSource(cleanup, fence); err != nil { return value, err }
+	return o.repository.Transition(cleanup, value.ID, PhaseRollingBack, PhaseRolledBack, "source-restored", fence.Generation)
 }
 
 func (o *Orchestrator) complete(ctx context.Context, migration Migration, generation uint64) (Migration, error) {
