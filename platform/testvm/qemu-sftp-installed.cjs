@@ -11,12 +11,15 @@ const {execFileSync,spawnSync}=require('node:child_process');
  const account=JSON.parse(fs.readFileSync('/home/harness/qemu-owner-login.json','utf8'));
  const tenant=JSON.parse(fs.readFileSync('/home/harness/qemu-fresh-tenant-46.json','utf8'));
  const passkeyPath='/home/harness/qemu-virtual-passkey.json';
- const workspace=fs.mkdtempSync('/home/harness/lanes/access/sftp-installed-');
+ const cleanupPath=process.argv.find(arg=>arg.startsWith('--revoke-receipt='))?.slice('--revoke-receipt='.length);
+ if(cleanupPath)assert(/^\/home\/harness\/lanes\/access\/sftp-installed-[a-zA-Z0-9]+\/receipt\.json$/.test(cleanupPath));
+ const workspace=cleanupPath?path.dirname(cleanupPath):fs.mkdtempSync('/home/harness/lanes/access/sftp-installed-');
  const prefix='qemu-sftp-'+Date.now();
- const receipt={stage:'prepared',workspace,tenant:tenant.id,filename:prefix+'.bin',symlink:prefix+'-escape',grant:null,username:null};
+ const receipt=cleanupPath?JSON.parse(fs.readFileSync(cleanupPath,'utf8')):{stage:'prepared',workspace,tenant:tenant.id,filename:prefix+'.bin',symlink:prefix+'-escape',grant:null,username:null};
+ if(cleanupPath)assert(receipt.grant&&/^cpsftp_[0-9a-f]{20}$/.test(receipt.username)&&receipt.tenant===tenant.id&&!receipt.revoked);
  const save=()=>fs.writeFileSync(path.join(workspace,'receipt.json'),JSON.stringify(receipt,null,2),{mode:0o600});
  save();
- execFileSync('/usr/bin/ssh-keygen',['-q','-t','ed25519','-N','','-f',path.join(workspace,'client')]);
+ if(!cleanupPath)execFileSync('/usr/bin/ssh-keygen',['-q','-t','ed25519','-N','','-f',path.join(workspace,'client')]);
  const publicKey=fs.readFileSync(path.join(workspace,'client.pub'),'utf8').trim();
  const bytes=Buffer.from('installed-sftp-exact-bytes\x00\xff\r\n','latin1');
  fs.writeFileSync(path.join(workspace,'source.bin'),bytes,{mode:0o600});
@@ -39,11 +42,22 @@ const {execFileSync,spawnSync}=require('node:child_process');
   const updated=await cdp.send('WebAuthn.getCredentials',{authenticatorId});
   fs.writeFileSync(passkeyPath,JSON.stringify(updated.credentials[0]),{mode:0o600});
   assert.equal(loginResponse.status(),200);await page.getByLabel('Username',{exact:true}).waitFor({state:'hidden'});
-  receipt.stage='authenticated';save();
+  if(!cleanupPath)receipt.stage='authenticated';save();
+  if(cleanupPath){
+   await page.locator('a[href="/access"]').click();
+   const row=page.locator('tbody tr').filter({hasText:receipt.username});await row.waitFor();
+   await row.locator('summary').click();await row.getByRole('button',{name:'Revoke',exact:true}).click();
+   const revoked=responseFor('access.credential.revoke');await page.getByRole('dialog').getByRole('button',{name:'Revoke',exact:true}).click();
+   const response=await revoked;const body=await response.json();assert.equal(response.status(),200,JSON.stringify({code:body.code,title:body.title}));
+   receipt.revoked=true;receipt.stage='revoked';save();
+   assert.notEqual(spawnSync('/usr/bin/getent',['passwd',receipt.username]).status,0,'revoke left native account');
+   fs.unlinkSync(path.join(workspace,'client'));receipt.private_key_removed=true;save();
+   console.log('PASS exact interrupted grant UI revoke200, native account absent; receipt '+cleanupPath);return;
+  }
 
   await page.locator('a[href="/files"]').click();
   const siteSelect=page.locator('.scope-bar select').first();
-  await siteSelect.locator('option').filter({hasText:'qemu-fresh46.example.invalid'}).waitFor();
+  await siteSelect.locator('option').filter({hasText:'qemu-fresh46.example.invalid'}).waitFor({state:'attached'});
   await siteSelect.selectOption({label:'qemu-fresh46.example.invalid'});
   receipt.site=await siteSelect.inputValue();assert(receipt.site);save();
   await page.locator('a[href="/access"]').click();
@@ -86,7 +100,12 @@ const {execFileSync,spawnSync}=require('node:child_process');
   assert.deepEqual(fs.readFileSync(path.join(workspace,'received.bin')),bytes);receipt.stage='transferred';save();
   for(const target of ['/etc/passwd','../../etc/passwd'])runSFTP('get '+target+' '+path.join(workspace,'forbidden.bin'),false);
   const crossSite=process.argv.find(arg=>arg.startsWith('--cross-site-file='))?.slice('--cross-site-file='.length);
-  if(crossSite){assert(/^\/var\/lib\/cyberpanel\/sites\/s-[a-z0-9]+\/roots\/g[0-9]+\/releases\/current\/public\/[a-zA-Z0-9._-]+$/.test(crossSite));assert(fs.statSync(crossSite).isFile(),'cross-site proof requires an actual known regular file');runSFTP('get '+crossSite+' '+path.join(workspace,'forbidden.bin'),false);receipt.cross_site_denied=crossSite;save()}
+  if(crossSite){
+   assert(/^\/var\/lib\/cyberpanel\/sites\/s-[a-z0-9]+\/roots\/g[0-9]+\/releases\/current\/public\/[a-zA-Z0-9._-]+$/.test(crossSite));
+   const marker=execFileSync('/usr/bin/sudo',['/usr/bin/stat','--format=%F:%u',crossSite],{encoding:'utf8'}).trim();assert.match(marker,/^regular file:[0-9]+$/);
+   const ownUID=execFileSync('/usr/bin/getent',['passwd',receipt.username],{encoding:'utf8'}).split(':')[2];assert.notEqual(marker.split(':')[1],ownUID,'cross-site marker must belong to a different site UID');
+   runSFTP('get '+crossSite+' '+path.join(workspace,'forbidden.bin'),false);receipt.cross_site_denied=crossSite;save();
+  }
   runSFTP('ln -s /etc/passwd public/'+receipt.symlink);
   runSFTP('get public/'+receipt.symlink+' '+path.join(workspace,'forbidden.bin'),false);
   console.log('PASS installed native SFTP exact-byte upload/download and absolute/traversal/symlink escape denial');

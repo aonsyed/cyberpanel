@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -22,6 +23,8 @@ func TestNativeSFTPGrantRootIsolation(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_SFTP") != "1" || os.Geteuid() != 0 {
 		t.Skip("requires reserved root QEMU SFTP fixture")
 	}
+	previousUmask := syscall.Umask(0027)
+	defer syscall.Umask(previousUmask)
 	for _, permission := range []AccessPermission{AccessReadWrite, AccessReadOnly} {
 		t.Run(string(permission), func(t *testing.T) { testNativeSFTPGrantRootIsolation(t, permission) })
 	}
