@@ -225,7 +225,7 @@ type PowerDNSBrokerResponse struct {
 	Activation       PowerDNSActivationReceipt `json:"activation,omitempty"`
 	Zone             PowerDNSZoneBrokerReceipt `json:"zone,omitempty"`
 	Runtime          PowerDNSRuntimeReceipt    `json:"runtime,omitempty"`
-	ZoneSpec         ZoneSpec                  `json:"zone_spec,omitempty"`
+	ZoneSpec         ZoneSpec                  `json:"zone_spec,omitzero"`
 	Zones            []ZoneSpec                `json:"zones,omitempty"`
 	RecordSetPage    []RecordSet               `json:"record_set_page,omitempty"`
 	NextCursor       string                    `json:"next_cursor,omitempty"`
