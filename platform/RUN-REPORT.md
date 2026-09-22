@@ -7,6 +7,21 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Installed80 — startup restored without bypassing frozen restore
 
+SAME interrupted79 plan recovered through authenticated API on installed80:
+status200/apply200→active/terminal replay200 idempotent. Parent read durable
+receipt, native state and verifier assertions, independently fetched exact native
+HTTP200 marker. Original snapshot proves promoted/frozen/nohealth; recovered
+state promoted/unfrozen with health digest
+dd3767153bd6af71b3d298891e7de4ecbce003c410aee0c978bc885bde55c172.
+Worker verified exact file bytes, SQL text/NULL/BLOB, real current directory,
+siteUID/public webUID reads and private denial, two encrypted objects, preserved
+legacy72 point/receipt. Core/executor/gateway/OLS active; panelHTTPS200.
+Guest installed79.json verified79 section names the fixture, not release80;
+interruption79.json captures original failure boundary. First status400 was an
+ignored harness read-request idempotency header mistake, corrected without any
+native mutation. Browser/watcher ended. No installed forced-health-failure or
+mid-SQL recovery claim. Apps now has exclusive normal recovery-removal lease.
+
 Signed qemu-workflow-3.1.79 sequence80/sourcec62b8007f committed:
 manifest db39317d4546fa4a9b9f9fe3dcfff0d87a9b08df6c335f6b0befb853fb4b2660;
 receipt8e078d02d84e76f01e095ac5ac3c0f0cd5960a5001d898850c1af42648790e6d;

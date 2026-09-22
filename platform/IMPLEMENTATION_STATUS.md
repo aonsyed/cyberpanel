@@ -11,11 +11,13 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 Newest installed checkpoint: signed80 qemu-workflow-3.1.79/sourcec62b8007f.
 Core/execd/gateway hashes verified, seven panel services active and newUI200.
-Stopped-engine startup fix works: OLS remains stopped and SAME interrupted79
-restore journal remains promoted/frozen/healthpending. Backup worker now retrying
-normal API recovery; no manual engine start or journal repair. Application SQL
-admission and DataTable mobile containment fixes included; installed checks wait
-for restore recovery/service lease. No parity completion claim.
+Stopped-engine startup fix worked without startingOLS; SAME interrupted79 plan
+then recovered through normal API: active receipt/idempotent retry, durablehealth
+and unfreeze, exact files/SQL/ACL/nativeHTTP verified. OLS now active through
+normal recovery, no manual engine start/journal repair. Application SQL admission
+and DataTable mobile containment fixes included; apps now owns installed normal
+removal/reinstall lease. Full-page mobile installed check still pending. No parity
+completion claim; mid-SQL and installed forcedhealthfailure remain unqualified.
 
 Latest live-test state (supersedes the healthy activation checkpoint below):
 installed79 backup interruption captured completed native promotion while frozen
