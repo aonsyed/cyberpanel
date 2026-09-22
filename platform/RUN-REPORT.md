@@ -5,6 +5,36 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed80 application removal and full-page mobile proof
+
+Follow-up9dd52b3b6 integrated08a35d42d: recover staging public ACL only when the
+managed source directory is empty with both ACLs absent, source/stage ownership/
+mode match and parent has exact provisioned traverse-only reader policy. Apply
+documented reader/default policy only to stage, not source/private. Filesystem
+regressions reject populated/foreign/symlink/widened cases. Parent QEMU
+apps0.254s/core1.409s/executor0.021s pass. Deployment/fresh lifecycle still pending.
+
+Retained78 Joomla removal succeeded through normal UI202: old installation
+app-6c8623f3dfca4f0a2c9b79dd8a7e980873d76c87b00f95c1 removed/gen5,
+owned database/principal absent, secret leases revoked, public empty/runtime
+absent. Required snapshot preserved at recovery-ffcfd6437c7c0d324a4cc61b279badd390d185a70f4cd907;
+parent independently checked DB/principal counts0 and archive SHA256
+482e5ace8f2e6fdf6f2a50041b1b1d8671263a7757940c7ddece83d440ca0966.
+Guest receipt /home/harness/qemu-joomla-resume22j.json recoveryCleanup section.
+Fresh same-site install then failed500 and compensated cleanly: old empty public
+root lacks access/default ACL, so strict stage validation rejected it. Product
+lifecycle correction underway; no manual ACL or fixture substitution. Homepage/
+administrator login and successful fresh-install removal remain unqualified.
+
+Installed80 actual Databases page passes1366px and390px: document matches viewport,
+window scrollX0, mobile table948px content scrolls locally inside360px viewport.
+Action menu accessible and existing console opens/closes both widths. Operations
+only login/session/dashboard/database.list: no SQL/console.issue/export/import.
+Parent read measured evidence and viewed mobile screenshot. Guest artifacts:
+/home/harness/lanes/database/layout80-installed-final.log, layout80-installed.json,
+layout80-page-390.png. Initial menu-toggle mistake was harness-only; corrected
+based on details.open, final exit0. Browser exited/lease released.
+
 ### Installed80 — startup restored without bypassing frozen restore
 
 SAME interrupted79 plan recovered through authenticated API on installed80:

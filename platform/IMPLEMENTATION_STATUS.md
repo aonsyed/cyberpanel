@@ -16,8 +16,12 @@ then recovered through normal API: active receipt/idempotent retry, durablehealt
 and unfreeze, exact files/SQL/ACL/nativeHTTP verified. OLS now active through
 normal recovery, no manual engine start/journal repair. Application SQL admission
 and DataTable mobile containment fixes included; apps now owns installed normal
-removal/reinstall lease. Full-page mobile installed check still pending. No parity
-completion claim; mid-SQL and installed forcedhealthfailure remain unqualified.
+removal/reinstall checks. Update: normal retained-app removal succeeded with
+DB/principal/secret cleanup and snapshot preservation. Fresh install then found
+empty old public root ACL absence; stage-only repair integrated08a35d42d with
+QEMU regressions, deployment pending. Full-page mobile installed check now passes
+1366/390 with zero window horizontal scroll and local table scrolling/menu access.
+No parity completion claim; mid-SQL and installed forcedhealthfailure unqualified.
 
 Latest live-test state (supersedes the healthy activation checkpoint below):
 installed79 backup interruption captured completed native promotion while frozen
