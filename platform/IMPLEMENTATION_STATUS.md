@@ -26,6 +26,18 @@ apiserver, apps, backup/providers, database, mail, DNS, cyberpanel and panel-exe
 package suites passed in the retained QEMU guest; combined UI typecheck/build
 passed. These are not yet installed/browser-qualified claims.
 
+Latest signed checkpoint69 (qemu-workflow-3.1.68, source481b6f836) is installed.
+Actual installed67 file workflow passed upload/read/download/rename/trash/restore,
+static/PHP HTTP, exact4MiB boundary and oversized preflight rejection. Tenant/site
+binding defect was reproduced with a tenant-limited HTTP regression and fixed
+across19 handlers; installed69 correct binding200/wrong binding404 passed.
+DNS create500 was a zero-zone JSON reply encoding bug (fixed in69), not native
+PowerDNS failure. WordPress create/install succeeded but HTTP404 exposed wrong
+application root (fixed in69); their full live reruns remain pending.
+Webmail actual UI send202 delivered exact subject/body to local IMAP; listing
+remains blocked on native TLS identity trust. Native protocol compatibility fixes
+are in69; public-only managed TLS identity publication is in progress.
+
 Database view import is already implemented by 89f46f587; a fresh native run
 passed all three engines and SQL/gzip with dependent views, INVOKER and exact
 latin1 data. Do not mistake the older appendices at the end of RUN-REPORT for

@@ -7,6 +7,56 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Resumed workflow checkpoint67 — 2026-09-22
 
+Latest69 qemu-workflow-3.1.68 from481b6f836 installs all three rebuilt binaries.
+Combined apiserver/DNS/webmail/cyberpanel/panel-execd/paneld suites pass in QEMU.
+Manifest63d33fb47a39ef9d69db131453e92afaee3690968e77286497d33cb44a6d2f1d;
+receipt378873b576db5d50249882c1ef688f5f9760c9287707a5279f641bd2b07c16ad;
+bundlef6581bcd9ef3c808f4b8238aa877a46d399ea30e11c514e126e1db982d02837e.
+Matching host bundle retained, guest duplicate removed, staging pruned. Obsolete
+releases22/23 similarly copied to host with checksum comparison and no live
+filesystem/process references before guest removal; active/previous untouched.
+
+Installed69 --scope-only file proof passes legitimate tenant/site200 and wrong
+tenant/site404. Underlying real Core HTTP + SQLite authority regression confirmed
+the earlier bypass with a tenant-limited credential and now prevents executor
+effects. All19 file/transfer/archive handlers use authoritative ownership lookup.
+
+Installed68 WordPress site201/install201/active7.1 nevertheless served404 because
+application root differed from provisioned document root;69 uses the validated
+relative served path. Original fixture retained for normal application removal.
+Installed68 DNS create500 was zero ZoneSpec marshaling an invalid empty DNSName;
+69 omits zero reply field, retains populated validation. Actual DNS native CRUD
+and new WordPress served-root browser reruns still pending at this checkpoint.
+
+Installed68 Webmail: passkey login200, account discovery200, folders503 on TLS;
+Compose self-send202 delivered exact unique subject/body via native strict-TLS
+IMAP; only that probe message expunged. Master login/INBOX also passes. Native
+responses confirmed preauth capability withholding, CONTEXT=SEARCH positive
+PARTIAL support (negative ranges BAD), empty NIL and informational OK behavior.
+69 includes protocol fixes, bounded COUNT+positive PARTIAL and mock/native tests.
+No unbounded mailbox fetch, TLS bypass, global trust changes or vendor changes.
+
+Follow-up68 installs the rebuilt gateway containing the final DNS contract delta;
+source code otherwise unchanged. Manifest58b71157ec6b8d28b12373b3086ebfe88bb452ce6d451304ddeaf7a624d65062,
+receipt7a3682ad858eb957b641de7c244adcf561043652fb1cd74021d441492e9bbaf9,
+bundle743a1fde143c8db2f1bebf05bc0d6df60b22dc5087d99b16bf4669a9427b7dbd.
+Running gateway matches built SHA256a62698f15e1fd8f1caae18760a3bd0558cc1e31319dd0d80ce7b93e1cdc09085;
+HTTPS Accept:text/html returns200. Matching host bundle retained; guest duplicate
+removed and installer redundant staging pruned.
+
+Installed67 real browser file-manager journey passed: upload/read/download,
+rename/trash/restore and second exact-byte download, static/PHP native HTTP,
+4MiB boundary upload/download and4MiB+1 rejection before mutation. Test files
+removed through API into recoverable trash; no public qemu-access fixtures remain.
+The global-owner wrong-tenant/site probe returned200; do not call it a passed
+tenant-isolation test. A suspected missing tenant/site ownership binding remains
+under bounded investigation. Reusable proof: testvm/qemu-access-flow.cjs.
+
+Obsolete sequence21 release directory e0c15354210502a420c2846b4044b183cbc7d0c14ff2b837dfe100a40e016a45
+also moved to ignored host .work/qemu. Checksum comparison had no differences;
+no service filesystem symlink or running process mapped it. Active/previous
+releases retained. The old directory remains recoverable on the host.
+
 Six bounded source lanes integrated on bfbaf4ab3. QEMU-only combined suites pass:
 access, apiserver, apps, backup/providers, database, mail, DNS, cyberpanel and
 panel-execd. UI typecheck/build pass. Native lane evidence includes webmail master
