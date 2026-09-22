@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,47 @@ import (
 	"testing"
 	"time"
 )
+
+func TestLiteralCommandNativeUIDFirst(t *testing.T) {
+	for _, test := range []struct {
+		prefix string
+		valid  bool
+	}{
+		{"* 1 FETCH (UID 3 BODY[] ", true},
+		{"* 1 FETCH (FLAGS () UID 3 BODY[] ", true},
+		{"* 1 FETCH (UID 30 BODY[] ", false},
+		{"* 1 FETCH (UID 4 BODY[] ", false},
+		{"* 1 OTHER (UID 3 BODY[] ", false},
+		{"* 0 FETCH (UID 3 BODY[] ", false},
+		{"* 1 FETCH (UID 3 UID 3 BODY[] ", false},
+	} {
+		t.Run(test.prefix, func(t *testing.T) {
+			connection, server := net.Pipe()
+			defer connection.Close()
+			defer server.Close()
+			go func() {
+				line, _ := bufio.NewReader(server).ReadString('\n')
+				tag := strings.Fields(line)[0]
+				fmt.Fprintf(server, "%s{4}\r\nbody)\r\n%s OK fetched\r\n", test.prefix, tag)
+			}()
+			client := &imapClient{connection: connection, reader: bufio.NewReader(connection), timeout: time.Second}
+			stream, size, err := client.literalCommand("UID FETCH 3 (UID BODY.PEEK[])", 3, MaximumRawMessageBytes)
+			if !test.valid {
+				if err == nil {
+					t.Fatal("accepted mismatched UID")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(stream)
+			if err != nil || stream.Close() != nil || size != 4 || string(body) != "body" {
+				t.Fatal("literal body failed", err)
+			}
+		})
+	}
+}
 
 func TestIMAPNegotiatesAuthenticatedCapabilities(t *testing.T) {
 	for _, authenticated := range []bool{true, false} {

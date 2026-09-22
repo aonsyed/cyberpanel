@@ -27,14 +27,14 @@ const (
 )
 
 type Endpoint struct {
-	UnixSocket   string
-	TLSAddress   string
-	TLSServerName string
-	TLSConfig    *tls.Config
+	UnixSocket             string
+	TLSAddress             string
+	TLSServerName          string
+	TLSConfig              *tls.Config
 	TLSConfigForConnection func() (*tls.Config, error)
-	OAuthAuthzID func(context.Context, string) (string, error)
-	DialTimeout  time.Duration
-	CommandTimeout time.Duration
+	OAuthAuthzID           func(context.Context, string) (string, error)
+	DialTimeout            time.Duration
+	CommandTimeout         time.Duration
 }
 
 func (endpoint Endpoint) valid() bool {
@@ -151,11 +151,11 @@ func dialIMAP(ctx context.Context, endpoint Endpoint, bearer string) (*imapClien
 }
 
 func oauthBearerInitialResponse(username, bearer string) (string, error) {
-	if username == "" || len(username)>320 || strings.IndexFunc(username,func(r rune)bool{return r<32||r==127})>=0 {
-		return "",ErrInvalid
+	if username == "" || len(username) > 320 || strings.IndexFunc(username, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
+		return "", ErrInvalid
 	}
-	username = strings.NewReplacer("=","=3D",",","=2C").Replace(username)
-	return base64.StdEncoding.EncodeToString([]byte("n,a="+username+",\x01auth=Bearer "+bearer+"\x01\x01")),nil
+	username = strings.NewReplacer("=", "=3D", ",", "=2C").Replace(username)
+	return base64.StdEncoding.EncodeToString([]byte("n,a=" + username + ",\x01auth=Bearer " + bearer + "\x01\x01")), nil
 }
 
 func hasCapabilities(lines []string, required ...string) bool {
@@ -331,7 +331,7 @@ func (client *imapClient) literalCommand(command string, expectedUID uint32, max
 	if _, err := io.WriteString(client.connection, tag+" "+command+"\r\n"); err != nil {
 		return nil, 0, errors.Join(ErrUnavailable, err)
 	}
-	uidMarker := " UID " + strconv.FormatUint(uint64(expectedUID), 10) + " "
+	uidValue := strconv.FormatUint(uint64(expectedUID), 10)
 	for count := 0; count < 16; count++ {
 		line, _, err := readPhysicalLine(client.reader)
 		if err != nil {
@@ -347,7 +347,26 @@ func (client *imapClient) literalCommand(command string, expectedUID uint32, max
 		if !ok {
 			return nil, 0, ErrAmbiguous
 		}
-		if !strings.Contains(line[:markerStart], uidMarker) || length < 0 || uint64(length) > maximum {
+		// Parse the FETCH attributes with an empty stand-in for the pending literal.
+		values, parseErr := parseIMAPValues(line[:markerStart] + "NIL)")
+		if parseErr != nil || len(values) != 4 || values[0].atom != "*" || !strings.EqualFold(values[2].atom, "FETCH") {
+			return nil, 0, ErrAmbiguous
+		}
+		sequence, sequenceErr := strconv.ParseUint(values[1].atom, 10, 32)
+		attributes := values[3].list
+		if sequenceErr != nil || sequence == 0 || len(attributes)%2 != 0 {
+			return nil, 0, ErrAmbiguous
+		}
+		matchingUID := false
+		for index := 0; index < len(attributes); index += 2 {
+			if strings.EqualFold(attributes[index].atom, "UID") {
+				if matchingUID || attributes[index+1].atom != uidValue {
+					return nil, 0, ErrAmbiguous
+				}
+				matchingUID = true
+			}
+		}
+		if !matchingUID || length < 0 || uint64(length) > maximum {
 			return nil, 0, ErrLimit
 		}
 		return &imapLiteralReader{client: client, tag: tag, remaining: int64(length)}, uint64(length), nil

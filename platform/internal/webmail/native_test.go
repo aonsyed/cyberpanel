@@ -5,7 +5,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,5 +72,27 @@ func TestQEMUDovecotNativeResponses(t *testing.T) {
 		if _, _, err := boundedUIDSearch(client, order, 0, 2, "ALL"); err != nil {
 			t.Fatal("native bounded search", order, err)
 		}
+	}
+	if evidence := os.Getenv("CYBERPANEL_QEMU_WEBMAIL_READ_EVIDENCE"); evidence != "" {
+		data, err := os.ReadFile(evidence)
+		var probe struct{ Subject string }
+		if err != nil || json.Unmarshal(data, &probe) != nil || probe.Subject == "" {
+			t.Fatal("invalid read probe evidence")
+		}
+		subject, _ := imapQuote(probe.Subject)
+		uids, _, err := boundedUIDSearch(client, SortNewest, 0, 2, "HEADER Subject "+subject)
+		if err != nil || len(uids) != 1 {
+			t.Fatal("unique delivered probe not found", err)
+		}
+		stream, _, err := client.literalCommand(fmt.Sprintf("UID FETCH %d (UID BODY.PEEK[])", uids[0]), uids[0], MaximumRawMessageBytes)
+		if err != nil {
+			t.Fatal("native delivered probe literal", err)
+		}
+		body, err := io.ReadAll(stream)
+		closeErr := stream.Close()
+		if err != nil || closeErr != nil || !strings.Contains(string(body), "Local-only installed panel webmail proof.") {
+			t.Fatal("native delivered probe body mismatch", err, closeErr)
+		}
+		t.Log("native delivered probe exact body read without mutation")
 	}
 }
