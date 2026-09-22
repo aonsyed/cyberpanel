@@ -132,6 +132,15 @@ func (service *Service) authorizedAccount(ctx context.Context, principal Princip
 	return account, nil
 }
 
+// AuthorizeMailboxScope binds settings operations to the same live account and
+// authorization epoch as message operations, without minting an unused IMAP grant.
+func (service *Service) AuthorizeMailboxScope(ctx context.Context, principal Principal, tenantID, mailboxID string, epoch uint64) error {
+	account,err:=service.authorizedAccount(ctx,principal,tenantID,mailboxID)
+	if err!=nil{return err}
+	if epoch==0||account.AuthorizationEpoch!=epoch{return ErrNotFound}
+	return nil
+}
+
 func accountSnapshotDigest(accounts []AuthorizedMailAccount) string {
 	parts := make([]string, 0, len(accounts)*2)
 	for _, account := range accounts {

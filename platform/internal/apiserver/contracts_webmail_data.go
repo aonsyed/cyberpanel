@@ -9,10 +9,11 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/identity"
 	"github.com/aonsyed/cyberpanel/platform/internal/mail"
+	securewebmail "github.com/aonsyed/cyberpanel/platform/internal/webmail"
 	"github.com/aonsyed/cyberpanel/platform/internal/webmaildata"
 )
 
-type WebmailDataSessionPayload struct { Session mail.MailSession `json:"session"`; MailboxID mail.MailboxID `json:"mailbox_id"` }
+type WebmailDataSessionPayload struct { WebmailEpochPayload; MailboxID mail.MailboxID `json:"mailbox_id"` }
 type WebmailDataContactPagePayload struct { WebmailDataSessionPayload; Search string `json:"search,omitempty"`; Cursor string `json:"cursor,omitempty"`; Limit uint16 `json:"limit,omitempty"` }
 type WebmailDataContactPayload struct { WebmailDataSessionPayload; Contact webmaildata.Contact `json:"contact"`; Mask webmaildata.FieldMask `json:"field_mask,omitempty"` }
 type WebmailDataContactDeletePayload struct { WebmailDataSessionPayload; RetainSeconds uint64 `json:"retain_seconds"` }
@@ -90,12 +91,12 @@ func registerWebmailDataContracts(registry *Registry) error {
 }
 
 func bindWebmailDataContracts(registry *Registry, services DomainServices) error {
-	if services.WebmailData == nil || services.Webmail == nil { return nil }
+	provider,ok:=services.WebmailEdge.(interface{SecureWebmail() *securewebmail.Service})
+	if services.WebmailData == nil || !ok || provider.SecureWebmail()==nil { return nil }
 	bind := func(name string, handler func(context.Context, Invocation, any, webmaildata.Call) (OperationResult, error)) error {
 		return registry.Bind(name, func(ctx context.Context, invocation Invocation, value any) (OperationResult, error) {
 			sessionPayload, ok := webmailDataSession(value); if !ok { return OperationResult{}, ErrInvalidRequest }
-			bound := mailSession(invocation, sessionPayload.Session); session, err := services.Webmail.ResolveSession(ctx, bound); if err != nil { return OperationResult{}, mapMailError(err) }; if sessionPayload.MailboxID == "" || sessionPayload.MailboxID != session.MailboxID { return OperationResult{}, ErrForbidden }
-			call := webmailDataCall(invocation, session)
+			call,err:=secureWebmailDataCall(ctx,provider.SecureWebmail(),invocation,*sessionPayload);if err!=nil{return OperationResult{},err}
 			return handler(ctx, invocation, value, call)
 		})
 	}
@@ -181,7 +182,7 @@ func webmailDataScope(request RequestEnvelope, value any) (identity.Scope, error
 }
 
 func validateWebmailDataPayload(value any) error {
-	session, ok := webmailDataSession(value); if !ok || validateWebmailSession(session.Session) != nil || !safeMailOpaque(string(session.MailboxID)) { return invalid("webmail data session") }
+	session, ok := webmailDataSession(value); if !ok || !validWebmailEpoch(session.AuthorizationEpoch) || !safeMailOpaque(string(session.MailboxID)) { return invalid("webmail data mailbox authorization") }
 	switch payload := value.(type) {
 	case *WebmailDataContactPagePayload: if payload.Limit == 0 { payload.Limit = 100 }; if payload.Limit > webmaildata.MaximumPageSize || len(payload.Cursor) > 2048 || len(payload.Search) > 512 { return invalid("contact page") }
 	case *WebmailDataContactDeletePayload: if payload.RetainSeconds < 86400 || payload.RetainSeconds > 315360000 { return invalid("contact retention") }
@@ -222,6 +223,13 @@ func webmailDataSession(value any) (*WebmailDataSessionPayload, bool) {
 	}
 }
 
-func webmailDataCall(invocation Invocation, session mail.MailSession) webmaildata.Call { edge:=edgeCall(invocation);return webmaildata.Call{ActorID:session.PrincipalID,OperationID:edge.CommandID,Scope:webmaildata.Scope{TenantID:session.TenantID,UserID:session.PrincipalID,MailboxID:string(session.MailboxID)},StepUpProof:edge.CredentialID} }
+type webmailDataMailboxAuthority interface { AuthorizeMailboxScope(context.Context,securewebmail.Principal,string,string,uint64)error }
+func secureWebmailDataCall(ctx context.Context,authority webmailDataMailboxAuthority,invocation Invocation,payload WebmailDataSessionPayload)(webmaildata.Call,error) {
+	principal,err:=secureWebmailPrincipal(invocation);if err!=nil{return webmaildata.Call{},err}
+	if authority==nil||!validWebmailEpoch(payload.AuthorizationEpoch)||!safeMailOpaque(string(payload.MailboxID)){return webmaildata.Call{},ErrInvalidRequest}
+	if err=authority.AuthorizeMailboxScope(ctx,principal,invocation.Request.TenantID,string(payload.MailboxID),payload.AuthorizationEpoch);err!=nil{return webmaildata.Call{},mapSecureWebmailError(err)}
+	edge:=edgeCall(invocation)
+	return webmaildata.Call{ActorID:principal.UserID,OperationID:edge.CommandID,Scope:webmaildata.Scope{TenantID:invocation.Request.TenantID,UserID:principal.UserID,MailboxID:string(payload.MailboxID)},StepUpProof:edge.CredentialID},nil
+}
 func webmailDataResult[T any](status int, call webmaildata.Call, resource T, revision uint64, err error)(OperationResult,error){if err!=nil{return OperationResult{},mapWebmailDataError(err)};return OperationResult{Status:status,Value:WebmailDataMutation[T]{OperationID:call.OperationID,Revision:revision,Resource:resource},Generation:revision},nil}
 func mapWebmailDataError(err error) error { switch { case err==nil:return nil;case errors.Is(err,webmaildata.ErrInvalid),errors.Is(err,webmaildata.ErrLimit),errors.Is(err,mail.ErrInvalidCommand):return ErrInvalidRequest;case errors.Is(err,webmaildata.ErrUnauthorized),errors.Is(err,mail.ErrUnauthorized):return ErrForbidden;case errors.Is(err,webmaildata.ErrStepUp):return ErrAssuranceRequired;case errors.Is(err,webmaildata.ErrNotFound),errors.Is(err,mail.ErrNotFound):return ErrNotFound;case errors.Is(err,webmaildata.ErrConflict),errors.Is(err,webmaildata.ErrDuplicate),errors.Is(err,webmaildata.ErrRetained),errors.Is(err,mail.ErrConflict):return ErrConflict;case errors.Is(err,mail.ErrRateLimited):return ErrRateLimited;case errors.Is(err,webmaildata.ErrActivation),errors.Is(err,webmaildata.ErrIntegrity),errors.Is(err,mail.ErrAmbiguous),errors.Is(err,mail.ErrInvalidReceipt):return ErrUnavailable;default:return err} }
