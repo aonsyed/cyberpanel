@@ -5,9 +5,30 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Next source210172dd0 — public ACL and retained-point resume
+
+Apps8c2411e81 integratedf94258fe0: copy only exact validated provisioned
+cyberpanel-web public/default ACL onto sibling public stage before extraction.
+No private/release widening. Worker actual native full Joomla runtime test2.191s
+proved webUID public read, private denial and unrelated-user denial. Parent
+apps0.552s/core1.338s/executor0.018s checks pass in QEMU.
+
+Database wrapping964f04125→b24031cfc; scoped resume2e1b6501d→210172dd0.
+Existing completed replacement can be inspected by job ID after reconnect;
+tenant/site/database/current-generation and retained-point evidence validated,
+with separate explicit retirement approval. No import replay or component-state
+injection. Three actual QEMU Node tests and Vue typecheck pass; installed
+390px/resumed-retirement proof awaits new release using the SAME recorded job.
+
+Current78 Joomla recovery also exposed missing durable owned references:
+installation remains installing/gen2 with no persisted DB binding/config-secret
+ref after health failure. ACL fix alone cannot safely remove that fixture.
+Worker implementing durable ownership persistence and trusted manifest-based
+recovery; no manual row edits, guessed names, orphan cleanup or live chmod.
+
 ### Recovery correction integrated; database installed functional path qualified
 
-Backup89d38cda9+a7 health follow-up7f29a2f82 integrated as a914f4d90/fa09dd015.
+Backup89d38cda9 plus health follow-up7f29a2f82 integrated as a914f4d90/fa09dd015.
 Completed-boundary recovery now runs normal promoted-health check before
 unfreeze; failed health rolls back only before the write frontier, otherwise
 fail-forward. Durable health evidence is required for already-unfrozen recovery.

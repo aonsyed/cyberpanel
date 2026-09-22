@@ -124,8 +124,16 @@ Backup recovery89d38cda9 plus health correction7f29a2f82 integrated as
 a914f4d90/fa09dd015, not installed. Recovery preserves health-before-unfreeze and
 requires durable prior-health proof after lost unfreeze reply. Native worker
 test7.61s and focused failed-health/frontier tests passed; parent combined QEMU
-backup/providers/API/core/executor passed. Mid-SQL effects, legacy72 unknown
-state and transient/reversed-write detection remain incomplete/fail-closed.
+backup/providers/API/core/executor passed. Mid-SQL effects and legacy72 unknown
+state remain denied; transient/reversed-write detection remains unqualified.
+
+Next source210172dd0 also integrates staged-public ACL preservationf94258fe0,
+mobile wrappingb24031cfc and scoped completed replacement resume UI210172dd0.
+Parent QEMU apps/core/executor checks, three resume-validation tests and Vue
+typecheck pass. These fixes are not installed yet. Apps worker closing a concrete
+lifecycle gap before next release: failed install left installation=installing
+without durable owned DB/config-secret refs, so legitimate existing-fixture
+removal needs validated manifest ownership recovery, never guessed identifiers.
 
 Post75 fixes now installed76: c7d477100 selects the actual
 packaged PHP CLI after the LSAPI installer no-op was reproduced;13d6bcfcf invalidates
