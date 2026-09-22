@@ -85,7 +85,7 @@ func bindAccessFiles(registry *Registry,files *access.FileService)error{
 	return registry.Bind("access.archive.extract",func(ctx context.Context,inv Invocation,value any)(OperationResult,error){payload:=value.(*ArchiveExtractPayload);if err:=accessSite(inv,payload.Source.Root,payload.Destination.Root);err!=nil{return OperationResult{},err};receipt,err:=files.ExtractArchive(ctx,payload.Source,payload.Destination,payload.Policy);if err!=nil{return OperationResult{},mapDomainError(err)};return OperationResult{Status:http.StatusOK,Value:receipt},nil})
 }
 
-func bindAccessFileDomains(registry *Registry,services DomainServices)error{return bindAccessFiles(registry,services.Files)}
+func bindAccessFileDomains(registry *Registry,services DomainServices)error{if err:=bindAccessFiles(registry,services.Files);err!=nil{return err};return bindAccessFileOwnership(registry,services.HostingQuery)}
 
 func accessActor(inv Invocation)access.AuditActor{return access.AuditActor{TenantID:access.TenantID(inv.Request.TenantID),PrincipalID:access.PrincipalID(inv.Actor.PrincipalID.String()),SourceIP:inv.Meta.ClientIP.String()}}
 func accessMutation(inv Invocation)access.Mutation{return access.Mutation{CommandID:access.CommandID(commandID(inv)),Actor:accessActor(inv),At:time.Now().UTC()}}
