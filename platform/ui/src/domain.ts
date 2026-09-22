@@ -181,7 +181,7 @@ export const pages: Record<string, PageDefinition> = {
   access: {
     id:"access",title:"FTP, SSH & terminal",description:"FTPS accounts, SSH/SFTP keys, access grants, active sessions, and tenant terminals.",resourceKind:"access.credential",listOperation:"access.credential.list",
     createAction:{id:"create",label:"Add access",operation:"access.credential.create",mutating:true,fields:[{key:"site_id",label:"Site",type:"text",required:true},{key:"kind",label:"Access kind",type:"select",required:true,options:[{label:"SFTP / SSH key",value:"ssh_key"},{label:"FTPS account",value:"ftps"},{label:"Terminal grant",value:"terminal"}]},{key:"label",label:"Label",type:"text",required:true}]},
-    columns:[{key:"label",label:"Credential"},{key:"kind",label:"Type"},{key:"site",label:"Site"},{key:"last_used_at",label:"Last used",format:"date"},{key:"expires_at",label:"Expires",format:"date"},{key:"state",label:"State",format:"status"}],
+    columns:[{key:"label",label:"Credential"},{key:"username",label:"SFTP login"},{key:"kind",label:"Type"},{key:"site",label:"Site"},{key:"last_used_at",label:"Last used",format:"date"},{key:"expires_at",label:"Expires",format:"date"},{key:"state",label:"State",format:"status"}],
     rowActions:[{id:"rotate",label:"Rotate",operation:"access.credential.rotate",mutating:true},{id:"session",label:"Open terminal",operation:"access.terminal.issue",mutating:true,tone:"info",assurance:"mfa"},{id:"revoke",label:"Revoke",operation:"access.credential.revoke",mutating:true,tone:"critical"}],emptyTitle:"No access credentials",emptyBody:"Issue a scoped credential or one-time terminal grant."
   },
   backups: {
