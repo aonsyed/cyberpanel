@@ -1,6 +1,7 @@
 package webmail
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -416,8 +418,45 @@ func (backend *DovecotBackend) OpenPart(ctx context.Context, bearer string, iden
 		client.close()
 		return nil, 0, ErrStaleUIDValidity
 	}
-	command := "UID FETCH " + strconv.FormatUint(uint64(identity.UID), 10) + " (UID BINARY.PEEK[" + partID + "])"
-	reader, size, err := client.literalCommand(command, identity.UID, maximum)
+	return openIMAPPart(client, identity.UID, partID, maximum)
+}
+
+func openIMAPPart(client *imapClient, uid uint32, partID string, maximum uint64) (io.ReadCloser, uint64, error) {
+	prefix := "UID FETCH " + strconv.FormatUint(uint64(uid), 10) + " (UID "
+	headerStream, _, err := client.literalCommand(prefix+"BODY.PEEK["+partID+".MIME])", uid, maximumIMAPLiteralBytes)
+	if err != nil {
+		client.close()
+		return nil, 0, err
+	}
+	headerBytes, err := io.ReadAll(headerStream)
+	if err != nil {
+		client.close()
+		return nil, 0, err
+	}
+	// Reading to EOF finishes the header command; retain this authenticated connection for the body.
+	header, err := textproto.NewReader(bufio.NewReader(bytes.NewReader(headerBytes))).ReadMIMEHeader()
+	if err != nil {
+		client.close()
+		return nil, 0, ErrProtocol
+	}
+	contentType, _, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if header.Get("Content-Type") == "" {
+		contentType, err = "text/plain", nil
+	}
+	if err != nil {
+		client.close()
+		return nil, 0, ErrProtocol
+	}
+	fetch := "BINARY.PEEK"
+	if strings.HasPrefix(contentType, "multipart/") || contentType == "message/rfc822" {
+		if !validContainerEncoding(header.Get("Content-Transfer-Encoding")) {
+			client.close()
+			return nil, 0, ErrProtocol
+		}
+		fetch = "BODY.PEEK"
+	}
+	command := prefix + fetch + "[" + partID + "])"
+	reader, size, err := client.literalCommand(command, uid, maximum)
 	if err != nil {
 		client.close()
 		return nil, 0, err
@@ -854,7 +893,7 @@ func parseFetchSummary(line, folder string, uidValidity uint32, threaded bool) (
 	threadHash := sha256.Sum256([]byte(threadSource))
 	return MessageSummary{
 		Identity: MessageIdentity{Folder: folder, UIDValidity: uidValidity, UID: uint32(uidValue)},
-		ModSeq: modSeq, ThreadID: "thr_" + hex.EncodeToString(threadHash[:16]), Flags: flags,
+		ModSeq:   modSeq, ThreadID: "thr_" + hex.EncodeToString(threadHash[:16]), Flags: flags,
 		Sender: sender, Subject: boundedProjection(envelope[1].atom, 998), Date: date.UTC(), Size: size,
 		HasAttachment: bodyHasAttachment(fields["BODYSTRUCTURE"]),
 	}, nil
@@ -993,12 +1032,12 @@ type cachedImage struct {
 }
 
 type HTTPRemoteImageProxy struct {
-	resolver   *net.Resolver
-	dialer     *net.Dialer
+	resolver          *net.Resolver
+	dialer            *net.Dialer
 	maximumCacheBytes uint64
-	cacheBytes uint64
-	cache      map[string]cachedImage
-	mutex      sync.Mutex
+	cacheBytes        uint64
+	cache             map[string]cachedImage
+	mutex             sync.Mutex
 }
 
 func NewHTTPRemoteImageProxy(resolver *net.Resolver, dialer *net.Dialer, maximumCacheBytes uint64) (*HTTPRemoteImageProxy, error) {
@@ -1172,7 +1211,7 @@ func (proxy *HTTPRemoteImageProxy) Fetch(ctx context.Context, request RemoteImag
 			return RemoteImage{}, resolveErr
 		}
 		transport := &http.Transport{Proxy: nil, DisableCompression: true, DisableKeepAlives: true,
-			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, ServerName: current.Hostname()},
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS13, ServerName: current.Hostname()},
 			TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 5 * time.Second, MaxResponseHeaderBytes: 32 << 10,
 			DialContext: func(dialContext context.Context, network, _ string) (net.Conn, error) {
 				return proxy.dialer.DialContext(dialContext, network, net.JoinHostPort(ip.String(), "443"))
@@ -1239,12 +1278,12 @@ func (proxy *HTTPRemoteImageProxy) Fetch(ctx context.Context, request RemoteImag
 var _ RemoteImageProxy = (*HTTPRemoteImageProxy)(nil)
 
 type LocalBlobStore struct {
-	root string
+	root  string
 	mutex sync.Mutex
 }
 
 type contextReader struct {
-	ctx context.Context
+	ctx    context.Context
 	reader io.Reader
 }
 

@@ -574,8 +574,17 @@ func walkMIMEPart(header textproto.MIMEHeader, body io.Reader, depth int, partID
 		filename = parameters["name"]
 	}
 	if strings.EqualFold(disposition, "attachment") || filename != "" {
-		// Container attachments need separate IMAP section semantics; never advertise a leaf ID for them.
-		if strings.HasPrefix(strings.ToLower(contentType), "multipart/") || strings.EqualFold(contentType, "message/rfc822") {
+		container := strings.HasPrefix(contentType, "multipart/") || contentType == "message/rfc822"
+		if container && !validContainerEncoding(header.Get("Content-Transfer-Encoding")) {
+			return ErrProtocol
+		}
+		if strings.HasPrefix(contentType, "multipart/") {
+			if parameters["boundary"] == "" || partID == "" {
+				return ErrProtocol
+			}
+			contentType = mime.FormatMediaType(contentType, map[string]string{"boundary": parameters["boundary"]})
+		}
+		if container && !safeContentType(contentType) {
 			return ErrProtocol
 		}
 		if !safeFilename(filename) {
@@ -587,7 +596,15 @@ func walkMIMEPart(header textproto.MIMEHeader, body io.Reader, depth int, partID
 		if partID == "" {
 			partID = "1"
 		}
-		size, readErr := io.Copy(io.Discard, io.LimitReader(decodeMIMEBody(header, body), MaximumAttachmentBytes+1))
+		source := decodeMIMEBody(header, body)
+		if container {
+			source = body
+		}
+		size, readErr := io.Copy(io.Discard, io.LimitReader(source, MaximumAttachmentBytes+1))
+		// Dovecot's raw multipart section includes the CRLF following its closing delimiter.
+		if strings.HasPrefix(contentType, "multipart/") {
+			size += 2
+		}
 		if readErr != nil || size > MaximumAttachmentBytes {
 			return errors.Join(ErrLimit, readErr)
 		}
@@ -950,7 +967,15 @@ func safeContentType(contentType string) bool {
 		return false
 	}
 	parsed, parameters, err := mime.ParseMediaType(contentType)
-	return err == nil && parsed != "" && len(parameters) == 0
+	return err == nil && parsed != "" && (len(parameters) == 0 || strings.HasPrefix(parsed, "multipart/") && len(parameters) == 1 && parameters["boundary"] != "")
+}
+
+func validContainerEncoding(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "7bit", "8bit", "binary":
+		return true
+	}
+	return false
 }
 
 func previewContentType(contentType string) bool {

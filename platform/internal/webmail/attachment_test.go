@@ -143,3 +143,23 @@ func TestAttachmentMetadataRejectsMalformedEncoding(t *testing.T) {
 		}
 	}
 }
+
+func TestContainerAttachmentMetadataIsOpaque(t *testing.T) {
+	for _, test := range []struct{ contentType, body string }{
+		{"message/rfc822", "Subject: attached\r\nContent-Type: text/html\r\n\r\n<script>opaque</script>"},
+		{"multipart/mixed; boundary=nested", "--nested\r\nContent-Type: text/html\r\n\r\n<script>opaque</script>\r\n--nested--"},
+	} {
+		header := textproto.MIMEHeader{"Content-Type": {test.contentType}, "Content-Disposition": {"attachment; filename=opaque.mime"}}
+		state := &renderedParts{}
+		if err := walkMIMEPart(header, strings.NewReader(test.body), 0, "2", state); err != nil {
+			t.Fatal(err)
+		}
+		expected := uint64(len(test.body))
+		if strings.HasPrefix(test.contentType, "multipart/") {
+			expected += 2
+		}
+		if len(state.attachments) != 1 || state.attachments[0].Size != expected || state.attachments[0].ContentType != test.contentType || state.html != "" || state.plain != "" {
+			t.Fatal("container bytes/metadata not retained opaquely")
+		}
+	}
+}
