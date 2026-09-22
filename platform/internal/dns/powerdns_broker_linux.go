@@ -1128,6 +1128,11 @@ func (server *PowerDNSDaemonServer) dispatch(ctx context.Context, request PowerD
 	default:
 		err = ErrPowerDNSDaemonProtocol
 	}
+	// Native key writes are durable before the daemon's cached signing state
+	// changes. Do not acknowledge a transition while serving the old state.
+	if err == nil && (request.Operation == PowerDNSBrokerDNSSECGenerate || request.Operation == PowerDNSBrokerDNSSECRetire || request.Operation == PowerDNSBrokerDNSSECRemove) {
+		_, err = server.Host.RediscoverZone(ctx, request.Zone.Name)
+	}
 	if err == nil {
 		response.Outcome = PowerDNSBrokerConfirmed
 		return response
