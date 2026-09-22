@@ -119,7 +119,8 @@ CREATE TABLE IF NOT EXISTS app_operations (
     updated_at TIMESTAMP NOT NULL
 );
 CREATE INDEX IF NOT EXISTS app_operations_scope ON app_operations(tenant_id, site_id, state, updated_at);
-CREATE UNIQUE INDEX IF NOT EXISTS app_operations_active_installation ON app_operations(installation_id) WHERE installation_id IS NOT NULL AND state IN ('admitted','executing','compensating','recovery_required');
+DROP INDEX IF EXISTS app_operations_active_installation;
+CREATE UNIQUE INDEX app_operations_active_installation ON app_operations(installation_id) WHERE installation_id IS NOT NULL AND state IN ('admitted','executing','compensating');
 CREATE TABLE IF NOT EXISTS app_staging_relations (
     id TEXT PRIMARY KEY,
     source_installation_id TEXT NOT NULL,
@@ -220,8 +221,11 @@ type SQLRepository struct { DB *sql.DB }
 
 func (repository SQLRepository) Bootstrap(ctx context.Context) error {
 	if repository.DB == nil { return errors.New("application database is required") }
-	_, err := repository.DB.ExecContext(ctx, SQLSchema)
-	return err
+	tx, err := repository.DB.BeginTx(ctx, nil)
+	if err != nil { return err }
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, SQLSchema); err != nil { return err }
+	return tx.Commit()
 }
 
 func encode(value any) ([]byte, error) {
@@ -247,8 +251,21 @@ func (repository SQLRepository) AdmitOperation(ctx context.Context, operation Op
 	if !errors.Is(err, ErrNotFound) { return Operation{}, false, err }
 	payload, err := encode(operation)
 	if err != nil { return Operation{}, false, err }
-	_, err = repository.DB.ExecContext(ctx, `INSERT INTO app_operations (command_id, kind, tenant_id, site_id, installation_id, request_digest, state, stage, operation_json, updated_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?)`, operation.CommandID, operation.Kind, operation.TenantID, operation.SiteID, operation.InstallationID, operation.RequestDigest, operation.State, operation.Stage, payload, operation.UpdatedAt)
-	if err == nil { return operation, true, nil }
+	// A recovery journal is retained evidence, not a running mutator. Only an
+	// explicit same-owner removal may pass an install's failed health boundary.
+	// The guarded INSERT and unique active-mutator index arbitrate atomically.
+	result, err := repository.DB.ExecContext(ctx, `INSERT INTO app_operations (command_id, kind, tenant_id, site_id, installation_id, request_digest, state, stage, operation_json, updated_at)
+SELECT ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?
+WHERE NOT EXISTS (
+ SELECT 1 FROM app_operations prior WHERE prior.installation_id=NULLIF(?, '') AND prior.state='recovery_required'
+ AND NOT (?='remove' AND prior.kind='install' AND prior.stage='health' AND prior.tenant_id=? AND prior.site_id=?)
+)`, operation.CommandID, operation.Kind, operation.TenantID, operation.SiteID, operation.InstallationID, operation.RequestDigest, operation.State, operation.Stage, payload, operation.UpdatedAt, operation.InstallationID, operation.Kind, operation.TenantID, operation.SiteID)
+	if err == nil {
+		count, err := result.RowsAffected()
+		if err != nil { return Operation{}, false, err }
+		if count != 1 { return Operation{}, false, ErrRecoveryRequired }
+		return operation, true, nil
+	}
 	existing, loadErr := repository.LoadOperation(ctx, operation.CommandID)
 	if loadErr == nil && existing.Kind == operation.Kind && existing.RequestDigest == operation.RequestDigest && existing.TenantID == operation.TenantID && existing.SiteID == operation.SiteID && existing.InstallationID == operation.InstallationID { return existing, false, nil }
 	if loadErr == nil { return Operation{}, false, ErrConflict }
