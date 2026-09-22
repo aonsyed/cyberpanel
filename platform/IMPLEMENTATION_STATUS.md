@@ -9,6 +9,14 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
+Installed84 cron lifecycle PASSED: normal API create, actual systemd12:13UTC
+timer firing through signed helper/broker, expected PHP marker owned200006:200006,
+normal disable/delete and exact unit/enablement/manifest/file cleanup. Parent
+inspected qemu-cron84.json; see CRON-VERIFICATION-2026-09-22.md. No more cron
+variations scheduled. Active follow-ons: apps worker Git deploy/rollback; database
+worker actual INVOKER routine preservation through existing scoped import fence;
+mail worker local campaign delivery/unsubscribe (exclusive browser/mail lease).
+
 Current installed84 qemu-workflow-3.1.83/source21baf991f includes renewal, cron,
 database export omission guard and migration rollback fixes. Seven services+OLS
 active, actual core/executor/gateway hashes match; panel/UI200. Signed cron helper

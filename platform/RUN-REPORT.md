@@ -5,6 +5,16 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed84 cron closure
+
+Parent inspected safe qemu-cron84.json: actual systemd timer dispatched at
+2026-09-22T12:13:00Z through the installed helper/broker, PHP marker owner
+200006:200006 mode0640. After normal disable/delete the timer is not-found/inactive,
+has no next expiry or unit/enablement files; authoritative manifest jobs0 and
+original public directory empty after exact fixture cleanup. No run-now/direct
+helper invocation substituted. Full bounded evidence in CRON-VERIFICATION-2026-09-22.md.
+Cron is closed for this pass; workers moved to campaign, Git and routine transfer.
+
 ### Installed84 — source21baf991f
 
 Signed qemu-workflow-3.1.83 sequence84 committed:
