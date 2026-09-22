@@ -9,6 +9,16 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
+Current installed83 qemu-workflow-3.1.82/sourceefab7f310: vacation discovery/UI,
+local SMTP submission correction, and application update public-root/ACL fix.
+Actual core/executor/gateway hashes match, seven panel services+OLS active,
+panel/new UI HTTP200, native Dovecot submission_host127.0.0.1:25 verified.
+Installed82 vacation accepted create/enable but failed reply submission; exact
+probe cleaned, no success claimed. New83 reply/suppression qualification active.
+Backup real-native health cancellation/retry passed; unhealthy-server detection
+and broader DR still unqualified. True Joomla version upgrade needs a second
+signed cached version; no downloads or fabricated version evidence.
+
 Newest installed82 qemu-workflow-3.1.81/source872457aef: normal retained79 restore
 passed and restored current Joomla PHP pool operation; retired pool remained down.
 Joomla then completed installed-panel install, actual homepage/admin dashboard login,

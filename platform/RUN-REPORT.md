@@ -5,6 +5,24 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed83 — sourceefab7f310
+
+Signed qemu-workflow-3.1.82 sequence83 committed:
+manifest a1440f83a8c7d73398202b2203be5e3ccfeee8a77e5bbc1cc5d77bc5ea868934;
+receipt e19337ae67532a17182fc300679636a3321f7b6b6eeac7fa181846fa3cc259c8;
+operation install-94cef1b4e4d2828601a4416c2fab8806cfc9bc8d4bfa50edde3ab29e52545277.
+Parent actual process hashes match QEMU-built inputs:
+core5e670b0c9885a26a540d0bc0e581bc392b2900666ada6546c0405b73359b5878;
+executor3238d844e65463077a00ed0a44825e07e35eee7a1fcc19999ca91bd0d00b6a44;
+gatewayba3e193628d1ebc60c32497806d4c576462b8d6804eccb94b3b945c82228c031.
+Seven panel services+OLS active, HTML/new panel-CqgoKpNv.js HTTP200, native
+doveconf confirms submission_host127.0.0.1:25. No config permissions widened.
+Combined QEMU apps/mail/backup-providers/core/executor suites pass (.251/.011/
+.466/1.470/.020s). UI fixture checks remain distinct from installed proof.
+New scoped vacation reply/suppression qualification dispatched after activation;
+not yet a success claim. Bundle SHA256
+d6ac0f0684075262557c0c4ffe11c4eb4565115c907ce42a3a56119d641e0e2c.
+
 ### Parallel follow-up: update shadow, native health cancellation, vacation failure
 
 Integrated8830ffe98 corrects application update shadow mapping so current/public
