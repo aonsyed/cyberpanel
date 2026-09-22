@@ -154,7 +154,11 @@ func (execution *BrokerImportExecution) VerifyIsolatedTransferDatabase(ctx conte
 }
 
 func (execution *BrokerImportExecution) PromoteIsolatedTransferDatabase(ctx context.Context, job TransferJob, database Database, isolated IsolatedTransferDatabase, point TransferRestorePoint) (TransferPromotion, error) {
-	if database.ID != job.DatabaseID || database.Generation != job.DatabaseGeneration || point != (TransferRestorePoint{}) {
+	expected := TransferRestorePoint{}
+	if job.ConflictPolicy == TransferConflictReplace {
+		expected = TransferRestorePoint{Reference: job.RestorePointRef, DatabaseID: job.DatabaseID, DatabaseGeneration: job.DatabaseGeneration, ProofDigest: job.RestorePointDigest, CreatedAt: job.RestorePointCreatedAt}
+	}
+	if database.ID != job.DatabaseID || database.Generation != job.DatabaseGeneration || point != expected {
 		return TransferPromotion{}, ErrUnauthorized
 	}
 	request, err := execution.request(job, "promote", &isolated)

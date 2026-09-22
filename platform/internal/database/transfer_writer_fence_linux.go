@@ -24,11 +24,12 @@ type transferFenceAccount struct {
 // drainage, not native replacement authority. Public replacement stays disabled.
 // Grants are captured and never revoked/replaced; ACCOUNT LOCK leaves them intact.
 type transferWriterFence struct {
-	Database       Database               `json:"database"`
-	Token          ResourceID             `json:"token"`
-	NativeIdentity string                 `json:"native_identity"`
-	Accounts       []transferFenceAccount `json:"accounts"`
-	State          string                 `json:"state"`
+	Restore        *transferReplacementRestorePoint `json:"restore,omitempty"`
+	Database       Database                         `json:"database"`
+	Token          ResourceID                       `json:"token"`
+	NativeIdentity string                           `json:"native_identity"`
+	Accounts       []transferFenceAccount           `json:"accounts"`
+	State          string                           `json:"state"`
 }
 
 func transferFenceJournalLock(database ResourceID) (func(), error) {
@@ -77,13 +78,21 @@ func (executor *LinuxMariaDBExecutor) acquireTransferWriterFence(ctx context.Con
 	}
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
+	admit, err := transferFenceAdmissionLock(true)
+	if err != nil {
+		return record, err
+	}
+	defer admit()
+	ctx = context.WithValue(ctx, transferFenceMutationAuthority{}, true)
 	unlock, err := transferFenceJournalLock(database.ID)
 	if err != nil {
 		return record, err
 	}
 	defer unlock()
 	if err = executor.readResource("transfer-fences", database.ID, &record); err == nil {
-		if record.Database.ID != database.ID || record.State != "released" || record.Token == token {
+		// Retained restore points are recovery anchors, not reusable lock slots.
+		// An explicit retention lifecycle must retire them before another import.
+		if record.Database.ID != database.ID || record.State != "released" || record.Token == token || record.Restore != nil {
 			return record, ErrConflict
 		}
 	} else if !errors.Is(err, ErrNotFound) {
@@ -213,13 +222,23 @@ func (executor *LinuxMariaDBExecutor) releaseTransferWriterFence(ctx context.Con
 	}
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
+	admit, err := transferFenceAdmissionLock(true)
+	if err != nil {
+		return err
+	}
+	defer admit()
+	ctx = context.WithValue(ctx, transferFenceMutationAuthority{}, true)
 	unlock, err := transferFenceJournalLock(databaseID)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	return executor.releaseTransferWriterFenceLocked(ctx, databaseID, token)
+}
+
+func (executor *LinuxMariaDBExecutor) releaseTransferWriterFenceLocked(ctx context.Context, databaseID, token ResourceID) error {
 	var record transferWriterFence
-	if err = executor.readResource("transfer-fences", databaseID, &record); err != nil {
+	if err := executor.readResource("transfer-fences", databaseID, &record); err != nil {
 		return err
 	}
 	if record.Database.Validate() != nil || record.Database.ID != databaseID || record.Token != token || len(record.Accounts) == 0 || len(record.Accounts) > 64 {
@@ -227,6 +246,21 @@ func (executor *LinuxMariaDBExecutor) releaseTransferWriterFence(ctx context.Con
 	}
 	if record.State != "acquiring" && record.State != "held" && record.State != "releasing" && record.State != "released" {
 		return ErrAmbiguous
+	}
+	if record.Restore != nil && !record.Restore.ImportID.IsZero() {
+		var imp isolatedTransferRecord
+		if err := executor.readResource("transfer-imports", record.Restore.ImportID, &imp); err == nil {
+			if imp.Job.Digest != record.Restore.JobDigest {
+				return ErrAmbiguous
+			}
+			switch imp.State {
+			case "creating", "allocated", "loading", "closed", "verified", "promotion-verified", "promoted", "replacement-rolled-back":
+			default:
+				return ErrAmbiguous
+			}
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
 	}
 	instance, err := executor.instance(record.Database.InstanceID)
 	if err != nil || instance.Placement != PlacementLocal {
