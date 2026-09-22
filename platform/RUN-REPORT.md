@@ -7,6 +7,39 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Resumed workflow checkpoint67 — 2026-09-22
 
+Latest70 qemu-workflow-3.1.69 (source9699e7bbd): manifest
+ce8428b51ff3fb72279b7257a7aef8c281d572cf75873d1e6d50210fc721b3a7,
+receiptcb88e58126a0fa542a36195180eb9c054bd920d8c0ac1a446a13db65c92ef63f,
+bundlef94807a6d8ccbc3e60b2dc94d2ce94a8ef9fda0b57d20efdd51c73a1f972db3c.
+All three running binaries equal built hashes; HTTPS200 serves combined UI.
+Combined API/DNS/webmail/certificates/backup/providers/core/executor/gateway tests
+and UI typecheck/build passed in QEMU. Matching bundle retained on host, guest
+duplicate removed and verified staging pruned.
+
+Installed70 DNS existing-zone list200, import202 and native A/TXT answers pass;
+390px editor and wrong-tenant read/write404 pass. Update202 changed native SQL
+but cached query stayed old. Fixed native scoped purge source has actual candidate
+purge→new dig A/TXT proof; installed lifecycle rerun awaits71, without replaying
+successful mutations. Zero-zone broker/API optional-field codecs were fixed.
+
+Installed70 public TLS mirror is root0444; actual core UID can read only public
+identity, not private key. Folder failure moved from503 to403. Separate native
+Dovecot fixture proved no-authzid OAuth denies before any introspection, while
+canonical authzid succeeds with one request; force_introspection alone does not
+fix it. Only trusted-address propagation remains in progress here.
+
+Installed70 backup root still root:service0750: upgrade skips initialize-authority.
+Shared backup-only init/migration/replay reconciliation is fixed in source and
+real isolated migration-hook regression passes with unchanged claim token.
+WordPress installed69 lifecycle/removal evidence is in
+WORDPRESS-VERIFICATION-2026-09-22.md; canonical-scheme source fix awaits71.
+
+Known obsolete releases15–17,21–27 were copied to ignored host .work/qemu with
+checksum dry-run equality and no filesystem/process references before removal;
+retained active/previous releases and app recovery snapshots were not removed.
+SSH wrapper now enforces4GiB guest free for assembly/install versus2GiB for builds,
+with an observed exit75 reservation rejection and guest shell syntax/pass check.
+
 Latest69 qemu-workflow-3.1.68 from481b6f836 installs all three rebuilt binaries.
 Combined apiserver/DNS/webmail/cyberpanel/panel-execd/paneld suites pass in QEMU.
 Manifest63d33fb47a39ef9d69db131453e92afaee3690968e77286497d33cb44a6d2f1d;

@@ -38,6 +38,23 @@ Webmail actual UI send202 delivered exact subject/body to local IMAP; listing
 remains blocked on native TLS identity trust. Native protocol compatibility fixes
 are in69; public-only managed TLS identity publication is in progress.
 
+Latest runtime is now70 (qemu-workflow-3.1.69, source9699e7bbd), with strict,
+rotation-aware public-only mail TLS identity publication, supported fuzzy backup
+policy/registration and DNS codec fixes. Combined affected suites plus UI checks
+pass, and all three running binary hashes match assembly. TLS now progresses to
+an OAuth403; native isolation proved Dovecot requires the canonical mailbox SASL
+authzid. That adapter fix is in progress; no insecure TLS/global CA/vendor changes.
+DNS create/list/import and390px editor work; cached old answers exposed missing
+scoped purge (source fixed for71). Backup parent ownership remained old because
+upgrades skip initialization (source fixed for71). WordPress installed69 full
+install→HTTP→remove succeeds; canonical URL now derives from trusted applied
+routing in source for71. File tenant binding remains installed and qualified.
+
+Disk guard now reserves4GiB before release assembly/application and2GiB before
+builds/tests. Actual guard rejection and guest shell syntax checks passed. Known
+unreferenced obsolete releases15–17 and21–27 are retained as checksum-matching
+host copies before guest removal; active/previous and app recovery snapshots stay.
+
 Database view import is already implemented by 89f46f587; a fresh native run
 passed all three engines and SQL/gzip with dependent views, INVOKER and exact
 latin1 data. Do not mistake the older appendices at the end of RUN-REPORT for
