@@ -182,7 +182,7 @@ func (spec LSAPISpec) RenderSystemdUnit() ([]byte, error) {
 	if profile.IOWriteBytesPerSecond != 0 { unit.WriteString("IOWriteBandwidthMax="); unit.WriteString(spec.GenerationRoot()); unit.WriteByte(' '); unit.WriteString(decimal(profile.IOWriteBytesPerSecond)); unit.WriteByte('\n') }
 	if profile.IOReadOperationsPerSec != 0 { unit.WriteString("IOReadIOPSMax="); unit.WriteString(spec.GenerationRoot()); unit.WriteByte(' '); unit.WriteString(decimal(profile.IOReadOperationsPerSec)); unit.WriteByte('\n') }
 	if profile.IOWriteOperationsPerSec != 0 { unit.WriteString("IOWriteIOPSMax="); unit.WriteString(spec.GenerationRoot()); unit.WriteByte(' '); unit.WriteString(decimal(profile.IOWriteOperationsPerSec)); unit.WriteByte('\n') }
-	unit.WriteString("OOMPolicy=stop\nLimitNOFILE=4096\n\n[Install]\nWantedBy=multi-user.target\n")
+	unit.WriteString("OOMPolicy=stop\nLimitNOFILE=4096\n\n[Install]\nWantedBy=multi-user.target lsws.service\n")
 	return []byte(unit.String()), nil
 }
 

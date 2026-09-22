@@ -655,7 +655,7 @@ func main() {
 		}()
 	}
 	startupIdentity := startupRecoveryIdentity{Version: 1, BootID: executionAdmission.BootID, PID: os.Getpid(), StartedAt: startupBegan, PowerDNS: pdnsSnapshot}
-	go reconcileStartupMutations(ctx, executionAdmission, mutationAdmission, managementHost, operationsExecutor, pdnsServer, startupIdentity)
+	go reconcileStartupMutations(ctx, executionAdmission, mutationAdmission, managementHost, operationsExecutor, pdnsServer, startupIdentity, func(ctx context.Context) error { return host.ReconcilePoolDependencies(ctx, registry, executionAdmission) })
 	go collectTombstones(ctx, executor)
 	go collectDatabaseExports(ctx, databaseExecutor)
 	select {
@@ -706,10 +706,11 @@ func main() {
 	}
 }
 
-func reconcileStartupMutations(ctx context.Context, raw *rebootcontrol.SQLExecutionAdmission, admission *startupMutationAdmission, managementHost *management.LinuxLifecycleHost, operationsExecutor *operations.LinuxOperationsExecutor, pdnsServer *dns.PowerDNSDaemonServer, identity startupRecoveryIdentity) {
+func reconcileStartupMutations(ctx context.Context, raw *rebootcontrol.SQLExecutionAdmission, admission *startupMutationAdmission, managementHost *management.LinuxLifecycleHost, operationsExecutor *operations.LinuxOperationsExecutor, pdnsServer *dns.PowerDNSDaemonServer, identity startupRecoveryIdentity, reconcilePools func(context.Context) error) {
 	waitingForDrain := false
 	for {
 		err := startupAdmissionSchemaReady(ctx, raw)
+		if err == nil { err = reconcilePools(ctx) }
 		if err == nil {
 			err = completeStartupMutationRecovery(ctx, raw, managementHost, operationsExecutor, pdnsServer, identity)
 		}
