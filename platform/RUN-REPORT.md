@@ -5,6 +5,34 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed76 follow-up and next source batch
+
+Encrypted local backup journey passed through the installed UI/API: explicit
+AES-GCM repository enrollment, visible policy format, capture, removal of only
+the new fixture file/table, and ordinary restore. Point
+point_623d7a62ace236a9f7530280081cfd51c4dff090511db9c4; plan
+restore_5c1cd87a436818699fce0734226f173ef9bc979d679f3c1b active/gen14.
+Evidence /home/harness/lanes/backup/installed76.json and verify-installed76.cjs.
+Parent inspected the receipt and verifier: exact native HTTP200/file bytes,
+SQL text/NULL/BLOB, real-directory publication, site/web UID access and private
+denial; two AES-GCM envelopes, v2 domain-bound commit marker, no raw blob copies.
+Legacy72 raw point and saved ambiguous receipt are preserved. This does not
+qualify ambiguous recovery, off-node key recovery or full disaster recovery.
+
+Installed SFTP UI create/list/revoke passed, but native upload failed because
+executor UMask0027 made the jail root0750. Disposable grant was revoked and its
+native resources removed. Integrated2c9ff300e corrects validated managed
+directories to0755, with restrictive-umask regression. Access package and
+installed harness syntax checks passed in QEMU; actual fixed installed transfer
+is pending. Harness2ea9bf49b/evidenceb9c37255c retain the precise failure.
+
+Internal database replacement532dca02f is integrated. Inspected actual worker
+QEMU logs: native lifecycle/fence suite6.434s; reconstruction tests are not
+SIGKILL tests. Parent combined source tests passed: database0.682s, API0.168s,
+core1.305s, executor0.018s. Public replacement remains disabled pending explicit
+preview/approval/run wiring. Core/executor/gateway source532dca02f builds passed
+in QEMU, but are not installed yet. No full-module completion claim.
+
 ### Installed76 — native access and encrypted backup batch, 2026-09-22
 
 Signed qemu-workflow-3.1.75, source1156571cd, committed.

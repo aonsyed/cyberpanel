@@ -60,6 +60,19 @@ cache invalidation and native MIME-container handling with explicit unknown-size
 metadata. Combined affected Go suites and changed UI typecheck/build passed in
 QEMU. RUN-REPORT has exact receipts, native evidence, and remaining limits.
 
+Latest follow-up: installed76 encrypted repository enrollment, visible policy
+format, capture and normal same-site files/SQL restore passed. Exact HTTP bytes,
+SQL text/NULL/BLOB, public UID access/private denial and ciphertext objects were
+checked; evidence /home/harness/lanes/backup/installed76.json. Legacy raw point
+and saved ambiguous receipt were preserved; ambiguous recovery is not solved.
+Installed SFTP create/list/revoke passed but upload exposed root-owned0750 jail
+permissions under executor UMask0027. Fix2c9ff300e explicitly restores0755 only
+on validated managed directories; QEMU access regression passes, deployment and
+installed transfer retest pending. Internal fenced database replacement532dca02f
+is integrated with affected database/API/core/executor tests passing in QEMU;
+public replacement wiring remains ongoing. Source532dca02f is pushed, not yet
+installed. Existing76 remains the live runtime during DNS installed checks.
+
 Post75 fixes now installed76: c7d477100 selects the actual
 packaged PHP CLI after the LSAPI installer no-op was reproduced;13d6bcfcf invalidates
 scoped DNSSEC caches after durable key transitions. Installed75 DNSSEC enable and
