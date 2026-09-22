@@ -72,7 +72,7 @@ installed transfer retest pending. Internal fenced database replacement532dca02f
 is integrated with affected database/API/core/executor tests passing in QEMU;
 public replacement wiring remains ongoing.
 
-CURRENT: signed77 qemu-workflow-3.1.76, source532dca02f, committed with SFTP
+Previous: signed77 qemu-workflow-3.1.76, source532dca02f, committed with SFTP
 permission correction and internal database replacement. Actual core/executor/
 gateway process hashes match rebuilt artifacts; all seven services and OLS
 active, panel HTML and existing UI asset200. Installed SFTP exact-byte transfer,
@@ -93,13 +93,20 @@ production-runtime fixture diagnosis; backup completed-boundary reconciliation
 (mid-SQL effects remain denied); DKIM local signing/public-key integration.
 These next assignments are not completion claims.
 
-Next source batch6a4c7d8ec is integrated, not installed: approved export-backed
+CURRENT: signed78 qemu-workflow-3.1.77 source6a4c7d8ec committed: approved export-backed
 database replacement/abort/retirement API and UI; Joomla generated table-prefix
 correction694003843. Worker native HTTP approval/recovery/retirement tests pass,
 including abort after failed point preparation. Parent combined QEMU checks
 pass: database/API/core/executor and UI typecheck/build. Actual installed UI
-replacement and Joomla homepage/admin/remove remain pending. Signed78 assembly
-uses these sources and waits for mail/backup mutation leases before activation.
+replacement and Joomla homepage/admin/remove remain pending. Core/executor/
+gateway live hashes match rebuilt artifacts, all seven services/OLSactive and
+HTML/new panel-DwPs7UA1.js200. Backup final native regression precedes Joomla
+installed lifecycle, then database installed UI (including pre-job404 abort).
+Local DKIM prepare/activate/publicTXT/native cryptographic signing proof passed
+on77; private key root:opendkim0440, core denied. Probe UID7 removed; exact scoped
+temporary DNS route removed and original OUTPUT rules independently checked.
+No external delivery/public delegation claim. Backup recovery source not yet
+integrated; completed-boundary recovery tests pass, mid-SQL effects stay denied.
 
 Post75 fixes now installed76: c7d477100 selects the actual
 packaged PHP CLI after the LSAPI installer no-op was reproduced;13d6bcfcf invalidates

@@ -5,6 +5,40 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed78 — Joomla prefix and approved database replacement
+
+Signed qemu-workflow-3.1.77, source6a4c7d8ec, sequence78 committed.
+Manifest fcd0f5607d91706e81bf42ee9227e92f0c4f575ca10c3b3831dcd2a6e6b778c5;
+receipt 523e97a59f2eadd77e7063fd27882ad1f20d54ac84878ee14cb722dfe812ac5f;
+bundle 1fac696e5489d0f3eddcb66ff54dcbdd78c3a6a0ef25fc71f4c2aa6419271fe2.
+Actual core/executor/gateway executable hashes equal their rebuilt artifacts:
+2f80069ebc3548692f600170d00561fa8883b486f4ff6f73e32ccad250e0b8fd,
+21744ab8d756d2911553da05ec002333c06984dfdff9d9dcf4a4b4d7e2b77251,
+3f371eb3229ea0eaaf1dbf72b4ef1e33aab00b9052694c6b494609f4aa943109.
+All seven services and OLSactive; panel HTML/new panel-DwPs7UA1.js200.
+Archive copied to ignored host path and SHA verified before guest duplicate
+removal. Installed Joomla lifecycle/replacement UI remain next checks, not passed.
+
+### Installed77 DKIM local qualification
+
+Existing product flow passed without source changes: authenticated prepare201,
+owned authoritative TXT zone publication, activate200 and foreigntenant404.
+Exactly one qa66 local self-send carried selectorcp3-6d9fb40ded4e signature;
+native RSA-SHA256 relaxed/simple signature and body hash verified against the
+projected public key. Parent inspected dkim-native-evidence.json/native.log,
+activation log and scoped route evidence. Public-key SHA256
+8383705c54623a6c60c10e24ad084a7ed0f52202595187cee2fe46dc120826fe;
+message SHA256652046af0a67476377ef3a142217c4646e46e4a8399b3be659a420392bc582c2.
+Private material root:opendkim0440, signer readable/core denied. Exact UID7 was
+verified then expunged, message absent. QA DKIM/domain selector TXT remain enabled.
+
+Because .invalid cannot resolve publicly, a temporary guest-only route matched
+only coreUID999, exact selector wire QNAME and upstream DNS destination to local
+authoritative port53. No mocked answer or general resolver replacement. Exact
+rules were removed before message submission; parent independently confirmed
+NAT OUTPUT is again only its original ACCEPT policy. This does NOT establish
+public DNS delegation, external inbound/outbound delivery or deliverability.
+
 ### Next source batch6a4c7d8ec — not installed yet
 
 Integrated approved export-backed database replacementc3ee42bd2 as6a4c7d8ec.
