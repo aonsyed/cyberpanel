@@ -10,8 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/executor/siteops"
+	"golang.org/x/sys/unix"
 )
 
 // This exercises real Joomla and MariaDB through the complete production install
@@ -51,7 +55,34 @@ func TestQEMURealJoomlaInstallation(t *testing.T) {
 	if err := os.MkdirAll(root, 0755); err != nil {
 		t.Fatal(err)
 	}
+	for _, relative := range []string{"roots", "roots/g1", "roots/g1/releases"} {
+		if err := os.Chmod(filepath.Join(site, relative), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.Chown(root, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	release := filepath.Dir(root)
+	for _, directory := range []string{release, root} {
+		if err := os.Chown(directory, uid, gid); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(directory, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	releaseFD, err := unix.Open(release, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = siteops.GrantRestoredPublicAccess(releaseFD, uint32(uid), uint32(gid))
+	unix.Close(releaseFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := filepath.Join(release, "private-fixture")
+	if err := os.WriteFile(private, []byte("private"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -123,6 +154,34 @@ func TestQEMURealJoomlaInstallation(t *testing.T) {
 	output, err := sql("SELECT COUNT(*) FROM " + name + "." + prefix + "users WHERE username='qemuadmin';")
 	if err != nil || strings.TrimSpace(string(output)) != "1" {
 		t.Fatalf("administrator not installed: %v: %s", err, output)
+	}
+	web, err := user.Lookup("cyberpanel-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	webUID, err := strconv.Atoi(web.Uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canRead := func(id uint32, path string) bool {
+		command := exec.CommandContext(ctx, "/usr/bin/test", "-r", path)
+		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: id, Gid: id}}
+		return command.Run() == nil
+	}
+	if !canRead(uint32(webUID), filepath.Join(root, "index.php")) {
+		for _, path := range []string{release, root, filepath.Join(root, "index.php")} {
+			info, _ := os.Stat(path)
+			var acl [256]byte
+			n, err := unix.Getxattr(path, "system.posix_acl_access", acl[:])
+			t.Logf("public access diagnostic: %s mode=%v acl=%x error=%v", filepath.Base(path), info.Mode(), acl[:max(0, n)], err)
+		}
+		t.Fatal("web worker cannot read installed public entry")
+	}
+	if canRead(uint32(webUID), private) {
+		t.Fatal("web worker can read private release data")
+	}
+	if canRead(65534, filepath.Join(root, "index.php")) {
+		t.Fatal("unrelated user can read installed public entry")
 	}
 }
 

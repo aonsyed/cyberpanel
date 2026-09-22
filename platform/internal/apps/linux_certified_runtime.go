@@ -655,6 +655,7 @@ func (runtime *LinuxApplicationRuntime) installCertifiedApplication(ctx context.
 	stage := linuxApplicationScope{binding: current.binding, root: stagePath}
 	committed := false
 	defer func() { if !committed { _ = os.RemoveAll(stagePath) } }()
+	if err := preserveCertifiedPublicAccess(current, stage); err != nil { return ExecutionReceipt{}, err }
 	if err := runtime.extractPinnedApplicationArtifact(ctx, stage, execution.Definition.Artifact); err != nil { return ExecutionReceipt{}, err }
 	if _, err := os.Lstat(filepath.Join(current.root, ".well-known")); err == nil {
 		if err := runtime.copyApplicationPath(ctx, current, stage, ".well-known", false); err != nil { return ExecutionReceipt{}, err }
