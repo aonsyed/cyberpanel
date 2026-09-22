@@ -127,10 +127,20 @@ func (runtime *Runtime) BuildTarget(ctx context.Context, edition webengine.Editi
 }
 
 func (runtime *Runtime) Inspect(ctx context.Context, edition webengine.Edition) (Installation, error) {
+	return runtime.inspect(ctx,edition,false)
+}
+
+// InspectInstalled keeps recovery APIs available while a managed restore holds
+// the engine stopped. It still verifies installed identity and catalog binding.
+func(runtime *Runtime)InspectInstalled(ctx context.Context,edition webengine.Edition)(Installation,error){return runtime.inspect(ctx,edition,true)}
+
+func (runtime *Runtime) inspect(ctx context.Context, edition webengine.Edition, installationOnly bool) (Installation, error) {
 	if runtime == nil || runtime.catalog == nil || runtime.lifecycle == nil {
 		return Installation{}, ErrInvalid
 	}
-	observed, err := runtime.lifecycle.Inspect(ctx, edition)
+	var observed Installation
+	var err error
+	if installationOnly {observed,err=runtime.lifecycle.InspectInstalled(ctx,edition)} else {observed,err=runtime.lifecycle.Inspect(ctx,edition)}
 	if err != nil { return Installation{}, err }
 	if observed.Transition != nil {
 		if !validConversionReceipt(*observed.Transition) { return Installation{}, ErrAmbiguous }

@@ -29,6 +29,7 @@ type LinuxManagementOperation string
 
 const (
 	LinuxManagementInspect          LinuxManagementOperation = "lifecycle.inspect"
+	LinuxManagementInspectInstalled LinuxManagementOperation = "lifecycle.inspect_installed"
 	LinuxManagementInstall          LinuxManagementOperation = "lifecycle.install"
 	LinuxManagementUpgrade          LinuxManagementOperation = "lifecycle.upgrade"
 	LinuxManagementConvert          LinuxManagementOperation = "lifecycle.convert"
@@ -171,7 +172,7 @@ func (server *LinuxManagementBrokerServer) serve(connection net.Conn) {
 	defer cancel()
 	mutation := true
 	switch request.Operation {
-	case LinuxManagementInspect:
+	case LinuxManagementInspect, LinuxManagementInspectInstalled:
 		mutation = false
 	case LinuxManagementInstall, LinuxManagementUpgrade, LinuxManagementConvert, LinuxManagementRemove, LinuxManagementLicenseConfigure, LinuxManagementLicenseRefresh, LinuxManagementPHPInstall, LinuxManagementPHPProfileApply, LinuxManagementPHPRollback, LinuxManagementStage, LinuxManagementValidate, LinuxManagementShadow, LinuxManagementActiveProbe, LinuxManagementSwitch, LinuxManagementConfirm, LinuxManagementRestore:
 	default:
@@ -415,6 +416,12 @@ func (client *LinuxManagementClient) Inspect(ctx context.Context, edition webeng
 		Edition webengine.Edition `json:"edition"`
 	}{edition}, &output)
 	return
+}
+
+// InspectInstalled verifies deployed artifacts/configuration, not runtime
+// availability. Only core startup uses this; operational Inspect stays strict.
+func(client *LinuxManagementClient)InspectInstalled(ctx context.Context,edition webengine.Edition)(output Installation,err error){
+	err=client.call(ctx,LinuxManagementInspectInstalled,struct{Edition webengine.Edition `json:"edition"`}{edition},&output);return
 }
 func (client *LinuxManagementClient) Install(ctx context.Context, request EffectRequest, plan ArtifactPlan) (output EffectReceipt, err error) {
 	err = client.call(ctx, LinuxManagementInstall, lifecyclePlanInput{request, plan}, &output)

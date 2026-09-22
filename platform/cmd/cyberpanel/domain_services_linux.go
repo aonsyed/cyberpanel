@@ -438,7 +438,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if _, err = repositories.WebEngine.EnsureGlobalTuning(ctx, observedTuning); err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("reconcile web-engine tuning projection: %w", err)
 	}
-	observedInstallation, err := webManagementRuntime.Inspect(ctx, webengine.Edition(installedEdition))
+	observedInstallation, err := webManagementRuntime.InspectInstalled(ctx, webengine.Edition(installedEdition))
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("inspect web-engine installation: %w", err)
 	}
