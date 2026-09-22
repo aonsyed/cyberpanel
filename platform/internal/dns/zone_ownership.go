@@ -580,7 +580,7 @@ func (authority *TenantZoneAuthority) ApplyZoneForTenant(ctx context.Context, te
 }
 
 func (authority *TenantZoneAuthority) ImportRecordSetsForTenant(ctx context.Context, tenant, effect string, spec ZoneSpec, sets []RecordSet, replace bool) (AuthorityReceipt, error) {
-	if len(sets) == 0 || len(sets) > 10000 {
+	if len(sets) == 0 && !replace || len(sets) > 10000 {
 		return AuthorityReceipt{}, ErrInvalidDNS
 	}
 	for _, set := range sets {

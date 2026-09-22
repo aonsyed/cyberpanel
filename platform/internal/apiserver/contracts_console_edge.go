@@ -1791,7 +1791,7 @@ func validateBackupRestorePlan(value any) error {
 
 func validateDNSZoneImport(value any) error {
 	payload := value.(*DNSZoneImportPayload)
-	if len(payload.RecordSets) == 0 || len(payload.RecordSets) > 10000 { return invalid("DNS import") }
+	if len(payload.RecordSets) == 0 && !payload.Replace || len(payload.RecordSets) > 10000 { return invalid("DNS import") }
 	for _, set := range payload.RecordSets {
 		if !validDNSOwner(set.Name) || !validDNSRecordType(set.Type) || set.TTL < 30 || set.TTL > 2147483647 || len(set.Values) == 0 || len(set.Values) > 1000 { return invalid("DNS record set") }
 		for _, record := range set.Values { if !safeEdgeText(record, 4096) { return invalid("DNS record") } }

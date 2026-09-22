@@ -168,7 +168,7 @@ func (request PowerDNSBrokerRequest) Validate(now time.Time) error {
 			return ErrPowerDNSDaemonProtocol
 		}
 	case PowerDNSBrokerImportRecordSets:
-		if request.Zone == nil || validatePowerDNSDNSSECZone(*request.Zone) != nil || !validPowerDNSEffectID(request.EffectID) || len(request.RecordSets) == 0 || len(request.RecordSets) > 10000 || request.Configuration != nil || request.Delete != nil || request.NotifyName != nil || request.TenantID != "" || request.ZoneID != "" || request.Limit != 0 || request.Cursor != "" || len(request.TransferPeers) != 0 {
+		if request.Zone == nil || validatePowerDNSDNSSECZone(*request.Zone) != nil || !validPowerDNSEffectID(request.EffectID) || len(request.RecordSets) == 0 && !request.Replace || len(request.RecordSets) > 10000 || request.Configuration != nil || request.Delete != nil || request.NotifyName != nil || request.TenantID != "" || request.ZoneID != "" || request.Limit != 0 || request.Cursor != "" || len(request.TransferPeers) != 0 {
 			return ErrPowerDNSDaemonProtocol
 		}
 		for _, set := range request.RecordSets {

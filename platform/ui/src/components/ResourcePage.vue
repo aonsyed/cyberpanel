@@ -9,6 +9,7 @@ import MailDomainCreate from "./MailDomainCreate.vue";
 import MailboxCreate from "./MailboxCreate.vue";
 import DatabaseConsole from "./DatabaseConsole.vue";
 import DatabaseUploadImport from "./DatabaseUploadImport.vue";
+import DNSRecords from "./DNSRecords.vue";
 import DataTable from "./DataTable.vue";
 
 const props = defineProps<{ definition: PageDefinition }>();
@@ -129,7 +130,8 @@ function isRecord(value: unknown): value is Record<string, unknown> { return Boo
       <footer v-if="nextCursor || previousCursors.length" class="pagination"><button class="button button-small" type="button" :disabled="!previousCursors.length" @click="previousPage">Previous</button><span class="mono">CURSOR PAGE {{ previousCursors.length + 1 }}</span><button class="button button-small" type="button" :disabled="!nextCursor" @click="nextPage">Next</button></footer>
     </template>
 
-    <DatabaseConsole v-if="activeAction?.operation === 'database.console.issue' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null"/>
+    <DNSRecords v-if="(activeAction?.operation === 'dns.recordset.list' || activeAction?.operation === 'dns.zone.import') && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null" @complete="complete"/>
+    <DatabaseConsole v-else-if="activeAction?.operation === 'database.console.issue' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null"/>
     <DatabaseUploadImport v-else-if="activeAction?.operation === 'database.upload.begin' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null" @complete="complete"/>
     <MailDomainCreate v-else-if="activeAction?.operation === 'mail.domain.create'" :tenant-id="activeTenantID" @close="activeAction=null;activeResource=null" @complete="complete"/>
     <MailboxCreate v-else-if="activeAction?.operation === 'mail.mailbox.create' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null" @complete="complete"/>
