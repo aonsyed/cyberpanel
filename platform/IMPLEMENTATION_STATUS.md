@@ -43,7 +43,11 @@ Qualified installed journeys in this resumption:
 - Backup installer: real node-release activation repairs only fixed repository
   authority to0700 cyberpanel:cyberpanel (72). No manual chmod or unrelated legacy
   hook invocation. Native capture/restore component proof passes; installed
-  disposable site/files/database capture→same-site restore still in progress.
+  disposable site/files/database capture passes (repository200, policy201,
+  verified files+SQL recovery point). Restore plan passes but apply503: real
+  provisioned current directory cannot be replaced as a symlink. No promotion;
+  fixture remains frozen/ambiguous pending product recovery and directory-layout
+  correction. This is NOT a qualified installed restore.
 
 These are bounded workflows, not full module or product parity. Earlier entries
 below are historical checkpoints; their obsolete NEXT blockers do not supersede

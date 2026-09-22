@@ -27,7 +27,22 @@ No resend: send202 was on71, read completion on72. Only exact probeUID3 expunged
 then subject absence confirmed. Parent inspected guest webmail-installed72-read-
 evidence.json operation receipts/cleanup; screenshot retained beside it. This
 closes bounded local panel compose/send/list/read, not attachments/drafts/Sieve
-or external delivery. Full backup capture/restore journey remains underway.
+or external delivery.
+
+Installed72 backup: disposable qemu-backup72.example.invalid site201, repository
+registration200, policy201 and Run now produce verified recovery point
+point_ed83625c0ef27740f5279a88ef9f2483b38b78b61500bc4b: real SQL2470B + files5120B.
+Restore plan succeeds, apply503. Actual current is a provisioned directory;
+promoteFiles attempts symlink-over-directory rename. Native proof shows frozen,
+not promoted; coordinator remains ambiguous. OLS failed after freeze while panel
+services stayed healthy. Normal service-only start restored OLS to active; no
+layout or state journals were manually changed. The old freeze state has no
+scoped before-write fingerprint/inode proof; empty TargetGeneration alone cannot
+authorize automatic retry. Preserve the ambiguous plan; do not claim it recovered.
+Directory-layout correction is in progress. A new explicit normal restore plan
+may qualify normal restore separately, only through existing safe admission.
+Earlier component restore proof used a symlink layout and does not qualify this
+installed flow. Interrupted/ambiguous recovery remains a separate release gate.
 
 Latest71 qemu-workflow-3.1.70 (source ac288b355) committed through the normal
 signed installer. Manifest e1f2f31f6100297d1a0c151dce040f4a43b8d4c4fdb769483668a72894b20168;
