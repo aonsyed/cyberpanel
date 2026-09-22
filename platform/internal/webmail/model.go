@@ -27,16 +27,17 @@ var (
 )
 
 const (
-	MaximumPageSize             = 100
-	MaximumSearchTerms          = 8
-	MaximumSearchText           = 256
-	MaximumFolderNameRunes      = 255
-	MaximumGrantLifetime        = 2 * time.Minute
-	MaximumCursorLifetime       = 10 * time.Minute
-	MaximumGrantsPerTenant      = 4096
-	MaximumReceiptsPerTenant    = 4096
-	MaximumCursorsPerTenant     = 4096
-	MaximumRawMessageBytes      = 8 << 20
+	MaximumPageSize          = 100
+	MaximumSearchTerms       = 8
+	MaximumSearchText        = 256
+	MaximumFolderNameRunes   = 255
+	MaximumGrantLifetime     = 2 * time.Minute
+	MaximumCursorLifetime    = 10 * time.Minute
+	MaximumGrantsPerTenant   = 4096
+	MaximumReceiptsPerTenant = 4096
+	MaximumCursorsPerTenant  = 4096
+	// Includes base64/line overhead for a maximum decoded attachment; streamed, not buffered.
+	MaximumRawMessageBytes      = 36 << 20
 	MaximumRenderedPartBytes    = 1 << 20
 	MaximumAttachmentBytes      = 25 << 20
 	MaximumComposeBytes         = 32 << 20

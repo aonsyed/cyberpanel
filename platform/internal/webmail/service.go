@@ -574,6 +574,10 @@ func walkMIMEPart(header textproto.MIMEHeader, body io.Reader, depth int, partID
 		filename = parameters["name"]
 	}
 	if strings.EqualFold(disposition, "attachment") || filename != "" {
+		// Container attachments need separate IMAP section semantics; never advertise a leaf ID for them.
+		if strings.HasPrefix(strings.ToLower(contentType), "multipart/") || strings.EqualFold(contentType, "message/rfc822") {
+			return ErrProtocol
+		}
 		if !safeFilename(filename) {
 			filename = "attachment"
 		}

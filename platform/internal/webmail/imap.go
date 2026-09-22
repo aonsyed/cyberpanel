@@ -317,7 +317,7 @@ func (reader *imapLiteralReader) Close() error {
 
 func (client *imapClient) literalCommand(command string, expectedUID uint32, maximum uint64) (io.ReadCloser, uint64, error) {
 	if client == nil || client.connection == nil || command == "" || len(command) > maximumIMAPCommandBytes ||
-		strings.ContainsAny(command, "\x00\r\n") || expectedUID == 0 || maximum == 0 || maximum > MaximumAttachmentBytes {
+		strings.ContainsAny(command, "\x00\r\n") || expectedUID == 0 || maximum == 0 || maximum > MaximumRawMessageBytes {
 		return nil, 0, ErrInvalid
 	}
 	sequence := atomic.AddUint32(&client.sequence, 1)

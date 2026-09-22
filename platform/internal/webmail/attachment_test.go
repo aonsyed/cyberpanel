@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/mail"
 	"net/textproto"
 	"os"
@@ -13,6 +15,64 @@ import (
 	"testing"
 	"time"
 )
+
+type attachmentZeroReader struct{}
+
+func (attachmentZeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }
+
+func TestRawAttachmentMessageStreamingBound(t *testing.T) {
+	for _, size := range []int64{(8 << 20) + 1, 36 << 20, (36 << 20) + 1} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			connection, server := net.Pipe()
+			defer connection.Close()
+			defer server.Close()
+			go func() {
+				line, err := bufio.NewReader(server).ReadString('\n')
+				if err != nil {
+					return
+				}
+				tag := strings.Fields(line)[0]
+				fmt.Fprintf(server, "* 1 FETCH (UID 3 BODY[] {%d}\r\n", size)
+				if size <= 36<<20 {
+					io.CopyN(server, attachmentZeroReader{}, size)
+					fmt.Fprintf(server, ")\r\n%s OK done\r\n", tag)
+				}
+			}()
+			client := &imapClient{connection: connection, reader: bufio.NewReader(connection), timeout: 10 * time.Second}
+			reader, _, err := client.literalCommand("UID FETCH 3 (UID BODY.PEEK[])", 3, 36<<20)
+			if size > 36<<20 {
+				if !errors.Is(err, ErrLimit) {
+					t.Fatal("oversize raw literal not rejected", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal("supported attachment raw envelope rejected", err)
+			}
+			n, err := io.Copy(io.Discard, reader)
+			if err != nil || reader.Close() != nil || n != size {
+				t.Fatal("bounded raw stream failed", err)
+			}
+		})
+	}
+}
+
+func TestDecodedAttachmentMaximum(t *testing.T) {
+	header := textproto.MIMEHeader{"Content-Type": {"application/octet-stream"}, "Content-Disposition": {"attachment; filename=maximum.bin"}}
+	for _, size := range []int64{MaximumAttachmentBytes, MaximumAttachmentBytes + 1} {
+		state := &renderedParts{}
+		err := walkMIME(header, io.LimitReader(attachmentZeroReader{}, size), 0, state)
+		if size > MaximumAttachmentBytes {
+			if !errors.Is(err, ErrLimit) {
+				t.Fatal("oversize decoded attachment accepted", err)
+			}
+			continue
+		}
+		if err != nil || len(state.attachments) != 1 || state.attachments[0].Size != uint64(size) {
+			t.Fatal("maximum attachment metadata failed", err)
+		}
+	}
+}
 
 func TestRenderedAttachmentMetadata(t *testing.T) {
 	raw := "Content-Type: multipart/mixed; boundary=outer\r\n\r\n--outer\r\nContent-Type: multipart/alternative; boundary=inner\r\n\r\n--inner\r\nContent-Type: text/plain\r\n\r\nbody\r\n--inner--\r\n--outer\r\nContent-Type: application/octet-stream; name=proof.bin\r\nContent-Disposition: attachment; filename=proof.bin\r\nContent-Transfer-Encoding: base64\r\n\r\nAAEC/w==\r\n--outer--\r\n"
@@ -75,5 +135,11 @@ func TestAttachmentMetadataRejectsMalformedEncoding(t *testing.T) {
 	header := textproto.MIMEHeader{"Content-Type": {"application/octet-stream"}, "Content-Disposition": {"attachment; filename=proof.bin"}, "Content-Transfer-Encoding": {"base64"}}
 	if err := walkMIME(header, strings.NewReader("invalid!"), 0, &renderedParts{}); err == nil {
 		t.Fatal("malformed attachment encoding accepted")
+	}
+	for _, contentType := range []string{"multipart/mixed; boundary=outer", "message/rfc822"} {
+		header.Set("Content-Type", contentType)
+		if err := walkMIME(header, strings.NewReader(""), 0, &renderedParts{}); !errors.Is(err, ErrProtocol) {
+			t.Fatal("unsupported attachment container advertised", err)
+		}
 	}
 }
