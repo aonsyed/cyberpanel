@@ -32,7 +32,7 @@ type TransferImportExecutor interface {
 
 func (request TransferImportRequest) validate() error {
 	j, source := request.Job, request.SourceExport
-	if j.Validate() != nil || j.Direction != TransferImport || j.ConflictPolicy != TransferConflictFail {
+	if j.Validate() != nil || j.Direction != TransferImport || (j.ConflictPolicy != TransferConflictFail && j.ConflictPolicy != TransferConflictReplace) {
 		return ErrUnauthorized
 	}
 	if j.UploadSource != nil {

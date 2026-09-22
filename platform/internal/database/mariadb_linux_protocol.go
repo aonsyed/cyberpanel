@@ -79,6 +79,7 @@ const (
 	sqlTransferFenceLock
 	sqlTransferFenceUnlock
 	sqlTransferFenceReplication
+	sqlReplaceImportTables
 )
 
 type principalMutation struct {
@@ -219,6 +220,11 @@ func (connection *mariaDBConnection) query(ctx context.Context, statement mariaD
 		return nil, ErrInvalidCommand
 	}
 	if connection.executor != nil {
+		releaseFence, err := connection.executor.guardTransferFenceMutation(ctx, statement)
+		if err != nil {
+			return nil, err
+		}
+		defer releaseFence()
 		guarded,release,err:=connection.executor.guardRootSQL(ctx,statement)
 		if err!=nil{return nil,err};defer release();ctx=guarded
 	}
@@ -256,6 +262,12 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 	if statement==sqlWriterSessionAudit||statement==sqlWriterSessions||statement==sqlKillWriterSession||statement==sqlStopWriterReplication{return buildWriterGateStatement(statement,values...)}
 	if statement==sqlObserveReplication||statement==sqlConfigureReplication||statement==sqlWaitReplication||statement==sqlObserveReplicationPrincipal||statement==sqlCreateReplicationPrincipal{return buildReplicationStatement(statement,values...)}
 	switch statement {
+	case sqlReplaceImportTables:
+		m, ok := oneValue[transferReplacementMutation](values)
+		if !ok {
+			return "", ErrInvalidResource
+		}
+		return transferReplacementRenameSQL(m.Live, m.Staged, m.Restore, m.Old, m.New)
 	case sqlObserveStatus:
 		if len(values) != 0 {
 			return "", ErrInvalidCommand

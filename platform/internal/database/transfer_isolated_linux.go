@@ -16,6 +16,7 @@ import (
 // Root-only native building blocks. The transfer broker enforces a closed
 // command, source-artifact ownership and execution admission before dispatch.
 type isolatedTransferRecord struct {
+	Replacement     *transferReplacementPlan `json:"replacement,omitempty"`
 	Views           []transferNativeView     `json:"views,omitempty"`
 	PromotionCommit *transferPromotionCommit `json:"promotion_commit,omitempty"`
 	Process         *TransferProcessReceipt  `json:"process,omitempty"`
@@ -190,7 +191,7 @@ func (configs isolatedImportConfigs) TransferClientConfig(ctx context.Context, j
 	principal, password, err := executor.createScopedMigrationLoader(bounded, record.Target, true)
 	defer wipeBytes(password)
 	if err != nil {
-		cleanup, stop := context.WithTimeout(context.Background(), 20*time.Second)
+		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 		defer stop()
 		cleanupErr := executor.cleanupMigrationLoader(cleanup, record.Target.ID)
 		if cleanupErr == nil {
@@ -204,7 +205,7 @@ func (configs isolatedImportConfigs) TransferClientConfig(ctx context.Context, j
 	path := ""
 	release := func() error {
 		once.Do(func() {
-			cleanup, stop := context.WithTimeout(context.Background(), 20*time.Second)
+			cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 			defer stop()
 			executor.mu.Lock()
 			defer executor.mu.Unlock()
@@ -226,7 +227,7 @@ func (configs isolatedImportConfigs) TransferClientConfig(ctx context.Context, j
 	}
 	// Error cleanup runs while this method already holds the executor mutex.
 	cleanupFailed := func() error {
-		cleanup, stop := context.WithTimeout(context.Background(), 20*time.Second)
+		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 		defer stop()
 		cleanupErr := executor.cleanupMigrationLoader(cleanup, record.Target.ID)
 		if path != "" {

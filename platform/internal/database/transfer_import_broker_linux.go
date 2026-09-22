@@ -16,6 +16,14 @@ func (executor *LinuxMariaDBExecutor) ExecuteTransferImport(ctx context.Context,
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	if request.Job.ConflictPolicy == TransferConflictReplace {
+		bounded, release, err := executor.replacementTransferContext(ctx, request.Job, request.Action)
+		if err != nil {
+			return result, err
+		}
+		defer release()
+		ctx = bounded
+	}
 	if request.Isolated != nil {
 		result.Isolated = *request.Isolated
 	}
@@ -60,7 +68,11 @@ func (executor *LinuxMariaDBExecutor) ExecuteTransferImport(ctx context.Context,
 			}
 		} else {
 			var proof TransferPromotion
-			proof, err = executor.promoteEmptyTransferImport(ctx, request.Job, result.Isolated)
+			if request.Job.ConflictPolicy == TransferConflictReplace {
+				proof, err = executor.promoteReplacementTransferImport(ctx, request.Job, result.Isolated, false)
+			} else {
+				proof, err = executor.promoteEmptyTransferImport(ctx, request.Job, result.Isolated)
+			}
 			if err == nil {
 				result.Promotion = &proof
 			}
