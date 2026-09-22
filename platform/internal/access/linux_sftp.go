@@ -74,7 +74,9 @@ func sftpDirectory(path string) error {
 	if !ok || !info.IsDir() || st.Uid != 0 || info.Mode().Perm()&0022 != 0 {
 		return ErrIntegrity
 	}
-	return nil
+	// The executor runs with UMask=0027. The chroot itself must remain
+	// traversable after sshd drops to the site UID; this never chmods site data.
+	return os.Chmod(path, 0755)
 }
 func sftpWrite(path string, data []byte, mode os.FileMode) error {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
