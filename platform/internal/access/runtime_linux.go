@@ -2,6 +2,11 @@
 
 package access
 
+import (
+	"context"
+	"time"
+)
+
 type LinuxAccessRuntime struct {
 	Files       *LinuxFileExecutor
 	Credentials *LinuxCredentialExecutor
@@ -22,6 +27,14 @@ func NewLinuxAccessRuntime(resolver LinuxSiteResolver, secretSource *LinuxAccess
 		return nil, err
 	}
 	credentials.Secrets = secretSource
+	// Native grants are root-journaled; rebuild only their validated site roots
+	// after reboot before accepting fresh access requests.
+	reconcileContext, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	err = credentials.ReconcileSFTP(reconcileContext)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
 	terminal, err := NewLinuxTerminalBroker(credentials, controlGID)
 	if err != nil {
 		return nil, err

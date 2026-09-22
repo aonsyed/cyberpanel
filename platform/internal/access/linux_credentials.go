@@ -29,6 +29,7 @@ const (
 type LinuxCredentialExecutor struct {
 	Files   *LinuxFileExecutor
 	Secrets *LinuxAccessSecretSource
+	sftp    *linuxSFTPHost
 }
 
 func NewLinuxCredentialExecutor(files *LinuxFileExecutor) (*LinuxCredentialExecutor, error) {
@@ -167,6 +168,9 @@ func (executor *LinuxCredentialExecutor) RemoveSSHKey(ctx context.Context, key S
 	if err := key.Validate(); err != nil {
 		return "", err
 	}
+	if err := executor.removeSFTPKey(ctx, key.ID); err != nil {
+		return "", err
+	}
 	entries, err := os.ReadDir(linuxAuthorizedKeysRoot)
 	if errors.Is(err, os.ErrNotExist) {
 		return accessReceipt("ssh-key-remove", string(key.ID)), nil
@@ -221,6 +225,9 @@ func (executor *LinuxCredentialExecutor) ApplyAccessGrant(ctx context.Context, g
 	if err = key.Validate(); err != nil {
 		return "", err
 	}
+	if grant.Protocol == ProtocolSFTP {
+		return executor.applySFTP(ctx, grant, key)
+	}
 	if err = ensureAuthorizedKeysRoot(); err != nil {
 		return "", err
 	}
@@ -232,6 +239,9 @@ func (executor *LinuxCredentialExecutor) ApplyAccessGrant(ctx context.Context, g
 	return accessReceipt("ssh-grant", string(grant.ID), key.PublicKey.Fingerprint), nil
 }
 func (executor *LinuxCredentialExecutor) RemoveAccessGrant(ctx context.Context, grant AccessGrant) (string, error) {
+	if grant.Protocol == ProtocolSFTP {
+		return executor.removeSFTP(ctx, grant)
+	}
 	binding, err := executor.binding(ctx, grant.SiteID)
 	if err != nil {
 		return "", err

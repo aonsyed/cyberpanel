@@ -280,6 +280,7 @@ type DatabaseExternalEnrollmentSecrets struct {
 }
 
 type AccessCredentialProjection struct {
+	Username string `json:"username,omitempty"`
 	ID         string    `json:"id"`
 	SiteID     string    `json:"site_id"`
 	Label      string    `json:"label"`
