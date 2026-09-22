@@ -74,6 +74,7 @@ type AuditSink interface { RecordWebmailData(context.Context, AuditEvent) error 
 type ForwardingPolicy interface { AuthorizeSieveRedirect(context.Context, Scope, string) error }
 type AutoresponderResolver interface { ResolveAutoresponder(context.Context, Scope, maildata.AutoresponderID, uint64) (maildata.AutoresponderRule, error) }
 type VacationLifecycle interface {
+	Discover(context.Context, Scope, string) (VacationDiscovery, error)
 	Create(context.Context, maildata.AutoresponderCreateRequest) (maildata.AutoresponderRule, error)
 	Inspect(context.Context, maildata.AutoresponderCall) (maildata.AutoresponderRule, error)
 	Enable(context.Context, maildata.AutoresponderCall) (maildata.AutoresponderRule, error)
@@ -373,6 +374,21 @@ type VacationRequest struct {
 	MailboxGeneration uint64                        `json:"mailbox_generation"`
 	ExpectedGeneration uint64                       `json:"expected_generation"`
 	Settings          maildata.AutoresponderSettings `json:"settings"`
+}
+
+type VacationDiscovery struct {
+	MailboxID string `json:"mailbox_id"`
+	DomainID maildata.DomainID `json:"domain_id"`
+	MailboxGeneration uint64 `json:"mailbox_generation"`
+	Rules []maildata.AutoresponderRule `json:"rules"`
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
+func (service *Service) DiscoverVacation(ctx context.Context, call Call, cursor string)(VacationDiscovery,error) {
+	if err:=service.ready(call);err!=nil{return VacationDiscovery{},err}
+	if service.Vacations==nil||cursor!=""&&!opaquePattern.MatchString(cursor){return VacationDiscovery{},ErrInvalid}
+	if err:=service.authorize(ctx,call,OperationSieveRead,"",false);err!=nil{return VacationDiscovery{},err}
+	return service.Vacations.Discover(ctx,call.Scope,cursor)
 }
 
 func (service *Service) CreateVacation(ctx context.Context, call Call, request VacationRequest) (maildata.AutoresponderRule, error) {

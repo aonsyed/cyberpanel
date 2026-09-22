@@ -23,6 +23,16 @@ func TestWebmailDataUsesCurrentSecureMailboxContext(t *testing.T) {
 	inv := Invocation{Actor: Actor{PrincipalID: owner, SessionID: session, CredentialID: credential}, Request: RequestEnvelope{TenantID: "tenant", ResourceID: "vacation_rule", RequestID: "request"}, IdempotencyKey: "vacation_create"}
 	payload := WebmailDataSessionPayload{WebmailEpochPayload: WebmailEpochPayload{AuthorizationEpoch: 3}, MailboxID: "mailbox"}
 	authority := &dataMailboxAuthority{}
+	list := &WebmailDataVacationListPayload{WebmailDataSessionPayload: payload}
+	if err := validateWebmailDataPayload(list); err != nil {
+		t.Fatal("discovery requires hidden metadata", err)
+	}
+	listEnvelope := inv.Request
+	listEnvelope.Operation = "webmail.data.vacation.list"
+	listEnvelope.ResourceID = ""
+	if _, err := webmailDataScope(listEnvelope, list); err != nil {
+		t.Fatal("discovery scope rejected", err)
+	}
 	if err := validateWebmailDataPayload(&WebmailDataVacationPayload{WebmailDataSessionPayload: payload}); err != nil {
 		t.Fatal("legacy session still required", err)
 	}
