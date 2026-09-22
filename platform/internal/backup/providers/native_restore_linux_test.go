@@ -106,11 +106,13 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 		mkdir(path, 0711)
 	}
 	mkdir(release, 0750)
+	mkdir(filepath.Join(release, "public"), 0750)
 	mkdir(filepath.Join(generation, "private"), 0700)
 	write(filepath.Join(release, "index.txt"), "restored site bytes\n", 0640)
+	write(filepath.Join(release, "public/served.txt"), "restored public bytes\n", 0640)
 	write(filepath.Join(generation, "private/secret.txt"), "private fixture bytes\n", 0600)
 	const uid = 62001
-	for _, path := range []string{release, filepath.Join(release, "index.txt"), filepath.Join(generation, "private"), filepath.Join(generation, "private/secret.txt")} {
+	for _, path := range []string{release, filepath.Join(release, "index.txt"), filepath.Join(release, "public"), filepath.Join(release, "public/served.txt"), filepath.Join(generation, "private"), filepath.Join(generation, "private/secret.txt")} {
 		must(os.Chown(path, uid, uid))
 	}
 	mkdir(runtimeRoot, 0700)
@@ -154,6 +156,7 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	t.Logf("native files+MariaDB capture committed: %s", run.RecoveryPointID)
 	// Remove captured content rather than merely comparing the still-live source.
 	must(os.Remove(filepath.Join(release, "index.txt")))
+	must(os.Remove(filepath.Join(release, "public/served.txt")))
 	must(os.Remove(filepath.Join(generation, "private/secret.txt")))
 	sqlCommand("DROP TABLE `" + dbname + "`.probe")
 	plan := backup.RestorePlanSpec{ID: backup.RestoreID(id), IdempotencyKey: id, TenantID: id, RecoveryPointID: run.RecoveryPointID, SourceScope: id, TargetScope: id, ComponentMapping: map[backup.ComponentKind]string{backup.ComponentFiles: id, backup.ComponentDatabase: id}, CollisionPolicy: backup.CollisionReplaceBlueGreen, SecretPolicy: backup.SecretResetRequired, RequiredFreeBytes: 1 << 20, Generation: 1}
@@ -162,6 +165,9 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	must(err)
 	if receipt.Phase != backup.RestoreActive {
 		t.Fatalf("restore phase: %s", receipt.Phase)
+	}
+	if info, err := os.Lstat(filepath.Join(generation, "releases/current")); err != nil || !info.IsDir() {
+		t.Fatalf("native vhost current must be a directory: %v", err)
 	}
 	for path, expected := range map[string]string{filepath.Join(generation, "releases/current/index.txt"): "restored site bytes\n", filepath.Join(generation, "private/secret.txt"): "private fixture bytes\n"} {
 		command := exec.CommandContext(ctx, "/usr/bin/cat", path)
@@ -176,6 +182,16 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 		t.Errorf("restored database mismatch: %q", rows)
 	}
 	t.Log("restored native SQL text/NULL/BLOB rows and site/private bytes checked")
+	publicRead := exec.CommandContext(ctx, "/usr/sbin/runuser", "-u", "cyberpanel-web", "--", "/usr/bin/cat", filepath.Join(generation, "releases/current/public/served.txt"))
+	if output, err := publicRead.CombinedOutput(); err != nil || string(output) != "restored public bytes\n" {
+		t.Fatalf("native web worker public read: %v %q", err, output)
+	}
+	for _, path := range []string{filepath.Join(generation, "private/secret.txt"), filepath.Join(generation, "releases/current/index.txt")} {
+		if exec.CommandContext(ctx, "/usr/sbin/runuser", "-u", "cyberpanel-web", "--", "/usr/bin/test", "-r", path).Run() == nil {
+			t.Fatal("web worker can read non-public content", path)
+		}
+	}
+	t.Log("native web worker reads public bytes, not release/private files")
 	// Exercise the safety rollback after promotion from a provisioned directory.
 	_, err = host.FreezeTargetWrites(ctx, plan, string(plan.ID)+":rollback-freeze")
 	must(err)
@@ -183,6 +199,9 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	must(err)
 	if rolledBack.Phase != backup.RestoreRolledBack {
 		t.Fatalf("rollback phase: %s", rolledBack.Phase)
+	}
+	if info, err := os.Lstat(filepath.Join(generation, "releases/current")); err != nil || !info.IsDir() {
+		t.Fatalf("rollback current must be a directory: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(generation, "releases/current/index.txt")); !os.IsNotExist(err) {
 		t.Fatalf("rollback did not restore removed-file safety snapshot: %v", err)
