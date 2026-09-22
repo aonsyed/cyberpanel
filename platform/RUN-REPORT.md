@@ -5,6 +5,34 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Parallel follow-up: update shadow, native health cancellation, vacation failure
+
+Integrated8830ffe98 corrects application update shadow mapping so current/public
+maps to candidate/public rather than the entire candidate release; preserves the
+validated public-reader ACL without widening the private sibling. QEMU regression
+reproduced the old mismatch and passed after correction; apps suite0.291s. Actual
+route activate/restore/remove restores original configuration in the filesystem
+fixture. A real Joomla version-to-version update is still unqualified: only the
+signed cached6.1.3 recipe/artifact exists. No fake version or download was used.
+
+Integrated0dbdc70df adds real native backup health-command cancellation proof.
+Native encrypted recovery test passed7.803s: no durable health receipt, unfreeze
+denied while engine remains stopped, normal retry recovers exact files/SQL/ACL.
+Parent read /home/harness/lanes/backup/native-health-cancellation.log and checked
+live OLS/core/executor/gateway active. This is command cancellation, NOT actual
+unhealthy-database/server detection or an installed negative-endpoint test.
+
+Installed82 vacation create201/enable200 succeeded, but first local trigger did
+not produce a reply. Native log traced sendmail rejection to mailbox UID lacking
+read access to protected Postfix main.cf. Worker preparing managed Dovecot local
+SMTP submission without widening permissions or relay rules. Normal disable200/
+delete204 and exact trigger cleanup completed; no autoresponse success claimed.
+
+Archived unused sequence70 release ce8428b51ff3fb72279b7257a7aef8c281d572cf75873d1e6d50210fc721b3a7
+to ignored host retired-node-releases; rsync checksum comparison had no differences.
+Active/previous, symlink and process-map reference checks excluded it before exact
+guest deletion. Recoverable host copy retained; guest reserve4.7GiB afterward.
+
 ### Installed82 follow-through and next UI integration
 
 Normal retained79 restore plan restore_e153d3df359db8ab16ce422a93767bf9b64976ffade394e4
