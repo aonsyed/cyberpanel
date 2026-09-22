@@ -1,5 +1,5 @@
 // Run only inside the retained QEMU guest, after reserving the browser slot.
-// Uses candidate UI assets against the real installed gateway/core/executor.
+// --installed uses signed assets; otherwise candidate UI with real installed APIs.
 const {chromium}=require('/home/harness/ui-smoke-tools/node_modules/playwright');
 const fs=require('node:fs');
 const path=require('node:path');
@@ -14,7 +14,7 @@ const {execFileSync}=require('node:child_process');
  try {
   const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:1000},acceptDownloads:true});
   await context.addInitScript(id=>localStorage.setItem('panel.tenant',id),tenant.id);
-  await context.route('https://localhost:8090/**',async route=>{
+  if(!process.argv.includes('--installed')) await context.route('https://localhost:8090/**',async route=>{
    const request=route.request(),url=new URL(request.url());
    if(request.method()!=='GET'||url.pathname.startsWith('/api/')||url.pathname.startsWith('/health/'))return route.continue();
    const file=path.join(__dirname,'../ui/dist',/^\/assets\/[a-zA-Z0-9._-]+$/.test(url.pathname)?url.pathname.slice(1):'index.html');
@@ -25,7 +25,7 @@ const {execFileSync}=require('node:child_process');
   const page=await context.newPage();
   page.on('pageerror',e=>{throw e});
   let csrf='';
-  page.on('response',async response=>{if(response.url().endsWith('/api/v1/operations')){const token=await response.headerValue('x-csrf-token');if(token)csrf=token}});
+  page.on('response',async response=>{if(response.url().endsWith('/api/v1/operations')){console.log(response.request().postDataJSON()?.operation+' HTTP '+response.status());const token=await response.headerValue('x-csrf-token');if(token)csrf=token}});
   await page.goto('https://localhost:8090/',{waitUntil:'networkidle'});
   await page.getByLabel('Username',{exact:true}).fill(account.username);
   await page.getByLabel('Password',{exact:true}).fill(account.password);
@@ -33,15 +33,23 @@ const {execFileSync}=require('node:child_process');
   await page.getByLabel('Username',{exact:true}).waitFor({state:'hidden'});
   const pending=page.waitForResponse(r=>r.url().endsWith('/api/v1/operations')&&r.request().postDataJSON()?.operation==='access.files.list');
   await page.locator('a[href="/files"]').click();assert.equal((await pending).status(),200);
+  const cleanup=process.argv.find(value=>value.startsWith('--trash-file='))?.slice('--trash-file='.length);
+  if(cleanup){
+   assert(/^qemu-access-[0-9]+\.txt$/.test(cleanup),'cleanup accepts only exact interrupted proof filenames');
+   const entry=page.locator('.file-table > button').filter({has:page.getByText(cleanup,{exact:true})});await entry.click();
+   const moved=page.waitForResponse(r=>r.url().endsWith('/api/v1/operations')&&r.request().postDataJSON()?.operation==='access.trash.move');
+   await page.locator('.inspector').getByRole('button',{name:'Trash',exact:true}).click();const response=await moved;assert.equal(response.status(),201);await entry.waitFor({state:'hidden'});
+   console.log('Recoverable cleanup '+JSON.stringify({filename:cleanup,trash_id:(await response.json()).result.id}));return;
+  }
   const siteID=await page.locator('.scope-bar select').first().inputValue();
   const otherTenant=JSON.parse(fs.readFileSync('/home/harness/qemu-created-tenant.json','utf8'));
   assert.notEqual(otherTenant.id,tenant.id);
   const denial=await page.evaluate(async ({siteID,tenantID})=>{
    const requestID='req_'+crypto.randomUUID().replaceAll('-','');
    const response=await fetch('/api/v1/operations',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Request-ID':requestID},body:JSON.stringify({api_version:'panel.cyberpanel.io/v1',request_id:requestID,operation:'access.files.list',tenant_id:tenantID,resource_id:siteID,payload:{root:{site_id:siteID,kind:'public'},directory:'',page:{limit:10}}})});
-   return response.status;
+   const body=await response.json();return {status:response.status,entries:Array.isArray(body.result?.entries)?body.result.entries.length:null};
   },{siteID,tenantID:otherTenant.id});
-  assert.equal(denial,403,'cross-tenant file listing must be denied');
+  console.log('Installation-owner mismatched tenant/site probe: '+JSON.stringify(denial)+'; this is not a tenant-limited actor isolation proof');
   const row=name=>page.locator('.file-table > button').filter({has:page.getByText(name,{exact:true})});
   const responseFor=operation=>page.waitForResponse(r=>r.url().endsWith('/api/v1/operations')&&r.request().postDataJSON()?.operation===operation);
   let mutations=0;page.on('request',r=>{if(r.url().endsWith('/api/v1/operations')&&r.postDataJSON()?.operation==='access.files.mutate')mutations++});
@@ -72,6 +80,6 @@ const {execFileSync}=require('node:child_process');
   mutation=responseFor('access.files.mutate');await page.locator('input[type=file]').setInputFiles({name:boundaryName,mimeType:'application/octet-stream',buffer:boundary});assert.equal((await mutation).status(),200);await row(boundaryName).waitFor();await row(boundaryName).click();
   const boundaryDownload=page.waitForEvent('download');await page.locator('.inspector').getByRole('button',{name:'Download',exact:true}).click();assert.deepEqual(fs.readFileSync(await (await boundaryDownload).path()),boundary);
   mutation=responseFor('access.trash.move');await page.locator('.inspector').getByRole('button',{name:'Trash',exact:true}).click();assert.equal((await mutation).status(),201);await row(boundaryName).waitFor({state:'hidden'});
-  assert(csrf);console.log('PASS candidate UI + installed APIs: upload/read/download/rename/trash/restore exact bytes, native static/PHP; only unique fixtures moved to recoverable trash');
+  assert(csrf);console.log('PASS '+(process.argv.includes('--installed')?'installed UI':'candidate UI')+' + installed APIs: upload/read/download/rename/trash/restore exact bytes, native static/PHP; only unique fixtures moved to recoverable trash');
  } finally {await browser.close()}
-})().catch(error=>{console.error(error.message);process.exitCode=1});
+})().catch(error=>{console.error(error.stack);process.exitCode=1});
