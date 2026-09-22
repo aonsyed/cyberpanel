@@ -22,9 +22,22 @@ delete200 removesSOA. Parent independently queried the deleted zone: noSOA.
 390px editor assertion passed; exact disposable zone cleaned normally. Prior
 wrong-tenant read/write404 remains proven; lesser-role denial is not yet qualified.
 
+Installed71 WordPress fresh default-English lifecycle passed site201/install201,
+homepage200/login200 and actual generated-credential wp-admin Dashboard, then
+normal removal202. Parent read saved safe evidence and independently checked
+exact database/principal absence. See WORDPRESS-VERIFICATION-2026-09-22.md.
+Webmail folders/list200 and self-send202 now pass; opening the delivered message
+still returns500. That single delivered probe is retained pending read-path fix;
+no duplicate sends. Safe evidence: guest webmail-installed71-evidence.json.
+
 Installed71 backup directory STILL root:cyberpanel0750 despite migration source
-fix. This is an observed upgrade failure, not a pass; worker tracing actual hook
-invocation. Webmail full installed flow and WordPress admin login remain pending.
+fix. Actual signed node-release lifecycle never invokes the older installer
+authority hook; shared backup-only reconciliation is being added to the real
+lifecycle. This observed failure is not counted as completed.
+
+Obsolete unreferenced guest releases48/49 also moved to ignored host copies:
+rsync checksum dry-run showed no differences before exact guest removal. Active/
+previous releases and app snapshots retained; guest free5.3GiB, host206GiB.
 
 Latest70 qemu-workflow-3.1.69 (source9699e7bbd): manifest
 ce8428b51ff3fb72279b7257a7aef8c281d572cf75873d1e6d50210fc721b3a7,

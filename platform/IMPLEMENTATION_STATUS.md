@@ -55,8 +55,11 @@ backup migration reconciliation, and complete HTTP WordPress manifest/probe fix.
 All three actual process hashes match rebuilt artifacts; HTTPS200 and affected
 QEMU suites pass. DNS update/empty/delete lifecycle passed with immediate native
 answers and normal fixture cleanup. Backup ownership remains WRONG after actual
-upgrade (root:cyberpanel0750); hook path diagnosis continues. Webmail installed
-full-flow and WordPress admin-login verification are still pending.
+upgrade (root:cyberpanel0750): real signed node-release path never calls the old
+authority hook; narrow real-lifecycle fix in progress. Webmail installed folders/
+list200 and self-send202 now pass, message opening500 remains. WordPress actual
+fresh install→homepage→generated-credential admin Dashboard→normal removal all
+pass on71, including exact database/principal absence. Proofdoc records limits.
 
 Disk guard now reserves4GiB before release assembly/application and2GiB before
 builds/tests. Actual guard rejection and guest shell syntax checks passed. Known
