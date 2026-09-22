@@ -7,6 +7,26 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Installed75 — parallel closure batch, 2026-09-22
 
+Follow-up installed proof: webmail attachment read200 projects part2,
+proof-bytes.bin/application/octet-stream/31 decoded bytes; actual UI download
+retains the filename and exact bytes (including NUL/high bytes). SHA256
+047c092c73717c3284501e4dcdcef26f6899a81677c6905452d1a96f42643bcd.
+Parent read actual guest /home/harness/webmail-attachment-read-evidence.json:
+wrong-tenant404, stale UIDVALIDITY409, oversized upload400, foreign-mailbox403;
+exact probeUID4 expunged and subject absent. Native decoded bytes also matched.
+No resend. Worker's initial narrative30 was corrected against actual31-byte
+fixture/download/metadata. Attached multipart/message containers remain explicitly
+unsupported; this is not complete MIME or scale qualification.
+
+Further installed failures: Joomla now passes destination validation but its
+LSAPI binary ignored CLI bootstrap flags; selected package PHP CLI correction
+c7d477100 is source-tested, not installed75. DNSSEC enable202 and exact DS now
+pass, but immediate DNSKEY/SOA responses retained unsigned cache state; scoped
+rediscovery/invalidation13d6bcfcf is source-tested, not installed75. Retained DNSSEC
+zone remains signed pending a warmed-cache transition verification and cleanup.
+Writer-fence primitive03dbed4ce is integrated but public replacement stays disabled
+until its full replacement lifecycle is connected and proved.
+
 Signed qemu-workflow-3.1.74, source20fa167b4, committed successfully.
 Manifest a66aec2fa18f77b62c0a8361e26e4c7cd2ddd562727371c52ba706efa0a1e9b9;
 receipt723f9531b8745a2ec0e97d87573bfa841df0965728c11a04c3010e7c814ba728;

@@ -45,7 +45,9 @@ suites pass; installed75 includes it. Database inspection found public replaceme
 already denies admission, so no redundant quarantine layer is being added; the
 worker is implementing the actual scoped native writer-fence prerequisite.
 Webmail attachment projection9e8c97d85 and supported-message-size correction
-2081c88d2 are installed75; actual download proof is queued. SFTP native
+2081c88d2 are installed75; actual UI download retained all31 binary bytes and
+filename, HTTP scope/stale/size denials passed, exact probeUID4 cleaned. Attached
+message/multipart containers remain a separate limitation being closed. SFTP native
 probe reproduced unreadable authorized_keys and absent root confinement; worker
 is implementing native jail/key/revoke lifecycle without altering system SSH in
 its isolated probes. Joomla6.1.3 has a cached signed recipe/archive; no download.
@@ -56,6 +58,16 @@ active. Includes Joomla served-root and DNSSEC exact native DS export fixes;
 their installed journeys are pending, not yet qualified. Rebuilt panel-node-install
 applied72. Affected combined Go suites passed in QEMU; UI is unchanged from its
 previous qualified build. RUN-REPORT has exact receipts and source-test scope.
+
+Post75 source fixes awaiting next installation: c7d477100 selects the actual
+packaged PHP CLI after the LSAPI installer no-op was reproduced;13d6bcfcf invalidates
+scoped DNSSEC caches after durable key transitions. Installed75 DNSSEC enable and
+DS projection work, but warmed-cache immediate signing is not yet qualified.
+Joomla's second attempt compensated; homepage/admin/removal remain unproven.
+03dbed4ce provides native durable writer-fence acquisition/release; replacement
+integration is ongoing and public replacement remains disabled. Combined affected
+database/apps/DNS/API/core/executor suites pass in QEMU, including native PHP
+bootstrap and isolated native DNSSEC tests. No new full-module completion claim.
 
 Qualified installed journeys in this resumption:
 
