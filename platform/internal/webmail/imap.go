@@ -31,6 +31,7 @@ type Endpoint struct {
 	TLSAddress   string
 	TLSServerName string
 	TLSConfig    *tls.Config
+	TLSConfigForConnection func() (*tls.Config, error)
 	DialTimeout  time.Duration
 	CommandTimeout time.Duration
 }
@@ -75,12 +76,20 @@ func dialIMAP(ctx context.Context, endpoint Endpoint, bearer string) (*imapClien
 		connection, err = dialer.DialContext(ctx, "unix", endpoint.UnixSocket)
 	} else {
 		config := endpoint.TLSConfig
+		if endpoint.TLSConfigForConnection != nil {
+			config, err = endpoint.TLSConfigForConnection()
+			if err != nil || config == nil || config.InsecureSkipVerify || config.ServerName == "" {
+				return nil, errors.Join(ErrUnavailable, err)
+			}
+		}
 		if config == nil {
 			config = &tls.Config{}
 		} else {
 			config = config.Clone()
 		}
-		config.ServerName = endpoint.TLSServerName
+		if endpoint.TLSConfigForConnection == nil {
+			config.ServerName = endpoint.TLSServerName
+		}
 		if config.MinVersion < tls.VersionTLS13 {
 			config.MinVersion = tls.VersionTLS13
 		}

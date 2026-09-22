@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"syscall"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/certificates"
 )
 
 // A fresh node needs a local fallback identity before any tenant certificate
@@ -13,6 +15,9 @@ import (
 // and has its own key instead of sharing the web-engine fallback private key.
 func bootstrapDefaultMailCertificate() error {
 	if _, err := bootstrapDefaultCertificate("mail", "default"); err != nil {
+		return err
+	}
+	if err := certificates.PublishLocalMailIdentity(""); err != nil {
 		return err
 	}
 	const parent = "/var/lib/cyberpanel/mail/tls"

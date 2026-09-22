@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
 	"encoding/binary"
@@ -242,7 +243,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("open secure webmail repository: %w", err)
 	}
-	webmailBackend, err := securewebmail.NewDovecotBackend(securewebmail.Endpoint{TLSAddress: "127.0.0.1:993", TLSServerName: mailHostname, DialTimeout: 5 * time.Second, CommandTimeout: 20 * time.Second})
+	webmailBackend, err := securewebmail.NewDovecotBackend(securewebmail.Endpoint{TLSAddress: "127.0.0.1:993", TLSServerName: mailHostname, TLSConfigForConnection: func() (*tls.Config, error) { return certificates.LocalMailTLSConfig(mailHostname) }, DialTimeout: 5 * time.Second, CommandTimeout: 20 * time.Second})
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize Dovecot OAuth backend: %w", err)
 	}

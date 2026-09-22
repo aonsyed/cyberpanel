@@ -3,6 +3,7 @@ package webmail
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -69,6 +70,21 @@ func TestIMAPNegotiatesAuthenticatedCapabilities(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestIMAPReloadsManagedTLSIdentityAndRejectsUnsafeConfig(t *testing.T) {
+	for _, config := range []*tls.Config{nil, {InsecureSkipVerify: true, ServerName: "mail.example.invalid"}, {ServerName: ""}} {
+		calls := 0
+		endpoint := Endpoint{TLSAddress: "127.0.0.1:1", TLSServerName: "mail.example.invalid", DialTimeout: time.Second, CommandTimeout: time.Second, TLSConfigForConnection: func() (*tls.Config, error) { calls++; return config, nil }}
+		for attempt := 0; attempt < 2; attempt++ {
+			if _, err := dialIMAP(context.Background(), endpoint, strings.Repeat("x", 32)); err == nil {
+				t.Fatal("unsafe TLS configuration accepted")
+			}
+		}
+		if calls != 2 {
+			t.Fatal("managed identity was cached across connections")
+		}
 	}
 }
 
