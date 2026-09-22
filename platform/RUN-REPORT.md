@@ -7,6 +7,24 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Resumed workflow checkpoint67 — 2026-09-22
 
+Latest73 qemu-workflow-3.1.72 (source0d43c5857) committed. Manifest
+cf03c819822267f9b1b82b78312b0a99b51b13a2df525d08663e8800443432ad;
+receipt d4898a807a165657a9ed7275829b9fdb3fb4930a48492ed60397d41794ad2a52;
+bundle fdddadc0d88503dcf0b0d9f3b239308ae55c5c62f3290cc51bffc499d1f96b26.
+All three live binary hashes equal the rebuilt artifacts; panel services/OLS
+active and HTTPS200. Backup directory promotion uses atomic exchange, retains the
+old directory at a persisted deterministic identity, and syncs the release parent.
+Native actual-directory files/SQL restore, safety rollback and corruption tests
+pass, along with affected combined packages. Host bundle checksum verified before
+guest duplicate deletion/staging prune. New installed normal restore plan reaches
+active/gen14 with exact files and text/NULL/BLOB restored, current site UID can
+read, and promoted=true/frozen=false. However native public HTTP remains404:
+OLS rejects the new symlink under existing allowSymbolLink0. The public marker
+path was confirmed correct. This is a serving regression, not full restore
+qualification. Directory-to-directory exchange plus persisted identity/replay
+checks is required; do not weaken OLS policy. Earlier ambiguous plan remains
+explicitly unresolved, not bypassed.
+
 Latest72 qemu-workflow-3.1.71 (source64c9e54d2) committed using the newly rebuilt
 panel-node-install, not the old bootstrap executable. Manifest
 644b050c82a1e148be5c79d24f1fbbfab6b6488d9f20621689fddf15c43b4456;

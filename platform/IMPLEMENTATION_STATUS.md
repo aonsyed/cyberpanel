@@ -21,7 +21,7 @@ parent; separate source trees /home/harness/lanes/<lane>/platform, shared offlin
 Go cache. No worker may overwrite /home/harness/platform or install a release.
 Source/module completion is not claimed merely from an assigned task.
 
-CURRENT: signed72, qemu-workflow-3.1.71, source64c9e54d2. Actual core/executor/
+CURRENT: signed73, qemu-workflow-3.1.72, source0d43c5857. Actual core/executor/
 gateway process hashes match all three rebuilt artifacts; HTTPS200 and all services
 active. Rebuilt panel-node-install applied72. Affected combined Go suites and the
 unchanged current UI typecheck/build passed in QEMU. RUN-REPORT has exact receipts.
@@ -46,8 +46,12 @@ Qualified installed journeys in this resumption:
   disposable site/files/database capture passes (repository200, policy201,
   verified files+SQL recovery point). Restore plan passes but apply503: real
   provisioned current directory cannot be replaced as a symlink. No promotion;
-  fixture remains frozen/ambiguous pending product recovery and directory-layout
-  correction. This is NOT a qualified installed restore.
+  old fixture plan remains frozen/ambiguous pending product recovery.73 contains
+  atomic directory-layout correction; native real-directory restore+rollback
+  passes.73 new normal plan active with exact files/SQL and site UID access, but
+  native HTTP404: allowSymbolLink0 rejects directory-to-symlink switch. Correct
+  directory-to-directory publication is in progress; no OLS policy relaxation.
+  No fully qualified installed restore or ambiguous-plan recovery claim yet.
 
 These are bounded workflows, not full module or product parity. Earlier entries
 below are historical checkpoints; their obsolete NEXT blockers do not supersede
