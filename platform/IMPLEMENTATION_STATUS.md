@@ -52,20 +52,22 @@ probe reproduced unreadable authorized_keys and absent root confinement; worker
 is implementing native jail/key/revoke lifecycle without altering system SSH in
 its isolated probes. Joomla6.1.3 has a cached signed recipe/archive; no download.
 
-CURRENT: signed75, qemu-workflow-3.1.74, source20fa167b4. Actual core/executor/
-gateway process hashes match all three rebuilt artifacts; HTTPS200 and all services
-active. Includes Joomla served-root and DNSSEC exact native DS export fixes;
-their installed journeys are pending, not yet qualified. Rebuilt panel-node-install
-applied72. Affected combined Go suites passed in QEMU; UI is unchanged from its
-previous qualified build. RUN-REPORT has exact receipts and source-test scope.
+CURRENT: signed76, qemu-workflow-3.1.75, source1156571cd. All seven live service
+binary hashes match rebuilt artifacts; panel/new UI asset200 and all services/OLS
+active. Includes SFTP confinement and usable form, purpose-bound encrypted local
+repositories with8MiB chunk capture/reassembly, Joomla packaged PHP CLI, DNSSEC
+cache invalidation and native MIME-container handling with explicit unknown-size
+metadata. Combined affected Go suites and changed UI typecheck/build passed in
+QEMU. RUN-REPORT has exact receipts, native evidence, and remaining limits.
 
-Post75 source fixes awaiting next installation: c7d477100 selects the actual
+Post75 fixes now installed76: c7d477100 selects the actual
 packaged PHP CLI after the LSAPI installer no-op was reproduced;13d6bcfcf invalidates
 scoped DNSSEC caches after durable key transitions. Installed75 DNSSEC enable and
 DS projection work, but warmed-cache immediate signing is not yet qualified.
 Joomla's second attempt compensated; homepage/admin/removal remain unproven.
-03dbed4ce provides native durable writer-fence acquisition/release; replacement
-integration is ongoing and public replacement remains disabled. Combined affected
+03dbed4ce provides native durable writer-fence acquisition/release; internal
+replacement8010188b2 awaits parent integration and public preparation/approval
+wiring is ongoing. Public replacement remains disabled. Combined affected
 database/apps/DNS/API/core/executor suites pass in QEMU, including native PHP
 bootstrap and isolated native DNSSEC tests. No new full-module completion claim.
 
@@ -121,10 +123,12 @@ restored only managed metadata with identical content hashes. Existing confined
 product validation already avoids this. See testvm/README.md; no native patch or
 fsstore security relaxation was required. Core/execd admission recovered.
 
-Concrete correction to prior status: local backup capture/provider currently
-stores raw objects. Encryption-domain/credential fields are metadata, not actual
-encryption. Authenticated encryption and wrong-key rejection remain implementation
-work. Backup worker also identified SQL source-name handling unsafe for cross-scope
+Concrete correction to prior status: installed75 and older stored raw local
+objects despite encryption-domain metadata. Installed76 adds actual AES-GCM local
+objects and purpose-bound keys, with native wrong-key/corruption rejection and
+large multi-object restore proof; actual installed encryption enrollment/restore
+remains to verify. Legacy objects, metadata and capture/restore spool remain
+explicitly plaintext. Backup worker identified SQL source-name handling unsafe for cross-scope
 restore; preserve fail-closed behavior until safely mapped and verified.
 
 Next work must close existing specification gaps, not re-run these passing flows

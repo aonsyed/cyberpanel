@@ -5,6 +5,49 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed76 — native access and encrypted backup batch, 2026-09-22
+
+Signed qemu-workflow-3.1.75, source1156571cd, committed.
+Manifest914856ac02ad4216efe394375ba53da60032c676b3b358c715bd49ab1a098072;
+receipt600c1f0aa419140ee831117786a4acb4b7ceac1f1840ba37ccbfed205791411f;
+bundle84cff647e411ea13cec6d6e183ecfcda69b75bc8f6efa7016908fd3edd0f7ad8.
+Operation install-a8255020054bb07f7f47d04c0c08760e76b2edaeb8756e954072df80181a528b.
+All seven core/executor/gateway/auth/secrets/provider/peer-inspector live process
+hashes match rebuilt artifacts; all services and OLS active. Panel HTML and new
+panel-CDFxR6yC.js return200; CSS index-h86HsoAP.css. UI typecheck/build and combined
+access/apps/DNS/backup/secrets/webmail/API/core/executor/gateway checks pass in
+QEMU. The existing >500kB Vite bundle warning is non-fatal, not a new gate.
+
+Included native source proof, not yet installed workflow qualification:
+
+- SFTP dedicated logins, root-owned descriptor-bound jails, native sandbox
+  confinement/read-only/revoke/expiry/remount and pidfd-scoped session termination;
+  UI now accepts actual public key/permission/expiry and shows the login. Evidence
+  commands/limits in testvm/SFTP-QEMU-2026-09-22.md. No actual reboot proof yet.
+- AES-256-GCM local repository objects with purpose-bound secret-broker enrollment,
+  authenticated object identity and explicit format. Legacy raw points stay raw
+  and readable; new capture requires explicit format. Metadata/spool/scratch are
+  not claimed encrypted. Wrong-key/tamper/truncation/substitution rejected.
+- Native8MiB chunking and verified reassembly remove the transitional16MiB
+  component limit. QEMU encrypted native proof: SQL37,752,634 bytes/5objects and
+  files18,880,512 bytes/3objects, exact payload hashes/NULL/BLOB/ACL/rollback and
+  invalid-chunk rejection. Off-node key recovery remains unqualified.
+- Joomla selected-package PHP CLI and DNSSEC scoped cache invalidation fixes.
+- Native attached message/multipart download path; multipart projected size is
+  explicitly unknown until the authoritative download literal supplies it, not
+  guessed. Ordinary installed75 attachment proof remains below; new container
+  UI behavior is not yet installed-qualified.
+
+Installed76 verification queue starts with real SFTP UI/API/native access, then
+DNSSEC warmed-cache transitions, Joomla lifecycle, and encrypted backup enrollment
+and restore. Public database replacement stays disabled. Internal replacement
+worker8010188b2 is not in this release; original ambiguous backup is unrecovered.
+
+Disk: obsolete unreferenced56–59 guest releases were archived to checksum-matching
+host .work/qemu/retired-node-releases copies before exact guest removal, preserving
+active/previous, receipts, and all application recovery material. Prebuild5.3GiB
+free; signed bundle retained on host. No downloads or vendor-source modifications.
+
 ### Installed75 — parallel closure batch, 2026-09-22
 
 Follow-up installed proof: webmail attachment read200 projects part2,
