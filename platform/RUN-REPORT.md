@@ -5,6 +5,29 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Sourcec62b8007f — stopped-engine startup correction
+
+Backup294fa9b7b integratedc62b8007f: existing authenticated management broker adds
+read-only installation inspection for core startup, verifying catalog/artifact
+plan/packages/binary/config identity without requiring a running service.
+Normal operational inspection still requires healthy service. No OLS startup or
+restore-journal edits. Parent QEMU tests against actual stopped installation plus
+affected suites passed: management0.044s/apps0.251s/backup0.246s/API0.225s/
+core1.573s/executor0.021s. Next signed80 includes this, recovery-removal admission
+and mobile table containment; installed recovery is still pending at this point.
+
+### Release80 storage preparation
+
+Archived unused65/66 release directories to ignored host retired-node-releases,
+then checksum dry-run matched with no changes. Neither matched installed79
+active/previous manifests; checked managed symlink and process-map references
+were absent. Exact guest copies removed, recoverable host copies preserved:
+24fcabbef4488836dbe7e424c62958f52413ca9aaa4581655a78cd34e41ce90a,
+b4a3983b882d21d8fbbb4adc5f149d2a8afdc92a769c69dd9c509fb33e0609a5.
+Guest5.2GiB free afterward. No frozen restore journal, point, current/previous
+release or application fixture was removed. Release80 spec/assets are prepared;
+activation waits for the stopped-engine startup correction.
+
 ### Installed79 interruption exposed recovery startup blocker
 
 Core now intentionally stopped to halt restart churn; OLS remains stopped and
