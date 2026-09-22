@@ -15,6 +15,13 @@ const submitting=ref(false);
 const failure=ref("");
 const result=ref<unknown>(null);
 const completed=ref(false);
+const visibleFields=computed(()=>(props.action.fields||[]).filter(field=>{
+  if(props.action.operation!=="access.credential.create")return true;
+  if(field.key==="public_key")return values.kind==="ssh_key";
+  if(field.key==="secret")return values.kind==="ftps";
+  if(field.key==="permission")return values.kind==="ssh_key"||values.kind==="ftps";
+  return true;
+}));
 const title=computed(()=>props.resource?`${props.action.label} · ${String(props.resource.name||props.resource.primary_hostname||props.resource.domain||props.resource.id||"")}`:props.action.label);
 const resultText=computed(()=>result.value===null?"":JSON.stringify(redact(result.value),null,2));
 const plannedChanges=computed(()=>Array.isArray(props.resource?.planned_changes)?props.resource.planned_changes.map(String):[]);
@@ -34,19 +41,20 @@ watch([()=>props.action,()=>props.resource],()=>{initialize();if(!props.action.m
 function initialize():void{Object.keys(values).forEach((key)=>delete values[key]);props.action.fields?.forEach((field)=>values[field.key]=field.defaultValue??(field.type==="boolean"?false:""));confirmation.value=!props.action.confirmation;failure.value="";result.value=null;completed.value=false}
 function validate():boolean{
   Object.keys(errors).forEach((key)=>delete errors[key]);
-  for(const field of props.action.fields||[]){
+  for(const field of visibleFields.value){
     const value=values[field.key];
     if(field.required&&(value===undefined||value===null||String(value).trim()==="")){errors[field.key]="This value is required.";continue}
     if(value&&field.type==="email"&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value)))errors[field.key]="Enter a valid email address.";
     if(value&&field.type==="hostname"&&!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(String(value)))errors[field.key]="Enter a valid DNS hostname.";
     if(value&&field.type==="cidr"&&!/^([0-9a-f:.]+)\/(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$/i.test(String(value)))errors[field.key]="Enter a canonical IPv4 or IPv6 prefix.";
     if(String(value??"").trim()&&field.type==="json")try{JSON.parse(String(value))}catch{errors[field.key]="Enter valid JSON."}
+    if(props.action.operation==="access.credential.create"&&field.key==="expires_in_seconds"&&(!Number.isSafeInteger(Number(value))||Number(value)<0||Number(value)>2678400))errors[field.key]="Use a whole number from 0 to 2678400.";
   }
   return Object.keys(errors).length===0;
 }
 function actionPayload():Record<string,unknown>{
   const payload:Record<string,unknown>={};
-  for(const field of props.action.fields||[]){
+  for(const field of visibleFields.value){
     if(field.key===props.action.tenantIdField||field.key===props.action.resourceIdField||field.key===props.action.expectedGenerationField)continue;
     const value=values[field.key];
     if(field.type==="json"){
@@ -101,7 +109,7 @@ onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>{c
             <ul><li v-for="service in plannedServices" :key="service">{{service}}</li></ul>
             <p>Reboot: {{resource.planned_reboot}} · Recovery: {{resource.recovery_kind||resource.recovery_status}}</p>
           </section>
-          <div v-for="field in action.fields||[]" :key="field.key" class="field">
+          <div v-for="field in visibleFields" :key="field.key" class="field">
             <label :for="`field-${field.key}`">{{field.label}}</label>
             <select v-if="field.type==='select'" :id="`field-${field.key}`" v-model="values[field.key]" class="select" :required="Boolean(field.required)"><option value="" disabled>Select…</option><option v-for="option in fieldOptions(field)" :key="option.value" :value="option.value">{{option.label}}</option></select>
             <textarea v-else-if="field.type==='textarea'||field.type==='json'" :id="`field-${field.key}`" :value="String(values[field.key]??'')" @input="values[field.key]=($event.target as HTMLTextAreaElement).value" class="textarea" :class="{mono:field.type==='json'}" :required="Boolean(field.required)" :autocomplete="field.sensitive?'off':'on'" :spellcheck="!field.sensitive"></textarea>
