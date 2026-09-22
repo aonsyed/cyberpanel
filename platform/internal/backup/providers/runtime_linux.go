@@ -62,8 +62,9 @@ func NewLocalRuntimeWithSource(database *sql.DB, source ObjectSource, now func()
 
 // ValidateLocalRepositories opens every cataloged local repository through the
 // descriptor-safe registry before the API begins accepting backup or restore
-// work. Repository roots are provisioned by the root installer/operator; the
-// unprivileged control process only validates and uses that fixed layout.
+// work. The installer protects the service-owned parent; registration creates
+// private repository directories there. Legacy root-provisioned roots remain
+// readable when their data directories belong to the control service.
 func (runtime *LocalRuntime) ValidateLocalRepositories(ctx context.Context) error {
 	if runtime == nil || runtime.DB == nil || runtime.Local == nil || runtime.Local.Registry == nil || ctx == nil {
 		return errors.New("local backup repository runtime required")

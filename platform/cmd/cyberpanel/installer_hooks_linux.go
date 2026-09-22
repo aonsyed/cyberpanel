@@ -124,7 +124,7 @@ func initializeAuthority()([]string,error){
 	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};paths:=[]string{"/var/lib/cyberpanel/control","/var/lib/cyberpanel/control/runtime","/var/lib/cyberpanel/control/trust","/var/lib/cyberpanel/control/recovery","/var/lib/cyberpanel/audit","/var/lib/cyberpanel/audit/segments","/var/lib/cyberpanel/audit/emergency","/var/lib/cyberpanel/backup-spool","/var/lib/cyberpanel/migration","/var/lib/cyberpanel/migration/chunks"}
 	backupRoot,repositoryRoot:="/var/backups/cyberpanel","/var/backups/cyberpanel/repositories"
 	if err=ensureOwnedDirectory(backupRoot,0750,0,gid);err!=nil{return nil,err}
-	if err=ensureOwnedDirectory(repositoryRoot,0750,0,gid);err!=nil{return nil,err}
+	if err=ensureOwnedDirectory(repositoryRoot,0700,uid,gid);err!=nil{return nil,err}
 	for _,path:=range paths{if err=ensureOwnedDirectory(path,0700,uid,gid);err!=nil{return nil,err}}
 	databasePath:="/var/lib/cyberpanel/control/control.db";created,err:=ensureOwnedFile(databasePath,0600,uid,gid,nil);if err!=nil{return nil,err}
 	changed:=append([]string{backupRoot,repositoryRoot},paths...);if created{changed=append(changed,databasePath)}

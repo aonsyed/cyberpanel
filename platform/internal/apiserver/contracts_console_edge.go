@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
+	"github.com/aonsyed/cyberpanel/platform/internal/backup"
 	"github.com/aonsyed/cyberpanel/platform/internal/database"
 	"github.com/aonsyed/cyberpanel/platform/internal/federation"
 	"github.com/aonsyed/cyberpanel/platform/internal/ha"
@@ -422,6 +423,8 @@ type BackupPolicyCreatePayload struct {
 	Schedule     string `json:"schedule"`
 	RepositoryID string `json:"repository_id"`
 	Retention    string `json:"retention"`
+	Consistency backup.ConsistencyClass `json:"consistency"`
+	Components []backup.ComponentKind `json:"components"`
 }
 
 type BackupRestorePlanPayload struct {
@@ -1779,7 +1782,7 @@ func validateApplicationCachePurge(value any) error {
 func validateBackupPolicyCreate(value any) error {
 	payload := value.(*BackupPolicyCreatePayload)
 	if payload.Name != "" && !safeEdgeText(payload.Name, 128) || !validEdgeID(payload.Scope) || !safeSchedule(payload.Schedule) || !validEdgeID(payload.RepositoryID) || !safeEdgeText(payload.Retention, 256) { return invalid("backup policy") }
-	return nil
+	return ValidateLocalBackupPolicy(backup.BackupPolicySpec{ID:backup.PolicyID(payload.Scope),Scope:payload.Scope,Repositories:[]backup.RepositoryID{backup.RepositoryID(payload.RepositoryID)},RequiredCopies:1,Consistency:payload.Consistency,Components:payload.Components})
 }
 
 func validateBackupRestorePlan(value any) error {

@@ -38,9 +38,10 @@ func (edge *backupEdge) CreatePolicy(ctx context.Context, call apiserver.EdgeCal
 	policyID := backup.PolicyID(backupEdgeID("policy", call.TenantID, call.CommandID))
 	policy := backup.BackupPolicySpec{
 		ID: policyID, TenantID: call.TenantID, Scope: payload.Scope, Schedule: payload.Schedule,
-		Components: backupComponents(payload.Scope), Repositories: []backup.RepositoryID{backup.RepositoryID(payload.RepositoryID)},
-		RequiredCopies: 1, Consistency: backup.ConsistencyApplication, Retention: retention, Generation: 1, Enabled: true,
+		Components: append([]backup.ComponentKind(nil),payload.Components...), Repositories: []backup.RepositoryID{backup.RepositoryID(payload.RepositoryID)},
+		RequiredCopies: 1, Consistency: payload.Consistency, Retention: retention, Generation: 1, Enabled: true,
 	}
+	if err = apiserver.ValidateLocalBackupPolicy(policy); err != nil { return apiserver.EdgeMutation[apiserver.BackupPolicyProjection]{},err }
 	if err = edge.catalog.PutPolicy(ctx, policy, 0); err != nil {
 		// Idempotent retries must resolve to the exact previously admitted policy.
 		prior, loadErr := edge.catalog.Policy(ctx, call.TenantID, policyID)
@@ -87,15 +88,6 @@ func backupRetention(raw string) (backup.RetentionPolicy,string,error) {
 	default: return backup.RetentionPolicy{},"",backup.ErrInvalidBackup
 	}
 	return policy,value,nil
-}
-
-func backupComponents(scope string) []backup.ComponentKind {
-	switch scope {
-	case "mail": return []backup.ComponentKind{backup.ComponentMail,backup.ComponentDNS,backup.ComponentSecrets}
-	case "database": return []backup.ComponentKind{backup.ComponentDatabase,backup.ComponentSecrets}
-	case "installation", "node": return []backup.ComponentKind{backup.ComponentFiles,backup.ComponentDatabase,backup.ComponentMail,backup.ComponentDNS,backup.ComponentControlState,backup.ComponentApplication,backup.ComponentSecrets}
-	default: return []backup.ComponentKind{backup.ComponentFiles,backup.ComponentDatabase,backup.ComponentDNS,backup.ComponentApplication,backup.ComponentSecrets}
-	}
 }
 
 func backupEdgeID(prefix string, values ...string) string { sum:=sha256.Sum256([]byte(strings.Join(values,"\x00")));return prefix+"_"+hex.EncodeToString(sum[:])[:48] }
