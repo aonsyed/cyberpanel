@@ -5,6 +5,41 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Source30841a4aa — ownership recovery and installed alias proof
+
+Apps9e42ec098 integrated30841a4aa: persist owned database/configuration references
+before runtime execution; health-failed installations transition to recovery.
+Legacy removal requires its normal snapshot, matching failed-install operation,
+validated native manifest, authoritative database/principal ownership, release
+record and scoped secret leases. No live journal/row/ACL edits. Parent QEMU
+checks passed: apps0.726s, backup0.225s, executor0.018s, API0.188s, core1.251s.
+Initial parent command used nonexistent internal/api and cmd/panel-core paths;
+those setup errors were corrected to apiserver/cyberpanel, not product failures.
+
+Installed78 mail alias API/native lifecycle passed: create/list/get/update;
+mapping changed qa65→qa66; foreign-tenant get/update404. One local message arrived
+at qa66 with exact body, none at qa65; exact UID8 expunged. Alias deletion200,
+subsequent get404, native map absent and authenticated SMTP RCPT550 with no DATA.
+Parent inspected evidence and harness assertions. Guest evidence:
+/home/harness/alias-installed-evidence.json and alias-native-evidence.json.
+This is authenticated API plus native delivery proof, not alias-form UI or
+external-delivery certification. No product fix was needed; lease released.
+
+### Release79 preparation
+
+Current integrated UI build passed in QEMU: index-B6Dvubmi.css and
+panel-B9tIZj9g.js. Ownership correction now integrated; core/executor/gateway
+rebuilt from30841a4aa in QEMU. No activation at this checkpoint.
+
+Guest storage reserve restored by archiving unused sequences63/64 to ignored
+host retired-node-releases; active/previous manifests differ, checked symlink
+and process-map references absent, checksum dry-run matched before deleting
+the exact guest copies. Recoverable host copies remain:
+00df96ae2be0756dfa40b4b784f97471f9955bc02d55361dad5ea705cef9171e,
+db95ffcb6727508a37e5ea6f57e766bfba2268ac8386dfed5d3e3243ea7a6c55.
+Guest4.9GiB free after cleanup. No current application/DB fixtures, retained
+database originals, backup points or active rollback release removed.
+
 ### Next source210172dd0 — public ACL and retained-point resume
 
 Apps8c2411e81 integratedf94258fe0: copy only exact validated provisioned
