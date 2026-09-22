@@ -14,6 +14,10 @@ panel HTML/JS and seven panel services+OLS/mail daemons verified. Managed Doveco
 hourly vacation extensions active through startup. Apps testing same-site fresh
 Joomla lifecycle with empty-public staging ACL fix. Vacation composition installed
 but API session-binding correction still in progress; no live autoresponse claim.
+Joomla81 now passes runtime stage but HTTPhealth503 exposed stopped active PHP
+pool: PartOf OLS stops it without start dependency restoring it. Native unit
+journal confirms; backup/webengine worker fixing lifecycle. App recovery state
+preserved, no manual service restart. Homepage/admin login still unqualified.
 
 Newest installed checkpoint: signed80 qemu-workflow-3.1.79/sourcec62b8007f.
 Core/execd/gateway hashes verified, seven panel services active and newUI200.

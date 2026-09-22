@@ -7,6 +7,15 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Installed81 — source87e3c52e7
 
+Fresh Joomla runtime progressed beyond old ACL denial, but health returned503.
+Current app-6b15e53ed0fcfc023450619109bfa0c10c16be4850908580 preserved recovery_required.
+Parent read unit state/journal: cyberpanel-lsapi-s-d7f1c5029d08a240c27ea1a0-g2.service
+started04:49:43, stopped05:00:24, inactive/dead thereafter. PartOf resolves to
+lshttpd.service, WantedBy only multi-user.target; OLS stop/start stops PHP pool
+without bringing it back. Webengine lifecycle correction assigned; no manual
+pool restart or repeated app install. Backup's prior exact static/files/SQL
+proof remains valid but did NOT qualify restored PHP service availability.
+
 Signed qemu-workflow-3.1.80 sequence81 committed:
 manifest32b005abcd6cc0074689fad8c2f78a12b8e871622c3be2ca7c62fa611e9ccf88;
 receipt6278a09e3196cecc0c4883d792a90f665d425fb47c3a0e83f154a81b9e5219e2;
@@ -24,6 +33,8 @@ legacy issuance path. Apps owns exclusive same-site fresh install/login/remove
 check using stage-only managed ACL recovery. Bundle SHA256
 52a4c6587d53148ea94a935bfb5f4e9088ee3567494385b51bce57c3633befaf;
 105artifacts/534708122bytes. No broader readiness claim.
+Host/guest bundle SHA256 matched before exact guest duplicate removal; staging
+pruned, guest4.6GiB free. Recoverable host archive retained.
 
 ### Source87e3c52e7 — vacation composition and release81 preparation
 
