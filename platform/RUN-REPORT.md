@@ -5,6 +5,27 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Backup write observation — source-only continuation, 2026-09-22
+
+QEMU reproduced three failures before correction: same-size file writes with
+preserved mtime were invisible; the server-wide InnoDB marker missed scoped Aria
+writes; and a persisted Frozen flag suppressed actual write observation.
+Observation now hashes file content and scoped native database dumps, preserves
+the first observed write timestamp, and rejects missing baselines as ambiguous.
+This is state-change detection, not proof against write-then-revert or a durable
+writer fence. The original ambiguous restore is still not recovered.
+
+Fresh Ubuntu ARM64 QEMU command from /home/harness/platform:
+`sudo env TMPDIR=/root CYBERPANEL_NATIVE_BACKUP_TEST=1 GOCACHE=/home/harness/.cache/go-build GOPATH=/home/harness/gopath GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOMAXPROCS=1 /home/harness/go/bin/go test -count=1 -p 1 ./internal/backup/... -v`.
+Exit0: backup0.145s, providers4.591s. Checks cover preserved-mtime bytes,
+Aria/InnoDB/MyISAM writes, unchanged/scoped isolation, frozen-state observation,
+first-write timestamp retention and missing-baseline denial. Native provider
+checks again exercised exact SQL text/NULL/BLOB and files, public/private access,
+directory publication/rollback and corrupt-object rejection. Fixtures clean up
+their exact generated resources. No native dependencies downloaded or modified.
+These source changes are not yet in installed74; installed evidence below remains
+the last released behavior. Parallel access, webmail and database lanes resumed.
+
 ### Resumed workflow checkpoint67 — 2026-09-22
 
 Latest74 qemu-workflow-3.1.73 (source61e40a55e) committed. Manifest

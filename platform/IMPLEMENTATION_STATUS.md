@@ -21,6 +21,23 @@ parent; separate source trees /home/harness/lanes/<lane>/platform, shared offlin
 Go cache. No worker may overwrite /home/harness/platform or install a release.
 Source/module completion is not claimed merely from an assigned task.
 
+### Current continuation dispatch / shared-resource scheduling
+
+Frame complete; fan-out resumed on the existing workers; aggregation and report
+pending. A completed lane does not block another lane's independent work. Only
+shared service/config/account mutations and the shared browser credential require
+a parent-granted exclusive lease; isolated QEMU tests may proceed concurrently
+with GOMAXPROCS=1 and -p1. No new downloads or release installation by workers.
+
+| Owner | Bounded unfinished slice | Shared-resource gate |
+| --- | --- | --- |
+| resume_access | SFTP allowed-root and cross-site isolation | Lease before accounts/config/live mutation |
+| resume_webmail | Attachment byte integrity, authorization and size limits | Lease before mail mutation/browser |
+| resume_database | Durable replacement state/recovery; preserve fail-closed fencing | Lease before shared database mutation |
+| Parent | Backup write-observation fixes already in flight; integrate outputs | Schedules leases and installed verification |
+
+These assignments are work in progress, not additional completion evidence.
+
 CURRENT: signed74, qemu-workflow-3.1.73, source61e40a55e. Actual core/executor/
 gateway process hashes match all three rebuilt artifacts; HTTPS200 and all services
 active. Rebuilt panel-node-install applied72. Affected combined Go suites and the
