@@ -103,7 +103,7 @@ func dialIMAP(ctx context.Context, endpoint Endpoint, bearer string) (*imapClien
 		return nil, ErrUnavailable
 	}
 	capabilities, err := client.command("CAPABILITY")
-	if err != nil || !hasCapabilities(capabilities, "IMAP4REV1", "AUTH=OAUTHBEARER", "SASL-IR", "ESEARCH", "PARTIAL", "SORT", "CONDSTORE", "LIST-EXTENDED", "LIST-STATUS", "SPECIAL-USE", "QUOTA", "BINARY", "MOVE", "UIDPLUS") {
+	if err != nil || !hasCapabilities(capabilities, "IMAP4REV1", "AUTH=OAUTHBEARER", "SASL-IR") {
 		client.stop()
 		connection.Close()
 		return nil, ErrUnavailable
@@ -113,6 +113,16 @@ func dialIMAP(ctx context.Context, endpoint Endpoint, bearer string) (*imapClien
 		client.stop()
 		connection.Close()
 		return nil, errors.Join(ErrUnauthorized, err)
+	}
+	// Dovecot exposes mailbox extensions only after authentication. Native
+	// CONTEXT=SEARCH supports positive PARTIAL ranges without advertising the
+	// newer PARTIAL capability; SPECIAL-USE RETURN is also accepted natively.
+	capabilities, err = client.command("CAPABILITY")
+	if err != nil || !hasCapabilities(capabilities, "IMAP4REV1", "ESEARCH", "CONDSTORE", "LIST-EXTENDED", "LIST-STATUS", "QUOTA", "BINARY", "MOVE", "UIDPLUS") ||
+		(!hasCapabilities(capabilities, "PARTIAL") && !hasCapabilities(capabilities, "CONTEXT=SEARCH")) {
+		client.stop()
+		connection.Close()
+		return nil, ErrUnavailable
 	}
 	return client, nil
 }

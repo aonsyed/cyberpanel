@@ -115,6 +115,9 @@ func parseFolders(lines []string, quota Quota) ([]Folder, error) {
 			return nil, ErrProtocol
 		}
 		switch strings.ToUpper(values[1].atom) {
+		case "OK":
+			// STATUS can emit informational HIGHESTMODSEQ responses.
+			continue
 		case "LIST":
 			if len(values) != 5 && len(values) != 7 || values[2].list == nil {
 				return nil, ErrProtocol
@@ -618,7 +621,6 @@ func boundedUIDSearch(client *imapClient, order MessageSort, afterUID uint32, li
 	rangeCriterion := "UID 1:*"
 	partial := "1:" + strconv.Itoa(limit)
 	if order == SortNewest {
-		partial = "-" + strconv.Itoa(limit) + ":-1"
 		if afterUID > 0 {
 			if afterUID == 1 {
 				return nil, false, nil
@@ -630,6 +632,27 @@ func boundedUIDSearch(client *imapClient, order MessageSort, afterUID uint32, li
 			return nil, false, nil
 		}
 		rangeCriterion = "UID " + strconv.FormatUint(uint64(afterUID+1), 10) + ":*"
+	}
+	if order == SortNewest {
+		// Native Dovecot CONTEXT=SEARCH implements positive PARTIAL ranges,
+		// not the newer negative range extension. COUNT keeps both responses
+		// bounded even when the mailbox contains millions of messages.
+		lines, err := client.command("UID SEARCH RETURN (COUNT) CHARSET UTF-8 " + rangeCriterion + " " + criteria)
+		if err != nil {
+			return nil, false, err
+		}
+		count, err := parseESearchCount(lines)
+		if err != nil {
+			return nil, false, err
+		}
+		if count == 0 {
+			return nil, false, nil
+		}
+		first := uint64(1)
+		if count > uint64(limit) {
+			first = count - uint64(limit) + 1
+		}
+		partial = strconv.FormatUint(first, 10) + ":" + strconv.FormatUint(count, 10)
 	}
 	lines, err := client.command("UID SEARCH RETURN (PARTIAL " + partial + ") CHARSET UTF-8 " + rangeCriterion + " " + criteria)
 	if err != nil {
@@ -648,6 +671,26 @@ func boundedUIDSearch(client *imapClient, order MessageSort, afterUID uint32, li
 	return uids, len(uids) == limit, nil
 }
 
+func parseESearchCount(lines []string) (uint64, error) {
+	if len(lines) != 1 {
+		return 0, ErrProtocol
+	}
+	values, err := parseIMAPValues(lines[0])
+	if err != nil || len(values) < 4 || values[0].atom != "*" || !strings.EqualFold(values[1].atom, "ESEARCH") {
+		return 0, ErrProtocol
+	}
+	for index := 2; index+1 < len(values); index++ {
+		if strings.EqualFold(values[index].atom, "COUNT") {
+			count, err := strconv.ParseUint(values[index+1].atom, 10, 32)
+			if err != nil {
+				return 0, ErrProtocol
+			}
+			return count, nil
+		}
+	}
+	return 0, ErrProtocol
+}
+
 func parseESearch(lines []string, maximum int) ([]uint32, error) {
 	var result []uint32
 	found := false
@@ -662,6 +705,9 @@ func parseESearch(lines []string, maximum int) ([]uint32, error) {
 		found = true
 		for index := 2; index+1 < len(values); index++ {
 			if strings.EqualFold(values[index].atom, "PARTIAL") && values[index+1].list != nil && len(values[index+1].list) == 2 {
+				if strings.EqualFold(values[index+1].list[1].atom, "NIL") {
+					break
+				}
 				result, err = expandUIDSet(values[index+1].list[1].atom, maximum)
 				if err != nil {
 					return nil, err
