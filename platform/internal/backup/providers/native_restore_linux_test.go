@@ -4,7 +4,9 @@ package providers
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -23,16 +25,29 @@ import (
 type nativeRestoreTarget struct{ *backup.LinuxBackupHost }
 
 func (target nativeRestoreTarget) StageArtifact(ctx context.Context, plan backup.RestorePlanSpec, scratch string, artifact backup.ArtifactManifest, open func(context.Context, backup.ObjectDescriptor) (backup.ReadObject, error), effect string) (string, error) {
-	var readers []io.Reader
-	for _, descriptor := range artifact.Objects {
-		object, err := open(ctx, descriptor)
-		if err != nil {
-			return "", err
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	go func() {
+		for _, descriptor := range artifact.Objects {
+			object, err := open(ctx, descriptor)
+			if err != nil {
+				writer.CloseWithError(err)
+				return
+			}
+			_, err = io.Copy(writer, object.Reader)
+			closeErr := object.Reader.Close()
+			if err != nil {
+				writer.CloseWithError(err)
+				return
+			}
+			if closeErr != nil {
+				writer.CloseWithError(closeErr)
+				return
+			}
 		}
-		defer object.Reader.Close()
-		readers = append(readers, object.Reader)
-	}
-	return target.StageArtifactStream(ctx, plan, scratch, artifact, io.MultiReader(readers...), effect)
+		writer.Close()
+	}()
+	return target.StageArtifactStream(ctx, plan, scratch, artifact, reader, effect)
 }
 
 // Run only on a disposable native host: promotion briefly stops lsws, and the
@@ -111,6 +126,19 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	write(filepath.Join(release, "index.txt"), "restored site bytes\n", 0640)
 	write(filepath.Join(release, "public/served.txt"), "restored public bytes\n", 0640)
 	write(filepath.Join(generation, "private/secret.txt"), "private fixture bytes\n", 0600)
+	large := os.Getenv("CYBERPANEL_NATIVE_BACKUP_CHUNKS_TEST") == "1"
+	largeDigest := ""
+	if large {
+		file, err := os.Create(filepath.Join(release, "large.bin"))
+		must(err)
+		hash := sha256.New()
+		for i := 0; i < 18; i++ {
+			_, err = io.Copy(io.MultiWriter(file, hash), strings.NewReader(strings.Repeat(fmt.Sprintf("%08d", i), 128*1024)))
+			must(err)
+		}
+		must(file.Close())
+		largeDigest = hex.EncodeToString(hash.Sum(nil))
+	}
 	const uid = 62001
 	for _, path := range []string{release, filepath.Join(release, "index.txt"), filepath.Join(release, "public"), filepath.Join(release, "public/served.txt"), filepath.Join(generation, "private"), filepath.Join(generation, "private/secret.txt")} {
 		must(os.Chown(path, uid, uid))
@@ -126,6 +154,14 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	must(os.MkdirAll(filepath.Dir(registry), 0700))
 	write(registry, fmt.Sprintf(`{"id":%q,"tenant_id":%q,"site_id":%q,"generation":1,"name":%q}`, id, id, id, dbname), 0600)
 	sqlCommand("CREATE DATABASE `" + dbname + "`; CREATE TABLE `" + dbname + "`.probe (id INT PRIMARY KEY, value TEXT, bytes BLOB); INSERT INTO `" + dbname + "`.probe VALUES (1,'original Ω',0x0001ff),(2,NULL,NULL)")
+	largeSQL := ""
+	if large {
+		sqlCommand("CREATE TABLE `" + dbname + "`.large_probe (id INT PRIMARY KEY, bytes LONGBLOB)")
+		for i := 0; i < 18; i++ {
+			sqlCommand(fmt.Sprintf("INSERT INTO `%s`.large_probe VALUES (%d,REPEAT('%08d',131072))", dbname, i, i))
+		}
+		largeSQL = sqlCommand("SELECT id,OCTET_LENGTH(bytes),SHA2(bytes,256) FROM `" + dbname + "`.large_probe ORDER BY id")
+	}
 	binding := backup.LinuxBackupSiteBinding{SiteKey: id, TenantID: id, SiteID: id, UID: uid, GID: uid, Generation: 1}
 	host := &backup.LinuxBackupHost{Root: runtimeRoot, Resolver: backup.LinuxBackupSiteResolverFunc(func(_ context.Context, tenant, scope string) (backup.LinuxBackupSiteBinding, error) {
 		if scope != id || tenant != "" && tenant != id {
@@ -162,6 +198,21 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 		t.Fatalf("backup status: %s", run.Status)
 	}
 	t.Logf("native files+MariaDB capture committed: %s", run.RecoveryPointID)
+	if large {
+		for _, artifact := range run.Manifest.Artifacts {
+			if artifact.Bytes <= 16<<20 || len(artifact.Objects) < 3 {
+				t.Fatalf("large component not chunked: %s bytes=%d chunks=%d", artifact.Component, artifact.Bytes, len(artifact.Objects))
+			}
+			for _, object := range artifact.Objects {
+				if object.Size > backup.LinuxBackupChunkBytes {
+					t.Fatal("unbounded object")
+				}
+			}
+			t.Logf("%s bytes=%d chunks=%d", artifact.Component, artifact.Bytes, len(artifact.Objects))
+		}
+		must(os.Remove(filepath.Join(release, "large.bin")))
+		sqlCommand("DROP TABLE `" + dbname + "`.large_probe")
+	}
 	// Remove captured content rather than merely comparing the still-live source.
 	must(os.Remove(filepath.Join(release, "index.txt")))
 	must(os.Remove(filepath.Join(release, "public/served.txt")))
@@ -169,8 +220,13 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	sqlCommand("DROP TABLE `" + dbname + "`.probe")
 	plan := backup.RestorePlanSpec{ID: backup.RestoreID(id), IdempotencyKey: id, TenantID: id, RecoveryPointID: run.RecoveryPointID, SourceScope: id, TargetScope: id, ComponentMapping: map[backup.ComponentKind]string{backup.ComponentFiles: id, backup.ComponentDatabase: id}, CollisionPolicy: backup.CollisionReplaceBlueGreen, SecretPolicy: backup.SecretResetRequired, RequiredFreeBytes: 1 << 20, Generation: 1}
 	coordinator := backup.RestoreCoordinator{Store: runtime.Restores, Capacity: host, Source: runtime.RestoreSource(), Scanner: backup.IntegrityRestoreScanner{}, Target: nativeRestoreTarget{host}, Safety: host}
+	if large {
+		plan.RequiredFreeBytes = 512 << 20
+	}
 	receipt, err := coordinator.Execute(ctx, plan)
-	must(err)
+	if err != nil {
+		t.Fatalf("restore phase=%s scratch=%s stages=%v: %v", receipt.Phase, receipt.ScratchID, receipt.StageReceipts, err)
+	}
 	if receipt.Phase != backup.RestoreActive {
 		t.Fatalf("restore phase: %s", receipt.Phase)
 	}
@@ -190,6 +246,21 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 		t.Errorf("restored database mismatch: %q", rows)
 	}
 	t.Log("restored native SQL text/NULL/BLOB rows and site/private bytes checked")
+	if large {
+		file, err := os.Open(filepath.Join(generation, "releases/current/large.bin"))
+		must(err)
+		hash := sha256.New()
+		_, err = io.Copy(hash, file)
+		must(err)
+		must(file.Close())
+		if hex.EncodeToString(hash.Sum(nil)) != largeDigest {
+			t.Fatal("large restored file mismatch")
+		}
+		if sqlCommand("SELECT id,OCTET_LENGTH(bytes),SHA2(bytes,256) FROM `"+dbname+"`.large_probe ORDER BY id") != largeSQL {
+			t.Fatal("large restored SQL mismatch")
+		}
+		t.Log("exact >16MiB file and SQL payload hashes restored from encrypted chunks")
+	}
 	publicRead := exec.CommandContext(ctx, "/usr/sbin/runuser", "-u", "cyberpanel-web", "--", "/usr/bin/cat", filepath.Join(generation, "releases/current/public/served.txt"))
 	if output, err := publicRead.CombinedOutput(); err != nil || string(output) != "restored public bytes\n" {
 		t.Fatalf("native web worker public read: %v %q", err, output)
