@@ -5,6 +5,28 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed84 — source21baf991f
+
+Signed qemu-workflow-3.1.83 sequence84 committed:
+manifest55a85f55ab1cf24847868a68fbc32faf4818df64a43c4683080f5b5784a07c73;
+receipt63dcaee5570504ef5ecf96c89da66fc838effaa5dc17a883d5282ef963ce9d86;
+operation install-4cfc98c094cd6f89d05dbfaaaa1fbb3507473054d9f1bfa8b78772375b02fdec.
+Actual running core/executor/gateway hashes match rebuilt inputs:
+31cbfff9bcd49198614cbe5681b70e4ac537ef2852beb92a9c2dcfc1ca5cceae;
+095e9696374be2753807564319a917b1d60f10b0ffde6203107d95ecf2c8e91b;
+abc3c238c69b2761ecb00cb11aa5484a4bed511b5e1b6e06e9fd49e31381215a.
+Added declared panel-cron-exec helper through signed bundle, installed/build SHA
+0128da2382472497b5684139a438ccbfa6fe98c04c37f9198730d5e5c5c26475.
+Seven panel services+OLS active, panel HTML/UI200. Cron installed timer proof
+dispatched; no scheduled execution success claimed at activation alone.
+Combined QEMU access/database/API/certificates/migration/core/executor suites
+passed (.019/.849/.212/.274/.323/1.470/.019s); helper builds successfully.
+Bundle d983c4ad6ea165f1ed325943346c4e7fffcd4d4ac377c0331519c652d1320036,
+106 artifacts540751758bytes. Also archived unused72
+644b050c82a1e148be5c79d24f1fbbfab6b6488d9f20621689fddf15c43b4456 to ignored
+host archive with checksum/no-reference checks before exact guest deletion;
+active/previous and application/backup data preserved. Host copy recoverable.
+
 ### Remaining-module batch — source21baf991f, activation pending
 
 Cron45374a748/7fe40b968: native systemd accepts wildcard/step calendars, PHP

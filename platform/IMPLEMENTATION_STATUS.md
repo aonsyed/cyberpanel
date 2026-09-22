@@ -9,6 +9,14 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
+Current installed84 qemu-workflow-3.1.83/source21baf991f includes renewal, cron,
+database export omission guard and migration rollback fixes. Seven services+OLS
+active, actual core/executor/gateway hashes match; panel/UI200. Signed cron helper
+now installed and hash-matched. Cron worker owns actual scheduled execution lease;
+marketing worker prepares existing campaign/unsubscribe workflow without shared
+mutation. Database guard and migration bounded slices returned; full program-object
+preservation and complete live migration remain open, not replaced by those fixes.
+
 ### Current dispatch boundaries (supersede historical lane tables below)
 
 | Owner | Active slice | Stop condition |
