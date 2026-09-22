@@ -8,9 +8,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestDovecotVacationUsesExistingLoopbackSubmission(t *testing.T) {
+	content := renderDovecot(ConfigSnapshot{Postmaster: "postmaster@qemu.invalid"})
+	if !bytes.Contains(content, []byte("submission_host = 127.0.0.1:25\n")) {
+		t.Fatal("vacation would fall back to sendmail under mailbox UID")
+	}
+	if os.Getenv("CYBERPANEL_QEMU_MAIL_CONFIG") != "1" {
+		return
+	}
+	path := filepath.Join(t.TempDir(), "dovecot.conf")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("/usr/bin/doveconf", "-c", path, "-h", "submission_host").Output()
+	if err != nil || strings.TrimSpace(string(output)) != "127.0.0.1:25" {
+		t.Fatalf("native submission setting: %q %v", output, err)
+	}
+}
 
 func TestQEMUDovecotRenderedConfiguration(t *testing.T) {
 	if os.Getenv("CYBERPANEL_QEMU_MAIL_CONFIG") != "1" {

@@ -494,6 +494,7 @@ func renderDovecot(snapshot ConfigSnapshot) []byte {
 listen = *, ::
 mail_home = /var/lib/cyberpanel/mailboxes/%%d/%%n
 mail_location = maildir:~/Maildir
+submission_host = 127.0.0.1:25
 first_valid_uid = 200000
 last_valid_uid = 299999
 ssl = required
