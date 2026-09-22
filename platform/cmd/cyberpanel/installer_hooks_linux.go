@@ -31,6 +31,7 @@ import (
 
 	"github.com/aonsyed/cyberpanel/platform/internal/apiserver"
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
+	"github.com/aonsyed/cyberpanel/platform/internal/backupauthority"
 	"github.com/aonsyed/cyberpanel/platform/internal/containers"
 	"github.com/aonsyed/cyberpanel/platform/internal/integrations"
 )
@@ -67,7 +68,7 @@ func runInstallerHook(arguments []string) error {
 	var containerPolicyPath string
 	// A receipt does not establish current directory ownership. Reconcile this
 	// shared authority boundary on both fresh and replayed install/upgrade hooks.
-	if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority" { uid,gid,lookupErr:=lookupIdentity("cyberpanel");if lookupErr!=nil{return lookupErr};if _,err=reconcileBackupRepositoryAuthority(uid,gid);err!=nil{return err} }
+	if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority" { if _,err=backupauthority.ReconcileLocalRepositoryAuthority();err!=nil{return err} }
 	if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority" { if err=validatePackagedContainerRecipes();err!=nil{return err};containerPolicyPath,err=containers.ProvisionRootlessContainerPolicy(context.Background());if err!=nil{return err} }
 	if existing,loadErr:=readHookJournal(indexPath);loadErr==nil { if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority"{manifest,validateErr:=apps.ValidateLinuxApplicationCatalog(context.Background(),"",time.Now().UTC());if validateErr!=nil||manifest.ReleaseID!=invocation.Release{return errors.Join(errors.New("application catalog no longer matches installer receipt"),validateErr)}};_,err=io.WriteString(os.Stdout,existing.Response);return err } else if !errors.Is(loadErr,os.ErrNotExist){return loadErr}
 	changed,err:=applyHook(invocation);if err!=nil{return err}
@@ -125,7 +126,7 @@ func validatePackagedContainerRecipes() error {
 
 func initializeAuthority()([]string,error){
 	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};paths:=[]string{"/var/lib/cyberpanel/control","/var/lib/cyberpanel/control/runtime","/var/lib/cyberpanel/control/trust","/var/lib/cyberpanel/control/recovery","/var/lib/cyberpanel/audit","/var/lib/cyberpanel/audit/segments","/var/lib/cyberpanel/audit/emergency","/var/lib/cyberpanel/backup-spool","/var/lib/cyberpanel/migration","/var/lib/cyberpanel/migration/chunks"}
-	backupPaths,err:=reconcileBackupRepositoryAuthority(uid,gid);if err!=nil{return nil,err}
+	backupPaths,err:=backupauthority.ReconcileLocalRepositoryAuthority();if err!=nil{return nil,err}
 	for _,path:=range paths{if err=ensureOwnedDirectory(path,0700,uid,gid);err!=nil{return nil,err}}
 	databasePath:="/var/lib/cyberpanel/control/control.db";created,err:=ensureOwnedFile(databasePath,0600,uid,gid,nil);if err!=nil{return nil,err}
 	changed:=append(backupPaths,paths...);if created{changed=append(changed,databasePath)}
@@ -134,14 +135,7 @@ func initializeAuthority()([]string,error){
 }
 
 func migrateAuthority()([]string,error){
-	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};changed,err:=reconcileBackupRepositoryAuthority(uid,gid);if err!=nil{return nil,err};path:="/var/lib/cyberpanel/control/control.db";if _,err=ensureOwnedFile(path,0600,uid,gid,nil);err!=nil{return nil,err};return append(changed,path),nil
-}
-
-func reconcileBackupRepositoryAuthority(uid,gid int)([]string,error){
-	backupRoot,repositoryRoot:="/var/backups/cyberpanel","/var/backups/cyberpanel/repositories"
-	if err:=ensureOwnedDirectory(backupRoot,0750,0,gid);err!=nil{return nil,err}
-	if err:=ensureOwnedDirectory(repositoryRoot,0700,uid,gid);err!=nil{return nil,err}
-	return []string{backupRoot,repositoryRoot},nil
+	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};changed,err:=backupauthority.ReconcileLocalRepositoryAuthority();if err!=nil{return nil,err};path:="/var/lib/cyberpanel/control/control.db";if _,err=ensureOwnedFile(path,0600,uid,gid,nil);err!=nil{return nil,err};return append(changed,path),nil
 }
 
 func bootstrapSecrets()([]string,error){

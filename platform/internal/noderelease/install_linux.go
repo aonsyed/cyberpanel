@@ -973,6 +973,9 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 		return installer.rollbackLocked(ctx, journal, trust, err)
 	}
 	for _, service := range activationServiceOrder(manifest) {
+		if err = prepareServiceAuthority(service.Unit); err != nil {
+			return installer.rollbackLocked(ctx, journal, trust, err)
+		}
 		execute, err := beginEffect(journal, "service_probe", service.Unit, installer.now())
 		if err != nil {
 			return InstallReceipt{}, err
