@@ -69,7 +69,7 @@ func (host *LinuxPowerDNSHost) GenerateAndPublishDNSSEC(ctx context.Context, zon
 		if key.Role == "zsk" {
 			continue
 		}
-		record, exportErr := host.exportPowerDNSDS(ctx, zone, key.PrivateHandle)
+		record, exportErr := host.exportPowerDNSDS(ctx, zone, key)
 		if exportErr != nil {
 			rollback()
 			return receipt, exportErr
@@ -158,12 +158,53 @@ func (host *LinuxPowerDNSHost) exportPowerDNSKey(ctx context.Context, zone ZoneS
 	return DNSSECKeyDescriptor{ID: "pdns-key-" + keyID, Role: role, Algorithm: algorithm, KeyTag: tag, PublicDNSKEY: public, PrivateHandle: keyID, CreatedAt: host.now()}, nil
 }
 
-func (host *LinuxPowerDNSHost) exportPowerDNSDS(ctx context.Context, zone ZoneSpec, keyID string) (DSRecord, error) {
-	output, err := runPowerDNSProcess(ctx, host.profile.pdnsUtil, "export-zone-ds", zone.Name.FQDN(), keyID)
+func (host *LinuxPowerDNSHost) exportPowerDNSDS(ctx context.Context, zone ZoneSpec, key DNSSECKeyDescriptor) (DSRecord, error) {
+	output, err := runPowerDNSProcess(ctx, host.profile.pdnsUtil, "export-zone-ds", zone.Name.FQDN())
 	if err != nil {
 		return DSRecord{}, err
 	}
-	return parsePowerDNSDS(output)
+	return powerDNSDSForKey(output, zone.Name, key)
+}
+
+// The native export is zone-wide, including old keys during rollover. Select
+// the SHA-256 DS for the exact newly published key rather than the first line.
+func powerDNSDSForKey(output []byte, name DNSName, key DNSSECKeyDescriptor) (DSRecord, error) {
+	fields := strings.Fields(key.PublicDNSKEY)
+	if len(fields) != 4 || !validPowerDNSZoneName(name) || dnskeyTag(key.PublicDNSKEY) != key.KeyTag {
+		return DSRecord{}, ErrInvalidDNS
+	}
+	algorithm, err := strconv.ParseUint(fields[2], 10, 8)
+	if err != nil {
+		return DSRecord{}, ErrInvalidDNS
+	}
+	flags, err := strconv.ParseUint(fields[0], 10, 16)
+	if err != nil {
+		return DSRecord{}, ErrInvalidDNS
+	}
+	protocol, err := strconv.ParseUint(fields[1], 10, 8)
+	if err != nil {
+		return DSRecord{}, ErrInvalidDNS
+	}
+	public, err := decodeDNSSECBase64(fields[3])
+	if err != nil {
+		return DSRecord{}, ErrInvalidDNS
+	}
+	wire := make([]byte, 0, 256+len(public))
+	for _, label := range strings.Split(name.String(), ".") {
+		wire = append(wire, byte(len(label)))
+		wire = append(wire, label...)
+	}
+	wire = append(wire, 0, byte(flags>>8), byte(flags), byte(protocol), byte(algorithm))
+	wire = append(wire, public...)
+	digest := sha256.Sum256(wire)
+	expected := strings.ToUpper(hex.EncodeToString(digest[:]))
+	for _, line := range strings.Split(string(output), "\n") {
+		record, err := parsePowerDNSDS([]byte(line))
+		if err == nil && record.KeyTag == key.KeyTag && record.Algorithm == uint8(algorithm) && record.DigestType == 2 && record.Digest == expected {
+			return record, nil
+		}
+	}
+	return DSRecord{}, ErrInvalidDNS
 }
 
 func validatePowerDNSDNSSECZone(zone ZoneSpec) error {
