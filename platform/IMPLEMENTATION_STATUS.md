@@ -9,6 +9,31 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
+### Current dispatch boundaries (supersede historical lane tables below)
+
+| Owner | Active slice | Stop condition |
+| --- | --- | --- |
+| apps | Cron scheduled execution and disable/delete | One native lifecycle, exact cleanup, minimal fixes |
+| backup | Migration cutover cancellation/fence rollback | Scoped failure/retry evidence and minimal fixes |
+| database | Prevent silently incomplete program-object exports | Real MariaDB rejection regression; full preservation remains open |
+| parent | Integrate renewal fix and qualified mail evidence | Affected QEMU checks, grouped activation |
+
+Closed this pass: Joomla install/login/remove, SFTP lifecycle, database replacement,
+DNSSEC transitions, vacation create/enable/reply/suppress/disable/delete. Do not
+assign another adjacent variation to these lanes merely because their workers are
+available. Reopen for a reproduced regression or an explicitly selected unmet
+requirement; otherwise move the worker to the remaining module queue. Example to
+avoid: extending a completed mail fixture while cron/migration have no worker.
+
+Installed83 vacation UI/native qualification PASSED: exactly three local triggers
+produced one exact-body reply; duplicate suppressed, disabled canonical script
+had no vacation include, explicit delete completed, four exact message UIDs and
+owned scripts cleaned. Parent inspected receipts and independently matched reply
+SHA2560464b9196e11d9bb9fa5f4a4896addae4ccfc64e2c6c7659aba08cd751848b5a.
+UI read/update still have isolated fixture evidence only; no additional mail run
+is scheduled for this pass. Renewal fix51da6da32 integrated, not installed yet:
+SQLite due-date binding and bounded cancellation-safe rollback/retry persistence.
+
 Current installed83 qemu-workflow-3.1.82/sourceefab7f310: vacation discovery/UI,
 local SMTP submission correction, and application update public-root/ACL fix.
 Actual core/executor/gateway hashes match, seven panel services+OLS active,

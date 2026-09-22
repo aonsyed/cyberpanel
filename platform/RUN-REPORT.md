@@ -5,6 +5,32 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed83 vacation closure; renewal source correction
+
+Actual installed UI create201/enable200/disable200/confirmed-delete204 passed;
+foreign tenant404, discovery200. Exactly three local triggers (qa66 UID10/11/12)
+produced one exact-body reply (qa65 UID3). Duplicate suppression passed; after
+disable reply count stayed one and active native Sieve lacked vacation include.
+Canonical filters preserved; all four exact UIDs confirmed absent and owned
+cp-vacation scripts retired. Parent inspected guest receipts and independently
+hashed the1717-byte reply:0464b9196e11d9bb9fa5f4a4896addae4ccfc64e2c6c7659aba08cd751848b5a.
+Evidence /home/harness/vacation-installed83-evidence.json,
+vacation-native83-evidence.json, vacation-ui83.log, vacation-reply83.eml and
+vacation-ui83-{enabled,deleted}.png. Harness-only corrections handled tenant
+preference/actual selector, legal Auto-Submitted comment and header folding;
+existing messages were inspected, not resent to force passing assertions.
+UI read/update remains fixture-only; external delivery is not claimed.
+
+Integrated51da6da32 fixes certificate renewal due selection (SQLite unixepoch
+did not accept the Go-time binding) plus bounded detached rollback30s/retry-state
+persistence5s after cancellation. Token fencing and causal/rollback errors remain
+visible. Worker QEMU certificates suite passed0.302s with real SQLite concurrent
+claims, expired-token rejection and six failure/retry cases. Issuance/deployment
+interfaces are controlled fixtures, NOT public ACME or native deployment proof.
+Parent read the actual tests and /home/harness/lanes/dns/renewal-green.log.
+Parent integrated QEMU certificates/core/executor suites passed0.280/1.530/0.019s.
+Native public ACME qualification remains separate; no repeat mail fixture needed.
+
 ### Installed83 — sourceefab7f310
 
 Signed qemu-workflow-3.1.82 sequence83 committed:
