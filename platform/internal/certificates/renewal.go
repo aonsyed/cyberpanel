@@ -131,7 +131,7 @@ AND ((renewal.id IS NULL AND EXISTS(SELECT 1 FROM certificate_deployments AS bou
 OR (renewal.state IN ('pending','degraded') AND renewal.next_attempt_at<=?)
 OR (renewal.state='running' AND renewal.updated_at<=?)
 OR (renewal.state='complete' AND EXISTS(SELECT 1 FROM certificate_deployments AS rebound WHERE rebound.generation_id=material.id AND rebound.rowid=(SELECT MAX(latest_rebound.rowid) FROM certificate_deployments AS latest_rebound WHERE latest_rebound.consumer=rebound.consumer))))
-ORDER BY unixepoch(json_extract(material.material_json,'$.not_after')),issuance.tenant_id,issuance.policy_id,issuance.id LIMIT ?`, now, now, now.Add(-renewalLease), limit)
+ORDER BY unixepoch(json_extract(material.material_json,'$.not_after')),issuance.tenant_id,issuance.policy_id,issuance.id LIMIT ?`, now.Format(time.RFC3339Nano), now, now.Add(-renewalLease), limit)
 	if err != nil { return nil, err }
 	defer rows.Close()
 	items := make([]renewalCandidate, 0, limit)
@@ -244,6 +244,9 @@ func (c *RenewalCoordinator) stale(ctx context.Context, renewal Renewal, token s
 }
 
 func (c *RenewalCoordinator) degrade(ctx context.Context, renewal Renewal, token string, expires time.Time, cause error) error {
+	// Cancellation must stop issuance, not prevent persisting its retry state.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	now := c.now()
 	next := now.Add(renewalBackoff(renewal.ID, renewal.Attempt, now, expires))
 	result, err := c.Store.DB.ExecContext(ctx, `UPDATE certificate_renewals_v2 SET state='degraded',next_attempt_at=?,error=?,claim_token='',updated_at=? WHERE id=? AND state='running' AND claim_token=?`, next,boundedRenewalError(cause),now,renewal.ID,token)
