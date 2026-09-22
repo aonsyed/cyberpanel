@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -23,6 +24,36 @@ import (
 type mailIdentityRunner struct{}
 
 func (mailIdentityRunner) Run(context.Context, string, ...string) error { return nil }
+
+func TestQEMULocalMailPublicReadableByCore(t *testing.T) {
+	if os.Getenv("CYBERPANEL_QEMU_MAIL_TLS") != "1" {
+		t.Skip("requires installed QEMU core identity")
+	}
+	root, err := os.MkdirTemp("/run", "cyberpanel-public-mail-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	if err := os.Chmod(root, 0711); err != nil {
+		t.Fatal(err)
+	}
+	host := &LinuxCertificateHost{CertificateRoot: root, Runner: mailIdentityRunner{}}
+	material, key := mailIdentityFixture(t, true)
+	_, candidate, err := host.StageCertificate(context.Background(), "mail/default", material, key, "mail-public-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.ActivateCertificate(context.Background(), "mail/default", candidate, "mail-public-test"); err != nil {
+		t.Fatal(err)
+	}
+	public := filepath.Join(root, "public", "mail-default.pem")
+	if err := exec.Command("/usr/sbin/runuser", "-u", "cyberpanel", "--", "/usr/bin/dd", "if="+public, "of=/dev/null", "status=none").Run(); err != nil {
+		t.Fatal("actual core UID cannot read public identity", err)
+	}
+	if err := exec.Command("/usr/sbin/runuser", "-u", "cyberpanel", "--", "/usr/bin/dd", "if="+filepath.Join(candidate, "private.key"), "of=/dev/null", "status=none").Run(); err == nil {
+		t.Fatal("actual core UID can read private key")
+	}
+}
 
 func mailIdentityFixture(t *testing.T, bootstrap bool) (CertificateMaterial, []byte) {
 	t.Helper()
