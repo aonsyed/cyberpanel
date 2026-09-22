@@ -5,6 +5,24 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed77 nested webmail attachment qualification
+
+Actual passkey UI read200 and two attachment issue201 operations returned exact
+attached-message120bytes and multipart187bytes. Saved download digests:
+3fd953904bca26b6051f50d3ffea4eff5ea90ffeba960de65b0fdd8d412e04a2 and
+9995fdcc9b958043269a8cd647bf647af73ee65d4d68bc770728206aa72cc2ae.
+Multipart Content-Type retains boundary=nested; UI says Size checked at download
+instead of asserting a guessed size. Raw native BODY187bytes matches download;
+native BINARY183bytes would transform the nested encoding and is not used.
+The initial fixture-builder estimate185bytes is not authoritative; saved evidence
+records that mismatch explicitly. Reparsed downloaded multipart retains base64
+child bytes decoding to00/01/02/ff. Embedded HTML remained unrendered.
+
+Parent inspected /home/harness/webmail-nested77-ui-evidence.json and actual
+webmail-nested77-ui.log/native.log. Only one local IMAP APPEND fixture, UID6,
+was used; exact UID expunged and subject absent. No external SMTP send, new source
+change or broad mail-completion claim. Broader DKIM/routing policy remains open.
+
 ### Installed77 — SFTP permission correction and replacement prerequisite
 
 Source532dca02f, signed qemu-workflow-3.1.76 sequence77 committed.

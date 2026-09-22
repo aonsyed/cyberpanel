@@ -84,6 +84,15 @@ DNSKEY/DS projection (raw delv output was not retained separately).
 Joomla76 retry still failed and compensated; actual packaged-PHP production
 runner diagnosis continues alongside database public integration.
 
+Installed77 nested webmail qualification passed: actual UI downloads of attached
+message120bytes and multipart187bytes match native raw sections, multipart
+boundary retained, unknown size displayed, embedded HTML not rendered. Exact
+fixture UID6 expunged; parent inspected saved evidence/log and download hashes.
+Next bounded lanes: database approved replacement/abort/retirement; Joomla full
+production-runtime fixture diagnosis; backup completed-boundary reconciliation
+(mid-SQL effects remain denied); DKIM local signing/public-key integration.
+These next assignments are not completion claims.
+
 Post75 fixes now installed76: c7d477100 selects the actual
 packaged PHP CLI after the LSAPI installer no-op was reproduced;13d6bcfcf invalidates
 scoped DNSSEC caches after durable key transitions. Installed75 DNSSEC enable and
