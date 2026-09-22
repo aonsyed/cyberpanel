@@ -9,6 +9,12 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
+Newest: installed81 qemu-workflow-3.1.80/source87e3c52e7. Actual process hashes,
+panel HTML/JS and seven panel services+OLS/mail daemons verified. Managed Dovecot
+hourly vacation extensions active through startup. Apps testing same-site fresh
+Joomla lifecycle with empty-public staging ACL fix. Vacation composition installed
+but API session-binding correction still in progress; no live autoresponse claim.
+
 Newest installed checkpoint: signed80 qemu-workflow-3.1.79/sourcec62b8007f.
 Core/execd/gateway hashes verified, seven panel services active and newUI200.
 Stopped-engine startup fix worked without startingOLS; SAME interrupted79 plan

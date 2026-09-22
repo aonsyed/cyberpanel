@@ -5,6 +5,26 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed81 — source87e3c52e7
+
+Signed qemu-workflow-3.1.80 sequence81 committed:
+manifest32b005abcd6cc0074689fad8c2f78a12b8e871622c3be2ca7c62fa611e9ccf88;
+receipt6278a09e3196cecc0c4883d792a90f665d425fb47c3a0e83f154a81b9e5219e2;
+operation install-f0038f7257af84e02ae19446063cbdd69cf26b7d365fe7144158f9a5595558d3.
+Actual running hashes match rebuilt inputs:
+core1eb3adfa10a8bc48394f45c268057b48972ccd169cb9f69563e52450ae0ca5ee;
+executordb39bc057846b2bbeee3b1ce8aaac5bf8bff9ea9c44bd7b2988e098d26f08cc9;
+gateway65e4001092d44c190c60c9c37eef765d102cd6f386271791f76e7613d33c7fbf.
+Seven panel services, OLS, Dovecot and Postfix active; HTML/newJS200.
+Actual doveconf confirms +vacation-seconds and1h minimum through normal startup
+reconciliation, no manual native configuration changes. Vacation API proof still
+pending: preparation identified old webmail.data session binding unreachable from
+current secure mailbox context; worker correcting that binding, not adding a
+legacy issuance path. Apps owns exclusive same-site fresh install/login/remove
+check using stage-only managed ACL recovery. Bundle SHA256
+52a4c6587d53148ea94a935bfb5f4e9088ee3567494385b51bce57c3633befaf;
+105artifacts/534708122bytes. No broader readiness claim.
+
 ### Source87e3c52e7 — vacation composition and release81 preparation
 
 Mailad1dac7ae integrated87e3c52e7. Existing vacation API now has canonical service
