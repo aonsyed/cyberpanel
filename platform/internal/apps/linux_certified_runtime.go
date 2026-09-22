@@ -416,7 +416,7 @@ func redactedApplicationOutput(value []byte, secrets ...[]byte) string {
 }
 
 func validateCertifiedInstallDestination(scope linuxApplicationScope) error {
-	if filepath.Base(scope.root) != "current" { return ErrUnsupported }
+	if filepath.Base(scope.root) != "current" && !(filepath.Base(scope.root) == "public" && filepath.Base(filepath.Dir(scope.root)) == "current") { return ErrUnsupported }
 	entries, err := os.ReadDir(scope.root)
 	if err != nil { return err }
 	for _, entry := range entries {
