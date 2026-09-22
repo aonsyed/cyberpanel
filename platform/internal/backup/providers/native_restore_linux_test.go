@@ -24,6 +24,37 @@ import (
 // entry point used by the privileged broker; no capture/restore effect is mocked.
 type nativeRestoreTarget struct{ *backup.LinuxBackupHost }
 
+// Loss injection never substitutes a native effect: it drops only its reply.
+type interruptedNativeRestoreTarget struct {
+	nativeRestoreTarget
+	losePromote, loseRollback bool
+}
+
+func (target interruptedNativeRestoreTarget) Promote(ctx context.Context, plan backup.RestorePlanSpec, scratch, effect string) (string, error) {
+	generation, err := target.LinuxBackupHost.Promote(ctx, plan, scratch, effect)
+	if err == nil && target.losePromote {
+		return "", backup.ErrBackupAmbiguous
+	}
+	return generation, err
+}
+func (target interruptedNativeRestoreTarget) RestorePrevious(ctx context.Context, plan backup.RestorePlanSpec, previous, effect string) error {
+	err := target.LinuxBackupHost.RestorePrevious(ctx, plan, previous, effect)
+	if err == nil && target.loseRollback {
+		return backup.ErrBackupAmbiguous
+	}
+	return err
+}
+
+type interruptedNativeUnfreeze struct{ *backup.LinuxBackupHost }
+
+func (target interruptedNativeUnfreeze) UnfreezeTargetWrites(ctx context.Context, plan backup.RestorePlanSpec, generation, effect string) error {
+	err := target.LinuxBackupHost.UnfreezeTargetWrites(ctx, plan, generation, effect)
+	if err == nil {
+		return backup.ErrBackupAmbiguous
+	}
+	return err
+}
+
 func (target nativeRestoreTarget) StageArtifact(ctx context.Context, plan backup.RestorePlanSpec, scratch string, artifact backup.ArtifactManifest, open func(context.Context, backup.ObjectDescriptor) (backup.ReadObject, error), effect string) (string, error) {
 	reader, writer := io.Pipe()
 	defer reader.Close()
@@ -220,10 +251,48 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	sqlCommand("DROP TABLE `" + dbname + "`.probe")
 	plan := backup.RestorePlanSpec{ID: backup.RestoreID(id), IdempotencyKey: id, TenantID: id, RecoveryPointID: run.RecoveryPointID, SourceScope: id, TargetScope: id, ComponentMapping: map[backup.ComponentKind]string{backup.ComponentFiles: id, backup.ComponentDatabase: id}, CollisionPolicy: backup.CollisionReplaceBlueGreen, SecretPolicy: backup.SecretResetRequired, RequiredFreeBytes: 1 << 20, Generation: 1}
 	coordinator := backup.RestoreCoordinator{Store: runtime.Restores, Capacity: host, Source: runtime.RestoreSource(), Scanner: backup.IntegrityRestoreScanner{}, Target: nativeRestoreTarget{host}, Safety: host}
+	recovery := os.Getenv("CYBERPANEL_NATIVE_BACKUP_RECOVERY_TEST") == "1"
+	if recovery {
+		coordinator.Target = interruptedNativeRestoreTarget{nativeRestoreTarget: nativeRestoreTarget{host}, losePromote: true}
+	}
 	if large {
 		plan.RequiredFreeBytes = 512 << 20
 	}
 	receipt, err := coordinator.Execute(ctx, plan)
+	if recovery {
+		if err == nil || receipt.Phase != backup.RestoreAmbiguous {
+			t.Fatalf("lost promotion reply not retained: %s %v", receipt.Phase, err)
+		}
+		host = &backup.LinuxBackupHost{Root: runtimeRoot, Resolver: host.Resolver}
+		coordinator.Target = nativeRestoreTarget{host}
+		coordinator.Safety = interruptedNativeUnfreeze{host}
+		if _, denied := coordinator.Apply(ctx, "foreign", plan.ID, receipt.Generation); denied == nil {
+			t.Fatal("foreign tenant recovery accepted")
+		}
+		if _, denied := coordinator.Apply(ctx, id, plan.ID, receipt.Generation+1); denied == nil {
+			t.Fatal("stale generation recovery accepted")
+		}
+		changed := plan
+		changed.Generation++
+		if _, denied := host.ReconcileRestore(ctx, changed, receipt); denied == nil {
+			t.Fatal("changed plan generation accepted")
+		}
+		_, err = coordinator.Apply(ctx, id, plan.ID, receipt.Generation)
+		if err == nil {
+			t.Fatal("lost unfreeze reply not injected")
+		}
+		host = &backup.LinuxBackupHost{Root: runtimeRoot, Resolver: host.Resolver}
+		coordinator.Target = nativeRestoreTarget{host}
+		coordinator.Safety = host
+		receipt, err = coordinator.Apply(ctx, id, plan.ID, receipt.Generation)
+		must(err)
+		again, againErr := coordinator.Apply(ctx, id, plan.ID, receipt.Generation)
+		must(againErr)
+		if again.Generation != receipt.Generation {
+			t.Fatal("recovery replay mutated terminal receipt")
+		}
+		t.Log("reconstructed completed promotion and lost unfreeze recovered; tenant/generation denied; replay idempotent")
+	}
 	if err != nil {
 		t.Fatalf("restore phase=%s scratch=%s stages=%v: %v", receipt.Phase, receipt.ScratchID, receipt.StageReceipts, err)
 	}
@@ -274,7 +343,19 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	// Exercise the safety rollback after promotion from a provisioned directory.
 	_, err = host.FreezeTargetWrites(ctx, plan, string(plan.ID)+":rollback-freeze")
 	must(err)
+	if recovery {
+		coordinator.Target = interruptedNativeRestoreTarget{nativeRestoreTarget: nativeRestoreTarget{host}, loseRollback: true}
+	}
 	rolledBack, err := coordinator.Rollback(ctx, plan, receipt)
+	if recovery {
+		if err == nil || rolledBack.Phase != backup.RestoreAmbiguous {
+			t.Fatalf("lost rollback reply not retained: %s %v", rolledBack.Phase, err)
+		}
+		host = &backup.LinuxBackupHost{Root: runtimeRoot, Resolver: host.Resolver}
+		coordinator.Target = nativeRestoreTarget{host}
+		coordinator.Safety = host
+		rolledBack, err = coordinator.Apply(ctx, id, plan.ID, rolledBack.Generation)
+	}
 	must(err)
 	if rolledBack.Phase != backup.RestoreRolledBack {
 		t.Fatalf("rollback phase: %s", rolledBack.Phase)
@@ -289,6 +370,33 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 		t.Fatalf("rollback did not restore pre-restore SQL: %q", rows)
 	}
 	t.Log("actual-directory promotion and safety rollback verified")
+	if recovery {
+		writePlan := plan
+		writePlan.ID += "-write"
+		writePlan.IdempotencyKey += "-write"
+		coordinator.Safety = interruptedNativeUnfreeze{host}
+		interrupted, writeErr := coordinator.Execute(ctx, writePlan)
+		if writeErr == nil || interrupted.Phase != backup.RestoreAmbiguous {
+			t.Fatalf("write fixture interruption: %s %v", interrupted.Phase, writeErr)
+		}
+		sqlCommand("UPDATE `" + dbname + "`.probe SET value='persistent user write' WHERE id=1")
+		host = &backup.LinuxBackupHost{Root: runtimeRoot, Resolver: host.Resolver}
+		coordinator.Target = nativeRestoreTarget{host}
+		coordinator.Safety = host
+		forward, forwardErr := coordinator.Apply(ctx, id, writePlan.ID, interrupted.Generation)
+		if forwardErr == nil || forward.Phase != backup.RestoreFailForward || forward.FirstWriteAt == nil {
+			t.Fatalf("persistent write was not fail-forward: %+v %v", forward, forwardErr)
+		}
+		if sqlCommand("SELECT value FROM `"+dbname+"`.probe WHERE id=1") != "persistent user write" {
+			t.Fatal("recovery overwrote post-restore SQL write")
+		}
+		again, againErr := coordinator.Apply(ctx, id, writePlan.ID, forward.Generation)
+		must(againErr)
+		if again.Phase != backup.RestoreFailForward {
+			t.Fatal("fail-forward not retained")
+		}
+		t.Log("completed rollback recovered; persistent SQL write survives reconstruction and forces idempotent fail-forward")
+	}
 	object := run.Manifest.Artifacts[0].Objects[0]
 	blob := filepath.Join(repoRoot, objectPath(object))
 	if spec.ObjectFormat == LocalEncryptedFormat {

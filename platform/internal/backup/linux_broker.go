@@ -47,6 +47,7 @@ const (
 	LinuxBackupFreeze            LinuxBackupOperation = "freeze"
 	LinuxBackupUnfreeze          LinuxBackupOperation = "unfreeze"
 	LinuxBackupVerifyHealth      LinuxBackupOperation = "verify_health"
+	LinuxBackupReconcile         LinuxBackupOperation = "reconcile_restore"
 )
 
 type LinuxBackupRequest struct {
@@ -68,20 +69,22 @@ type LinuxBackupRequest struct {
 	PreviousGeneration string                `json:"previous_generation,omitempty"`
 	Watermark          uint64                `json:"watermark,omitempty"`
 	RequiredBytes      uint64                `json:"required_bytes,omitempty"`
+	RecoveryReceipt    RestoreReceipt        `json:"recovery_receipt,omitempty"`
 }
 
 type LinuxBackupResponse struct {
-	Version      uint16               `json:"version"`
-	RequestID    string               `json:"request_id"`
-	Operation    LinuxBackupOperation `json:"operation"`
-	Views        []ReadView           `json:"views,omitempty"`
-	Artifact     ArtifactManifest     `json:"artifact,omitempty"`
-	Value        string               `json:"value,omitempty"`
-	SecondValue  string               `json:"second_value,omitempty"`
-	Watermark    uint64               `json:"watermark,omitempty"`
-	FirstWriteAt *time.Time           `json:"first_write_at,omitempty"`
-	StreamSize   uint64               `json:"stream_size,omitempty"`
-	Failure      string               `json:"failure,omitempty"`
+	Version      uint16                `json:"version"`
+	RequestID    string                `json:"request_id"`
+	Operation    LinuxBackupOperation  `json:"operation"`
+	Views        []ReadView            `json:"views,omitempty"`
+	Artifact     ArtifactManifest      `json:"artifact,omitempty"`
+	Value        string                `json:"value,omitempty"`
+	SecondValue  string                `json:"second_value,omitempty"`
+	Watermark    uint64                `json:"watermark,omitempty"`
+	FirstWriteAt *time.Time            `json:"first_write_at,omitempty"`
+	StreamSize   uint64                `json:"stream_size,omitempty"`
+	Failure      string                `json:"failure,omitempty"`
+	Recovery     *RestoreRecoveryProof `json:"recovery,omitempty"`
 }
 
 // LinuxBackupExecutor is the complete privileged backup vocabulary. The
@@ -238,7 +241,7 @@ func (server *LinuxBackupBrokerServer) serveConnection(connection net.Conn) {
 	switch request.Operation {
 	case LinuxBackupOpenObject, LinuxBackupVerifyCapacity, LinuxBackupVerifyScratch, LinuxBackupVerifyHealth:
 		mutation = false
-	case LinuxBackupCreateViews, LinuxBackupReleaseViews, LinuxBackupCaptureComponent, LinuxBackupCreateScratch, LinuxBackupStageArtifact, LinuxBackupCurrentGeneration, LinuxBackupPromote, LinuxBackupObserveWrites, LinuxBackupRestorePrevious, LinuxBackupQuarantine, LinuxBackupFinalize, LinuxBackupCreateSafety, LinuxBackupFreeze, LinuxBackupUnfreeze:
+	case LinuxBackupCreateViews, LinuxBackupReleaseViews, LinuxBackupCaptureComponent, LinuxBackupCreateScratch, LinuxBackupStageArtifact, LinuxBackupCurrentGeneration, LinuxBackupPromote, LinuxBackupObserveWrites, LinuxBackupRestorePrevious, LinuxBackupQuarantine, LinuxBackupFinalize, LinuxBackupCreateSafety, LinuxBackupFreeze, LinuxBackupUnfreeze, LinuxBackupReconcile:
 	default:
 		return
 	}
@@ -318,6 +321,17 @@ func (server *LinuxBackupBrokerServer) serveConnection(connection net.Conn) {
 		err = server.Executor.UnfreezeTargetWrites(ctx, request.Plan, request.Generation, request.EffectID)
 	case LinuxBackupVerifyHealth:
 		response.Value, err = server.Executor.VerifyPromotedHealth(ctx, request.Plan, request.Generation, request.EffectID)
+	case LinuxBackupReconcile:
+		target, ok := server.Executor.(RestoreRecoveryTarget)
+		if !ok {
+			err = ErrBackupAmbiguous
+		} else {
+			var proof RestoreRecoveryProof
+			proof, err = target.ReconcileRestore(ctx, request.Plan, request.RecoveryReceipt)
+			if err == nil {
+				response.Recovery = &proof
+			}
+		}
 	default:
 		err = ErrInvalidBackup
 	}
@@ -344,6 +358,8 @@ func terminalLinuxBackupResponse(request LinuxBackupRequest, response LinuxBacku
 		return false
 	}
 	switch request.Operation {
+	case LinuxBackupReconcile:
+		return response.Recovery != nil && isSHA256(response.Recovery.Digest) && response.Recovery.Watermark != 0 && (response.Recovery.Phase == RestoreActive || response.Recovery.Phase == RestoreRolledBack)
 	case LinuxBackupCreateViews:
 		return validateViews(request.Policy, response.Views) == nil
 	case LinuxBackupCaptureComponent:
@@ -642,6 +658,25 @@ func (client *LocalLinuxBackupClient) RestorePrevious(ctx context.Context, plan 
 	request.Plan, request.PreviousGeneration, request.EffectID = plan, previous, effect
 	_, err = client.roundTrip(ctx, request)
 	return err
+}
+
+func (client *LocalLinuxBackupClient) ReconcileRestore(ctx context.Context, plan RestorePlanSpec, receipt RestoreReceipt) (RestoreRecoveryProof, error) {
+	request, err := client.request(ctx, LinuxBackupReconcile)
+	if err != nil {
+		return RestoreRecoveryProof{}, err
+	}
+	// Each observation is fresh; a cached pre-write proof is not recovery evidence.
+	request.Plan = plan
+	request.RecoveryReceipt = receipt
+	request.EffectID = string(plan.ID) + ":reconcile:" + request.RequestID
+	response, err := client.roundTrip(ctx, request)
+	if err != nil {
+		return RestoreRecoveryProof{}, err
+	}
+	if response.Recovery == nil {
+		return RestoreRecoveryProof{}, ErrBackupAmbiguous
+	}
+	return *response.Recovery, nil
 }
 func (client *LocalLinuxBackupClient) Quarantine(ctx context.Context, plan RestorePlanSpec, scratch, effect string) error {
 	request, err := client.request(ctx, LinuxBackupQuarantine)
