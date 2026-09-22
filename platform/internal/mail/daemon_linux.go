@@ -587,6 +587,13 @@ func (host *LinuxMailHost) storeArtifacts(ctx context.Context, generation Config
 		return nil, mailboxErr
 	}
 	result = append(result, mailboxArtifacts...)
+	master, err := loadWebmailMaster()
+	if err != nil {
+		wipeMailArtifacts(result)
+		return nil, err
+	}
+	result = append(result, webmailMasterPassdbArtifact(master, host.Ownership.DovecotGID))
+	wipeMailBytes(master)
 	return result, nil
 }
 func validatedDKIMPrivateKey(material []byte, publicBinding string) ([]byte, error) {

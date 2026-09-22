@@ -507,7 +507,7 @@ passdb {
   driver = passwd-file
   master = yes
   mechanisms = plain login
-  args = /etc/cyberpanel/secrets/mail-webmail-master
+  args = /var/lib/cyberpanel/mail/current/dovecot/webmail-master
   result_success = continue
 }
 passdb {
