@@ -5,6 +5,29 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed79 interruption exposed recovery startup blocker
+
+Normal Joomla recovery removal failed before native mutation: SQL index
+app_operations_active_installation includes recovery_required, blocking admission
+of the explicit removal needed to recover that installation. SQL-backed admission
+correction is in progress; no installed removal success is claimed.
+
+Backup worker captured a real process-interruption boundary for NEW plan
+restore_fa908b290923a0000f55319c99ce92456a6fc21143e1f880: native promoted=true,
+frozen=true, health_digest absent. Only observed corePID214830 was killed; no
+journal edits. Restart then exposed a concrete product blocker: core assembly
+exits with `inspect web-engine installation: webengine management broker failed`
+while restore has intentionally stopped OLS. Parent inspected service journal
+and /home/harness/lanes/backup/interruption79.json. Recovery API unavailable,
+so installed recovery has NOT passed. Browser/watcher exited; fixture and health
+gate remain preserved. Worker correcting startup dependency, not starting OLS
+manually or bypassing health verification. Older72/76 points remain untouched.
+
+Database isolated standards-mode browser reproduction identified actual mobile
+page overflow from the DataTable Actions header's uncontained absolute sr-only
+label; minimal containing-block correction is underway. Earlier console-only
+390px qualification remains valid; full-page qualification remains pending.
+
 ### Installed79 — source30841a4aa
 
 Installed real UI resumed SAME completed replacement job
