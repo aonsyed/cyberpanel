@@ -2,6 +2,7 @@
 import { computed, inject, onBeforeUnmount, ref } from "vue";
 import type { APIClient } from "../api";
 import DatabaseImportStatus from "./DatabaseImportStatus.vue";
+import { resumableReplacement } from "../databaseReplacement";
 
 const props = defineProps<{ tenantId?: string | undefined; source: Record<string, unknown>; artifact: Record<string, unknown>; disabled?: boolean }>();
 const emit = defineEmits<{ busy: [value: boolean] }>();
@@ -13,6 +14,7 @@ const selected = ref("");
 const confirmedName = ref("");
 const replacement = ref(false);
 const replacementApproved = ref(false);
+const resumeJobID = ref("");
 const retainedJob = ref<ImportJob | null>(null);
 const retireConfirmed = ref(false);
 const retired = ref(false);
@@ -58,6 +60,23 @@ async function prepare(): Promise<void> {
       payload: { database_id: target.value.id, source_export: props.source, artifact: props.artifact, replacement: replacement.value }
     });
     job.value = response.result;
+  } catch (error) { report(error); }
+  finally { setBusy(false); }
+}
+async function resumeCompletedReplacement(): Promise<void> {
+  const destination = target.value;
+  const id = resumeJobID.value.trim();
+  if (loading.value || job.value || !destination || !id) return;
+  setBusy(true); failure.value = "";
+  try {
+    const response = await api.invoke<unknown>("database.import.inspect", { ...scope(), payload: { job_id: id } });
+    const restored = resumableReplacement(response.result, id, {
+      tenant: props.tenantId || String(props.source.tenant_id), site: String(props.source.site_id),
+      database: destination.id, generation: destination.generation
+    });
+    job.value = restored; retainedJob.value = restored; replacement.value = true; submitted.value = true;
+    status.value = "completed"; confirmedName.value = ""; replacementApproved.value = false;
+    retireConfirmed.value = false; retired.value = false;
   } catch (error) { report(error); }
   finally { setBusy(false); }
 }
@@ -116,6 +135,12 @@ onBeforeUnmount(() => { controller.abort(); emit("busy", false); });
         </select>
         <label v-if="api.available('database.import.replace.run')"><input v-model="replacement" type="checkbox" :disabled="loading"> Replace existing tables with a retained recovery point</label>
         <button type="submit" class="button" :disabled="loading || !target">Check import destination</button>
+      </form>
+      <form v-if="loaded && target && api.available('database.import.inspect')" @submit.prevent="resumeCompletedReplacement">
+        <label for="replacement-resume-job">Completed replacement job ID</label>
+        <input id="replacement-resume-job" v-model="resumeJobID" class="input" autocomplete="off" required :disabled="loading">
+        <p>Inspect an existing completed replacement for {{ target.name }} at current generation {{ target.generation }}. This does not rerun an import. Retirement requires a separate confirmation.</p>
+        <button type="submit" class="button" :disabled="loading || !resumeJobID.trim()">Resume retained recovery point</button>
       </form>
       <p v-if="loaded && !destinations.length">No other ready databases on this site. Create an empty database first.</p>
     </template>
