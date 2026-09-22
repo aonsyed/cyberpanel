@@ -61,6 +61,14 @@ list200 and self-send202 now pass, message opening500 remains. WordPress actual
 fresh install→homepage→generated-credential admin Dashboard→normal removal all
 pass on71, including exact database/principal absence. Proofdoc records limits.
 
+Installed72 (source64c9e54d2) fixes backup ownership through actual noderelease
+activation, using a rebuilt installer: observed0700 cyberpanel:cyberpanel. All
+three live binaries match source builds and HTTPS200. Includes native UID-first
+FETCH parser correction; exact delivered body regression passes. Installed72 UI
+folders/list/read/action200 with exact body and sanitized iframe passed; only
+probeUID3 cleaned, no duplicate send. Local compose/send/list/read now qualified,
+not full webmail parity. Disposable backup capture/restore remains in progress.
+
 Disk guard now reserves4GiB before release assembly/application and2GiB before
 builds/tests. Actual guard rejection and guest shell syntax checks passed. Known
 unreferenced obsolete releases15–17 and21–27 are retained as checksum-matching

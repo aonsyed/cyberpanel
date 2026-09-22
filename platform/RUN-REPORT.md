@@ -7,6 +7,28 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Resumed workflow checkpoint67 — 2026-09-22
 
+Latest72 qemu-workflow-3.1.71 (source64c9e54d2) committed using the newly rebuilt
+panel-node-install, not the old bootstrap executable. Manifest
+644b050c82a1e148be5c79d24f1fbbfab6b6488d9f20621689fddf15c43b4456;
+receipt90a501e78d0692442bfda3d3d80d4e939f192fb57e72f403d7207f4b581de44c;
+bundle97500247ff843357acb61c2b2ec385aea44298d9e79ea4d8f1b6b2553fb3b278.
+Actual backup repository parent is now0700 cyberpanel:cyberpanel, reconciled
+through the real signed installer boundary without manual chmod/chown. Shared
+helper rejects unsafe ancestry/foreign owners/symlinks; fresh/replay native
+sandbox cases and combined affected suites pass. All three actual live binary
+hashes match the builds; core/executor/gateway/PowerDNS/OLS active, HTTPS200.
+Host bundle checksum matches, guest duplicate removed and staging pruned.
+
+Webmail native UID-first FETCH response parsing fixed: actual delivered probe
+failed before the fix, exact body read passed after it. Wrong UID/prefix/duplicate
+UID and malformed FETCH regressions pass. Installed72 actual UI account/folders/
+list/read/action all200, exact delivered plain text and sanitized iframe match.
+No resend: send202 was on71, read completion on72. Only exact probeUID3 expunged,
+then subject absence confirmed. Parent inspected guest webmail-installed72-read-
+evidence.json operation receipts/cleanup; screenshot retained beside it. This
+closes bounded local panel compose/send/list/read, not attachments/drafts/Sieve
+or external delivery. Full backup capture/restore journey remains underway.
+
 Latest71 qemu-workflow-3.1.70 (source ac288b355) committed through the normal
 signed installer. Manifest e1f2f31f6100297d1a0c151dce040f4a43b8d4c4fdb769483668a72894b20168;
 receipt 16187084cbc307f946eda889efc8616beb4e3d341723d9ea2e487ede23cceed3;
