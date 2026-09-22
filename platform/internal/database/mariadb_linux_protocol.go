@@ -71,6 +71,14 @@ const (
 	sqlObserveImportViewColumns
 	sqlCreateImportViewPlaceholder
 	sqlRecreateImportView
+	sqlTransferFenceIdentity
+	sqlTransferFenceAudit
+	sqlTransferFenceAccount
+	sqlTransferFenceGrants
+	sqlTransferFenceSessions
+	sqlTransferFenceLock
+	sqlTransferFenceUnlock
+	sqlTransferFenceReplication
 )
 
 type principalMutation struct {
@@ -242,6 +250,9 @@ func (connection *mariaDBConnection) query(ctx context.Context, statement mariaD
 }
 
 func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, error) {
+	if statement >= sqlTransferFenceIdentity && statement <= sqlTransferFenceReplication {
+		return buildTransferFenceStatement(statement, values...)
+	}
 	if statement==sqlWriterSessionAudit||statement==sqlWriterSessions||statement==sqlKillWriterSession||statement==sqlStopWriterReplication{return buildWriterGateStatement(statement,values...)}
 	if statement==sqlObserveReplication||statement==sqlConfigureReplication||statement==sqlWaitReplication||statement==sqlObserveReplicationPrincipal||statement==sqlCreateReplicationPrincipal{return buildReplicationStatement(statement,values...)}
 	switch statement {

@@ -541,7 +541,7 @@ func verifyRootDirectory(path string) error {
 
 func safeStateComponent(value string) bool {
 	switch value {
-	case "instances", "databases", "principals", "grants", "policies", "sessions", "tuning", "upgrades", "effects", "compensations", "migration-restores", "transfer-imports":
+	case "instances", "databases", "principals", "grants", "policies", "sessions", "tuning", "upgrades", "effects", "compensations", "migration-restores", "transfer-imports", "transfer-fences":
 		return true
 	default:
 		return false
