@@ -5,6 +5,36 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed75 — parallel closure batch, 2026-09-22
+
+Signed qemu-workflow-3.1.74, source20fa167b4, committed successfully.
+Manifest a66aec2fa18f77b62c0a8361e26e4c7cd2ddd562727371c52ba706efa0a1e9b9;
+receipt723f9531b8745a2ec0e97d87573bfa841df0965728c11a04c3010e7c814ba728;
+bundle4c3cd189a1f53142e3f1f3e6a74e43f806e84ed96f2d988ddebd653b54d8f78a.
+Operation install-72a3be52df5d9077e8c0a93f877881ee9966fe973d3658234023727ca7a680e7.
+Actual core/executor/gateway process hashes match all three rebuilt artifacts;
+all active, OLS active, panel HTTPS200, installed highest_sequence75.
+
+Included: backup scoped write observation539477d66; webmail attachment metadata
+9e8c97d85 and supported raw-size bounds2081c88d2; certified application served-root
+admission8d36e4442; exact native DNSSEC DS export20fa167b4. QEMU combined backup,
+webmail, API, core, executor and gateway suites pass; apps0.522s; native isolated
+DNSSEC0.155s, including multi-key exact DNSKEY digest selection. All builds/tests
+remain QEMU-only/offline. Native backup proof is recorded below. UI was unchanged.
+
+Installed74 reproduced Joomla install503 (compensated, current/public rejected)
+and DNSSEC configure400 (invalid native export-zone-ds argv). Those source fixes
+are now installed, but their full live journeys and webmail attachment download
+are pending in the coordinated browser queue. Do not count pending checks as
+passed. Database fence, SFTP confinement, and encryption are separate in-flight
+worker changes, not included in75. Original ambiguous backup remains unrecovered.
+
+Disk: unreferenced obsolete releases54/55 were copied to host ignored
+.work/qemu/retired-node-releases; checksum dry-run matched before exact guest
+removal. Neither active/previous nor symlink/process-map references used them.
+Guest free space rose from4.5GiB to5.4GiB before build/install; host copies remain
+recoverable. No application snapshots, receipts or database data removed.
+
 ### Backup write observation — source-only continuation, 2026-09-22
 
 QEMU reproduced three failures before correction: same-size file writes with

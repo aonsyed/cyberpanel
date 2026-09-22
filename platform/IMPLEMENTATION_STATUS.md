@@ -34,14 +34,28 @@ with GOMAXPROCS=1 and -p1. No new downloads or release installation by workers.
 | resume_access | SFTP allowed-root and cross-site isolation | Lease before accounts/config/live mutation |
 | resume_webmail | Attachment byte integrity, authorization and size limits | Lease before mail mutation/browser |
 | resume_database | Durable replacement state/recovery; preserve fail-closed fencing | Lease before shared database mutation |
+| resume_backup | Authenticated repository object encryption and verified decryption | Lease before shared native restore mutations |
+| resume_apps | Cached Joomla install/admin login/remove | Exclusive browser/native app lease |
+| resume_dns | Native DNSSEC signing/key/DS/disable | Lease before shared DNS/browser mutations |
 | Parent | Backup write-observation fixes already in flight; integrate outputs | Schedules leases and installed verification |
 
 These assignments are work in progress, not additional completion evidence.
+Parent write-observation correction is committed539477d66 and QEMU native backup
+suites pass; installed75 includes it. Database inspection found public replacement
+already denies admission, so no redundant quarantine layer is being added; the
+worker is implementing the actual scoped native writer-fence prerequisite.
+Webmail attachment projection9e8c97d85 and supported-message-size correction
+2081c88d2 are installed75; actual download proof is queued. SFTP native
+probe reproduced unreadable authorized_keys and absent root confinement; worker
+is implementing native jail/key/revoke lifecycle without altering system SSH in
+its isolated probes. Joomla6.1.3 has a cached signed recipe/archive; no download.
 
-CURRENT: signed74, qemu-workflow-3.1.73, source61e40a55e. Actual core/executor/
+CURRENT: signed75, qemu-workflow-3.1.74, source20fa167b4. Actual core/executor/
 gateway process hashes match all three rebuilt artifacts; HTTPS200 and all services
-active. Rebuilt panel-node-install applied72. Affected combined Go suites and the
-unchanged current UI typecheck/build passed in QEMU. RUN-REPORT has exact receipts.
+active. Includes Joomla served-root and DNSSEC exact native DS export fixes;
+their installed journeys are pending, not yet qualified. Rebuilt panel-node-install
+applied72. Affected combined Go suites passed in QEMU; UI is unchanged from its
+previous qualified build. RUN-REPORT has exact receipts and source-test scope.
 
 Qualified installed journeys in this resumption:
 
