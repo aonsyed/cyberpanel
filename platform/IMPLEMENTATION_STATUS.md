@@ -4,13 +4,16 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+All builds, formatting, program execution and tests run inside QEMU guests.
+No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
+
 ## Resumed bounded parallel closure — 2026-09-22
 
 Goal resumed by user; no change in full parity scope. Six newly authorized workers
 use isolated resume-20260922-{webmail,database,backup,apps,access,dns} worktrees,
 all based on d54ee9ce0. No child delegation, downloads or native-vendor changes.
 Parent integrates and verifies outputs. Shared existing Ubuntu ARM64 QEMU resumed
-without recreating its disk; guest3.6GiB free. All execution remains guest-only.
+without recreating its disk; latest guest4.7GiB free. All execution remains guest-only.
 
 Coordination phases: framing complete; fan-out active; aggregate verified commits;
 then report actual results. Native/browser mutations are exclusively scheduled by
@@ -18,60 +21,38 @@ parent; separate source trees /home/harness/lanes/<lane>/platform, shared offlin
 Go cache. No worker may overwrite /home/harness/platform or install a release.
 Source/module completion is not claimed merely from an assigned task.
 
-Integrated source checkpoint bfbaf4ab3 adds protected Dovecot master verifier,
-site upload ACL preservation, bounded HTTP download chunks, file rename/session
-trash restore UI, offline WordPress bootstrap, native backup ownership/capture
-fixes, DNS service ordering and native DNS record editing. Combined access,
-apiserver, apps, backup/providers, database, mail, DNS, cyberpanel and panel-execd
-package suites passed in the retained QEMU guest; combined UI typecheck/build
-passed. These are not yet installed/browser-qualified claims.
+CURRENT: signed72, qemu-workflow-3.1.71, source64c9e54d2. Actual core/executor/
+gateway process hashes match all three rebuilt artifacts; HTTPS200 and all services
+active. Rebuilt panel-node-install applied72. Affected combined Go suites and the
+unchanged current UI typecheck/build passed in QEMU. RUN-REPORT has exact receipts.
 
-Latest signed checkpoint69 (qemu-workflow-3.1.68, source481b6f836) is installed.
-Actual installed67 file workflow passed upload/read/download/rename/trash/restore,
-static/PHP HTTP, exact4MiB boundary and oversized preflight rejection. Tenant/site
-binding defect was reproduced with a tenant-limited HTTP regression and fixed
-across19 handlers; installed69 correct binding200/wrong binding404 passed.
-DNS create500 was a zero-zone JSON reply encoding bug (fixed in69), not native
-PowerDNS failure. WordPress create/install succeeded but HTTP404 exposed wrong
-application root (fixed in69); their full live reruns remain pending.
-Webmail actual UI send202 delivered exact subject/body to local IMAP; listing
-remains blocked on native TLS identity trust. Native protocol compatibility fixes
-are in69; public-only managed TLS identity publication is in progress.
+Qualified installed journeys in this resumption:
 
-Latest runtime is now70 (qemu-workflow-3.1.69, source9699e7bbd), with strict,
-rotation-aware public-only mail TLS identity publication, supported fuzzy backup
-policy/registration and DNS codec fixes. Combined affected suites plus UI checks
-pass, and all three running binary hashes match assembly. TLS now progresses to
-an OAuth403; native isolation proved Dovecot requires the canonical mailbox SASL
-authzid. That adapter fix is in progress; no insecure TLS/global CA/vendor changes.
-DNS create/list/import and390px editor work; cached old answers exposed missing
-scoped purge (source fixed for71). Backup parent ownership remained old because
-upgrades skip initialization (source fixed for71). WordPress installed69 full
-install→HTTP→remove succeeds; canonical URL now derives from trusted applied
-routing in source for71. File tenant binding remains installed and qualified.
+- Files: upload/read/download/rename/trash/restore, static/PHP HTTP, exact4MiB
+  boundary and oversized rejection (67); correct tenant/site200, mismatched404
+  after authoritative binding across19 handlers (69).
+- DNS: create/list/import/update/empty/delete, immediate authoritative A/TXT/SOA,
+  390px editor and wrong-tenant denial (70/71). Exact disposable zone removed.
+- WordPress: fresh default-English install, public homepage, actual generated-
+  credential admin Dashboard, normal remove and exact database/principal absence
+  (71). Recovery snapshots retained. WORDPRESS-VERIFICATION-2026-09-22.md has limits.
+- Webmail: actual compose/send202 (71), folders/list/read/action200 with exact
+  delivered body and sanitized iframe (72). Only probeUID3 cleaned; no resend.
+  Protected native master verifier, strict rotation-aware public TLS mirror,
+  canonical OAuth authzid and bounded native IMAP compatibility fixes included.
+- Backup installer: real node-release activation repairs only fixed repository
+  authority to0700 cyberpanel:cyberpanel (72). No manual chmod or unrelated legacy
+  hook invocation. Native capture/restore component proof passes; installed
+  disposable site/files/database capture→same-site restore still in progress.
 
-Installed71 (source ac288b355) now includes the mail OAuth authzid, DNS purge,
-backup migration reconciliation, and complete HTTP WordPress manifest/probe fix.
-All three actual process hashes match rebuilt artifacts; HTTPS200 and affected
-QEMU suites pass. DNS update/empty/delete lifecycle passed with immediate native
-answers and normal fixture cleanup. Backup ownership remains WRONG after actual
-upgrade (root:cyberpanel0750): real signed node-release path never calls the old
-authority hook; narrow real-lifecycle fix in progress. Webmail installed folders/
-list200 and self-send202 now pass, message opening500 remains. WordPress actual
-fresh install→homepage→generated-credential admin Dashboard→normal removal all
-pass on71, including exact database/principal absence. Proofdoc records limits.
-
-Installed72 (source64c9e54d2) fixes backup ownership through actual noderelease
-activation, using a rebuilt installer: observed0700 cyberpanel:cyberpanel. All
-three live binaries match source builds and HTTPS200. Includes native UID-first
-FETCH parser correction; exact delivered body regression passes. Installed72 UI
-folders/list/read/action200 with exact body and sanitized iframe passed; only
-probeUID3 cleaned, no duplicate send. Local compose/send/list/read now qualified,
-not full webmail parity. Disposable backup capture/restore remains in progress.
+These are bounded workflows, not full module or product parity. Earlier entries
+below are historical checkpoints; their obsolete NEXT blockers do not supersede
+this section. Remaining breadth is recorded in STATUS-2026-09-21.md with the
+explicit corrections here and in RUN-REPORT; rough percentages are not re-scored.
 
 Disk guard now reserves4GiB before release assembly/application and2GiB before
 builds/tests. Actual guard rejection and guest shell syntax checks passed. Known
-unreferenced obsolete releases15–17 and21–27 are retained as checksum-matching
+unreferenced obsolete releases15–17,21–27,48/49 are retained as checksum-matching
 host copies before guest removal; active/previous and app recovery snapshots stay.
 
 Database view import is already implemented by 89f46f587; a fresh native run
@@ -91,7 +72,7 @@ encryption. Authenticated encryption and wrong-key rejection remain implementati
 work. Backup worker also identified SQL source-name handling unsafe for cross-scope
 restore; preserve fail-closed behavior until safely mapped and verified.
 
-## Current recovery point — 2026-09-21 (installed66; local mailbox delivery qualified)
+## Historical recovery point — 2026-09-21 (installed66; local mailbox delivery qualified)
 
 Release qemu-mail-delivery-3.1.65 sequence66 contains 5f31c57e1; installer
 committed manifest b4a3983b882d21d8fbbb4adc5f149d2a8afdc92a769c69dd9c509fb33e0609a5,
