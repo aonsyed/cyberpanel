@@ -19,6 +19,14 @@ import (
 
 type importHTTPAuth struct{ exportHTTPAuth }
 
+func TestReplacementPreparationKeepsUploadPathDisabled(t *testing.T) {
+	var operations *DatabaseTransferOperations
+	_, err := operations.PrepareDatabaseImport(context.Background(), Invocation{}, DatabaseImportPreparePayload{Replacement: true, UploadSource: &database.TransferUploadIntent{}})
+	if err != database.ErrUnavailable {
+		t.Fatal("upload replacement reached execution", err)
+	}
+}
+
 func TestImportPreparationIdentityDoesNotUseEmptyReadIdempotencyKey(t *testing.T) {
 	actor, _ := identity.NewID("import-owner")
 	inv := Invocation{Actor: Actor{PrincipalID: actor}, Request: RequestEnvelope{Operation: "database.import.prepare", TenantID: "import-tenant", ResourceID: "import-site", RequestID: "prepare-request-one"}}

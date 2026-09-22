@@ -55,6 +55,9 @@ func NewDatabaseTransferOperations(ctx context.Context, db *sql.DB, repository *
 }
 
 func (operations *DatabaseTransferOperations) PrepareDatabaseImport(ctx context.Context, inv Invocation, p DatabaseImportPreparePayload) (database.TransferJob, error) {
+	if p.Replacement && (p.SourceExport == nil || p.UploadSource != nil) {
+		return database.TransferJob{}, database.ErrUnavailable
+	}
 	tenant, err := site.NewTenantID(inv.Request.TenantID)
 	if err != nil {
 		return database.TransferJob{}, ErrInvalidRequest
@@ -109,7 +112,11 @@ func (operations *DatabaseTransferOperations) PrepareDatabaseImport(ctx context.
 	if err != nil {
 		return database.TransferJob{}, err
 	}
-	job.Impact, err = execution.PreviewDatabaseTransfer(ctx, *target, job.Direction, job.Selection, job.Source)
+	if p.Replacement {
+		job.Impact, err = operations.coordinator.PreviewReplacement(ctx, job)
+	} else {
+		job.Impact, err = execution.PreviewDatabaseTransfer(ctx, *target, job.Direction, job.Selection, job.Source)
+	}
 	if err != nil {
 		return database.TransferJob{}, err
 	}
@@ -124,7 +131,7 @@ func databaseImportIdentity(inv Invocation) (database.ResourceID, string) {
 	return id, id.String()
 }
 
-func (operations *DatabaseTransferOperations) service(inv Invocation, job database.TransferJob) (database.TransferService, error) {
+func (operations *DatabaseTransferOperations) service(inv Invocation, job database.TransferJob, approval ...*DatabaseReplacementApproval) (database.TransferService, error) {
 	if job.Validate() != nil || job.Direction != database.TransferImport || (job.ExportSource == nil && job.UploadSource == nil) || job.TenantID.String() != inv.Request.TenantID || job.SiteID.String() != inv.Request.ResourceID || job.Limits.MaximumBytes > 64<<20 || job.Limits.MaximumRows > 1_000_000 || job.Limits.MaximumDuration > 90*time.Second {
 		return database.TransferService{}, database.ErrUnauthorized
 	}
@@ -133,14 +140,24 @@ func (operations *DatabaseTransferOperations) service(inv Invocation, job databa
 		return database.TransferService{}, err
 	}
 	gate := databaseTransferAuthority{operations: operations, invocation: inv}
+	if len(approval) == 1 {
+		gate.approval = approval[0]
+	}
 	return database.NewTransferService(operations.jobs, execution, gate, execution, gate, gate, gate, time.Now)
 }
 
 func (operations *DatabaseTransferOperations) RunDatabaseImport(ctx context.Context, inv Invocation, job database.TransferJob) (database.TransferReceipt, error) {
+	if job.ConflictPolicy != database.TransferConflictFail {
+		return database.TransferReceipt{}, database.ErrUnauthorized
+	}
+	return operations.runDatabaseImport(ctx, inv, job, nil)
+}
+
+func (operations *DatabaseTransferOperations) runDatabaseImport(ctx context.Context, inv Invocation, job database.TransferJob, approval *DatabaseReplacementApproval) (database.TransferReceipt, error) {
 	if inv.Request.ExpectedGeneration != job.DatabaseGeneration {
 		return database.TransferReceipt{}, database.ErrTransferStale
 	}
-	service, err := operations.service(inv, job)
+	service, err := operations.service(inv, job, approval)
 	if err != nil {
 		return database.TransferReceipt{}, err
 	}
@@ -155,7 +172,11 @@ func (operations *DatabaseTransferOperations) RunDatabaseImport(ctx context.Cont
 	} else if !errors.Is(loadErr, database.ErrNotFound) {
 		return database.TransferReceipt{}, loadErr
 	}
-	state, err = service.Create(ctx, inv.Actor.PrincipalID.String(), job, nil)
+	var stepUp *database.TransferStepUpRequest
+	if approval != nil {
+		stepUp = &database.TransferStepUpRequest{Actor: inv.Actor.PrincipalID.String(), TenantID: job.TenantID, DatabaseID: job.DatabaseID, JobID: job.ID, AssertionRef: job.RestorePointRef, Revision: job.DatabaseGeneration}
+	}
+	state, err = service.Create(ctx, inv.Actor.PrincipalID.String(), job, stepUp)
 	if err != nil {
 		return database.TransferReceipt{}, err
 	}
@@ -208,6 +229,7 @@ func (operations *DatabaseTransferOperations) RecoverDatabaseImport(ctx context.
 }
 
 type databaseTransferAuthority struct {
+	approval   *DatabaseReplacementApproval
 	operations *DatabaseTransferOperations
 	invocation Invocation
 }
@@ -235,12 +257,21 @@ func (gate databaseTransferAuthority) AuthorizeDatabaseTransfer(ctx context.Cont
 	return nil
 }
 
-// Replacement is not exposed by this export-backed, non-replacing API.
-func (databaseTransferAuthority) VerifyDatabaseTransferStepUp(context.Context, database.TransferStepUpRequest) error {
-	return database.ErrUnavailable
+func (gate databaseTransferAuthority) VerifyDatabaseTransferStepUp(ctx context.Context, r database.TransferStepUpRequest) error {
+	if gate.approval == nil || r.Validate() != nil || gate.invocation.Request.Operation != "database.import.replace.run" || r.Actor != gate.invocation.Actor.PrincipalID.String() || r.DatabaseID != gate.approval.DatabaseID || r.Revision != gate.approval.Generation || r.AssertionRef != gate.approval.RestorePointRef {
+		return database.ErrUnauthorized
+	}
+	siteID, err := site.NewSiteID(gate.invocation.Request.ResourceID)
+	if err != nil {
+		return database.ErrUnauthorized
+	}
+	return gate.AuthorizeDatabaseTransfer(ctx, database.TransferAuthorizationRequest{Actor: r.Actor, TenantID: r.TenantID, SiteID: siteID, DatabaseID: r.DatabaseID, JobID: r.JobID, Action: database.AuthorizeTransferExecute})
 }
-func (databaseTransferAuthority) CreateDatabaseTransferRestorePoint(context.Context, database.TransferJob, database.Database) (database.TransferRestorePoint, error) {
-	return database.TransferRestorePoint{}, database.ErrUnavailable
+func (gate databaseTransferAuthority) CreateDatabaseTransferRestorePoint(ctx context.Context, job database.TransferJob, _ database.Database) (database.TransferRestorePoint, error) {
+	if gate.approval == nil {
+		return database.TransferRestorePoint{}, database.ErrUnauthorized
+	}
+	return gate.operations.coordinator.ReplacementPoint(ctx, job, "replacement-inspect")
 }
 
 func (gate databaseTransferAuthority) RecordDatabaseTransfer(ctx context.Context, r database.TransferAuditRecord) error {

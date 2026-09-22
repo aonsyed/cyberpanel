@@ -16,6 +16,13 @@ func (executor *LinuxMariaDBExecutor) ExecuteTransferImport(ctx context.Context,
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	if request.Action == "replacement-prepare" || request.Action == "replacement-inspect" || request.Action == "replacement-retire" || request.Action == "replacement-abort" {
+		point, err := executor.executeReplacementPoint(ctx, request)
+		if err == nil && request.Action != "replacement-abort" {
+			result.RestorePoint = &point
+		}
+		return result, err
+	}
 	if request.Job.ConflictPolicy == TransferConflictReplace {
 		bounded, release, err := executor.replacementTransferContext(ctx, request.Job, request.Action)
 		if err != nil {

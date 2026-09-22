@@ -67,7 +67,7 @@ onBeforeUnmount(() => { controller.abort(); emit("busy", false); });
       <button v-if="!finished && api.available('database.import.cancel')" type="button" class="button" :disabled="pending || !!state?.cancellation_requested" @click="check('cancel')">Request cancellation</button>
       <button v-if="state && ['ambiguous', 'promoting'].includes(state.status) && api.available('database.import.recover')" type="button" class="button" :disabled="pending" @click="check('recover')">Recover verified result</button>
     </div>
-    <p v-if="state && ['ambiguous', 'promoting'].includes(state.status)">Recovery only reconciles an already-verified native result after the worker lease expires. It never reruns the import.</p>
+    <p v-if="state && ['ambiguous', 'promoting'].includes(state.status)">Recovery reconciles durable native evidence after the worker lease expires. A fenced replacement may finish or reverse its recorded atomic table move; it never reloads the import stream or guesses an unknown table layout.</p>
     <p v-if="failure" role="alert" class="import-error">{{ failure }}</p>
   </section>
 </template>

@@ -17,6 +17,7 @@ type TransferImportRequest struct {
 }
 
 type TransferImportResult struct {
+	RestorePoint *TransferRestorePoint    `json:"restore_point,omitempty"`
 	Impact       *TransferImpactPreview   `json:"impact,omitempty"`
 	Action       string                   `json:"action"`
 	JobDigest    string                   `json:"job_digest"`
@@ -43,6 +44,18 @@ func (request TransferImportRequest) validate() error {
 		return ErrUnauthorized
 	}
 	switch request.Action {
+	case "replacement-prepare":
+		if request.Isolated != nil || j.ConflictPolicy != TransferConflictFail {
+			return ErrInvalidCommand
+		}
+	case "replacement-abort":
+		if request.Isolated != nil || j.ConflictPolicy != TransferConflictFail {
+			return ErrInvalidCommand
+		}
+	case "replacement-inspect", "replacement-retire":
+		if request.Isolated != nil || j.ConflictPolicy != TransferConflictReplace {
+			return ErrInvalidCommand
+		}
 	case "allocate", "preview", "recover":
 		if request.Isolated != nil {
 			return ErrInvalidCommand
@@ -62,6 +75,15 @@ func validTransferExportSource(job, source TransferJob) bool {
 }
 
 func (result TransferImportResult) matches(request TransferImportRequest) bool {
+	if request.Action == "replacement-abort" {
+		return result.Action == request.Action && result.JobDigest == request.Job.Digest && result.RestorePoint == nil && result.Impact == nil && result.Isolated == (IsolatedTransferDatabase{}) && result.Process == nil && result.Verification == nil && result.Promotion == nil
+	}
+	if request.Action == "replacement-prepare" || request.Action == "replacement-inspect" || request.Action == "replacement-retire" || request.Action == "replacement-abort" {
+		return result.Action == request.Action && result.JobDigest == request.Job.Digest && result.RestorePoint != nil && result.RestorePoint.Validate() == nil && result.RestorePoint.DatabaseID == request.Job.DatabaseID && result.RestorePoint.DatabaseGeneration == request.Job.DatabaseGeneration && result.Impact == nil && result.Isolated == (IsolatedTransferDatabase{}) && result.Process == nil && result.Verification == nil && result.Promotion == nil
+	}
+	if result.RestorePoint != nil {
+		return false
+	}
 	if request.Action == "preview" {
 		return result.Action == request.Action && result.JobDigest == request.Job.Digest && result.Isolated == (IsolatedTransferDatabase{}) && result.Process == nil && result.Verification == nil && result.Promotion == nil && result.Impact != nil && result.Impact.Validate() == nil && result.Impact.DatabaseID == request.Job.DatabaseID && result.Impact.DatabaseGeneration == request.Job.DatabaseGeneration
 	}
