@@ -5,6 +5,20 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Source872457aef — enabled PHP pool lifecycle correction
+
+8c8d3ab1c integrated872457aef. New pools join normal engine-start dependency.
+Executor startup migrates only active/current already-enabled trusted canonical
+default-profile units; no service start, disabled/retired/custom units untouched.
+Registry root/pool generation equality follows existing ensure-pool invariant.
+Cached migration checks unitbytes and wantedlink. Isolated QEMU real-systemd
+canonical/alias stop-start, migration/replay and trust-denial tests passed; parent
+default siteops0.044s/executor0.021s/core1.444s passed. Custom-profile migration
+unsupported; installed pool/PHP proof pending82 deployment. Normal restore using
+retained79 point/same disposable79site authorized for exact OLS stop/start proof,
+not manual service workaround. Discovery2b2c074fc ready separately for UI release;
+82 is built from872457aef and includes secure mailbox binding, not discovery.
+
 ### Source194797eed — secure mailbox settings binding
 
 42cb06b8f integrated194797eed: webmail.data operations now use current secure
