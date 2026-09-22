@@ -9,6 +9,14 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
+Newest installed checkpoint: signed80 qemu-workflow-3.1.79/sourcec62b8007f.
+Core/execd/gateway hashes verified, seven panel services active and newUI200.
+Stopped-engine startup fix works: OLS remains stopped and SAME interrupted79
+restore journal remains promoted/frozen/healthpending. Backup worker now retrying
+normal API recovery; no manual engine start or journal repair. Application SQL
+admission and DataTable mobile containment fixes included; installed checks wait
+for restore recovery/service lease. No parity completion claim.
+
 Latest live-test state (supersedes the healthy activation checkpoint below):
 installed79 backup interruption captured completed native promotion while frozen
 and healthpending. Core startup incorrectly requires active OLS, making recovery

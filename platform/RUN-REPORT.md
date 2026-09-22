@@ -5,6 +5,25 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed80 — startup restored without bypassing frozen restore
+
+Signed qemu-workflow-3.1.79 sequence80/sourcec62b8007f committed:
+manifest db39317d4546fa4a9b9f9fe3dcfff0d87a9b08df6c335f6b0befb853fb4b2660;
+receipt8e078d02d84e76f01e095ac5ac3c0f0cd5960a5001d898850c1af42648790e6d;
+operation install-6784e7b2039e2ebf884cc1b884655f62037edd999fa98ad8db4fb40baeb8ad19.
+Actual process hashes match QEMU-built inputs:
+core3b8e1026f8b96afb342dbd54db5f4e09e473d171215ac6120d3074347ee261e7;
+executorfb6bc8ebc8b63d78d6057138695e8151318f7938c9153d1fe2111f69170fb26f;
+gatewaydbbc96db6939b4aad8c78761ca421200694a3ba88cd4033d2b020eb22ef0f0a3.
+All seven panel services active; HTML/newJS panel-D-z36eeV.js200. OLS remains
+stopped/failed, and exact79 restore remains promoted=true/frozen=true/nohealth.
+Thus startup is restored without starting OLS or bypassing the restore gate.
+Worker granted exclusive retry of SAME plan through normal recovery API.
+Bundle4e7a6ec51e59d0c34e1603608cdf36dc4e4a6673261ce54efb125403cebea88f,
+105artifacts/534538009bytes; installed recovery result still pending.
+Host/guest bundle checksums matched; guest duplicate removed and installer
+staging pruned. Guest4.4GiB free; recoverable ignored host archive retained.
+
 ### Sourcec62b8007f — stopped-engine startup correction
 
 Backup294fa9b7b integratedc62b8007f: existing authenticated management broker adds
