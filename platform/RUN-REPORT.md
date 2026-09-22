@@ -5,6 +5,37 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Remaining-module batch — source21baf991f, activation pending
+
+Cron45374a748/7fe40b968: native systemd accepts wildcard/step calendars, PHP
+uses the packaged CLI, disabled jobs are not scheduled or dispatched, obsolete
+timers/services stop before unit deletion. Owned native timer create/disable/
+re-enable/delete and UID/GID1000 PHP marker passed; fixtures removed. Restricted
+day-of-month/day-of-week uses two OnCalendar entries to preserve cron OR semantics;
+native next occurrence matched scheduler.NextLogicalTime. Actual scheduled dispatch
+awaits normal signed installation of the already-declared panel-cron-exec helper.
+
+Database3adca4cbf: actual SQL/gzip export/import previously succeeded while omitting
+source trigger/routines/event. Protected catalog visibility plus prepare/run/
+pre-commit guards now reject unsupported schema exports with a scoped diagnostic.
+Native regression passed0.971s for all four object kinds and an event introduced
+before commit; ordinary table/view exact rows still pass. Exact schemas/principals
+verified0 afterward. Parent inspected transfer-program-objects-final.log and
+transfer-program-objects-cleanup.log. Full program-object preservation remains
+UNIMPLEMENTED; these pre/post checks are not a concurrent-DDL fence.
+
+Migration21baf991f: canceled fence binding now uses bounded cleanup; pre-write
+rollback records intent before compensation, never reports rolled_back until both
+target/source cleanup succeed, and resumes failed cleanup with the stored plan.
+QEMU migration suite passed0.327s using real SQLite, signed file plans and isolated
+filesystem gates with controlled target effects. Parent inspected production diff
+and migration-cancellation.log. Full live migration/final-sync recovery still open.
+
+Unused release71 e1f2f31f6100297d1a0c151dce040f4a43b8d4c4fdb769483668a72894b20168
+archived to ignored host retired-node-releases, checksum comparison clean; active/
+previous and symlink/process references excluded before removing exact guest copy.
+Host copy recoverable; guest4.5GiB free afterward. No downloaded dependencies.
+
 ### Installed83 vacation closure; renewal source correction
 
 Actual installed UI create201/enable200/disable200/confirmed-delete204 passed;
