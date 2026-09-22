@@ -5,6 +5,37 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Resumed workflow checkpoint67 — 2026-09-22
+
+Six bounded source lanes integrated on bfbaf4ab3. QEMU-only combined suites pass:
+access, apiserver, apps, backup/providers, database, mail, DNS, cyberpanel and
+panel-execd. UI typecheck/build pass. Native lane evidence includes webmail master
+authentication/negative credentials, upload ACL/exact bytes, offline WordPress
+command boundaries, same-site files+SQL restoration and corrupt-object rejection.
+Ordinary dependent-view imports were already implemented (89f46f587); fresh native
+three-engine × SQL/gzip checks pass. Replacement remains an unexposed primitive.
+
+Signed qemu-workflow-3.1.66 sequence67 installed successfully, prior66 retained.
+Manifest6865fef7cedd803187d9aaac8d092904c14d78884324f6456450faaf1039be7b;
+receipt868571b4397fccd8e1f59c84c8af32a6671ddf40d24e5296797e70e54fb199b5;
+bundle434f3dccbda5fb053fd9916dd8cfc313a9adb313c16dbf4f8aa1e5712aa17ac2.
+Live process binary hashes match assembly, HTTPS returns actual new UI assets.
+Gateway was built before the final DNS empty-replacement contract delta; this is
+explicitly pending correction in the next signed checkpoint, not DNS qualification.
+Browser workflows are in progress, not yet declared passing.
+
+Recovered test environment without recreating disk or downloads. Bare native OLS
+configuration test changed managed permissions; restored managed metadata only,
+unchanged content hashes. Existing confined product runner avoids that side effect;
+testvm/README.md now records the safe diagnostic rule. The separate pdns dependency
+fix demonstrated starting execd starts pdns first and restores mutation admission.
+Temporary QA HTTPS identity restored with gateway-only private-key permissions.
+
+Moved old panel-web-catalog-3.1.35.tar and retained-mail-33-35.tar.zst from guest
+/var/tmp to ignored host .work/qemu after matching SHA256; recoverable host copies
+retained. New67 bundle also retained on host with matching digest, guest duplicate
+removed and verified redundant staging pruned. No test images/bundles added to Git.
+
 ### Installed66 ordinary mailbox browser and delivery — 2026-09-21
 
 Source5f31c57e1, release qemu-mail-delivery-3.1.65 sequence66. Signed installer

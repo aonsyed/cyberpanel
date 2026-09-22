@@ -18,6 +18,25 @@ parent; separate source trees /home/harness/lanes/<lane>/platform, shared offlin
 Go cache. No worker may overwrite /home/harness/platform or install a release.
 Source/module completion is not claimed merely from an assigned task.
 
+Integrated source checkpoint bfbaf4ab3 adds protected Dovecot master verifier,
+site upload ACL preservation, bounded HTTP download chunks, file rename/session
+trash restore UI, offline WordPress bootstrap, native backup ownership/capture
+fixes, DNS service ordering and native DNS record editing. Combined access,
+apiserver, apps, backup/providers, database, mail, DNS, cyberpanel and panel-execd
+package suites passed in the retained QEMU guest; combined UI typecheck/build
+passed. These are not yet installed/browser-qualified claims.
+
+Database view import is already implemented by 89f46f587; a fresh native run
+passed all three engines and SQL/gzip with dependent views, INVOKER and exact
+latin1 data. Do not mistake the older appendices at the end of RUN-REPORT for
+the latest state. Live-database replacement remains fail-closed; the new atomic
+swap primitive is not the missing durable lifecycle/writer fence.
+
+Bare native OLS `-t` diagnostics caused managed metadata drift during recovery;
+restored only managed metadata with identical content hashes. Existing confined
+product validation already avoids this. See testvm/README.md; no native patch or
+fsstore security relaxation was required. Core/execd admission recovered.
+
 Concrete correction to prior status: local backup capture/provider currently
 stores raw objects. Encryption-domain/credential fields are metadata, not actual
 encryption. Authenticated encryption and wrong-key rejection remain implementation
