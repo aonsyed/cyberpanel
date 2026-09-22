@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -277,6 +278,33 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 		if _, denied := host.ReconcileRestore(ctx, changed, receipt); denied == nil {
 			t.Fatal("changed plan generation accepted")
 		}
+		// Run the real native health implementation with a canceled context.
+		// The SQL fingerprint command cannot run; no health success may become
+		// durable and even a direct unfreeze request must remain fail-closed.
+		beforeHealth, healthErr := host.ReconcileRestore(ctx, plan, receipt)
+		must(healthErr)
+		if !beforeHealth.Frozen || beforeHealth.HealthDigest != "" {
+			t.Fatal("lost promotion fixture already passed health")
+		}
+		failedContext, cancelHealth := context.WithCancel(ctx)
+		cancelHealth()
+		if digest, failedHealth := host.VerifyPromotedHealth(failedContext, plan, beforeHealth.TargetGeneration, string(plan.ID)); digest != "" || !errors.Is(failedHealth, context.Canceled) {
+			t.Fatalf("native cancelled health not rejected: digest=%q error=%v", digest, failedHealth)
+		}
+		if unfreezeErr := host.UnfreezeTargetWrites(ctx, plan, beforeHealth.TargetGeneration, string(plan.ID)); !errors.Is(unfreezeErr, backup.ErrBackupAmbiguous) {
+			t.Fatalf("failed native health allowed unfreeze: %v", unfreezeErr)
+		}
+		afterHealth, healthErr := host.ReconcileRestore(ctx, plan, receipt)
+		must(healthErr)
+		if !afterHealth.Frozen || afterHealth.HealthDigest != "" || afterHealth.Digest != beforeHealth.Digest || afterHealth.Watermark != beforeHealth.Watermark {
+			t.Fatal("failed health changed durable promotion proof")
+		}
+		_, retained, loadErr := runtime.Restores.Load(ctx, id, plan.ID)
+		must(loadErr)
+		if retained.Phase != backup.RestoreAmbiguous || retained.Generation != receipt.Generation || exec.Command("/usr/bin/systemctl", "is-active", "--quiet", "lsws.service").Run() == nil {
+			t.Fatal("failed health claimed active or released native freeze")
+		}
+		t.Log("real native SQL health cancellation rejected; no health receipt, unfreeze denied, engine remains stopped; normal retry follows")
 		_, err = coordinator.Apply(ctx, id, plan.ID, receipt.Generation)
 		if err == nil {
 			t.Fatal("lost unfreeze reply not injected")
