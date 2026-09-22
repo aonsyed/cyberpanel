@@ -4,6 +4,26 @@ This file is the compact recovery point for ongoing implementation. The normativ
 
 ## Hard execution rule
 
+## Resumed bounded parallel closure — 2026-09-22
+
+Goal resumed by user; no change in full parity scope. Six newly authorized workers
+use isolated resume-20260922-{webmail,database,backup,apps,access,dns} worktrees,
+all based on d54ee9ce0. No child delegation, downloads or native-vendor changes.
+Parent integrates and verifies outputs. Shared existing Ubuntu ARM64 QEMU resumed
+without recreating its disk; guest3.6GiB free. All execution remains guest-only.
+
+Coordination phases: framing complete; fan-out active; aggregate verified commits;
+then report actual results. Native/browser mutations are exclusively scheduled by
+parent; separate source trees /home/harness/lanes/<lane>/platform, shared offline
+Go cache. No worker may overwrite /home/harness/platform or install a release.
+Source/module completion is not claimed merely from an assigned task.
+
+Concrete correction to prior status: local backup capture/provider currently
+stores raw objects. Encryption-domain/credential fields are metadata, not actual
+encryption. Authenticated encryption and wrong-key rejection remain implementation
+work. Backup worker also identified SQL source-name handling unsafe for cross-scope
+restore; preserve fail-closed behavior until safely mapped and verified.
+
 ## Current recovery point — 2026-09-21 (installed66; local mailbox delivery qualified)
 
 Release qemu-mail-delivery-3.1.65 sequence66 contains 5f31c57e1; installer
