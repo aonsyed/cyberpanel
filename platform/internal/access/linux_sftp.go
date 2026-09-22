@@ -48,9 +48,19 @@ func (e *LinuxCredentialExecutor) sftpHost() linuxSFTPHost {
 		return *e.sftp
 	}
 	return linuxSFTPHost{root: "/var/lib/cyberpanel/sftp", config: "/etc/ssh/sshd_config", snippets: "/etc/ssh/cyberpanel-sftp.d", reload: func(ctx context.Context) error {
-		_, err := runFixedAccess(ctx, "/usr/bin/systemctl", nil, "try-reload-or-restart", "ssh.service")
-		return err
+		return reloadSFTPUnit(func(unit string) error {
+			_, err := runFixedAccess(ctx, "/usr/bin/systemctl", nil, "try-reload-or-restart", unit)
+			return err
+		})
 	}}
+}
+func reloadSFTPUnit(reload func(string) error) error {
+	if err := reload("sshd.service"); err != nil {
+		if fallback := reload("ssh.service"); fallback != nil {
+			return errors.Join(err, fallback)
+		}
+	}
+	return nil
 }
 func sftpDirectory(path string) error {
 	if err := os.Mkdir(path, 0755); err != nil && !errors.Is(err, os.ErrExist) {
