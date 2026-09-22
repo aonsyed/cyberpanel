@@ -5,6 +5,27 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed82 — source872457aef
+
+Signed qemu-workflow-3.1.81 sequence82 committed:
+manifestaf33af55c99bbd90df52f7e9579242aea789a39a3e5d25e3b360d31f269a3633;
+receiptc20e60339c81d33e1ba8b7911fda8dd32505b8d3fb5df6d52302189bc5812c8b;
+operation install-c05010f256bc5ff3420646e3665e54498bc7d8775cddcecdcad4e82d6ff86e5f.
+Actual process hashes match QEMU build:
+core00189fe2cd807e2cb9786c91933407038555c185a42df6aa720efbd02c4235bf;
+executorc206e4f5460a5208ae4f1c4664f459cb604eceede3688e06ccbd71924bd2081a;
+gatewayc347bf0a33fba61a162b5fe7227b868742e501f9b0434ed7f5e8ddbec7ba9b76.
+All seven panel services/OLSactive, HTML200. New currentJoomlag2 dependency link
+exists under lsws.service.wants; pool remains inactive as intended at startup.
+Worker leased normal retained79-point restore for actual stop/start/PHP proof.
+Bundle7f66559190a25db6728e0990095c8eed25d2e4c4c1ddb7fd9998b87f75fa9114.
+
+Initial apply blocked by storage guard before installer mutation. Unused69 was
+archived/checksum-verified to ignored host retired-node-releases then exact guest
+copy removed:63d33fb47a39ef9d69db131453e92afaee3690968e77286497d33cb44a6d2f1d.
+Active/previous and checked symlink/process references excluded; recoverable host
+copy retained,4.3GiB reserve restored before retry. No guard bypass.
+
 ### Source872457aef — enabled PHP pool lifecycle correction
 
 8c8d3ab1c integrated872457aef. New pools join normal engine-start dependency.

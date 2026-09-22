@@ -9,6 +9,14 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
+Newest installed82 qemu-workflow-3.1.81/source872457aef: secure mailbox binding
+and PHP pool dependency migration installed, actual binaries/services verified.
+Joomla currentg2 wantedlink exists while pool remains stopped (startup deliberately
+does not start services). Backupworker now owns normal retained79 restore lease
+to prove engine stop/start resumes current pool/PHP, retiredg1 staysdown. Current
+app81 recovery preserved. Vacation discovery2b2c074fc ready but NOT integrated/
+installed yet; UI worker finishing controls+204 client handling, installed proof pending.
+
 Newest: installed81 qemu-workflow-3.1.80/source87e3c52e7. Actual process hashes,
 panel HTML/JS and seven panel services+OLS/mail daemons verified. Managed Dovecot
 hourly vacation extensions active through startup. Apps testing same-site fresh
