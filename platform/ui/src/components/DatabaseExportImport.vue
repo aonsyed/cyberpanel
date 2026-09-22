@@ -150,5 +150,5 @@ onBeforeUnmount(() => { controller.abort(); emit("busy", false); });
 </template>
 
 <style scoped>
-.export-import{margin:24px 0;padding-top:16px;border-top:1px solid var(--border)}h3{font-size:16px}p,label{font-size:13px}p{color:var(--muted)}form{display:grid;gap:12px;margin:16px 0}form .button{justify-self:start}.job-id{overflow-wrap:anywhere}.import-error{color:var(--critical)}input,select{max-width:100%;box-sizing:border-box}
+.export-import{margin:24px 0;padding-top:16px;border-top:1px solid var(--border)}h3{font-size:16px}p,label{font-size:13px;overflow-wrap:anywhere}p{color:var(--muted)}form{display:grid;gap:12px;margin:16px 0}form .button{justify-self:start}.job-id{overflow-wrap:anywhere}.import-error{color:var(--critical)}input,select{max-width:100%;box-sizing:border-box}
 </style>
