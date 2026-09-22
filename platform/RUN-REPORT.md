@@ -5,6 +5,29 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Source87e3c52e7 — vacation composition and release81 preparation
+
+Mailad1dac7ae integrated87e3c52e7. Existing vacation API now has canonical service
+wiring and actor/tenant/mailbox authorization, one-use OAuth ManageSieve grants
+instead of root-only plaintext master reads, and named canonical Sieve includes
+preserving existing filters. Shared mailbox mutation lock covers filter changes,
+vacation activation/rollback and post-persistence retirement; current/rollback/
+active references preserved. Bounded protocol parser drains terminal diagnostics.
+Managed Dovecot config enables hourly vacation-seconds semantics; normal startup
+reconciles rendered generation through existing mail coordinator, not manual edits.
+Worker isolated native CHECKSCRIPT/PUTSCRIPT/SETACTIVE lifecycle/rollback/retirement
+and authorization tests passed; parent inspected code and logs. Installed OAuth,
+actual vacation reply and duplicate suppression still pending.
+Parent combined QEMU suites pass apps0.225s/webmaildata0.076s/mail0.008s/API0.188s/
+core1.276s/executor0.017s. Includes stage-only empty-public ACL correction08a35d42d.
+
+Unused67/68 releases archived to ignored host retired-node-releases; active/previous
+and checked symlink/process references excluded, checksum dry-run matched before
+exact guest deletion. Recoverable copies:
+6865fef7cedd803187d9aaac8d092904c14d78884324f6456450faaf1039be7b,
+58b71157ec6b8d28b12373b3086ebfe88bb452ce6d451304ddeaf7a624d65062.
+Guest5.3GiB free after cleanup; all application snapshots/backup data preserved.
+
 ### Installed80 application removal and full-page mobile proof
 
 Follow-up9dd52b3b6 integrated08a35d42d: recover staging public ACL only when the
