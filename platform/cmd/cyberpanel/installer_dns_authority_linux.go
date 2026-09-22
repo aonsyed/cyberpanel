@@ -107,6 +107,15 @@ ExecStart=
 ExecStart=/usr/sbin/pdns_server --guardian=no --daemon=no --disable-syslog --log-timestamp=no --write-pid=no --config-dir=/run/credentials/pdns.service
 `
 
+// A completed configuration receipt is not a daemon-start receipt for a new
+// boot. Pull the native service in before executor recovery probes it. Wants
+// deliberately permits first installation without an active generation: the
+// existing executor activation then materializes and starts PowerDNS.
+const powerDNSStartupUnit = `[Unit]
+Wants=pdns.service
+After=pdns.service
+`
+
 func installPowerDNSCredentialUnit() error {
 	const directory = "/etc/systemd/system/pdns.service.d"
 	if err := trustedDNSAncestors(filepath.Dir(directory)); err != nil {
@@ -125,6 +134,21 @@ func installPowerDNSCredentialUnit() error {
 	content, err := os.ReadFile(path)
 	if err != nil || string(content) != powerDNSCredentialUnit {
 		return errors.New("PowerDNS credential unit differs from managed definition")
+	}
+	const startupDirectory = "/etc/systemd/system/panel-execd.service.d"
+	if err := os.Mkdir(startupDirectory, 0755); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if err := trustedDNSAncestors(startupDirectory); err != nil {
+		return err
+	}
+	startupPath := filepath.Join(startupDirectory, "50-cyberpanel-powerdns.conf")
+	if _, err := ensureOwnedFile(startupPath, 0644, 0, 0, []byte(powerDNSStartupUnit)); err != nil {
+		return err
+	}
+	content, err = os.ReadFile(startupPath)
+	if err != nil || string(content) != powerDNSStartupUnit {
+		return errors.New("PowerDNS startup unit differs from managed definition")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

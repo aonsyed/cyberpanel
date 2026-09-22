@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,12 @@ func TestQEMUPowerDNSCredentialUnit(t *testing.T) {
 	}
 	if out, err := exec.Command("/usr/bin/systemd-analyze", "verify", "pdns.service").CombinedOutput(); err != nil {
 		t.Fatalf("unit verification: %v: %s", err, out)
+	}
+	for _, property := range []string{"Wants", "After"} {
+		out, err := exec.Command("/usr/bin/systemctl", "show", "panel-execd.service", "--property="+property, "--value").Output()
+		if err != nil || !strings.Contains(" "+strings.TrimSpace(string(out))+" ", " pdns.service ") {
+			t.Fatalf("executor must pull in PowerDNS before startup recovery (%s): %v", property, err)
+		}
 	}
 }
 
