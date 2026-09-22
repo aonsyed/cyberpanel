@@ -187,6 +187,7 @@ type applicationRecoveryInput struct {
 type applicationRecoveryOutput struct {
 	ID       RecoveryPointID `json:"id"`
 	Frontier uint64          `json:"frontier"`
+	Ownership *linuxApplicationReleaseManifest `json:"ownership,omitempty"`
 }
 type applicationStagingHealthResult struct {
 	Health  HealthObservation `json:"health"`

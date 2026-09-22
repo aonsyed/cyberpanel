@@ -197,10 +197,15 @@ func (coordinator LifecycleCoordinator) Remove(ctx context.Context, request Remo
 	operation, created, err := coordinator.Store.AdmitOperation(ctx, operation)
 	if err != nil { return ApplicationInstallation{}, err }
 	if !created { return ApplicationInstallation{}, ErrConflict }
-	recoveryPoint, _, err := coordinator.Recovery.CreateRecoveryPoint(ctx, RecoveryRequest{TenantID: installation.TenantID, SiteID: installation.SiteID, InstallationID: installation.ID, Purpose: "application_removal", Consistency: "application_consistent", Required: true})
+	recoveryPoint, _, err := coordinator.Recovery.CreateRecoveryPoint(ctx, removalRecoveryRequest(installation))
 	if err != nil { return ApplicationInstallation{}, coordinator.fail(ctx, operation, "recovery_point", err) }
 	scope := SiteExecutionScope{TenantID: installation.TenantID, SiteID: installation.SiteID, SiteUID: installation.SiteUID, Root: installation.Root, IsolationProfile: request.IsolationProfile, ResourceGeneration: request.SiteGeneration}
 	execution := RemovalExecution{Scope: scope, Installation: installation.ID, DefinitionID: installation.DefinitionID, RecoveryPointID: recoveryPoint, Disposition: request.Disposition}
+	// Older health failures journaled recovery without updating the installation.
+	// Reconcile only a matching durable failed install, after its required snapshot.
+	if installation.State == InstallationInstalling {
+		if err := coordinator.recoverStrandedInstall(ctx, &installation, recoveryPoint); err != nil { return ApplicationInstallation{}, coordinator.fail(ctx, operation, "recover_install", err) }
+	}
 	previousGeneration := installation.Generation
 	next := InstallationQuarantined
 	if request.Disposition == RemovalPurge { next = InstallationRemoving }

@@ -100,6 +100,10 @@ func (service ApplicationService) Install(ctx context.Context, request InstallRe
 	}
 	secretRefs = append(secretRefs, configurationSecret)
 	installation.SecretRefs = secretRefs
+	previousGeneration = installation.Generation
+	installation.Generation++
+	installation.UpdatedAt = service.now()
+	if err := service.Store.UpdateInstallation(ctx, installation, previousGeneration); err != nil { return ApplicationInstallation{}, service.compensateInstall(ctx, operation, database.ID, secretRefs, err) }
 	scope := SiteExecutionScope{TenantID: request.TenantID, SiteID: request.SiteID, SiteUID: request.SiteUID, Root: request.Root, IsolationProfile: request.IsolationProfile, ResourceGeneration: request.SiteGeneration}
 	execution := InstallExecution{Scope: scope, Installation: request.InstallationID, Definition: definition, RuntimeID: request.RuntimeID, Database: database, Administrator: request.Administrator, CanonicalURL: request.CanonicalURL, Locale: request.Locale, Timezone: request.Timezone, Title: request.Title, ReleaseID: request.ReleaseID}
 	if err := execution.Validate(service.now()); err != nil { return ApplicationInstallation{}, service.compensateInstall(ctx, operation, database.ID, secretRefs, err) }
@@ -159,6 +163,16 @@ func (service ApplicationService) failRecovery(ctx context.Context, operation Op
 	defer cancel()
 	operation.State, operation.Stage, operation.Failure, operation.UpdatedAt = OperationRecoveryRequired, stage, cause.Error(), service.now()
 	persistenceErr := service.Store.UpdateOperation(ctx, operation)
+	if persistenceErr == nil && operation.Kind == "install" && operation.InstallationID != "" && stage != "compensation" && stage != "persist_compensation" {
+		installation, err := service.Store.LoadInstallation(ctx, operation.InstallationID)
+		if err == nil && (installation.ID != operation.InstallationID || installation.TenantID != operation.TenantID || installation.SiteID != operation.SiteID) { err = ErrPolicyDenied }
+		if err == nil && installation.State == InstallationInstalling {
+			previous := installation.Generation
+			err = installation.Transition(InstallationRecovery, service.now())
+			if err == nil { err = service.Store.UpdateInstallation(ctx, installation, previous) }
+		}
+		persistenceErr = errors.Join(persistenceErr, err)
+	}
 	return errors.Join(ErrRecoveryRequired, cause, persistenceErr)
 }
 
