@@ -108,6 +108,25 @@ temporary DNS route removed and original OUTPUT rules independently checked.
 No external delivery/public delegation claim. Backup recovery source not yet
 integrated; completed-boundary recovery tests pass, mid-SQL effects stay denied.
 
+Latest78 findings: Joomla runtime installation now succeeds but health fails
+with public403/root404: staged public replacement lost the provisioned web-reader
+ACL. Fixture app-6c8623f3dfca4f0a2c9b79dd8a7e980873d76c87b00f95c1 remains
+recovery_required; apps worker fixing publication and legitimate recovery path,
+no manual ACL change. Database UI harness stopped at a console locator before
+export/fencing, then resumed the same recorded qrui2e71ab8ef8s/t fixtures after
+harness correction. Installed database export/preview/approval/pre-job404 abort/
+exact replacement/replay/retained-original inspection passed; retirement paused
+on390px label overflow. Same completed job and retained originals preserved.
+Wrapping correction and legitimate resume-by-job UI are in progress; no injected
+component state or duplicate replacements.
+
+Backup recovery89d38cda9 plus health correction7f29a2f82 integrated as
+a914f4d90/fa09dd015, not installed. Recovery preserves health-before-unfreeze and
+requires durable prior-health proof after lost unfreeze reply. Native worker
+test7.61s and focused failed-health/frontier tests passed; parent combined QEMU
+backup/providers/API/core/executor passed. Mid-SQL effects, legacy72 unknown
+state and transient/reversed-write detection remain incomplete/fail-closed.
+
 Post75 fixes now installed76: c7d477100 selects the actual
 packaged PHP CLI after the LSAPI installer no-op was reproduced;13d6bcfcf invalidates
 scoped DNSSEC caches after durable key transitions. Installed75 DNSSEC enable and

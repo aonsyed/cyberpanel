@@ -5,6 +5,50 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Recovery correction integrated; database installed functional path qualified
+
+Backup89d38cda9+a7 health follow-up7f29a2f82 integrated as a914f4d90/fa09dd015.
+Completed-boundary recovery now runs normal promoted-health check before
+unfreeze; failed health rolls back only before the write frontier, otherwise
+fail-forward. Durable health evidence is required for already-unfrozen recovery.
+Five focused cases cover these paths. Worker final native files/SQL recovery
+reported7.61s with fixture cleanup and OLSactive. Parent combined actual QEMU
+outputs pass: backup0.238s/providers0.394s/API0.194s/core1.297s/executor0.019s.
+Not yet installed; old72, mid-SQL interruption and reversed/transient writes
+remain outside proven recovery. No claim that all disaster recovery is complete.
+
+Installed78 database flow progressed beyond harness issues: same exact fixtures
+qrui2e71ab8ef8s/t completed export, unlocked read-only preview, explicit approval,
+pre-job404 inspection with usable abort, successful replacement, exact rows,
+replay and retained-original inspection. Parent read durable completed receipt
+and mobile failure screenshot. Job
+import-0e7785d8412ade6e3c7747469d4f102a269333689d9dbb9210ea95df867b03c5;
+retained original cprst4cf860703133262501946c14; targetgeneration2.
+Retirement not performed: long label overflowed390px. Fix pending deployment;
+resume-by-job UI also needed because component memory is lost on reconnect.
+No test-only component injection or new replacement fixture is authorized.
+
+### Installed78 follow-up — unresolved findings
+
+Normal Joomla install reached runtime activation, then health failed503 with
+native root404/index.php403. Public staged directory lacks cyberpanel-web ACL
+retained by the provisioned parent. Operation app-6c8623f3dfca4f0a2c9b79dd8a7e980873d76c87b00f95c1
+is recovery_required, not compensated. No manual ACL/config mutation or repeated
+blind install. Worker fixes public publication and uses legitimate product
+recovery; current fixture and its database preserved.
+
+Database UI attempt created only exact disposable qrui2e71ab8ef8s/t fixtures and
+stopped at a harness console locator before export/any writer fence. Existing
+fixtures reused for corrected harness; evidence replacement78-installed.json
+and log under /home/harness/lanes/database. No UI replacement pass claimed.
+
+Parent held backup89d38cda9 during integration inspection: recoverCompleted
+could bypass VerifyPromotedHealth after lost promotion reply and unfreeze an
+unverified candidate. Worker must preserve health gate and prove failed-health
+recovery does not activate/unfreeze; durable prior-health evidence needed for
+lost unfreeze reply. Previous native success cases do not prove this failure
+case. Mid-SQL effects and legacy72 missing evidence remain denied.
+
 ### Installed78 — Joomla prefix and approved database replacement
 
 Signed qemu-workflow-3.1.77, source6a4c7d8ec, sequence78 committed.
