@@ -233,7 +233,9 @@ func sourcesCover(sources []netip.Prefix, target netip.Prefix) bool {
 
 func renderNFTables(policy FirewallPolicy) []byte {
 	var buffer bytes.Buffer
-	buffer.WriteString("flush table inet cyberpanel\ntable inet cyberpanel {\n")
+	// Recreate the owned table in the same atomic batch: flushing preserves
+	// the old table userdata, so nft would retain a stale generation comment.
+	buffer.WriteString("delete table inet cyberpanel\ntable inet cyberpanel {\n")
 	policyDigest, _ := activationDigest(policy)
 	fmt.Fprintf(&buffer, " comment \"cyberpanel-generation:%d:%s\"\n", policy.Generation, policyDigest)
 	renderNFTChain := func(name string, hook string, priority int, defaultAction FirewallAction) {
