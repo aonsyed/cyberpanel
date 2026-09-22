@@ -5,6 +5,18 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Source194797eed — secure mailbox settings binding
+
+42cb06b8f integrated194797eed: webmail.data operations now use current secure
+authenticated principal, mailbox_id and live authorization_epoch instead of an
+unreachable legacy MailSession requirement. No legacy issuance path added;
+operation assurance remains unchanged. Foreign tenant/mailbox/user/session and
+stale epoch rejection tests included. Parent QEMU API0.188s/webmail0.013s/
+webmaildata0.070s/core1.318s passed. Deployment/live vacation still pending.
+Independent UI worker assigned existing webmail vacation controls; no UI vacation
+completion inferred from native/API plumbing. PHP pool worker correcting new
+unit dependencies plus trusted existing-enabled-current-pool reconciliation.
+
 ### Installed81 — source87e3c52e7
 
 Fresh Joomla runtime progressed beyond old ACL denial, but health returned503.
