@@ -9,6 +9,18 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
+Latest live-test state (supersedes the healthy activation checkpoint below):
+installed79 backup interruption captured completed native promotion while frozen
+and healthpending. Core startup incorrectly requires active OLS, making recovery
+API unavailable while restore intentionally stops OLS. Core now intentionally
+stopped to avoid restart churn; OLS remains stopped, journal preserved. Worker
+fixing installation-only startup inspection, retaining strict operation health.
+Apps worker fixing SQL recovery_required admission that blocks explicit removal.
+Database same-job retirement/cleanup passed; whole-page table label overflow
+fix integratedc95799ccd. Parent real-component browser QEMU proof:390px document,
+scrollX0, locally scrollable760px table; typecheck/build passed. Installed check
+pending next release. Mail worker fixing existing vacation/ManageSieve wiring.
+
 Latest checkpoint: signed sequence79, qemu-workflow-3.1.78, product source30841a4aa
 is committed in the existing Ubuntu ARM64 guest. Actual core/executor/gateway
 process hashes match rebuilt inputs; seven panel services plus OLS active; new

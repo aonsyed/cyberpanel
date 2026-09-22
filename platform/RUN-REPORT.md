@@ -7,10 +7,26 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Installed79 interruption exposed recovery startup blocker
 
+Core now intentionally stopped to halt restart churn; OLS remains stopped and
+frozen fixture unchanged. Worker traced startup failure to installation Inspect
+unconditionally requiring systemctl is-active; correction will separate verified
+installation inspection at startup from strict operational health inspection.
+Database overflow fix52d096532 integratedc95799ccd: only position:relative on
+Actions header. Parent real-component QEMU browser regression passes desktop1366
+and mobile390 with document width equal viewport and scrollX0; mobile table
+remains locally scrollable760px. Vue typecheck/build pass; new assets
+index-4zh1TzLa.css/panel-D-z36eeV.js prepared, not installed. Whole installed-page
+check still pending; no replacement fixtures recreated for layout testing.
+
 Normal Joomla recovery removal failed before native mutation: SQL index
 app_operations_active_installation includes recovery_required, blocking admission
 of the explicit removal needed to recover that installation. SQL-backed admission
-correction is in progress; no installed removal success is claimed.
+correction8d633f0ce integrated1c4adb310. Transactional index migration retains one
+running mutator; atomic guarded INSERT permits only same-owner explicit removal
+across install-health recovery, preserving original audit. Actual SQL regression
+covers old-index migration, foreign scope/update denials and two competing
+removals. Parent QEMU apps0.243s/API0.211s/core1.467s/executor0.019s passed.
+Not installed yet; no installed removal success is claimed.
 
 Backup worker captured a real process-interruption boundary for NEW plan
 restore_fa908b290923a0000f55319c99ce92456a6fc21143e1f880: native promoted=true,
