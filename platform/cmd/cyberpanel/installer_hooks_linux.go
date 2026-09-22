@@ -65,6 +65,9 @@ func runInstallerHook(arguments []string) error {
 	// A receipt cannot prove the broker still holds the matching signing key.
 	if invocation.Verb=="reconcile-services" { if err=reconcileWebEngineAuthority();err!=nil{return err};if err=reconcileDNSAuthority();err!=nil{return err};if err=reconcileMailAuthority();err!=nil{return err};if _,err=reconcileMalwareApprovalTrust();err!=nil{return err} }
 	var containerPolicyPath string
+	// A receipt does not establish current directory ownership. Reconcile this
+	// shared authority boundary on both fresh and replayed install/upgrade hooks.
+	if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority" { uid,gid,lookupErr:=lookupIdentity("cyberpanel");if lookupErr!=nil{return lookupErr};if _,err=reconcileBackupRepositoryAuthority(uid,gid);err!=nil{return err} }
 	if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority" { if err=validatePackagedContainerRecipes();err!=nil{return err};containerPolicyPath,err=containers.ProvisionRootlessContainerPolicy(context.Background());if err!=nil{return err} }
 	if existing,loadErr:=readHookJournal(indexPath);loadErr==nil { if invocation.Verb=="initialize-authority"||invocation.Verb=="migrate-authority"{manifest,validateErr:=apps.ValidateLinuxApplicationCatalog(context.Background(),"",time.Now().UTC());if validateErr!=nil||manifest.ReleaseID!=invocation.Release{return errors.Join(errors.New("application catalog no longer matches installer receipt"),validateErr)}};_,err=io.WriteString(os.Stdout,existing.Response);return err } else if !errors.Is(loadErr,os.ErrNotExist){return loadErr}
 	changed,err:=applyHook(invocation);if err!=nil{return err}
@@ -122,18 +125,23 @@ func validatePackagedContainerRecipes() error {
 
 func initializeAuthority()([]string,error){
 	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};paths:=[]string{"/var/lib/cyberpanel/control","/var/lib/cyberpanel/control/runtime","/var/lib/cyberpanel/control/trust","/var/lib/cyberpanel/control/recovery","/var/lib/cyberpanel/audit","/var/lib/cyberpanel/audit/segments","/var/lib/cyberpanel/audit/emergency","/var/lib/cyberpanel/backup-spool","/var/lib/cyberpanel/migration","/var/lib/cyberpanel/migration/chunks"}
-	backupRoot,repositoryRoot:="/var/backups/cyberpanel","/var/backups/cyberpanel/repositories"
-	if err=ensureOwnedDirectory(backupRoot,0750,0,gid);err!=nil{return nil,err}
-	if err=ensureOwnedDirectory(repositoryRoot,0700,uid,gid);err!=nil{return nil,err}
+	backupPaths,err:=reconcileBackupRepositoryAuthority(uid,gid);if err!=nil{return nil,err}
 	for _,path:=range paths{if err=ensureOwnedDirectory(path,0700,uid,gid);err!=nil{return nil,err}}
 	databasePath:="/var/lib/cyberpanel/control/control.db";created,err:=ensureOwnedFile(databasePath,0600,uid,gid,nil);if err!=nil{return nil,err}
-	changed:=append([]string{backupRoot,repositoryRoot},paths...);if created{changed=append(changed,databasePath)}
+	changed:=append(backupPaths,paths...);if created{changed=append(changed,databasePath)}
 	claimPath:="/var/lib/cyberpanel/control/recovery/claim.token";if _,statErr:=os.Lstat(claimPath);errors.Is(statErr,os.ErrNotExist){token:=make([]byte,32);if _,err=io.ReadFull(rand.Reader,token);err!=nil{return nil,err};encoded:=[]byte(base64.RawURLEncoding.EncodeToString(token)+"\n");wipeBytes(token);if _,err=ensureOwnedFile(claimPath,0600,uid,gid,encoded);err!=nil{return nil,err};changed=append(changed,claimPath)}else if statErr!=nil{return nil,statErr}
 	return changed,nil
 }
 
 func migrateAuthority()([]string,error){
-	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};path:="/var/lib/cyberpanel/control/control.db";if _,err=ensureOwnedFile(path,0600,uid,gid,nil);err!=nil{return nil,err};return []string{path},nil
+	uid,gid,err:=lookupIdentity("cyberpanel");if err!=nil{return nil,err};changed,err:=reconcileBackupRepositoryAuthority(uid,gid);if err!=nil{return nil,err};path:="/var/lib/cyberpanel/control/control.db";if _,err=ensureOwnedFile(path,0600,uid,gid,nil);err!=nil{return nil,err};return append(changed,path),nil
+}
+
+func reconcileBackupRepositoryAuthority(uid,gid int)([]string,error){
+	backupRoot,repositoryRoot:="/var/backups/cyberpanel","/var/backups/cyberpanel/repositories"
+	if err:=ensureOwnedDirectory(backupRoot,0750,0,gid);err!=nil{return nil,err}
+	if err:=ensureOwnedDirectory(repositoryRoot,0700,uid,gid);err!=nil{return nil,err}
+	return []string{backupRoot,repositoryRoot},nil
 }
 
 func bootstrapSecrets()([]string,error){
