@@ -677,6 +677,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize local backup provider: %w", err)
 	}
+	backupRuntime.Local.Keys=&backupproviders.RepositoryKeys{Material:mailDeliveryMaterial,Management:secretEnrollment.client,ConsumerReleaseDigest:mailDeliveryConsumerDigest}
 	if err = backupRuntime.Bootstrap(ctx); err != nil {
 		_ = backupRuntime.Close()
 		return apiserver.DomainServices{}, fmt.Errorf("bootstrap backup provider runtime: %w", err)

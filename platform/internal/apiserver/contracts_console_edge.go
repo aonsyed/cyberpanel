@@ -439,6 +439,7 @@ type BackupPolicyProjection struct {
 	Scope        string    `json:"scope"`
 	Schedule     string    `json:"schedule"`
 	RepositoryID string    `json:"repository_id"`
+	RepositoryObjectFormat string `json:"repository_object_format"`
 	Retention    string    `json:"retention"`
 	State        string    `json:"state"`
 	Generation   uint64    `json:"generation"`

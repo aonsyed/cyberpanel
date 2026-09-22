@@ -25,6 +25,22 @@ func registerBackupRepository(ctx context.Context, services DomainServices, cata
 		return err
 	}
 	defer tx.Rollback()
+	var existingRaw []byte
+	err = tx.QueryRowContext(ctx, `SELECT repository_json FROM backup_repositories_v2 WHERE id=?`, spec.Repository.ID).Scan(&existingRaw)
+	if err == nil {
+		var prior backup.RepositorySpec
+		if json.Unmarshal(existingRaw, &prior) != nil {
+			return backup.ErrBackupConflict
+		}
+		if prior.ObjectFormat == "" {
+			prior.ObjectFormat = "plaintext-v1"
+		}
+		if prior.TenantID != spec.TenantID || prior.EncryptionDomain != spec.EncryptionDomain || prior.ObjectFormat != spec.ObjectFormat || prior.Repository.Kind != spec.Repository.Kind || prior.Repository.Endpoint != spec.Repository.Endpoint {
+			return backup.ErrBackupConflict
+		}
+	} else if err != sql.ErrNoRows {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO backup_repositories_v2(id,tenant_id,repository_json) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET repository_json=excluded.repository_json WHERE backup_repositories_v2.tenant_id=excluded.tenant_id`, spec.Repository.ID, spec.TenantID, raw)
 	if err != nil {
 		return err

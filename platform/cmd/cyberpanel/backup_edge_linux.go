@@ -30,9 +30,12 @@ func (edge *backupEdge) CreatePolicy(ctx context.Context, call apiserver.EdgeCal
 	if edge == nil || ctx == nil || call.CommandID == "" || call.TenantID == "" || payload.Scope == "" || payload.RepositoryID == "" {
 		return apiserver.EdgeMutation[apiserver.BackupPolicyProjection]{}, backup.ErrInvalidBackup
 	}
-	if _, err := edge.catalog.Repository(ctx, call.TenantID, backup.RepositoryID(payload.RepositoryID)); err != nil {
+	repository,err := edge.catalog.Repository(ctx, call.TenantID, backup.RepositoryID(payload.RepositoryID))
+	if err != nil {
 		return apiserver.EdgeMutation[apiserver.BackupPolicyProjection]{}, err
 	}
+	objectFormat:=repository.ObjectFormat
+	if objectFormat==""{objectFormat="legacy-plaintext-v1"}
 	retention, normalizedRetention, err := backupRetention(payload.Retention)
 	if err != nil { return apiserver.EdgeMutation[apiserver.BackupPolicyProjection]{}, err }
 	policyID := backup.PolicyID(backupEdgeID("policy", call.TenantID, call.CommandID))
@@ -49,7 +52,7 @@ func (edge *backupEdge) CreatePolicy(ctx context.Context, call apiserver.EdgeCal
 		policy = prior
 	}
 	name := strings.TrimSpace(payload.Name); if name == "" { name = string(policy.ID) }
-	projection := apiserver.BackupPolicyProjection{ID:string(policy.ID),Name:name,Scope:policy.Scope,Schedule:policy.Schedule,RepositoryID:payload.RepositoryID,Retention:normalizedRetention,State:"active",Generation:policy.Generation,UpdatedAt:edge.now().UTC()}
+	projection := apiserver.BackupPolicyProjection{ID:string(policy.ID),Name:name,Scope:policy.Scope,Schedule:policy.Schedule,RepositoryID:payload.RepositoryID,RepositoryObjectFormat:objectFormat,Retention:normalizedRetention,State:"active",Generation:policy.Generation,UpdatedAt:edge.now().UTC()}
 	return apiserver.EdgeMutation[apiserver.BackupPolicyProjection]{OperationID:call.CommandID,State:"applied",Generation:policy.Generation,Resource:projection},nil
 }
 

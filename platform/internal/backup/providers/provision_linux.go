@@ -28,6 +28,25 @@ func (provider *LocalProvider) PrepareRepository(ctx context.Context, spec backu
 	if syscall.Fstat(parent, &stat) != nil || stat.Uid != uint32(os.Geteuid()) || stat.Mode&07777 != 0700 {
 		return ErrInvalid
 	}
+	format, err := localObjectFormat(spec)
+	if err != nil {
+		return err
+	}
+	if format == LocalEncryptedFormat {
+		if provider.Keys == nil {
+			return ErrCredential
+		}
+		fd, openErr := syscall.Openat(parent, string(spec.Repository.ID), syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		if fd >= 0 {
+			syscall.Close(fd)
+		}
+		if openErr != nil && !errors.Is(openErr, syscall.ENOENT) {
+			return openErr
+		}
+		if err = provider.Keys.EnsureKey(ctx, spec, errors.Is(openErr, syscall.ENOENT)); err != nil {
+			return err
+		}
+	}
 	return provisionLocalRepositoryAt(parent, string(spec.Repository.ID))
 }
 

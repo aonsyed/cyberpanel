@@ -140,12 +140,20 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	repository := &LocalRepository{ID: backup.RepositoryID(id), Root: repoRoot, rootFD: repositoryFD}
 	defer repository.Close()
 	provider := &LocalProvider{Repositories: map[backup.RepositoryID]*LocalRepository{backup.RepositoryID(id): repository}, Source: host}
+	if os.Getenv("CYBERPANEL_NATIVE_BACKUP_ENCRYPTED_TEST") == "1" {
+		provider.Keys = isolatedRepositoryKeys(t)
+	}
 	handle, err := sql.Open("sqlite", filepath.Join(runtimeRoot, "catalog.db"))
 	must(err)
 	defer handle.Close()
 	runtime := NewRuntime(handle, ProviderSet{Local: provider})
 	must(runtime.Bootstrap(ctx))
-	spec := backup.RepositorySpec{Repository: backup.Repository{ID: backup.RepositoryID(id), Kind: backup.Local, Endpoint: "file://" + repoRoot, CredentialRef: "fixture-local"}, TenantID: id, FailureDomain: "local", EncryptionDomain: "plaintext-local-current-implementation", MaximumConcurrency: 1}
+	spec := backup.RepositorySpec{Repository: backup.Repository{ID: backup.RepositoryID(id), Kind: backup.Local, Endpoint: "file://" + repoRoot, CredentialRef: "fixture-local"}, TenantID: id, FailureDomain: "local", EncryptionDomain: "plaintext-local-current-implementation", ObjectFormat: LocalPlaintextFormat, MaximumConcurrency: 1}
+	if provider.Keys != nil {
+		spec.ObjectFormat = LocalEncryptedFormat
+		spec.EncryptionDomain = "native-encrypted-fixture"
+		must(provider.Keys.EnsureKey(ctx, spec, true))
+	}
 	must(runtime.Catalog.PutRepository(ctx, spec))
 	policy := backup.BackupPolicySpec{ID: backup.PolicyID(id), TenantID: id, Scope: id, Schedule: "manual", Components: []backup.ComponentKind{backup.ComponentFiles, backup.ComponentDatabase}, Repositories: []backup.RepositoryID{spec.Repository.ID}, RequiredCopies: 1, Consistency: backup.ConsistencyFuzzy, Retention: backup.RetentionPolicy{KeepLast: 1, MinimumVerifiedCopies: 1}, Generation: 1}
 	run, err := runtime.BackupCoordinator(host, host).Run(ctx, id, id, policy, []backup.RepositorySpec{spec})
@@ -212,6 +220,9 @@ func TestNativeLocalBackupRestore(t *testing.T) {
 	t.Log("actual-directory promotion and safety rollback verified")
 	object := run.Manifest.Artifacts[0].Objects[0]
 	blob := filepath.Join(repoRoot, objectPath(object))
+	if spec.ObjectFormat == LocalEncryptedFormat {
+		blob = filepath.Join(repoRoot, encryptedObjectPath(spec, object))
+	}
 	file, err := os.OpenFile(blob, os.O_WRONLY, 0)
 	must(err)
 	_, err = file.WriteAt([]byte{0xff}, 0)
