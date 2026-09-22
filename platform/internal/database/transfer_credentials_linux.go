@@ -38,11 +38,14 @@ func (configs *LinuxWorkspaceExportConfigs) TransferClientConfig(ctx context.Con
 	if database.Name != name {
 		return TransferClientConfigDescriptor{}, ErrUnauthorized
 	}
+	if job.Selection.Schema { if err = executor.checkExportProgramObjects(ctx, database); err != nil { return TransferClientConfigDescriptor{}, err } }
 	releaseSlot, err := executor.acquireWorkspace(session)
 	if err != nil {
 		return TransferClientConfigDescriptor{}, err
 	}
-	return configs.writeClientConfig(ctx, job, session, principal, name, releaseSlot)
+	descriptor, err := configs.writeClientConfig(ctx, job, session, principal, name, releaseSlot)
+	if err == nil { descriptor.checkExportSchema = func(ctx context.Context) error { return executor.checkExportProgramObjects(ctx, database) } }
+	return descriptor, err
 }
 
 func (executor *LinuxMariaDBExecutor) authorizeWorkspaceExport(ctx context.Context, access WorkspaceAccess, job TransferJob) (DatabaseWorkspaceSession, Database, DatabasePrincipal, error) {

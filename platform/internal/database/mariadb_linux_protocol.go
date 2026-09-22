@@ -80,6 +80,7 @@ const (
 	sqlTransferFenceUnlock
 	sqlTransferFenceReplication
 	sqlReplaceImportTables
+	sqlObserveTransferPrograms
 )
 
 type principalMutation struct {
@@ -262,6 +263,10 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 	if statement==sqlWriterSessionAudit||statement==sqlWriterSessions||statement==sqlKillWriterSession||statement==sqlStopWriterReplication{return buildWriterGateStatement(statement,values...)}
 	if statement==sqlObserveReplication||statement==sqlConfigureReplication||statement==sqlWaitReplication||statement==sqlObserveReplicationPrincipal||statement==sqlCreateReplicationPrincipal{return buildReplicationStatement(statement,values...)}
 	switch statement {
+	case sqlObserveTransferPrograms:
+		database, ok := oneValue[Database](values)
+		if !ok { return "", ErrInvalidResource }
+		return transferProgramObjectsSQL(database)
 	case sqlReplaceImportTables:
 		m, ok := oneValue[transferReplacementMutation](values)
 		if !ok {

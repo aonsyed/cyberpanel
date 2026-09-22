@@ -76,7 +76,12 @@ func databaseExportCall(inv Invocation, session database.ResourceID) (database.W
 	return database.WorkspaceCall{TenantID: tenant, SiteID: siteID, SessionID: session, SessionGeneration: inv.Request.ExpectedGeneration}, nil
 }
 
+type databaseExportUnsupportedObjectsError struct{}
+func (*databaseExportUnsupportedObjectsError) Error() string { return database.ErrTransferUnsupportedObjects.Error() }
+func (*databaseExportUnsupportedObjectsError) Unwrap() error { return ErrInvalidRequest }
+
 func databaseExportError(err error) error {
+	if errors.Is(err, database.ErrTransferUnsupportedObjects) { return &databaseExportUnsupportedObjectsError{} }
 	if errors.Is(err, database.ErrTransferInvalid) || errors.Is(err, database.ErrTransferLimit) {
 		return ErrInvalidRequest
 	}

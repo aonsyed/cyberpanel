@@ -42,6 +42,8 @@ func (executor *LinuxMariaDBExecutor) guardTransferFenceMutation(ctx context.Con
 		return func() {}, nil
 	}
 	switch statement {
+	case sqlObserveTransferPrograms:
+		return func() {}, nil
 	case sqlObserveStatus, sqlObserveDatabase, sqlObservePrincipal, sqlObserveGrants, sqlObserveTuning, sqlObserveHA, sqlObserveNativePrincipal, sqlObserveDataDirectory, sqlObserveImportTables, sqlObserveImportSchema, sqlObserveImportView, sqlObserveImportViewColumns, sqlCountImportRows, sqlCheckImportTable, sqlTransferFenceIdentity, sqlTransferFenceAudit, sqlTransferFenceAccount, sqlTransferFenceGrants, sqlTransferFenceSessions, sqlTransferFenceReplication:
 		return func() {}, nil
 	}

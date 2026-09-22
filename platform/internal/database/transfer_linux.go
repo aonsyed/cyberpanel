@@ -57,6 +57,7 @@ type TransferClientConfigDescriptor struct {
 	Release func() error
 	// Set only by the protected workspace credential resolver, never wire input.
 	transportArguments []string
+	checkExportSchema func(context.Context) error
 }
 
 type MariaDBTransferClientConfigs interface {
@@ -89,6 +90,10 @@ func (backend *LinuxTransferBackend) Export(ctx context.Context, job TransferJob
 	if err != nil { return TransferProcessReceipt{}, err }
 	if err = validateTransferClientConfig(descriptor, job, database); err != nil { releaseTransferConfig(descriptor); return TransferProcessReceipt{}, err }
 	defer releaseTransferConfig(descriptor)
+	if job.Selection.Schema {
+		if descriptor.checkExportSchema == nil { return TransferProcessReceipt{}, ErrTransferUnsupportedObjects }
+		if err = descriptor.checkExportSchema(ctx); err != nil { return TransferProcessReceipt{}, err }
+	}
 	if !descriptor.ExpiresAt.IsZero() {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, descriptor.ExpiresAt)
@@ -137,6 +142,9 @@ func (backend *LinuxTransferBackend) Export(ctx context.Context, job TransferJob
 		if errors.Is(headerErr, ErrTransferCancelled) || errors.Is(copyErr, ErrTransferCancelled) || errors.Is(ctx.Err(), context.Canceled) { return receipt, ErrTransferCancelled }
 		if errors.Is(headerErr, ErrTransferLimit) || errors.Is(copyErr, ErrTransferLimit) { return receipt, ErrTransferLimit }
 		return receipt, ErrTransferStale
+	}
+	if job.Selection.Schema {
+		if err = descriptor.checkExportSchema(ctx); err != nil { receipt.Partial = true; return SealTransferProcessReceipt(receipt), err }
 	}
 	artifact, err := writer.Commit(ctx, artifactOutput.Digest(), artifactOutput.count, rowCounter.rows)
 	if err != nil { receipt.Partial = true; receipt = SealTransferProcessReceipt(receipt); return receipt, err }
