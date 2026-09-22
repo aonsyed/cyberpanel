@@ -21,7 +21,8 @@ type transferFenceAccount struct {
 }
 
 // A held record is evidence of account admission closure and natural session
-// drainage, not native replacement authority. Public replacement stays disabled.
+// drainage, not by itself native replacement authority. Replacement also needs
+// the matching durable recovery point and an explicitly approved transfer job.
 // Grants are captured and never revoked/replaced; ACCOUNT LOCK leaves them intact.
 type transferWriterFence struct {
 	Restore        *transferReplacementRestorePoint `json:"restore,omitempty"`
@@ -92,7 +93,7 @@ func (executor *LinuxMariaDBExecutor) acquireTransferWriterFence(ctx context.Con
 	if err = executor.readResource("transfer-fences", database.ID, &record); err == nil {
 		// Retained restore points are recovery anchors, not reusable lock slots.
 		// An explicit retention lifecycle must retire them before another import.
-		if record.Database.ID != database.ID || record.State != "released" || record.Token == token || record.Restore != nil {
+		if record.Database.ID != database.ID || record.State != "released" || record.Token == token || record.Restore != nil && record.Restore.State != "retired" {
 			return record, ErrConflict
 		}
 	} else if !errors.Is(err, ErrNotFound) {

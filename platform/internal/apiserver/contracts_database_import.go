@@ -9,6 +9,7 @@ import (
 )
 
 type DatabaseImportPreparePayload struct {
+	Replacement  bool                                `json:"replacement,omitempty"`
 	DatabaseID   database.ResourceID                 `json:"database_id"`
 	SourceExport *database.TransferJob               `json:"source_export,omitempty"`
 	UploadSource *database.TransferUploadIntent      `json:"upload_source,omitempty"`
@@ -22,6 +23,9 @@ type DatabaseImportInspectPayload struct {
 }
 
 func registerDatabaseImportContracts(registry *Registry) error {
+	if err := registerDatabaseReplacementContracts(registry); err != nil {
+		return err
+	}
 	if err := registerDatabaseUploadContracts(registry); err != nil {
 		return err
 	}
@@ -73,6 +77,9 @@ func registerDatabaseImportContracts(registry *Registry) error {
 }
 
 func bindDatabaseImportContracts(registry *Registry, services DomainServices) error {
+	if err := bindDatabaseReplacementContracts(registry, services); err != nil {
+		return err
+	}
 	if err := bindDatabaseUploadContracts(registry, services); err != nil {
 		return err
 	}

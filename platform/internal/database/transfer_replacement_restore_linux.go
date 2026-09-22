@@ -211,7 +211,7 @@ func (executor *LinuxMariaDBExecutor) replacementTransferContext(ctx context.Con
 		release()
 		return ctx, nil, ErrUnauthorized
 	}
-	if f.Restore.JobDigest == "" {
+	if f.Restore.JobDigest == "" && action != "preview" {
 		if f.State != "held" {
 			release()
 			return ctx, nil, ErrAmbiguous

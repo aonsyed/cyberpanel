@@ -229,6 +229,10 @@ func testQEMUTransferReplacementLifecycle(t *testing.T, phase string) {
 		if e = executor.releaseTransferWriterFence(ctx, live.ID, point.Reference); !errors.Is(e, ErrAmbiguous) {
 			t.Fatal("released unresolved native placement", e)
 		}
+		retire := TransferImportRequest{Action: "replacement-retire", Job: job, SourceExport: export}
+		if _, e = executor.ExecuteTransferImport(ctx, retire); !errors.Is(e, ErrAmbiguous) {
+			t.Fatal("retired active or ambiguous original", e)
+		}
 		if phase == "recover_after" || phase == "rollback_after" {
 			swap, e := transferReplacementRenameSQL(live, record.Target, restore, []string{"sample"}, []string{"sample"})
 			if e != nil {
