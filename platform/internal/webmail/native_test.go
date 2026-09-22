@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/mail"
+	"net/textproto"
 	"os"
 	"strings"
 	"testing"
@@ -89,10 +91,35 @@ func TestQEMUDovecotNativeResponses(t *testing.T) {
 			t.Fatal("native delivered probe literal", err)
 		}
 		body, err := io.ReadAll(stream)
-		closeErr := stream.Close()
+		closeErr := error(nil)
+		if os.Getenv("CYBERPANEL_QEMU_WEBMAIL_ATTACHMENT") == "" {
+			closeErr = stream.Close()
+		}
 		if err != nil || closeErr != nil || !strings.Contains(string(body), "Local-only installed panel webmail proof.") {
 			t.Fatal("native delivered probe body mismatch", err, closeErr)
 		}
 		t.Log("native delivered probe exact body read without mutation")
+		if os.Getenv("CYBERPANEL_QEMU_WEBMAIL_ATTACHMENT") != "" {
+			message, err := mail.ReadMessage(bufio.NewReader(strings.NewReader(string(body))))
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := &renderedParts{}
+			if err := walkMIME(textproto.MIMEHeader(message.Header), message.Body, 0, state); err != nil || len(state.attachments) != 1 || state.attachments[0].PartID != "2" || state.attachments[0].Filename != "proof-bytes.bin" || state.attachments[0].ContentType != "application/octet-stream" {
+				t.Fatal("native attachment metadata mismatch", err)
+			}
+			part, _, err := client.literalCommand(fmt.Sprintf("UID FETCH %d (UID BINARY.PEEK[2])", uids[0]), uids[0], MaximumAttachmentBytes)
+			if err != nil {
+				t.Fatal("native attachment literal", err)
+			}
+			content, err := io.ReadAll(part)
+			if err != nil || part.Close() != nil || string(content) != string(append([]byte{0, 1, 2, 13, 10, 127, 128, 254, 255}, []byte("Attachment exact bytes")...)) {
+				t.Fatal("native attachment bytes mismatch", err)
+			}
+			if state.attachments[0].Size != uint64(len(content)) {
+				t.Fatal("decoded attachment size mismatch")
+			}
+			t.Log("native uploaded/sent attachment metadata and exact binary bytes verified")
+		}
 	}
 }

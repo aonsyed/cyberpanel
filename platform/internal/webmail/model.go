@@ -11,46 +11,46 @@ import (
 )
 
 var (
-	ErrInvalid           = errors.New("webmail: invalid request")
-	ErrNotFound          = errors.New("webmail: not found")
-	ErrUnauthorized      = errors.New("webmail: unauthorized")
-	ErrConflict          = errors.New("webmail: conflict")
-	ErrLimit             = errors.New("webmail: limit exceeded")
-	ErrGrantInvalid      = errors.New("webmail: grant invalid or already used")
-	ErrCursorInvalid     = errors.New("webmail: cursor invalid or already used")
-	ErrStaleUIDValidity  = errors.New("webmail: stale uidvalidity")
-	ErrPartial           = errors.New("webmail: bounded operation returned partial data")
-	ErrAmbiguous         = errors.New("webmail: ambiguous server response")
-	ErrProtocol          = errors.New("webmail: invalid imap response")
-	ErrUnavailable       = errors.New("webmail: imap unavailable")
-	ErrIneligibleFolder  = errors.New("webmail: folder is protected")
+	ErrInvalid          = errors.New("webmail: invalid request")
+	ErrNotFound         = errors.New("webmail: not found")
+	ErrUnauthorized     = errors.New("webmail: unauthorized")
+	ErrConflict         = errors.New("webmail: conflict")
+	ErrLimit            = errors.New("webmail: limit exceeded")
+	ErrGrantInvalid     = errors.New("webmail: grant invalid or already used")
+	ErrCursorInvalid    = errors.New("webmail: cursor invalid or already used")
+	ErrStaleUIDValidity = errors.New("webmail: stale uidvalidity")
+	ErrPartial          = errors.New("webmail: bounded operation returned partial data")
+	ErrAmbiguous        = errors.New("webmail: ambiguous server response")
+	ErrProtocol         = errors.New("webmail: invalid imap response")
+	ErrUnavailable      = errors.New("webmail: imap unavailable")
+	ErrIneligibleFolder = errors.New("webmail: folder is protected")
 )
 
 const (
-	MaximumPageSize       = 100
-	MaximumSearchTerms    = 8
-	MaximumSearchText     = 256
-	MaximumFolderNameRunes = 255
-	MaximumGrantLifetime  = 2 * time.Minute
-	MaximumCursorLifetime = 10 * time.Minute
-	MaximumGrantsPerTenant = 4096
-	MaximumReceiptsPerTenant = 4096
-	MaximumCursorsPerTenant  = 4096
-	MaximumRawMessageBytes = 8 << 20
-	MaximumRenderedPartBytes = 1 << 20
-	MaximumAttachmentBytes = 25 << 20
-	MaximumComposeBytes = 32 << 20
-	MaximumComposeAttachments = 32
-	MaximumUploadsPerMailbox = 128
-	MaximumDraftsPerMailbox = 512
-	MaximumRecipients = 100
-	MaximumMessageBatch = 100
-	MaximumRemoteImageBytes = 5 << 20
+	MaximumPageSize             = 100
+	MaximumSearchTerms          = 8
+	MaximumSearchText           = 256
+	MaximumFolderNameRunes      = 255
+	MaximumGrantLifetime        = 2 * time.Minute
+	MaximumCursorLifetime       = 10 * time.Minute
+	MaximumGrantsPerTenant      = 4096
+	MaximumReceiptsPerTenant    = 4096
+	MaximumCursorsPerTenant     = 4096
+	MaximumRawMessageBytes      = 8 << 20
+	MaximumRenderedPartBytes    = 1 << 20
+	MaximumAttachmentBytes      = 25 << 20
+	MaximumComposeBytes         = 32 << 20
+	MaximumComposeAttachments   = 32
+	MaximumUploadsPerMailbox    = 128
+	MaximumDraftsPerMailbox     = 512
+	MaximumRecipients           = 100
+	MaximumMessageBatch         = 100
+	MaximumRemoteImageBytes     = 5 << 20
 	MaximumRemoteImageRedirects = 3
-	MaximumRemoteImageLifetime = 24 * time.Hour
-	MaximumUploadLifetime = 24 * time.Hour
-	MaximumBlobStoreFiles = 65536
-	MaximumBlobStoreBytes = 10 << 30
+	MaximumRemoteImageLifetime  = 24 * time.Hour
+	MaximumUploadLifetime       = 24 * time.Hour
+	MaximumBlobStoreFiles       = 65536
+	MaximumBlobStoreBytes       = 10 << 30
 )
 
 var opaqueIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -66,12 +66,12 @@ func (principal Principal) valid() bool {
 }
 
 type AuthorizedMailAccount struct {
-	TenantID          string
-	MailboxID         string
-	DisplayLabel      string
-	AddressLabel      string
+	TenantID           string
+	MailboxID          string
+	DisplayLabel       string
+	AddressLabel       string
 	AuthorizationEpoch uint64
-	Enabled           bool
+	Enabled            bool
 }
 
 func (account AuthorizedMailAccount) valid() bool {
@@ -135,14 +135,14 @@ const (
 func (sort MessageSort) valid() bool { return sort == SortNewest || sort == SortOldest }
 
 type Preferences struct {
-	TenantID   string
-	UserID     string
-	MailboxID  string
-	Revision   uint64
-	PageSize   uint16
-	Sort       MessageSort
-	Threaded   bool
-	UpdatedAt  time.Time
+	TenantID  string
+	UserID    string
+	MailboxID string
+	Revision  uint64
+	PageSize  uint16
+	Sort      MessageSort
+	Threaded  bool
+	UpdatedAt time.Time
 }
 
 func (preferences Preferences) valid() bool {
@@ -161,20 +161,20 @@ const (
 )
 
 type CursorState struct {
-	Kind                CursorKind
-	TenantID            string
-	UserID              string
-	SessionID           string
-	MailboxID           string
-	AuthorizationEpoch  uint64
-	FolderName          string
-	UIDValidity         uint32
-	LastUID             uint32
-	LastAccountID       string
-	LastFolderName      string
-	Sort                MessageSort
-	QueryDigest         string
-	ExpiresAt           time.Time
+	Kind               CursorKind
+	TenantID           string
+	UserID             string
+	SessionID          string
+	MailboxID          string
+	AuthorizationEpoch uint64
+	FolderName         string
+	UIDValidity        uint32
+	LastUID            uint32
+	LastAccountID      string
+	LastFolderName     string
+	Sort               MessageSort
+	QueryDigest        string
+	ExpiresAt          time.Time
 }
 
 func (cursor CursorState) valid(now time.Time) bool {
@@ -198,15 +198,15 @@ func (cursor CursorState) valid(now time.Time) bool {
 }
 
 type OperationReceipt struct {
-	RequestID      string
-	TenantID       string
-	UserDigest     string
-	MailboxDigest  string
-	Operation      string
-	Outcome        string
-	ItemCount      uint16
-	Partial        bool
-	OccurredAt     time.Time
+	RequestID     string
+	TenantID      string
+	UserDigest    string
+	MailboxDigest string
+	Operation     string
+	Outcome       string
+	ItemCount     uint16
+	Partial       bool
+	OccurredAt    time.Time
 }
 
 func (receipt OperationReceipt) valid() bool {
@@ -229,7 +229,7 @@ const (
 )
 
 type Quota struct {
-	UsedBytes uint64
+	UsedBytes  uint64
 	LimitBytes uint64
 }
 
@@ -249,8 +249,8 @@ type Folder struct {
 }
 
 type FolderPageRequest struct {
-	Limit  uint16
-	Cursor string
+	Limit     uint16
+	Cursor    string
 	afterName string
 }
 
@@ -321,34 +321,34 @@ type MessageSummary struct {
 }
 
 type MessagePageRequest struct {
-	Folder string
-	Limit  uint16
-	Cursor string
-	Sort   MessageSort
-	Threaded bool
+	Folder              string
+	Limit               uint16
+	Cursor              string
+	Sort                MessageSort
+	Threaded            bool
 	expectedUIDValidity uint32
-	afterUID uint32
+	afterUID            uint32
 }
 
 type MessagePage struct {
-	Folder       string
-	UIDValidity  uint32
+	Folder        string
+	UIDValidity   uint32
 	HighestModSeq uint64
-	Messages     []MessageSummary
-	NextCursor   string
-	Partial      bool
-	more         bool
-	lastUID      uint32
+	Messages      []MessageSummary
+	NextCursor    string
+	Partial       bool
+	more          bool
+	lastUID       uint32
 }
 
 type SearchCriteria struct {
-	Text      string
-	From      string
-	Subject   string
-	Since     time.Time
-	Before    time.Time
-	Seen      *bool
-	Flagged   *bool
+	Text          string
+	From          string
+	Subject       string
+	Since         time.Time
+	Before        time.Time
+	Seen          *bool
+	Flagged       *bool
 	HasAttachment *bool
 }
 
@@ -382,24 +382,24 @@ func (criteria SearchCriteria) valid() bool {
 }
 
 type SearchRequest struct {
-	Folder   string
-	Criteria SearchCriteria
-	Limit    uint16
-	Cursor   string
-	Sort     MessageSort
+	Folder              string
+	Criteria            SearchCriteria
+	Limit               uint16
+	Cursor              string
+	Sort                MessageSort
 	expectedUIDValidity uint32
-	afterUID uint32
+	afterUID            uint32
 }
 
 type SearchPage struct {
-	Folder       string
-	UIDValidity  uint32
+	Folder        string
+	UIDValidity   uint32
 	HighestModSeq uint64
-	Identities   []MessageIdentity
-	NextCursor   string
-	Partial      bool
-	more         bool
-	lastUID      uint32
+	Identities    []MessageIdentity
+	NextCursor    string
+	Partial       bool
+	more          bool
+	lastUID       uint32
 }
 
 type RemoteImagePolicy string
@@ -417,12 +417,20 @@ type RemoteImageReference struct {
 }
 
 type RenderedMessage struct {
-	Identity      MessageIdentity
-	PlainText     string
-	SanitizedHTML string
-	CSP           string
+	Identity       MessageIdentity
+	PlainText      string
+	SanitizedHTML  string
+	CSP            string
 	ReferrerPolicy string
-	RemoteImages  []RemoteImageReference
+	RemoteImages   []RemoteImageReference
+	Attachments    []AttachmentReference
+}
+
+type AttachmentReference struct {
+	PartID      string
+	Filename    string
+	ContentType string
+	Size        uint64
 }
 
 type MessageReadRequest struct {
@@ -440,13 +448,13 @@ type RemoteImageRequest struct {
 }
 
 type RemoteImage struct {
-	ContentType  string
-	Size         uint64
-	Body         io.ReadCloser
-	CacheKey     string
-	CacheUntil   time.Time
-	FromCache    bool
-	CacheControl string
+	ContentType    string
+	Size           uint64
+	Body           io.ReadCloser
+	CacheKey       string
+	CacheUntil     time.Time
+	FromCache      bool
+	CacheControl   string
 	ReferrerPolicy string
 }
 
@@ -560,26 +568,26 @@ type SpamReporter interface {
 }
 
 type UploadRequest struct {
-	Filename    string
-	ContentType string
+	Filename     string
+	ContentType  string
 	MaximumBytes uint64
-	ExpiresAt   time.Time
+	ExpiresAt    time.Time
 }
 
 type MessageAction string
 
 const (
-	ActionMove      MessageAction = "move"
-	ActionCopy      MessageAction = "copy"
-	ActionDelete    MessageAction = "delete"
-	ActionUndelete  MessageAction = "undelete"
-	ActionArchive   MessageAction = "archive"
-	ActionRead      MessageAction = "read"
-	ActionUnread    MessageAction = "unread"
-	ActionFlag      MessageAction = "flag"
-	ActionUnflag    MessageAction = "unflag"
-	ActionSpam      MessageAction = "spam"
-	ActionNotSpam   MessageAction = "not_spam"
+	ActionMove     MessageAction = "move"
+	ActionCopy     MessageAction = "copy"
+	ActionDelete   MessageAction = "delete"
+	ActionUndelete MessageAction = "undelete"
+	ActionArchive  MessageAction = "archive"
+	ActionRead     MessageAction = "read"
+	ActionUnread   MessageAction = "unread"
+	ActionFlag     MessageAction = "flag"
+	ActionUnflag   MessageAction = "unflag"
+	ActionSpam     MessageAction = "spam"
+	ActionNotSpam  MessageAction = "not_spam"
 )
 
 type MessageActionRequest struct {
@@ -589,9 +597,9 @@ type MessageActionRequest struct {
 }
 
 type MessageActionResult struct {
-	Action       MessageAction
-	Affected     uint16
-	UIDValidity  uint32
+	Action        MessageAction
+	Affected      uint16
+	UIDValidity   uint32
 	HighestModSeq uint64
 }
 
@@ -636,14 +644,14 @@ type Authorizer interface {
 }
 
 type AuditEvent struct {
-	Operation      string
-	Outcome        string
-	TenantID       string
-	UserDigest     string
-	SessionDigest  string
-	MailboxDigest  string
-	RequestID      string
-	OccurredAt     time.Time
+	Operation     string
+	Outcome       string
+	TenantID      string
+	UserDigest    string
+	SessionDigest string
+	MailboxDigest string
+	RequestID     string
+	OccurredAt    time.Time
 }
 
 type Auditor interface {

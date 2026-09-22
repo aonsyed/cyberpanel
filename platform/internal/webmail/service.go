@@ -26,19 +26,19 @@ import (
 )
 
 type Service struct {
-	repository Repository
-	authorizer Authorizer
-	auditor    Auditor
-	backend    Backend
-	audience   string
+	repository    Repository
+	authorizer    Authorizer
+	auditor       Auditor
+	backend       Backend
+	audience      string
 	grantLifetime time.Duration
-	now        func() time.Time
-	blobs      BlobStore
-	scanner    MalwareScanner
-	images     RemoteImageProxy
-	submitter  Submitter
-	scheduler  SubmissionScheduler
-	spam       SpamReporter
+	now           func() time.Time
+	blobs         BlobStore
+	scanner       MalwareScanner
+	images        RemoteImageProxy
+	submitter     Submitter
+	scheduler     SubmissionScheduler
+	spam          SpamReporter
 }
 
 type ContentDependencies struct {
@@ -421,8 +421,8 @@ func (service *Service) ListMessages(ctx context.Context, mailbox MailboxContext
 		return MessagePage{}, errors.Join(ErrInvalid, err, service.receipt(ctx, mailbox, "message.list", "failed", 0, false))
 	}
 	digest, err := queryDigest(struct {
-		Folder string
-		Sort MessageSort
+		Folder   string
+		Sort     MessageSort
 		Threaded bool
 	}{request.Folder, request.Sort, request.Threaded})
 	if err != nil {
@@ -462,9 +462,9 @@ func (service *Service) Search(ctx context.Context, mailbox MailboxContext, requ
 		return SearchPage{}, errors.Join(ErrInvalid, service.receipt(ctx, mailbox, "message.search", "failed", 0, false))
 	}
 	digest, err := queryDigest(struct {
-		Folder string
+		Folder   string
 		Criteria SearchCriteria
-		Sort MessageSort
+		Sort     MessageSort
 	}{request.Folder, request.Criteria, request.Sort})
 	if err != nil {
 		return SearchPage{}, err
@@ -531,10 +531,11 @@ func decodeMIMEBody(header textproto.MIMEHeader, body io.Reader) io.Reader {
 }
 
 type renderedParts struct {
-	plain string
-	html  string
-	parts int
-	total uint64
+	plain       string
+	html        string
+	parts       int
+	total       uint64
+	attachments []AttachmentReference
 }
 
 func readRenderedPart(reader io.Reader, state *renderedParts) (string, error) {
@@ -554,6 +555,10 @@ func readRenderedPart(reader io.Reader, state *renderedParts) (string, error) {
 }
 
 func walkMIME(header textproto.MIMEHeader, body io.Reader, depth int, state *renderedParts) error {
+	return walkMIMEPart(header, body, depth, "", state)
+}
+
+func walkMIMEPart(header textproto.MIMEHeader, body io.Reader, depth int, partID string, state *renderedParts) error {
 	if depth > 8 || state.parts >= 128 {
 		return ErrLimit
 	}
@@ -563,8 +568,26 @@ func walkMIME(header textproto.MIMEHeader, body io.Reader, depth int, state *ren
 		contentType = "text/plain"
 		parameters = nil
 	}
-	disposition, _, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
-	if strings.EqualFold(disposition, "attachment") {
+	disposition, dispositionParameters, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
+	filename := dispositionParameters["filename"]
+	if filename == "" {
+		filename = parameters["name"]
+	}
+	if strings.EqualFold(disposition, "attachment") || filename != "" {
+		if !safeFilename(filename) {
+			filename = "attachment"
+		}
+		if !safeContentType(contentType) {
+			contentType = "application/octet-stream"
+		}
+		if partID == "" {
+			partID = "1"
+		}
+		size, readErr := io.Copy(io.Discard, io.LimitReader(decodeMIMEBody(header, body), MaximumAttachmentBytes+1))
+		if readErr != nil || size > MaximumAttachmentBytes {
+			return errors.Join(ErrLimit, readErr)
+		}
+		state.attachments = append(state.attachments, AttachmentReference{PartID: partID, Filename: filename, ContentType: contentType, Size: uint64(size)})
 		return nil
 	}
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/") {
@@ -573,6 +596,7 @@ func walkMIME(header textproto.MIMEHeader, body io.Reader, depth int, state *ren
 			return ErrProtocol
 		}
 		multipartReader := multipart.NewReader(body, boundary)
+		partNumber := 0
 		for {
 			part, nextErr := multipartReader.NextPart()
 			if errors.Is(nextErr, io.EOF) {
@@ -581,7 +605,12 @@ func walkMIME(header textproto.MIMEHeader, body io.Reader, depth int, state *ren
 			if nextErr != nil {
 				return ErrProtocol
 			}
-			if err = walkMIME(part.Header, part, depth+1, state); err != nil {
+			partNumber++
+			childID := strconv.Itoa(partNumber)
+			if partID != "" {
+				childID = partID + "." + childID
+			}
+			if err = walkMIMEPart(part.Header, part, depth+1, childID, state); err != nil {
 				part.Close()
 				return err
 			}
@@ -821,7 +850,7 @@ func (service *Service) ReadMessage(ctx context.Context, mailbox MailboxContext,
 		sanitized = "<pre>" + html.EscapeString(state.plain) + "</pre>"
 	}
 	result := RenderedMessage{Identity: request.Identity, PlainText: boundedProjection(state.plain, MaximumRenderedPartBytes),
-		SanitizedHTML: sanitized, CSP: messageCSP, ReferrerPolicy: "no-referrer", RemoteImages: images}
+		SanitizedHTML: sanitized, CSP: messageCSP, ReferrerPolicy: "no-referrer", RemoteImages: images, Attachments: state.attachments}
 	return result, service.receipt(ctx, mailbox, "message.read", "succeeded", 1, false)
 }
 
@@ -888,7 +917,7 @@ type joinedReadCloser struct {
 
 type countingReader struct {
 	reader io.Reader
-	count uint64
+	count  uint64
 }
 
 func (reader *countingReader) Read(buffer []byte) (int, error) {
@@ -1191,7 +1220,7 @@ func writeFoldedHeader(writer io.Writer, name, value string) error {
 }
 
 type boundedWriter struct {
-	writer io.Writer
+	writer    io.Writer
 	remaining int64
 }
 

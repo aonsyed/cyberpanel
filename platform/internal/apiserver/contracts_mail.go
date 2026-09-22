@@ -265,6 +265,13 @@ type WebmailRenderedMessageResult struct {
 	CSP            string                         `json:"csp"`
 	ReferrerPolicy string                         `json:"referrer_policy"`
 	RemoteImages   []WebmailRemoteImageProjection `json:"remote_images"`
+	Attachments    []WebmailAttachmentReference   `json:"attachments"`
+}
+type WebmailAttachmentReference struct {
+	PartID      string `json:"part_id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Size        uint64 `json:"size"`
 }
 type WebmailRemoteImageResult struct {
 	ContentType    string `json:"content_type"`
@@ -311,7 +318,7 @@ type WebmailSendResult struct {
 func registerMailContracts(registry *Registry) error {
 	manage := identity.MustPermission("mail:manage")
 	definitions := []Operation{
-		{Name:"mail.mailbox.password.enroll",Permission:manage,Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,MaximumBodyBytes:4096,NewPayload:func()any{return &MailboxPasswordPayload{}},ValidatePayload:validateMailboxPassword,ResolveScope:mailExistingScope},
+		{Name: "mail.mailbox.password.enroll", Permission: manage, Assurance: identity.AssuranceMFA, Auth: AuthRequired, Mutating: true, MaximumBodyBytes: 4096, NewPayload: func() any { return &MailboxPasswordPayload{} }, ValidatePayload: validateMailboxPassword, ResolveScope: mailExistingScope},
 		{Name: "mail.domain.list", Permission: manage, Assurance: identity.AssurancePassword, Auth: AuthRequired, NewPayload: func() any { return &MailPagePayload{} }, ValidatePayload: validateMailPage, ResolveScope: mailListScope},
 		{Name: "mail.domain.get", Permission: manage, Assurance: identity.AssurancePassword, Auth: AuthRequired, NewPayload: func() any { return &EmptyPayload{} }, ResolveScope: mailGetScope},
 		{Name: "mail.domain.create", Permission: manage, Assurance: identity.AssuranceMFA, Auth: AuthRequired, Mutating: true, NewPayload: func() any { return &MailDomainPayload{} }, ValidatePayload: validateMailDomain, ResolveScope: mailCreateScope},
@@ -861,7 +868,9 @@ func safeCompose(message mail.ComposeMessage) bool {
 }
 
 func bindMail(registry *Registry, services DomainServices) error {
-	if err:=bindMailboxPassword(registry,services.MailboxPasswords);err!=nil{return err}
+	if err := bindMailboxPassword(registry, services.MailboxPasswords); err != nil {
+		return err
+	}
 	if services.MailControl != nil && services.MailControl.Store != nil {
 		for name, kind := range map[string]mail.ResourceKind{"mail.domain.list": mail.ResourceDomain, "mail.mailbox.list": mail.ResourceMailbox, "mail.alias.list": mail.ResourceAlias, "mail.policy.list": mail.ResourcePolicy} {
 			name, kind := name, kind
@@ -1192,11 +1201,15 @@ func apiWebmailSearchPage(value securewebmail.SearchPage) WebmailSearchPageResul
 	return WebmailSearchPageResult{Folder: value.Folder, UIDValidity: value.UIDValidity, HighestModSeq: value.HighestModSeq, Items: items, NextCursor: value.NextCursor, Partial: value.Partial}
 }
 func apiWebmailRenderedMessage(value securewebmail.RenderedMessage) WebmailRenderedMessageResult {
+	attachments := make([]WebmailAttachmentReference, len(value.Attachments))
+	for index, attachment := range value.Attachments {
+		attachments[index] = WebmailAttachmentReference{PartID: attachment.PartID, Filename: attachment.Filename, ContentType: attachment.ContentType, Size: attachment.Size}
+	}
 	images := make([]WebmailRemoteImageProjection, len(value.RemoteImages))
 	for index, image := range value.RemoteImages {
 		images[index] = WebmailRemoteImageProjection{ID: image.ID, URL: image.URL, Digest: image.URLDigest, Blocked: image.Blocked}
 	}
-	return WebmailRenderedMessageResult{Identity: apiWebmailIdentity(value.Identity), PlainText: value.PlainText, SanitizedHTML: value.SanitizedHTML, CSP: value.CSP, ReferrerPolicy: value.ReferrerPolicy, RemoteImages: images}
+	return WebmailRenderedMessageResult{Identity: apiWebmailIdentity(value.Identity), PlainText: value.PlainText, SanitizedHTML: value.SanitizedHTML, CSP: value.CSP, ReferrerPolicy: value.ReferrerPolicy, RemoteImages: images, Attachments: attachments}
 }
 func apiWebmailBlob(value securewebmail.BlobInfo) WebmailBlobResult {
 	return WebmailBlobResult{ID: value.ID, Filename: value.Filename, ContentType: value.ContentType, Size: value.Size, Digest: value.Digest, ExpiresAt: value.ExpiresAt}
