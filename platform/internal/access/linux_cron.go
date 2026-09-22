@@ -87,6 +87,38 @@ func renderCalendar(expression string) (string, error) {
 	}
 	return prefix + "*-" + fields[3] + "-" + fields[2] + " " + fields[1] + ":" + fields[0] + ":00", nil
 }
+
+// Cron combines restricted month-day and weekday fields with OR, whereas
+// systemd combines them with AND. Separate calendars retain cron's union.
+func renderCalendars(expression string) ([]string, error) {
+	calendar, err := renderCalendar(expression)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(expression, "@") {
+		return []string{calendar}, nil
+	}
+	normalized, err := scheduler.NormalizeExpression(expression)
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Fields(normalized)
+	if fields[2] == "*" || fields[4] == "*" {
+		return []string{calendar}, nil
+	}
+	weekday := fields[4]
+	fields[4] = "*"
+	monthDayCalendar, err := renderCalendar(strings.Join(fields, " "))
+	if err != nil {
+		return nil, err
+	}
+	fields[2], fields[4] = "*", weekday
+	weekdayCalendar, err := renderCalendar(strings.Join(fields, " "))
+	if err != nil {
+		return nil, err
+	}
+	return []string{monthDayCalendar, weekdayCalendar}, nil
+}
 func systemdWeekdays(field string) (string, error) {
 	names := []string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 	items := strings.Split(field, ",")
@@ -177,16 +209,18 @@ func (executor *LinuxCronExecutor) ApplySchedule(ctx context.Context, site SiteI
 		}
 		token := cronUnitToken(binding, job)
 		wanted[token] = struct{}{}
-		calendar, calendarErr := renderCalendar(job.Schedule.String())
+		calendars, calendarErr := renderCalendars(job.Schedule.String())
 		if calendarErr != nil {
 			return CronApplyReceipt{}, calendarErr
 		}
 		service := fmt.Sprintf("[Unit]\nDescription=CyberPanel site cron %s\n\n[Service]\nType=oneshot\nExecStart=/usr/local/libexec/cyberpanel/panel-cron-exec --manifest %s --job %s\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nReadWritePaths=/var/lib/cyberpanel/sites /var/lib/cyberpanel/access-cron\n", job.ID, systemdEscapeArgument(manifestPath), systemdEscapeArgument(string(job.ID)))
 		timer := "[Unit]\nDescription=CyberPanel site cron timer " + string(job.ID) + "\n\n[Timer]\nAccuracySec=1s\nPersistent=true\n"
-		if calendar == "boot" {
-			timer += "OnBootSec=1min\n"
-		} else {
-			timer += "OnCalendar=" + calendar + " " + job.Timezone + "\n"
+		for _, calendar := range calendars {
+			if calendar == "boot" {
+				timer += "OnBootSec=1min\n"
+			} else {
+				timer += "OnCalendar=" + calendar + " " + job.Timezone + "\n"
+			}
 		}
 		timer += "Unit=" + token + ".service\n\n[Install]\nWantedBy=timers.target\n"
 		if err = atomicRootFile("/etc/systemd/system/"+token+".service", []byte(service), 0644); err != nil {

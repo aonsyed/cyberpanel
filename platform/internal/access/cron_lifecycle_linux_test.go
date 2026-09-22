@@ -7,8 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/aonsyed/cyberpanel/platform/internal/scheduler"
 )
 
 func TestCronCalendarAcceptedByNativeScheduler(t *testing.T) {
@@ -24,6 +28,49 @@ func TestCronCalendarAcceptedByNativeScheduler(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s rejected: %s", expression, output)
 		}
+	}
+}
+
+func TestCronNativeCalendarPreservesDayUnion(t *testing.T) {
+	if _, err := exec.LookPath("/usr/bin/systemd-analyze"); err != nil {
+		t.Skip("native systemd calendar parser unavailable")
+	}
+	const expression = "0 0 1 * 1"
+	after := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	want, err := scheduler.NextLogicalTime(expression, "UTC", after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calendars, err := renderCalendars(expression)
+	if err != nil || len(calendars) != 2 {
+		t.Fatalf("expected two OR branches: %v %v", calendars, err)
+	}
+	var earliest time.Time
+	for _, calendar := range calendars {
+		command := exec.Command("/usr/bin/systemd-analyze", "calendar", "--base-time="+after.Format("2006-01-02 15:04:05 MST"), calendar+" UTC")
+		command.Env = append(os.Environ(), "TZ=UTC", "LC_ALL=C")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("native calendar: %v %s", err, output)
+		}
+		var next time.Time
+		for _, line := range strings.Split(string(output), "\n") {
+			if value, ok := strings.CutPrefix(strings.TrimSpace(line), "Next elapse: "); ok {
+				next, err = time.Parse("Mon 2006-01-02 15:04:05 MST", value)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if next.IsZero() {
+			t.Fatalf("missing next occurrence: %s", output)
+		}
+		if earliest.IsZero() || next.Before(earliest) {
+			earliest = next
+		}
+	}
+	if !earliest.Equal(want) {
+		t.Fatalf("native OR next=%s, cron contract=%s", earliest, want)
 	}
 }
 
