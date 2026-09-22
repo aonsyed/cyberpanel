@@ -7,6 +7,25 @@ The scope remains the complete product defined in the existing design spec.
 
 ### Resumed workflow checkpoint67 — 2026-09-22
 
+Latest71 qemu-workflow-3.1.70 (source ac288b355) committed through the normal
+signed installer. Manifest e1f2f31f6100297d1a0c151dce040f4a43b8d4c4fdb769483668a72894b20168;
+receipt 16187084cbc307f946eda889efc8616beb4e3d341723d9ea2e487ede23cceed3;
+bundle 6cf3b39a761218bf21140ad9fc31a79e66a28bea335108ef24b75cb4fb033839.
+Actual core/executor/gateway process hashes equal the three rebuilt artifacts;
+all services and PowerDNS/OLS active, panel HTTPS200. Combined apps/catalog/DNS/
+webmail/backup/providers/core/executor/gateway suites passed in QEMU. Matching
+host bundle retained, guest duplicate removed, staging pruned; guest4.4GiB free.
+
+Installed71 DNS full remaining UI lifecycle passed: update202 immediately serves
+A192.0.2.24/TXTdns-final, empty replacement202 removes A/TXT while retainingSOA,
+delete200 removesSOA. Parent independently queried the deleted zone: noSOA.
+390px editor assertion passed; exact disposable zone cleaned normally. Prior
+wrong-tenant read/write404 remains proven; lesser-role denial is not yet qualified.
+
+Installed71 backup directory STILL root:cyberpanel0750 despite migration source
+fix. This is an observed upgrade failure, not a pass; worker tracing actual hook
+invocation. Webmail full installed flow and WordPress admin login remain pending.
+
 Latest70 qemu-workflow-3.1.69 (source9699e7bbd): manifest
 ce8428b51ff3fb72279b7257a7aef8c281d572cf75873d1e6d50210fc721b3a7,
 receiptcb88e58126a0fa542a36195180eb9c054bd920d8c0ac1a446a13db65c92ef63f,

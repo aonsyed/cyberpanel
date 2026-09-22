@@ -50,6 +50,14 @@ upgrades skip initialization (source fixed for71). WordPress installed69 full
 install→HTTP→remove succeeds; canonical URL now derives from trusted applied
 routing in source for71. File tenant binding remains installed and qualified.
 
+Installed71 (source ac288b355) now includes the mail OAuth authzid, DNS purge,
+backup migration reconciliation, and complete HTTP WordPress manifest/probe fix.
+All three actual process hashes match rebuilt artifacts; HTTPS200 and affected
+QEMU suites pass. DNS update/empty/delete lifecycle passed with immediate native
+answers and normal fixture cleanup. Backup ownership remains WRONG after actual
+upgrade (root:cyberpanel0750); hook path diagnosis continues. Webmail installed
+full-flow and WordPress admin-login verification are still pending.
+
 Disk guard now reserves4GiB before release assembly/application and2GiB before
 builds/tests. Actual guard rejection and guest shell syntax checks passed. Known
 unreferenced obsolete releases15–17 and21–27 are retained as checksum-matching
