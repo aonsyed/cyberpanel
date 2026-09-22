@@ -23,11 +23,11 @@ type DNSAuthorityService interface{
 
 type DNSZoneApplyPayload struct{Zone dns.ZoneSpec `json:"zone"`;RecordSets []dns.RecordSet `json:"record_sets"`;TransferPeers []dns.TransferPeerSpec `json:"transfer_peers"`}
 type DNSZonePayload struct{Zone dns.ZoneSpec `json:"zone"`}
-type DNSZoneDeletePayload struct{Zone dns.ZoneSpec `json:"zone"`}
+type DNSZoneDeletePayload struct{Zone dns.ZoneSpec `json:"zone,omitzero"`}
 type DNSZoneCreatePayload struct{Name string `json:"name"`;Mode dns.ZoneMode `json:"mode"`;PrimaryAddresses []netip.Addr `json:"primary_addresses,omitempty"`}
 type DNSZonePagePayload struct{Limit uint16 `json:"limit"`;Cursor string `json:"cursor,omitempty"`}
 type DNSZonePage struct{Items []dns.ZoneSpec `json:"items"`;NextCursor string `json:"next_cursor,omitempty"`}
-type DNSRecordSetPagePayload struct{Zone dns.ZoneSpec `json:"zone"`;Limit uint16 `json:"limit"`;Cursor string `json:"cursor,omitempty"`}
+type DNSRecordSetPagePayload struct{Zone dns.ZoneSpec `json:"zone,omitzero"`;Limit uint16 `json:"limit"`;Cursor string `json:"cursor,omitempty"`}
 type DNSRecordSetPage struct{Items []dns.RecordSet `json:"items"`;NextCursor string `json:"next_cursor,omitempty"`}
 type DNSSECEnablePayload struct{Zone dns.ZoneSpec `json:"zone"`;Policy dns.DNSSECPolicy `json:"policy"`}
 
