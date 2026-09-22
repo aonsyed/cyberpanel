@@ -5,6 +5,40 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed79 — source30841a4aa
+
+Installed real UI resumed SAME completed replacement job
+import-0e7785d8412ade6e3c7747469d4f102a269333689d9dbb9210ea95df867b03c5;
+wrong destination rejected, separate retirement approval enforced. Retained
+original row verified before explicit retirement, retained schema then absent,
+exact replacement NULL/BLOB data preserved afterward. Exact disposable source/
+target databases and principals cleaned. No replacement repeated. Console
+client/scroll widths879/879 at1366px and389/389 at390px; parent viewed screenshot.
+Underlying full-page overflow remains visible, so no whole-page mobile claim.
+Worker assigned that specific layout correction separately. Evidence:
+/home/harness/lanes/database/replacement79-installed.log and
+replacement78-installed.json resume79 section; proof digest
+36c875f65633f98d52d487010a5b5c18a133bb55558ff7be3a7110b7adb39d4d.
+Apps worker received next exclusive normal removal/reinstall lease.
+
+Signed qemu-workflow-3.1.78 sequence79 committed through normal installer:
+manifest c459cf46e4e6c7e6ed1a82c50c3de5af8f8aa7de4867c6b555367519aa5f3413;
+receipt1875aa73ccae120118411baeb2f1a49fa37d4eaafddf0037d23a33705aa93254;
+operation install-7204e94896d21fe621dbc926c2d124b5dd5657bd44c71444979a08e801d8fbd4.
+Actual running hashes equal QEMU-built inputs:
+core be9c8b01c2ad1a6bb80cb2442d38013f1c347c2d9548259a5a3b159e75813bee;
+executor839b3d71b33327dd6f3826e8aac8bcdd049b7fb9bdd871ab476f1b4e93f7553b;
+gateway096e24e129a303384fe0b383a285af60aa3bd4a89b15af294544a3c008c8ee98.
+All seven panel services and OLS active. Actual HTML references new assets
+index-B6Dvubmi.css/panel-B9tIZj9g.js; JS200. Installation proves deployment, not
+completion of pending application removal/login or installed recovery tests.
+Database worker received first exclusive lease for same-job resume/retirement.
+Bundle714ca58d9e80c388c1cf71fb2fcd9ff6d764527320ff9d6105d19b102772cec9
+copied to ignored host archive; 105artifacts/534536336bytes.
+Host/guest bundle SHA256 matched before exact guest duplicate deletion; installer
+prune-staging returned pruned. Guest4.3GiB free. Host archive is recoverable;
+no application snapshots or retained native data were removed by this cleanup.
+
 ### Source30841a4aa — ownership recovery and installed alias proof
 
 Apps9e42ec098 integrated30841a4aa: persist owned database/configuration references

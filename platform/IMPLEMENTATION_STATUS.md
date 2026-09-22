@@ -9,6 +9,18 @@ No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
+Latest checkpoint: signed sequence79, qemu-workflow-3.1.78, product source30841a4aa
+is committed in the existing Ubuntu ARM64 guest. Actual core/executor/gateway
+process hashes match rebuilt inputs; seven panel services plus OLS active; new
+UI panel-B9tIZj9g.js returns200. This installs public-reader ACL, durable failed-app
+ownership/removal, backup completed-boundary health-gated recovery, database
+mobile wrapping and scoped retained-job resume. Installed alias API/native
+create/update/local-delivery/delete passed with exact probe cleanup.
+Database worker now verifying same completed job retirement/mobile UI; apps and
+backup installed recovery proofs queued for exclusive shared-service leases.
+Full parity remains incomplete; no new overall percentage inferred from these
+checks. Subsequent sections retain historical checkpoints, not current blockers.
+
 Goal resumed by user; no change in full parity scope. Six newly authorized workers
 use isolated resume-20260922-{webmail,database,backup,apps,access,dns} worktrees,
 all based on d54ee9ce0. No child delegation, downloads or native-vendor changes.
@@ -27,7 +39,7 @@ Frame complete; fan-out resumed on the existing workers; aggregation and report
 pending. A completed lane does not block another lane's independent work. Only
 shared service/config/account mutations and the shared browser credential require
 a parent-granted exclusive lease; isolated QEMU tests may proceed concurrently
-with GOMAXPROCS=1 and -p1. No new downloads or release installation by workers.
+with GOMAXPROCS=1 and -p 1. No new downloads or release installation by workers.
 
 | Owner | Bounded unfinished slice | Shared-resource gate |
 | --- | --- | --- |
