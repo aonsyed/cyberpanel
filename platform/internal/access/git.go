@@ -115,9 +115,11 @@ func (repository GitRepository) Validate() error {
 	if err := requireID("Git repository", string(repository.ID)); err != nil { return err }
 	if err := requireID("site", string(repository.SiteID)); err != nil { return err }
 	if repository.Provider != GitHub && repository.Provider != GitLab && repository.Provider != Bitbucket && repository.Provider != GitGeneric { return fmt.Errorf("invalid Git provider") }
-	parsed, err := ParseRemoteRepository(repository.Remote.URL()); if err != nil { return err }
-	if parsed != repository.Remote { return ErrIntegrity }
-	if err = repository.Worktree.Validate(); err != nil { return err }
+	if repository.Remote != (RemoteRepository{}) {
+		parsed, err := ParseRemoteRepository(repository.Remote.URL()); if err != nil { return err }
+		if parsed != repository.Remote { return ErrIntegrity }
+	} else if repository.DeployKeyID != "" || repository.CredentialRef != "" { return ErrIntegrity }
+	if err := repository.Worktree.Validate(); err != nil { return err }
 	if repository.Worktree.Root.SiteID != repository.SiteID { return ErrUnauthorized }
 	if !validGitRef(repository.Branch) { return fmt.Errorf("invalid Git branch") }
 	if repository.Strategy != GitFastForward && repository.Strategy != GitHardDeploy && repository.Strategy != GitManual { return fmt.Errorf("invalid Git strategy") }
@@ -543,6 +545,7 @@ func (service GitService) ExecuteDeployment(ctx context.Context, id DeploymentID
 	if err = service.transitionDeployment(ctx, &deployment, DeploymentSucceeded); err != nil { return Deployment{}, err }
 	previous := repository.Generation; repository.Generation++; repository.HeadRevision, repository.UpdatedAt = deployment.ResolvedRevision, service.now()
 	if err = service.Store.AdvanceRepository(ctx, repository, previous); err != nil { return Deployment{}, err }
+	if err = service.Executor.DiscardDeployment(ctx, repository, deployment); err != nil { return deployment, err }
 	return deployment, nil
 }
 
@@ -564,6 +567,7 @@ func (service GitService) rollbackDeployment(ctx context.Context, repository Git
 	if transitionErr := service.transitionDeployment(ctx, &deployment, DeploymentRollingBack); transitionErr != nil { return Deployment{}, transitionErr }
 	if _, rollbackErr := service.Executor.RollbackDeployment(ctx, repository, deployment); rollbackErr != nil { _ = service.failDeployment(ctx, &deployment, rollbackErr); return Deployment{}, errors.Join(cause, rollbackErr) }
 	if transitionErr := service.transitionDeployment(ctx, &deployment, DeploymentRolledBack); transitionErr != nil { return Deployment{}, transitionErr }
+	if cleanupErr := service.Executor.DiscardDeployment(ctx, repository, deployment); cleanupErr != nil { return deployment, errors.Join(cause, cleanupErr) }
 	return deployment, cause
 }
 
