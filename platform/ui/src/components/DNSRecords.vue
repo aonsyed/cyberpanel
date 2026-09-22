@@ -15,7 +15,7 @@ const confirmed=ref(false);
 const generation=ref(Number(props.resource.generation));
 const attempt=ref<{key:string;payload:string}|null>(null);
 let nextKey=0;
-const kinds=["A","AAAA","CNAME","TXT","MX","NS","SRV","PTR","CAA","NAPTR","TLSA","SSHFP","DS","DNSKEY","HTTPS","SVCB"];
+const kinds=["A","AAAA","CNAME","TXT","MX","NS","SRV","PTR","CAA","NAPTR","TLSA","SSHFP"];
 onMounted(()=>void load());
 
 async function load():Promise<void>{
@@ -25,6 +25,7 @@ async function load():Promise<void>{
     do{
       const response=await api.invoke<{items:RecordSet[];next_cursor?:string}>("dns.recordset.list",{tenantId:props.tenantId,resourceId:String(props.resource.id),payload:{limit:1000,cursor:cursor||undefined}});
       for(const set of response.result.items||[]){
+        if(set.kind!=="SOA"&&!kinds.includes(set.kind))throw new Error(`This zone contains ${set.kind} records that this editor cannot replace. No changes were made.`);
         if(set.kind!=="SOA")all.push({key:nextKey++,name:set.owner,type:set.kind,ttl:set.ttl,values:set.records.join("\n")});
       }
       cursor=response.result.next_cursor||"";
