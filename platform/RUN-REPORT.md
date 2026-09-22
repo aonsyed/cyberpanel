@@ -5,6 +5,37 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Next source batch6a4c7d8ec — not installed yet
+
+Integrated approved export-backed database replacementc3ee42bd2 as6a4c7d8ec.
+Read-only preview does not fence applications; explicit target/name/generation/
+job/point approval starts the native fence. Approval is audited; failed preparing
+points have explicit safe abort, completed retained originals explicit retirement.
+Public native HTTP final test passed1.623s, including reconstructed interrupted
+creation and post-lock pre-job failure; actual log inspected at
+/home/harness/lanes/database/replacement-public-final.log. Seven native lifecycle
+cases passed3.797s. Uploaded replacement stays disabled. UI controls typecheck,
+but installed UI proof, especially inspect404 before job admission then abort,
+remains pending. Existing handler releases busy on failed inspection.
+
+Joomla fixd14e4875d integrated694003843: generated cp_<hash>_ prefix violated
+Joomla's permitted format; use cp<hash>_. Existing native fixture now exercises
+the complete runtime install, actual packaged PHP, exact managed grants, admin
+row and active release manifest. Worker full apps/native pass2.990s; parent
+default apps pass0.584s. Installed homepage/admin/removal remain unproven.
+
+Parent combined source checks passed in QEMU: database14.320s, API0.914s,
+core1.330s, executor0.018s; UI typecheck and Vite build passed. New assets
+index-Chi4kHMs.css and panel-DwPs7UA1.js; existing bundle-size warning nonfatal.
+Core/executor/gateway binaries built. No release activation during concurrent
+mail/DNS or backup native mutation leases.
+
+Unused sequences61/62 archived to ignored host retired-node-releases after no
+active/previous, symlink or process-map references and checksum-matching dry-run;
+exact guest copies removed (about1GiB), recoverable host copies remain:
+bae97e346bae9d1ace8b1683c28dcc3961537a2ff28c204c74de41f7f173f584,
+c98e86aaea81cc6c00c54664c076d52a02cce02959418024345a7888112c0561.
+
 ### Installed77 nested webmail attachment qualification
 
 Actual passkey UI read200 and two attachment issue201 operations returned exact

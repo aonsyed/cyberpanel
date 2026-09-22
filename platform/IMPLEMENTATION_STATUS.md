@@ -93,6 +93,14 @@ production-runtime fixture diagnosis; backup completed-boundary reconciliation
 (mid-SQL effects remain denied); DKIM local signing/public-key integration.
 These next assignments are not completion claims.
 
+Next source batch6a4c7d8ec is integrated, not installed: approved export-backed
+database replacement/abort/retirement API and UI; Joomla generated table-prefix
+correction694003843. Worker native HTTP approval/recovery/retirement tests pass,
+including abort after failed point preparation. Parent combined QEMU checks
+pass: database/API/core/executor and UI typecheck/build. Actual installed UI
+replacement and Joomla homepage/admin/remove remain pending. Signed78 assembly
+uses these sources and waits for mail/backup mutation leases before activation.
+
 Post75 fixes now installed76: c7d477100 selects the actual
 packaged PHP CLI after the LSAPI installer no-op was reproduced;13d6bcfcf invalidates
 scoped DNSSEC caches after durable key transitions. Installed75 DNSSEC enable and
