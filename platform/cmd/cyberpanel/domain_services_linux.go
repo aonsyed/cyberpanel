@@ -606,7 +606,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 	wordpressManager := &apps.WordPressManager{Store: repositories.Applications, Executor: applicationClient, Recovery: applicationRecovery, Now: runtimeClock{}.Now}
 	applicationAutologin := &apps.AutologinService{Store: repositories.Applications, Tokens: apps.CryptoRandomTokenSource{}, Now: runtimeClock{}.Now, Endpoint: "/api/v1/applications/wordpress/autologin/exchange"}
 	applicationAutologinBridge := &apps.AutologinBridgeManager{Store: repositories.Applications, Executor: applicationClient, Verifier: applicationCatalogAuthority, Now: runtimeClock{}.Now}
-	applicationConsoleEdge, err := newApplicationEdge(applicationService, applicationLifecycle, wordpressManager, applicationAutologin, applicationAutologinBridge, repositories.Applications, repositories.Hosting, applicationClient, applicationCatalog, applicationCatalogAuthority, applicationSecrets, installedEdition, runtimeClock{}.Now)
+	applicationConsoleEdge, err := newApplicationEdge(applicationService, applicationLifecycle, wordpressManager, applicationAutologin, applicationAutologinBridge, repositories.Applications, repositories.Hosting, applicationClient, applicationCatalog, applicationCatalogAuthority, applicationSecrets, installedEdition, catalog, runtimeClock{}.Now)
 	if err != nil {
 		return apiserver.DomainServices{}, fmt.Errorf("initialize application console edge: %w", err)
 	}

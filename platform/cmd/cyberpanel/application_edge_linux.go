@@ -18,8 +18,10 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/apps"
 	"github.com/aonsyed/cyberpanel/platform/internal/executor/siteops"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/provisioning"
+	hostingservice "github.com/aonsyed/cyberpanel/platform/internal/hosting/service"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/site"
 	"github.com/aonsyed/cyberpanel/platform/internal/hosting/sqlrepo"
+	webcatalog "github.com/aonsyed/cyberpanel/platform/internal/webengine/catalog"
 )
 
 type applicationEdge struct {
@@ -36,11 +38,12 @@ type applicationEdge struct {
 	secrets   *apps.ApplicationSecretIssuer
 	target    apps.CatalogTarget
 	scanner   apps.ScanCoordinator
+	routes    *webcatalog.SQLCatalog
 	now       func() time.Time
 }
 
-func newApplicationEdge(service *apps.ApplicationService,lifecycle *apps.LifecycleCoordinator,wordpress *apps.WordPressManager,autologin *apps.AutologinService,bridge *apps.AutologinBridgeManager,store apps.SQLRepository,hosting *sqlrepo.Repository,client *apps.LinuxApplicationClient,catalog *apps.PinnedCatalog,authority *apps.LinuxRecipeCatalogAuthority,secrets *apps.ApplicationSecretIssuer,edition siteops.EngineEdition,now func()time.Time)(*applicationEdge,error){
-	if service==nil||lifecycle==nil||wordpress==nil||autologin==nil||bridge==nil||store.DB==nil||hosting==nil||client==nil||catalog==nil||authority==nil||secrets==nil{return nil,apps.ErrInvalid};if now==nil{now=time.Now};target,err:=applicationCatalogTarget(edition);if err!=nil{return nil,err};scanner:=apps.ScanCoordinator{Store:store,Snapshots:client,Providers:map[string]apps.ScannerProvider{client.ID():client},Now:now};return &applicationEdge{service,lifecycle,wordpress,autologin,bridge,store,hosting,client,catalog,authority,secrets,target,scanner,now},nil
+func newApplicationEdge(service *apps.ApplicationService,lifecycle *apps.LifecycleCoordinator,wordpress *apps.WordPressManager,autologin *apps.AutologinService,bridge *apps.AutologinBridgeManager,store apps.SQLRepository,hosting *sqlrepo.Repository,client *apps.LinuxApplicationClient,catalog *apps.PinnedCatalog,authority *apps.LinuxRecipeCatalogAuthority,secrets *apps.ApplicationSecretIssuer,edition siteops.EngineEdition,routes *webcatalog.SQLCatalog,now func()time.Time)(*applicationEdge,error){
+	if service==nil||lifecycle==nil||wordpress==nil||autologin==nil||bridge==nil||store.DB==nil||hosting==nil||client==nil||catalog==nil||authority==nil||secrets==nil||routes==nil{return nil,apps.ErrInvalid};if now==nil{now=time.Now};target,err:=applicationCatalogTarget(edition);if err!=nil{return nil,err};scanner:=apps.ScanCoordinator{Store:store,Snapshots:client,Providers:map[string]apps.ScannerProvider{client.ID():client},Now:now};return &applicationEdge{service,lifecycle,wordpress,autologin,bridge,store,hosting,client,catalog,authority,secrets,target,scanner,routes,now},nil
 }
 
 func(edge *applicationEdge)ApplicationCapabilities()apiserver.ApplicationEdgeCapabilities{return apiserver.ApplicationEdgeCapabilities{List:true,Discover:true,Adopt:true,Install:true,Update:true,Remove:true,Scan:true,Autologin:edge!=nil&&edge.autologin!=nil&&edge.bridge!=nil,CachePurge:true}}
@@ -71,7 +74,8 @@ func(edge *applicationEdge)InstallApplication(ctx context.Context,call apiserver
 	title:=strings.TrimSpace(payload.Title);if title==""{title=hostname}
 	spec:=provisioning.RuntimeSpec{}
 	root,err:=applicationServedRoot(spec.ApplicationRoot(),spec.DocumentRoot());if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err}
-	request:=apps.InstallRequest{CommandID:apps.CommandID(call.CommandID),TenantID:tenantID,ProjectID:apps.ProjectID(aggregate.ProjectID().String()),SiteID:siteID,SiteUID:scope.SiteUID,SiteGeneration:scope.ResourceGeneration,IsolationProfile:scope.IsolationProfile,InstallationID:installationID,DatabaseInstanceID:apps.DatabaseInstanceID(payload.DatabaseInstanceID),Recipe:reference,CatalogTarget:target,Root:root,RuntimeID:string(aggregate.PHPProfile()),CanonicalURL:"https://"+hostname+"/",Administrator:apps.AdministratorBootstrap{Username:payload.AdministratorUsername,Email:payload.AdministratorEmail,DisplayName:payload.AdministratorDisplayName,PasswordRef:apps.SecretRef(apps.ApplicationManagedSecretID("administrator",installationID).String())},Title:title,Locale:locale,Timezone:timezone,ReleaseID:releaseID}
+	scheme,err:=edge.routes.SiteScheme(ctx,hostingservice.CommandScope{TenantID:aggregate.TenantID(),SiteID:aggregate.ID()},hostname,aggregate.Generation());if err!=nil{return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err}
+	request:=apps.InstallRequest{CommandID:apps.CommandID(call.CommandID),TenantID:tenantID,ProjectID:apps.ProjectID(aggregate.ProjectID().String()),SiteID:siteID,SiteUID:scope.SiteUID,SiteGeneration:scope.ResourceGeneration,IsolationProfile:scope.IsolationProfile,InstallationID:installationID,DatabaseInstanceID:apps.DatabaseInstanceID(payload.DatabaseInstanceID),Recipe:reference,CatalogTarget:target,Root:root,RuntimeID:string(aggregate.PHPProfile()),CanonicalURL:scheme+"://"+hostname+"/",Administrator:apps.AdministratorBootstrap{Username:payload.AdministratorUsername,Email:payload.AdministratorEmail,DisplayName:payload.AdministratorDisplayName,PasswordRef:apps.SecretRef(apps.ApplicationManagedSecretID("administrator",installationID).String())},Title:title,Locale:locale,Timezone:timezone,ReleaseID:releaseID}
 	if len(material.DatabaseClientCertificate)>0 { request.DatabaseClientIdentityRef=apps.SecretRef(apps.ApplicationManagedSecretID("database_tls",installationID).String()) }
 	if err:=request.Validate(edge.now());err!=nil { return apiserver.EdgeMutation[apiserver.ApplicationProjection]{},err }
 	administratorSecret,err:=edge.secrets.EnrollAdministratorSecret(ctx,tenantID,siteID,installationID,material.AdministratorPassword)
