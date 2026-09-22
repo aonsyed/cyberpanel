@@ -52,7 +52,7 @@ probe reproduced unreadable authorized_keys and absent root confinement; worker
 is implementing native jail/key/revoke lifecycle without altering system SSH in
 its isolated probes. Joomla6.1.3 has a cached signed recipe/archive; no download.
 
-CURRENT: signed76, qemu-workflow-3.1.75, source1156571cd. All seven live service
+Previous batch: signed76, qemu-workflow-3.1.75, source1156571cd. All seven live service
 binary hashes match rebuilt artifacts; panel/new UI asset200 and all services/OLS
 active. Includes SFTP confinement and usable form, purpose-bound encrypted local
 repositories with8MiB chunk capture/reassembly, Joomla packaged PHP CLI, DNSSEC
@@ -70,8 +70,19 @@ permissions under executor UMask0027. Fix2c9ff300e explicitly restores0755 only
 on validated managed directories; QEMU access regression passes, deployment and
 installed transfer retest pending. Internal fenced database replacement532dca02f
 is integrated with affected database/API/core/executor tests passing in QEMU;
-public replacement wiring remains ongoing. Source532dca02f is pushed, not yet
-installed. Existing76 remains the live runtime during DNS installed checks.
+public replacement wiring remains ongoing.
+
+CURRENT: signed77 qemu-workflow-3.1.76, source532dca02f, committed with SFTP
+permission correction and internal database replacement. Actual core/executor/
+gateway process hashes match rebuilt artifacts; all seven services and OLS
+active, panel HTML and existing UI asset200. Installed SFTP exact-byte transfer,
+escape/cross-site denial and UI revoke/native cleanup passed; parent checked
+receipt and matching upload/download hashes. Actual reboot/AlmaLinux remain.
+DNS installed76 warmed transitions/local-anchor validation/tenant denial/cleanup
+passed in worker tool output; parent inspected executed assertions and saved
+DNSKEY/DS projection (raw delv output was not retained separately).
+Joomla76 retry still failed and compensated; actual packaged-PHP production
+runner diagnosis continues alongside database public integration.
 
 Post75 fixes now installed76: c7d477100 selects the actual
 packaged PHP CLI after the LSAPI installer no-op was reproduced;13d6bcfcf invalidates

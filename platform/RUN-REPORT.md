@@ -5,6 +5,41 @@ The scope remains the complete product defined in the existing design spec.
 
 ## Source and environment
 
+### Installed77 — SFTP permission correction and replacement prerequisite
+
+Source532dca02f, signed qemu-workflow-3.1.76 sequence77 committed.
+Manifest ad94af26cdd4cbfb4c6ab86aca5337c416982e07a210f728b154f7a1256c5605;
+receipt 2519ae82f340c1b95eee9ab7c625f3f17e6a584df0da6324feee1fa287b5477c;
+bundle 7b77d88bc86d7f76180df6cc255a2293a307f9997328f134157fc80a9974a649.
+Actual running /proc/MainPID/exe hashes equal rebuilt source artifacts:
+core7b68f24976505a61f04f98d7ae1d9670e66785f1eb08deef2e19c60864b44435,
+executor9bc914b9a7153abb3c7d10b1bb324505a020bdb337edb6dfe8b5d0454ca7d390,
+gatewaye6ac714927beaf28bd274afd7cb3705650c4e67bdad9397496dccc1967f99204.
+All seven services and OLS active; HTML and panel-CDFxR6yC.js200. Installed SFTP
+transfer/isolation retest passed: UI201 grant, selectable login, native exact
+30-byte put/get, absolute/traversal/symlink/cross-site denial, UI200 revoke and
+native reauthentication denial. Parent inspected the revoked receipt and both
+files' equal SHA256 f336a57a7ea4f3b0b23d253d106529493effb2fc2ab838fdcdd9f9447c0fe7cd.
+Evidence /home/harness/lanes/access/sftp-installed-ijxXg9/receipt.json and
+testvm/SFTP-QEMU-2026-09-22.md. Actual reboot and AlmaLinux remain unqualified.
+Bundle copied to ignored host .work/qemu/panel-workflow-3.1.76.tar with matching
+SHA256 before guest duplicate deletion; staging pruned, guest4.1GiB available.
+
+DNS installed76 cache-cycle completed exit0 in worker session71690/chunkd99cd1:
+both warmed cache transitions, exact DNSKEY/DS, local-anchor delv validation,
+foreign tenant404, disable and exact zone cleanup. Cleanup chunk01c342 reports
+zero fixture zone and retained-key rows. Parent inspected qa-dnssec.cjs's native
+query/validation assertions and saved dnssec-public-status.json (key34286).
+Raw delv output was asserted in memory, not retained as a separate log. This is
+local-anchor signing qualification, not public delegation or parent-DS proof.
+
+Disk reserve maintained by archiving unused sequence60 release
+4e6adc56dc5e8bb775af85a68df7cb8bbca8d8ca696f2d1144e8afae631e0837
+to ignored host .work/qemu/retired-node-releases. It was neither active nor
+previous, with no checked service/config symlink or process mapping reference.
+Checksum dry-run matched before exact guest deletion; recoverable host copy
+retained. No database/app recovery points were removed.
+
 ### Installed76 follow-up and next source batch
 
 Encrypted local backup journey passed through the installed UI/API: explicit
