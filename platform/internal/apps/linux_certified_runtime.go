@@ -68,8 +68,7 @@ func (manifest linuxApplicationReleaseManifest) Validate() error {
 	}
 	if err := manifest.Artifact.Validate(); err != nil { return err }
 	if err := manifest.Database.Validate(); err != nil { return err }
-	parsed, err := url.Parse(manifest.CanonicalURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" || parsed.RawQuery != "" || parsed.Port() != "" && parsed.Port() != "443" {
+	if _, _, err := applicationCanonicalURL(manifest.CanonicalURL); err != nil {
 		return ErrIntegrity
 	}
 	if len(manifest.Probes) == 0 || len(manifest.Probes) > 16 { return ErrIntegrity }
@@ -914,7 +913,11 @@ func (runtime *LinuxApplicationRuntime) probeApplicationDatabase(ctx context.Con
 }
 
 func (runtime *LinuxApplicationRuntime) probeApplicationHTTP(ctx context.Context, manifest linuxApplicationReleaseManifest, probe ProbeDefinition) (string, error) {
-	canonical, err := url.Parse(manifest.CanonicalURL)
+	return probeApplicationHTTPWithDial(ctx, manifest, probe, (&net.Dialer{Timeout: probe.Timeout}).DialContext)
+}
+
+func probeApplicationHTTPWithDial(ctx context.Context, manifest linuxApplicationReleaseManifest, probe ProbeDefinition, dial func(context.Context, string, string) (net.Conn, error)) (string, error) {
+	canonical, port, err := applicationCanonicalURL(manifest.CanonicalURL)
 	if err != nil { return "", ErrIntegrity }
 	requestURL := *canonical
 	requestURL.Path = path.Join(canonical.Path, probe.RelativeEndpoint)
@@ -923,7 +926,7 @@ func (runtime *LinuxApplicationRuntime) probeApplicationHTTP(ctx context.Context
 		Proxy: nil, DisableKeepAlives: true, MaxIdleConns: 0, TLSHandshakeTimeout: probe.Timeout,
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: canonical.Hostname()},
 		DialContext: func(dialContext context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: probe.Timeout}).DialContext(dialContext, "tcp", "127.0.0.1:443")
+			return dial(dialContext, "tcp", net.JoinHostPort("127.0.0.1", port))
 		},
 	}
 	defer transport.CloseIdleConnections()
