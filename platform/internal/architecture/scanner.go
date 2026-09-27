@@ -196,12 +196,22 @@ type exactImportAllowance struct {
 }
 
 // Maildir mutation runs inside the privileged mail host and resolves the
-// exact durable site runtime identity before touching a mailbox. Keep this
-// exception file-specific rather than opening mail as an executor client.
+// exact durable site runtime identity before touching a mailbox. Site-facing
+// restore/provisioning paths follow the same rule: they re-apply the exact
+// durable public-reader ACL after privileged file publication, and their
+// component tests prove that behavior with the real helper. Keep every
+// exception file-specific rather than opening domain packages as executor
+// clients.
 var domainHostExecutorImportAllowances = map[exactImportAllowance]struct{}{
 	{"internal/mail/daemon_linux.go", "internal/executor/siteops"}:            {},
 	{"internal/mail/maildir_transfer_linux.go", "internal/executor/siteops"}:  {},
 	{"internal/mail/migration_maildir_linux.go", "internal/executor/siteops"}: {},
+	{"internal/mail/mailbox_provision_linux.go", "internal/executor/siteops"}: {},
+	{"internal/mail/mailbox_provision_linux_test.go", "internal/executor/siteops"}: {},
+	{"internal/backup/site_restore_linux.go", "internal/executor/siteops"}:    {},
+	{"internal/apps/certified_public_access_linux_test.go", "internal/executor/siteops"}:   {},
+	{"internal/apps/joomla_install_live_linux_test.go", "internal/executor/siteops"}:       {},
+	{"internal/apps/update_shadow_linux_test.go", "internal/executor/siteops"}:             {},
 }
 
 func allowedDomainHostExecutorImport(sourceFile, importPath, modulePath string) bool {
