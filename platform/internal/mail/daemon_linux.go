@@ -703,7 +703,7 @@ func (host *LinuxMailHost) validateGeneration(ctx context.Context, id string) (s
 		output, err := runMailProcess(ctx, command[0], command[1:]...)
 		evidence = append(evidence, command[0], string(output), errorText(err))
 		if err != nil {
-			return digestMailEvidence(evidence...), err
+			return digestMailEvidence(evidence...), fmt.Errorf("%s %s: %w: %s", command[0], strings.Join(command[1:], " "), err, commandDiagnostic(string(output)))
 		}
 	}
 	redisEvidence, err := host.validateRedisConfig(ctx, filepath.Join(root, "redis/redis.conf"))
