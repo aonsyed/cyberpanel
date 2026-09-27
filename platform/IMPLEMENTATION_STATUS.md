@@ -13,6 +13,33 @@ Branch `codex/completion-20260927` (from b0fd20158). Whole-source build
 passed at HEAD in Ubuntu ARM64; the full suite passed there after the
 changes below (log `/home/harness/final-completion-test.log`).
 
+### Clean-host lane update — apply reached COMMITTED once; core's first mail generation is the remaining boundary
+
+Continuing the campaign below, the PowerDNS fail-closed was instrumented
+and root-caused (probe replicated every native-access check): the shared
+generation store writer creates its root 0750, while native-access
+admission accepts only 0700 pre-grant. Fixed by normalizing exactly that
+root-owned ACL-less fresh state at authority open (regression:
+`TestQEMIFreshPowerDNSStoreRootNormalization`). With this, apply14 on the
+dr2 clean host reached **state committed** with panel-authd, execd,
+gateway, peer-inspectd, providerd, secretd, openlitespeed active and a
+real pdns_server serving on :53 from a host-born SQLite authority.
+
+panel-core, however, crash-loops during its own startup: the Dovecot
+OAuth passdb activation applies the FIRST mail generation and the
+activation ends ErrAmbiguous. Instrumentation added for this boundary
+(all retained in the daemon journal now): the broker logs the underlying
+failure causes, and native validator errors name the failing command and
+its output. Findings so far: every native validator passes against the
+staged generation (postfix, doveconf, rspamadm, opendkim — opendkim only
+fails through a dangling `current` after rollback); the failure is in
+the reload/start cascade over services that a clean host has never
+started. A targeted fix landed (reload of an inactive unit falls back to
+start), after which reloads reach the services but the activation still
+fences ambiguous — the remaining diagnosis is the first-generation
+reload/probe/rollback cascade with the mail fleet cold. Every failed
+apply rolled back cleanly; dr2 disk and apply logs 13–19 are retained.
+
 ### Clean-host installation lane — five boundary fixes, chain still open
 
 The clean-host drill continued past documentation into product fixes. A
