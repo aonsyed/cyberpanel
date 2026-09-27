@@ -184,18 +184,28 @@ func migrationPrivateTLSRender(render native.RenderRequest, rehearsal migrationC
 	}
 	listeners := render.Desired.Engine.Listeners[:0]
 	tlsCount, clearCount := 0, 0
+	clearPort := uint16(18080)
 	for _, listener := range render.Desired.Engine.Listeners {
 		if !listenerSet[listener.Ref] {
 			continue
 		}
 		listener.Addresses = []string{"127.0.0.1"}
 		listener.DefaultBindingRef = binding.Ref
-		listeners = append(listeners, listener)
+		// The candidate engine runs inside the executor sandbox, which
+		// deliberately carries no CAP_NET_BIND_SERVICE: production listener
+		// ports cannot bind there. The rehearsal's private network namespace
+		// makes fixed unprivileged ports collision-free, and this same render
+		// reaches config generation and the probe, so the ports stay bound
+		// into the evidence.
 		if listener.TLSMode == webengine.TLSModeTLS {
+			listener.Port = 18443
 			tlsCount++
 		} else {
+			clearPort++
+			listener.Port = clearPort
 			clearCount++
 		}
+		listeners = append(listeners, listener)
 	}
 	if tlsCount != 1 || clearCount < 1 {
 		return render, migration.ErrBlocked

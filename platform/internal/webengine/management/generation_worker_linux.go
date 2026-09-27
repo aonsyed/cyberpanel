@@ -3,6 +3,8 @@
 package management
 
 import (
+	"strconv"
+	"os/user"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -19,6 +21,7 @@ import (
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation"
 	"github.com/aonsyed/cyberpanel/platform/internal/webengine/activation/fsstore"
+	"github.com/aonsyed/cyberpanel/platform/internal/webengine/native"
 )
 
 const LinuxLifecycleWorkerMode = "--private-webengine-candidate"
@@ -178,6 +181,18 @@ func RunLinuxLifecycleWorker() (err error) {
 	closeErr := store.Close()
 	if err != nil || closeErr != nil { return errors.Join(err, closeErr) }
 	if err = isolateLifecycleFiles(master, edition); err != nil { return err }
+	if input.Mode == "probe" {
+		// The renderer maps the panel-health context at the candidate's
+		// snapshot generation; the activation flow creates that directory
+		// when it seals a generation, so a rehearsal candidate must create
+		// it too or the engine refuses the vhost at startup.
+		health := native.HealthDocumentRoot(input.Candidate.Render.Snapshot.Generation)
+		if info, statErr := os.Lstat(health); statErr == nil {
+			if !info.IsDir() || info.Mode().Perm() != 0o755 { return ErrConflict }
+		} else if os.IsNotExist(statErr) {
+			if err = os.Mkdir(health, 0o755); err != nil { return err }
+		} else { return statErr }
+	}
 	if len(input.Candidate.PrivateTLS) != 0 {
 		if err = validatePrivateTLSMaterials(input.Candidate.Render, input.Candidate.PrivateTLS, time.Now().UTC()); err != nil { return err }
 		if err = mountPrivateTLSMaterials(input.Candidate.PrivateTLS); err != nil { return err }
@@ -242,8 +257,30 @@ func isolateLifecycleFiles(candidate string, edition webengine.Edition) error {
 	if err := lifecycleTmpfs("/run", "mode=0755,size=16m"); err != nil { return err }
 	if err := os.MkdirAll("/run/cyberpanel/site-runtime", 0o755); err != nil { return err }
 	if err := syscall.Mount("/tmp/site-runtime", "/run/cyberpanel/site-runtime", "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil { return err }
-	for _, directory := range []string{"/usr/local/lsws/logs", "/usr/local/lsws/admin/logs", "/usr/local/lsws/admin/tmp", "/dev/shm"} {
-		if err := lifecycleTmpfs(directory, "mode=0770,size=32m"); err != nil { return err }
+	for _, directory := range []string{"/usr/local/lsws/logs", "/usr/local/lsws/admin/logs", "/usr/local/lsws/admin/tmp", "/usr/local/lsws/cgid", "/dev/shm"} {
+		mode := "mode=0770,size=32m"
+		if directory == "/usr/local/lsws/cgid" {
+			// lscgid creates its sockets under the engine root on startup;
+			// the installed tree keeps this directory root-owned and 0755.
+			mode = "mode=0755,size=8m"
+		}
+		if err := lifecycleTmpfs(directory, mode); err != nil { return err }
+	}
+	// The engine's admin server runs as the fixed lsadm account and must
+	// create its command socket inside admin/tmp, exactly as the installed
+	// service arranges. A root-owned tmpfs leaves the candidate engine unable
+	// to start its admin listener, so the fresh mounts take the same
+	// ownership as the installed tree.
+	if account, accountErr := user.Lookup("lsadm"); accountErr == nil {
+		uid, uidErr := strconv.ParseUint(account.Uid, 10, 32)
+		gid, gidErr := strconv.ParseUint(account.Gid, 10, 32)
+		if uidErr == nil && gidErr == nil && uid > 0 && gid > 0 {
+			for _, directory := range []string{"/usr/local/lsws/admin/logs", "/usr/local/lsws/admin/tmp"} {
+				if chownErr := os.Chown(directory, int(uid), int(gid)); chownErr == nil {
+					_ = os.Chmod(directory, 0o755)
+				}
+			}
+		}
 	}
 	master := filepath.Join(lifecycleConfigurationRoot, "httpd_config.conf")
 	if edition == webengine.EditionLiteSpeedEnterprise { master = filepath.Join(lifecycleConfigurationRoot, "httpd_config.xml") }
