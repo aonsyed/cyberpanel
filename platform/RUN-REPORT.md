@@ -3,6 +3,93 @@
 This is a verification checkpoint, not a parity-release certification.
 The scope remains the complete product defined in the existing design spec.
 
+## Completion pass evidence — 2026-09-27
+
+Branch `codex/completion-20260927` (base b0fd20158).
+
+### INVOKER routines end to end — PASS
+
+Ubuntu ARM64 guest, source = completion HEAD. Native probes first
+confirmed MariaDB 10.11 PREPARE accepts CREATE PROCEDURE with a
+multi-statement body (probe `cp_probe` created, shown, removed).
+
+`TestQEMUTransferNativeRoutines` (CYBERPANEL_QEMU_LIVE_TRANSFER_OBJECTS=1)
+drove the real production resolvers against real MariaDB:
+
+- Workspace export of a schema with one INVOKER procedure + one INVOKER
+  function publishes an artifact containing the
+  `cyberpanel-invoker-routine-v1` marker (verified through broker chunked
+  download).
+- Trigger, event and routine+view fixtures are each rejected in preview
+  and export with ErrTransferUnsupportedObjects, and a fresh prepare
+  after three rejections still succeeds (no stranded workspace slot).
+- Direct backend import recreates both routines; `CALL` returns the
+  exact row body, the function returns 7, `mysql.proc.security_type` is
+  INVOKER for both.
+- Isolated allocate → load → verify → promote: staging shows exactly two
+  routines before verify; promotion recreates them in the destination
+  (same callable checks), and the staging schema is fully dropped.
+
+The complete database package with CYBERPANEL_QEMU_LIVE_TRANSFER=1,
+CYBERPANEL_QEMU_LIVE_TRANSFER_OBJECTS=1 and CYBERPANEL_QEMU_LIVE_MARIADB=1
+passes, including the external TLS export suite (fixture admin gained
+SELECT on mysql.proc/mysql.event plus TRIGGER on the fixture schema — the
+same authority the audit demands of a real external administrator; TLS
+refusals now surface at the audit connection or the dump, both on the
+same pinned transport, and still publish no artifact).
+
+Unit regressions: `transfer_routine_linux_test.go` (marker round trip,
+DEFINER/SQL SECURITY body rejection, unknown-field JSON rejection, mode
+and identifier rejections, size caps).
+
+### Whole-suite at completion HEAD
+
+Ubuntu ARM64 smoke guest `go test -p 2 ./... -count=1`: 51 packages ok,
+zero failures (`final-completion-20260927-test.log` in the smoke run
+directory). This includes the architecture dependency lint, which at
+baseline HEAD failed on six undocumented `executor/siteops` imports from
+apps/backup/mail restore paths (now documented file-specific allowances).
+
+### Clean-host signed-install drill — gaps recorded, drill stopped
+
+Fresh Ubuntu 24.04 ARM64 cloud-image guest. Offline release84 bundle
+(manifest re-issued with an extended signed expiry using the retained
+guest-only test key; member order preserved). Reproduced cleanly:
+
+1. dpkg configuration fails on a bare image: `libzip4t64` and `php-cli`
+   (cyberpanel-wp-cli dependency) are not in the bundle and not on the
+   image. The long-lived guest had them installed as development
+   prerequisites, which masked the gap.
+2. After satisfying dpkg, `panel-node-install apply` activates and probes
+   services, but bootstrap ceremony inputs (authn/secrets credential
+   files, service identities, container-recipe trust anchor) do not
+   exist on a clean host. Provisioning identities and recipe trust and
+   running the installer hooks from the retained release hits ordering
+   constraints: hooks must precede activation (credential files are probe
+   prerequisites) and the application-catalog hook conflicts with
+   catalog destinations an activation has already deployed. Each attempt
+   rolled back cleanly under the watchdog (journal evidence retained:
+   `apply-attempt.log`, `journal.json` under
+   `.work/qemu/runs/dr-ubuntu-arm64-20260927-01/`).
+
+Conclusion recorded in IMPLEMENTATION_STATUS: clean-host bootstrap is the
+unqualified system-installer path with concrete reproduction evidence
+now attached; cross-host DR restore stays blocked behind it.
+
+### Four-guest current-source matrix
+
+- AlmaLinux 9 ARM64: `go mod verify` ok; root `go test -count=1 ./...`
+  and `go build ./...` exit 0 (51 packages ok) after provisioning the
+  `cyberpanel-web` identity and `/var/lib/cyberpanel/sites` that newer
+  siteops/apps tests require (`matrix-completion-20260927.log`).
+- Ubuntu 24.04 AMD64 and AlmaLinux 9 AMD64: same commands as root under
+  TCG; results appended below when the runs completed.
+
+An earlier non-root invocation failed only on `/proc/1/exe` permission
+and a not-exported offline environment prefix; both are invocation
+artifacts, not product failures, and the recorded root runs supersede
+them.
+
 ## Source and environment
 
 ### Installed84 cron closure
