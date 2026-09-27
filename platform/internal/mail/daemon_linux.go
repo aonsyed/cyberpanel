@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -380,7 +381,7 @@ func (host *LinuxMailHost) controlService(ctx context.Context, service MailServi
 	}
 	receipt := MailServiceReceipt{Service: service, Action: action, ObservedAt: host.now()}
 	if action == ServiceProbe {
-		output, err := runMailProcess(ctx, host.profile.systemctl, "is-active", "--quiet", unit)
+		output, err := waitForMailService(ctx, host.profile.systemctl, unit)
 		receipt.Active = err == nil
 		receipt.EvidenceDigest = digestMailEvidence(string(output), errorText(err))
 		return receipt, err
@@ -420,7 +421,7 @@ func (host *LinuxMailHost) controlService(ctx context.Context, service MailServi
 	}
 	receipt.EvidenceDigest = digestMailEvidence(string(output), errorText(err))
 	if err == nil && action != ServiceStop {
-		_, probeErr := runMailProcess(ctx, host.profile.systemctl, "is-active", "--quiet", unit)
+		_, probeErr := waitForMailService(ctx, host.profile.systemctl, unit)
 		receipt.Active = probeErr == nil
 		if probeErr != nil {
 			err = probeErr
@@ -428,6 +429,43 @@ func (host *LinuxMailHost) controlService(ctx context.Context, service MailServi
 	}
 	return receipt, err
 }
+
+// A cold fleet converges asynchronously: systemd reports activating long
+// after the start job returns (ClamAV loads signatures for tens of
+// seconds on a clean host). An instantaneous probe misreads that as
+// failure and rolls a healthy generation back. Poll activation state
+// until the unit settles, and only report failure once it actually left
+// the transient states (or the bounded settle window expired).
+func waitForMailService(ctx context.Context, systemctl, unit string) ([]byte, error) {
+	deadline := time.Now().Add(mailServiceSettleWindow)
+	for {
+		output, err := runMailProcess(ctx, systemctl, "is-active", unit)
+		switch strings.TrimSpace(string(output)) {
+		case "active":
+			return output, nil
+		case "activating", "reloading":
+			if err := ctx.Err(); err != nil {
+				return output, err
+			}
+			if !time.Now().Before(deadline) {
+				return output, err
+			}
+			select {
+			case <-ctx.Done():
+				return output, ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+		default:
+			return output, err
+		}
+	}
+}
+
+// mailServiceSettleWindow bounds cold-start convergence polling. Cold
+// ClamAV signature loading dominates; the caller's own deadline still
+// applies on top.
+const mailServiceSettleWindow = 90 * time.Second
+
 func (host *LinuxMailHost) Queue(ctx context.Context, action MailQueueAction, id QueueID) (MailQueueReceipt, error) {
 	receipt := MailQueueReceipt{Action: action, QueueID: id, ObservedAt: time.Now().UTC()}
 	if host == nil {
@@ -755,12 +793,44 @@ func (host *LinuxMailHost) probeAll(ctx context.Context) (string, error) {
 			failures = append(failures, err)
 		}
 	}
-	redisOutput, redisErr := runMailProcess(ctx, host.profile.redisCLI, "-s", "/run/cyberpanel-mail-redis/redis.sock", "PING")
+	redisOutput, redisErr := waitForMailRedis(ctx, host.profile.redisCLI)
 	evidence = append(evidence, string(redisOutput), errorText(redisErr))
 	if redisErr != nil || strings.TrimSpace(string(redisOutput)) != "PONG" {
 		failures = append(failures, errors.Join(ErrInvalidReceipt, redisErr))
 	}
 	return digestMailEvidence(evidence...), errors.Join(failures...)
+}
+
+// The dedicated mail redis socket appears shortly after the instance
+// becomes active; poll briefly for the PONG instead of failing the whole
+// generation probe on a cold first start.
+func waitForMailRedis(ctx context.Context, redisCLI string) ([]byte, error) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		output, err := runMailProcess(ctx, redisCLI, "-s", "/run/cyberpanel-mail-redis/redis.sock", "PING")
+		if strings.TrimSpace(string(output)) == "PONG" && err == nil {
+			return output, nil
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !isTransientSocketError(err) {
+			return output, err
+		}
+		if err := ctx.Err(); err != nil || !time.Now().Before(deadline) {
+			return output, err
+		}
+		select {
+		case <-ctx.Done():
+			return output, ctx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+}
+
+func isTransientSocketError(err error) bool {
+	var networkError *net.OpError
+	if errors.As(err, &networkError) {
+		return errors.Is(networkError.Err, syscall.ENOENT) || errors.Is(networkError.Err, syscall.ECONNREFUSED) || errors.Is(networkError.Err, syscall.EAGAIN)
+	}
+	return false
 }
 func equalMailGenerations(left, right ConfigGeneration) bool {
 	if left.ID != right.ID || left.NodeID != right.NodeID || left.SnapshotGeneration != right.SnapshotGeneration || left.Digest != right.Digest || len(left.Artifacts) != len(right.Artifacts) {
