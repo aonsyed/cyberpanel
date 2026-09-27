@@ -12,32 +12,39 @@ import (
 // schema objects. Audit using the instance administrator, never the workspace
 // SELECT account (whose information_schema projection can hide such objects).
 func (executor *LinuxMariaDBExecutor) checkExportProgramObjects(ctx context.Context, database Database) error {
+	_,err:=executor.exportTransferRoutines(ctx,database);return err
+}
+
+func (executor *LinuxMariaDBExecutor) exportTransferRoutines(ctx context.Context,database Database)([]transferNativeRoutine,error){
 	executor.mu.Lock()
 	instance, err := executor.instance(database.InstanceID)
 	executor.mu.Unlock()
 	if err != nil {
-		return err
+		return nil,err
 	}
 	connection, closeConnection, err := executor.connection(ctx, instance)
 	if err != nil {
-		return ErrTransferUnsupportedObjects
+		return nil,ErrTransferUnsupportedObjects
 	}
 	defer closeConnection()
 	output, err := connection.query(ctx, sqlObserveTransferPrograms, database)
 	if err != nil {
-		return ErrTransferUnsupportedObjects
+		return nil,ErrTransferUnsupportedObjects
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) != 4 {
-		return ErrTransferUnsupportedObjects
+		return nil,ErrTransferUnsupportedObjects
 	}
 	for index, field := range fields {
 		count, err := strconv.ParseUint(field, 10, 64)
-		if err != nil || index < 3 && count != 0 || index == 3 && count == 0 {
-			return ErrTransferUnsupportedObjects
+		if err != nil || (index == 0 || index == 2) && count != 0 || index == 3 && count == 0 {
+			return nil,ErrTransferUnsupportedObjects
 		}
 	}
-	return nil
+	routines,err:=observeTransferRoutines(ctx,connection,database)
+	if err!=nil{return nil,err}
+	if len(routines)>0 {tables,e:=connection.query(ctx,sqlObserveImportTables,database);if e!=nil{return nil,e};if strings.Contains(string(tables),"\tVIEW\t"){return nil,ErrTransferUnsupportedObjects}}
+	return routines,nil
 }
 
 func transferProgramObjectsSQL(database Database) (string, error) {

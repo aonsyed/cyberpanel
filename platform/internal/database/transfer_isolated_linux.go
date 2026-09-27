@@ -190,6 +190,7 @@ func (configs isolatedImportConfigs) TransferClientConfig(ctx context.Context, j
 	}
 	principal, password, err := executor.createScopedMigrationLoader(bounded, record.Target, true)
 	defer wipeBytes(password)
+	if err==nil {instance,e:=executor.instance(job.InstanceID);if e==nil {var c *mariaDBConnection;var closeConnection func();c,closeConnection,e=executor.connection(bounded,instance);if e==nil {_,e=c.query(bounded,sqlGrantTransferRoutines,grantMutation{Database:record.Target,Principal:principal});closeConnection()}};err=e}
 	if err != nil {
 		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 		defer stop()
