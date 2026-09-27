@@ -13,6 +13,57 @@ Branch `codex/completion-20260927` (from b0fd20158). Whole-source build
 passed at HEAD in Ubuntu ARM64; the full suite passed there after the
 changes below (log `/home/harness/final-completion-test.log`).
 
+### Stable clean-host install — ACHIEVED
+
+The sequence-85 apply on the dr2 clean host is now durably `committed`
+with **panel-core active and stable** through repeated restarts, gateway
+serving the UI over TLS, and the full native fleet running: execd,
+authd, secretd, providerd, peer-inspectd, OpenLiteSpeed, Dovecot,
+Postfix, OpenDKIM, Rspamd, mail redis, ClamAV and PowerDNS. Remaining
+fixes after the mail cascade below:
+
+- **web-engine initial activation**: every silent connection-close path
+  in the activation server now names itself in the journal
+  (instrumentation commit). The clean-host EOF was reproduced as
+  `execution admission rejected: reboot-control rollback capability is
+  unproven` — stale `ambiguous` rows in `reboot_execution_effects` from
+  the earlier crash-loop era blocked admission; after clearing the
+  debris and refreshing the expired web-engine artifact catalog
+  (test-authority `catalogrefresh` guest tool, same key family as
+  `reciperefresh`), first activation completed and core assembled.
+- **Web-engine artifact catalog expiry**: the signed catalog windows
+  lapsed 2026-09-26 like the app-catalog recipes; refreshed in place
+  (entries byte-identical). A future bundle should mint longer windows.
+- **Gateway TLS bootstrap**: a clean host boots the gateway in plaintext
+  loopback mode; WebAuthn requires TLS, so clean-host passkey login
+  needs a provisioned panel certificate (drill guest: self-signed
+  localhost cert installed and owned for the gateway uid). Recorded as
+  a bootstrap input alongside ClamAV signatures and MariaDB packages.
+- **fd leak**: during failed assembly only; with startup succeeding the
+  delta is zero. Underlying leak retained as follow-up.
+
+### Cross-host backup/DR restore drill — executed to the product boundary
+
+Full journey through the real panels: password login, real browser
+passkey enrollment (CDP virtual authenticator, campaign protocol) and
+MFA passkey login on BOTH panels; on the source panel: site +
+managed-database creation, plaintext local repository registration,
+files+database policy, marker file upload through the chunked upload
+API, native SQL seeding, and `backup.run.execute` capture producing a
+committed restorable recovery point. Repository tree transferred to the
+clean host (checksum-verified), repository registered through the real
+MFA-authenticated API there, recovery point adopted into the target
+catalog (test-authority row transfer), and `backup.restore.workflow`
+executed. **The restore fail-closed at the product's own documented
+guard**: `cross-scope database restore requires resource remapping`
+(`validateLinuxRestoreScope`) — an intentionally unimplemented importer
+carried over from the campaign ("preserve fail-closed behavior until
+safely mapped and verified"). A same-site-ID restore path (deterministic
+site IDs from fixed idempotency keys) was prepared but not completed
+this session. Evidence: `/home/harness/drill-*.json`,
+`drill2-receipt.json`, restore receipt `drillrestore1` (phase failed,
+that exact error), apply logs under the dr2 run directory.
+
 ### Mail first-generation cascade — FIXED; all native services converge
 
 The cold-fleet ambiguity is resolved by three product fixes, each
