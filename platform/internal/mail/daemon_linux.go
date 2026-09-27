@@ -404,6 +404,20 @@ func (host *LinuxMailHost) controlService(ctx context.Context, service MailServi
 		return receipt, ErrInvalidCommand
 	}
 	output, err := runMailProcess(ctx, host.profile.systemctl, verb, unit)
+	// A clean host activates its first mail generation with every native
+	// service still stopped; reload of an inactive unit is not a failure of
+	// the generation. Fall back to a plain start so first activation can
+	// bring the fleet up instead of rolling the generation back.
+	if err != nil && action == ServiceReload && verb == "reload" {
+		if _, stateErr := runMailProcess(ctx, host.profile.systemctl, "is-active", "--quiet", unit); stateErr != nil {
+			startOutput, startErr := runMailProcess(ctx, host.profile.systemctl, "start", unit)
+			if startErr == nil {
+				output, err = startOutput, nil
+			} else {
+				err = errors.Join(err, startErr)
+			}
+		}
+	}
 	receipt.EvidenceDigest = digestMailEvidence(string(output), errorText(err))
 	if err == nil && action != ServiceStop {
 		_, probeErr := runMailProcess(ctx, host.profile.systemctl, "is-active", "--quiet", unit)
