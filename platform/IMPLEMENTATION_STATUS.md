@@ -7,6 +7,38 @@ This file is the compact recovery point for ongoing implementation. The normativ
 All builds, formatting, program execution and tests run inside QEMU guests.
 No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
+## Shadow engine log capture + startability fixes — 2026-09-27 (third follow-up)
+
+Directive: capture the shadow OLS candidate's own logs from inside the
+rehearsal namespace, fix why the listener never accepts, and drive the
+migration through cutover. The candidate engine's log root was
+bind-mounted to a host-visible directory before the tmpfs mounts
+(diagnostic build), yielding the engine's own error log — the decisive
+evidence — plus its control-script transcript:
+
+- Both rehearsal listeners (80/443) failed with EPERM: the executor
+  sandbox deliberately carries no CAP_NET_BIND_SERVICE. Fixed by
+  rewriting the dark-rehearsal listeners to fixed unprivileged ports
+  (18443 TLS / 18081+ clear) in the same render that generates the
+  config and drives the probe.
+- The vhost refused to start while the panel-health context directory
+  for the candidate's snapshot generation was missing (only the
+  activation flow ever created it). The shadow worker now creates it
+  (root 0755) before launching the engine.
+- The engine's admin server (lsadm) and lscgid needed writable
+  admin/tmp, admin/logs (now chowned to lsadm like the installed tree)
+  and a writable cgid dir (now a 0755 tmpfs).
+
+Commit 190dbdcb2. After these fixes the candidate engine loads its
+config with no bind or context errors and reaches launch — the residual
+gate is the engine exiting before writing its pid inside the namespaced
+sandbox (lswsctrl reports `start, LSWS running: 0`; admin logs stay
+empty; no EPERM lines remain). Next diagnostic step: strace the engine
+inside the namespace (e.g. a diagnostic worker build wrapping the
+litespeed invocation) to name the failing syscall/path. The
+webengine/management suite passes; the fsstore and certificates
+failures reproduce identically on the untouched baseline tree.
+
 ## Shadow PHP/TLS rehearsal diagnosis — 2026-09-27 (follow-up)
 
 Directive: wire the shadow rehearsal probe

@@ -3,6 +3,21 @@
 This is a verification checkpoint, not a parity-release certification.
 The scope remains the complete product defined in the existing design spec.
 
+## Shadow engine log capture evidence — 2026-09-27 (third follow-up)
+
+Source = 190dbdcb2. A diagnostic worker build bind-mounted
+/var/lib/cyberpanel/shadow-debug over the candidate engine's log root
+before the tmpfs mounts, capturing the engine's own error log,
+lswsctrl's restart transcript and its (permission-spam) stderr on the
+host. The captured error log named both blockers verbatim — listener
+EPERM on 127.0.0.1:80/:443 and the missing panel-health context
+directory — which became the committed fixes (unprivileged rehearsal
+ports; candidate health-dir creation; lsadm-owned admin mounts; cgid
+tmpfs). The candidate engine now parses its config with zero bind or
+context errors; remaining gate documented (engine exits pre-pid inside
+the sandbox). fsstore/certificates test failures reproduce on the
+untouched baseline.
+
 ## Shadow rehearsal chain diagnosis — 2026-09-27 (follow-up)
 
 Source = 97efff77d, installed dr2 host. Five cross-layer fixes, each proven
