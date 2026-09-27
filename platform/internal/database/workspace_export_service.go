@@ -37,13 +37,15 @@ func (coordinator Coordinator) PrepareWorkspaceExport(ctx context.Context, call 
 	if metadata.Truncated {
 		return TransferJob{}, ErrTransferLimit
 	}
-	if options.Selection.Schema && !metadata.ExportProgramObjectsAbsent { return TransferJob{}, ErrTransferUnsupportedObjects }
+	if options.Selection.Schema && !metadata.ExportProgramObjectsAbsent && !metadata.ExportRoutinesSupported { return TransferJob{}, ErrTransferUnsupportedObjects }
+	if options.Selection.Schema && metadata.ExportRoutineCount>0 && len(options.Selection.Tables)>0{return TransferJob{},ErrTransferUnsupportedObjects}
 	selected := map[string]bool{}
 	for _, table := range options.Selection.Tables {
 		selected[table.String()] = false
 	}
 	now := coordinator.clock.Now().UTC()
 	preview := TransferImpactPreview{DatabaseID: access.DatabaseID, DatabaseGeneration: access.DatabaseGeneration, CapturedAt: now}
+	if options.Selection.Schema {preview.SchemaObjects=uint64(metadata.ExportRoutineCount)}
 	for _, entry := range metadata.Entries {
 		if entry.Kind != WorkspaceMetadataTable && entry.Kind != WorkspaceMetadataView {
 			continue

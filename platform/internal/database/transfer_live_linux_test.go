@@ -213,10 +213,13 @@ func testQEMUTransferNativeRoundTrip(t *testing.T, engine string, programObjects
 			coordinator := NewCoordinator(liveExportRepository{executor: exportConfigs.executor}, exportClient, liveExportClock{})
 			call := WorkspaceCall{TenantID: tenant, SiteID: siteID, SessionID: exportConfigs.access.SessionID, SessionGeneration: exportConfigs.access.SessionGeneration}
 			if len(programObjects) > 0 {
+				// Triggers and events remain unsupported schema objects.
+				// INVOKER routines are supported without views and covered by
+				// TestQEMUTransferNativeRoutines; this view-bearing fixture
+				// must still reject them as an unsupported combination.
 				objects := []struct{ kind, create, drop string }{
 					{"trigger", "CREATE TRIGGER `" + source.String() + "`.sample_insert BEFORE INSERT ON `" + source.String() + "`.sample FOR EACH ROW SET NEW.body=CONCAT('trigger:',NEW.body)", "DROP TRIGGER `" + source.String() + "`.sample_insert"},
-					{"procedure", "CREATE PROCEDURE `" + source.String() + "`.sample_procedure() SQL SECURITY INVOKER SELECT 7", "DROP PROCEDURE `" + source.String() + "`.sample_procedure"},
-					{"function", "CREATE FUNCTION `" + source.String() + "`.sample_function() RETURNS INT DETERMINISTIC SQL SECURITY INVOKER RETURN 7", "DROP FUNCTION `" + source.String() + "`.sample_function"},
+					{"procedure with views", "CREATE PROCEDURE `" + source.String() + "`.sample_procedure() SQL SECURITY INVOKER SELECT 7", "DROP PROCEDURE `" + source.String() + "`.sample_procedure"},
 					{"disabled event", "CREATE EVENT `" + source.String() + "`.sample_event ON SCHEDULE EVERY 1 DAY DISABLE DO SET @fixture_event=1", "DROP EVENT `" + source.String() + "`.sample_event"},
 				}
 				for _, object := range objects {

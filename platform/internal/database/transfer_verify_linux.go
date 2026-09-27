@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -87,6 +88,8 @@ func (executor *LinuxMariaDBExecutor) observeTransferDatabase(bounded context.Co
 	if len(lines) > MaximumTransferTables {
 		return TransferVerification{}, ErrTransferLimit
 	}
+	routines,err:=observeTransferRoutines(bounded,connection,target);if err!=nil{return TransferVerification{},err}
+	if len(routines)>0&&strings.Contains(string(metadata),"\tVIEW\t"){return TransferVerification{},ErrTransferUnsupportedObjects}
 	schema, integrity := sha256.New(), sha256.New()
 	verification := TransferVerification{IsolatedToken: isolated.Token, Health: HealthHealthy}
 	for _, line := range lines {
@@ -151,6 +154,7 @@ func (executor *LinuxMariaDBExecutor) observeTransferDatabase(bounded context.Co
 		integrity.Write(check)
 		integrity.Write([]byte{0})
 	}
+	if len(routines)>0 {encoded,_:=json.Marshal(routines);schema.Write([]byte("\x00ROUTINES\x00"));schema.Write(encoded)}
 	verification.SchemaDigest = hex.EncodeToString(schema.Sum(nil))
 	verification.IntegrityDigest = hex.EncodeToString(integrity.Sum(nil))
 	verification.VerifiedAt = executor.now().UTC()

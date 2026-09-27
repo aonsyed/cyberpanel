@@ -81,6 +81,10 @@ const (
 	sqlTransferFenceReplication
 	sqlReplaceImportTables
 	sqlObserveTransferPrograms
+	sqlObserveTransferRoutines
+	sqlCreateTransferRoutine
+	sqlDropTransferRoutine
+	sqlGrantTransferRoutines
 )
 
 type principalMutation struct {
@@ -293,6 +297,14 @@ func buildMariaDBStatement(statement mariaDBStatement, values ...any) (string, e
 	case sqlCreateImportViewPlaceholder, sqlRecreateImportView:
 		view,ok:=oneValue[transferViewMutation](values);if !ok{return "",ErrInvalidResource}
 		return transferViewMutationSQL(view, statement==sqlCreateImportViewPlaceholder)
+	case sqlObserveTransferRoutines:
+		database,ok:=oneValue[Database](values);if !ok{return "",ErrInvalidResource};return transferRoutinesSQL(database)
+	case sqlCreateTransferRoutine, sqlDropTransferRoutine:
+		mutation,ok:=oneValue[transferRoutineMutation](values);if !ok{return "",ErrInvalidResource};return transferRoutineMutationSQL(mutation,statement==sqlDropTransferRoutine)
+	case sqlGrantTransferRoutines:
+		mutation,ok:=oneValue[grantMutation](values)
+		if !ok||mutation.Database.Validate()!=nil||mutation.Principal.Validate()!=nil||!strings.HasPrefix(mutation.Principal.Name.String(),"cpmig_")||mutation.Principal.InstanceID!=mutation.Database.InstanceID{return "",ErrInvalidResource}
+		return "GRANT CREATE ROUTINE ON "+quotedIdentifier(mutation.Database.Name)+".* TO "+quotedAccount(mutation.Principal)+";\n",nil
 	case sqlObserveImportTables:
 		database,ok:=oneValue[Database](values)
 		if !ok || database.Validate()!=nil{return "",ErrInvalidResource}

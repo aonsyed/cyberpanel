@@ -58,6 +58,7 @@ type TransferClientConfigDescriptor struct {
 	// Set only by the protected workspace credential resolver, never wire input.
 	transportArguments []string
 	checkExportSchema func(context.Context) error
+	routines []transferNativeRoutine
 }
 
 type MariaDBTransferClientConfigs interface {
@@ -129,6 +130,7 @@ func (backend *LinuxTransferBackend) Export(ctx context.Context, job TransferJob
 	_, headerErr := rawOutput.Write([]byte(transferSQLMagic))
 	_, copyErr := io.CopyBuffer(rowCounter, stdout, make([]byte, 64<<10))
 	if copyErr==nil{copyErr=rowCounter.finish()}
+	if copyErr==nil { for _,routine:=range descriptor.routines { var statement []byte; statement,copyErr=routine.artifactStatement();if copyErr==nil {_,copyErr=rawOutput.Write(statement)};if copyErr!=nil{break} } }
 	if headerErr != nil || copyErr != nil { cancel() }
 	if compressed != nil {
 		if closeErr := compressed.Close(); copyErr == nil { copyErr = closeErr }

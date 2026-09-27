@@ -16,6 +16,7 @@ const transferViewAccount = "(?:`(?:``|[^`\\x00])*`|'(?:''|\\\\.|[^'\\\\])*'|[A-
 var transferViewEnvelope = regexp.MustCompile("(?is)^\\s*CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:ALGORITHM\\s*=\\s*(UNDEFINED|MERGE|TEMPTABLE)\\s+)?(?:DEFINER\\s*=\\s*" + transferViewAccount + "\\s*@\\s*" + transferViewAccount + "\\s+)?(?:SQL\\s+SECURITY\\s+(?:DEFINER|INVOKER)\\s+)?VIEW\\s+(" + transferViewIdentifier + ")(\\s*\\(\\s*" + transferViewIdentifier + "(?:\\s*,\\s*" + transferViewIdentifier + ")*\\s*\\))?\\s+AS\\s+(.+)$")
 
 func prepareTransferSQLStatement(statement []byte) ([]byte, error) {
+	if prepared,matched,err:=prepareTransferRoutineStatement(statement);matched{return prepared,err}
 	fields := strings.Fields(normalizeTransferSQL(statement))
 	if len(fields) == 0 || fields[0] != "CREATE" || !containsTransferToken(fields, "VIEW") {
 		if err := validateTransferSQLStatement(statement); err != nil {

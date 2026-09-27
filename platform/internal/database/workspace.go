@@ -100,6 +100,8 @@ type WorkspaceMetadataResult struct {
 	Truncated bool                      `json:"truncated"`
 	// True only after a complete privileged catalog proves no omitted program objects.
 	ExportProgramObjectsAbsent bool    `json:"export_program_objects_absent"`
+	ExportRoutinesSupported bool `json:"export_routines_supported"`
+	ExportRoutineCount uint32 `json:"export_routine_count"`
 }
 
 type WorkspaceService interface {

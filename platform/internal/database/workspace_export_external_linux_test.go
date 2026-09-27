@@ -24,7 +24,7 @@ func (source externalExportSecrets) PrincipalPassword(context.Context, SecretRef
 // Runs inside the existing disposable TLS server fixture, never the host.
 func liveExternalWorkspaceExport(t *testing.T, ctx context.Context, instance DatabaseInstance, secrets *liveTLSSecrets, rootQuery func(string) ([]byte, error)) {
 	t.Helper()
-	if _, err := rootQuery("CREATE DATABASE qemu_export; CREATE TABLE qemu_export.sample(id INT, body TEXT); INSERT INTO qemu_export.sample VALUES(1,'external export'); GRANT SELECT,SHOW VIEW ON qemu_export.* TO 'qemu_tls'@'127.0.0.1';"); err != nil {
+	if _, err := rootQuery("CREATE DATABASE qemu_export; CREATE TABLE qemu_export.sample(id INT, body TEXT); INSERT INTO qemu_export.sample VALUES(1,'external export'); GRANT SELECT,SHOW VIEW,TRIGGER ON qemu_export.* TO 'qemu_tls'@'127.0.0.1'; GRANT SELECT ON mysql.proc TO 'qemu_tls'@'127.0.0.1'; GRANT SELECT ON mysql.event TO 'qemu_tls'@'127.0.0.1';"); err != nil {
 		t.Fatal(err)
 	}
 	id := func(s string) ResourceID {
@@ -134,8 +134,11 @@ func liveExternalWorkspaceExport(t *testing.T, ctx context.Context, instance Dat
 				if err == nil {
 					t.Fatal("unauthorized export succeeded")
 				}
-				if variant != "wrong-tenant" && receipt.ExitCode == 0 {
-					t.Fatal("TLS refusal did not reach native dump")
+				// The refusal may surface either in the program-object audit
+				// connection or the native dump; both ride the same pinned
+				// TLS transport, and neither may publish an artifact.
+				if variant != "wrong-tenant" && err == ErrUnauthorized {
+					t.Fatal("TLS refusal never reached a native connection")
 				}
 				if _, err := os.Lstat(path); !os.IsNotExist(err) {
 					t.Fatal("failed export published artifact")

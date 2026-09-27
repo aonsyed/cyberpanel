@@ -4,6 +4,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,13 +39,14 @@ func (configs *LinuxWorkspaceExportConfigs) TransferClientConfig(ctx context.Con
 	if database.Name != name {
 		return TransferClientConfigDescriptor{}, ErrUnauthorized
 	}
-	if job.Selection.Schema { if err = executor.checkExportProgramObjects(ctx, database); err != nil { return TransferClientConfigDescriptor{}, err } }
+	var routines []transferNativeRoutine
+	if job.Selection.Schema { if routines,err = executor.exportTransferRoutines(ctx, database); err != nil { return TransferClientConfigDescriptor{}, err };if len(routines)>0&&len(job.Selection.Tables)>0{return TransferClientConfigDescriptor{},ErrTransferUnsupportedObjects} }
 	releaseSlot, err := executor.acquireWorkspace(session)
 	if err != nil {
 		return TransferClientConfigDescriptor{}, err
 	}
 	descriptor, err := configs.writeClientConfig(ctx, job, session, principal, name, releaseSlot)
-	if err == nil { descriptor.checkExportSchema = func(ctx context.Context) error { return executor.checkExportProgramObjects(ctx, database) } }
+	if err == nil { descriptor.routines=routines; descriptor.checkExportSchema = func(ctx context.Context) error { current,e:=executor.exportTransferRoutines(ctx,database);if e!=nil{return e};before,_:=json.Marshal(routines);after,_:=json.Marshal(current);if string(before)!=string(after){return ErrTransferStale};return nil } }
 	return descriptor, err
 }
 

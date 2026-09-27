@@ -155,6 +155,7 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 	}
 	var tables []string
 	record.Views = nil
+	record.Routines = nil
 	var viewBytes uint64
 	if strings.TrimSpace(string(metadata)) != "" {
 		for _, line := range strings.Split(strings.TrimSpace(string(metadata)), "\n") {
@@ -184,6 +185,25 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 			tables = append(tables, string(name))
 		}
 	}
+	// Routines cannot be renamed across schemas either. Persist the native
+	// observation with the view plan before any move, so an interrupted
+	// promotion stays ambiguous instead of guessing what was recreated.
+	routines, err := observeTransferRoutines(ctx, connection, record.Target)
+	if err != nil {
+		return result, err
+	}
+	var routineBytes uint64
+	for _, routine := range routines {
+		definition, err := routine.definition()
+		if err != nil {
+			return result, err
+		}
+		if uint64(len(definition)) > job.Limits.MaximumBytes-routineBytes {
+			return result, ErrTransferLimit
+		}
+		routineBytes += uint64(len(definition))
+	}
+	record.Routines = routines
 	// Persist the native view plan before moving any table. An interrupted
 	// promotion remains ambiguous; neither reloading SQL nor guessing is safe.
 	record.State = "promoting"
@@ -207,6 +227,14 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 			}
 		}
 	}
+	// Routines are recreated by the same administrator observation the plan
+	// persisted; an uploaded artifact record is never authority for the
+	// destination CREATE. Any failure here stays ambiguous, never retried.
+	for _, routine := range record.Routines {
+		if _, err := connection.query(ctx, sqlCreateTransferRoutine, transferRoutineMutation{Database: live, Routine: routine}); err != nil {
+			return result, ErrAmbiguous
+		}
+	}
 	confirmed, err := executor.observeTransferDatabase(ctx, connection, job, isolated, live)
 	if err != nil || confirmed.SchemaDigest != verified.SchemaDigest {
 		return result, ErrAmbiguous
@@ -225,7 +253,8 @@ func (executor *LinuxMariaDBExecutor) promoteEmptyTransferImport(ctx context.Con
 		Before, After TransferVerification
 		Tables        []string
 		Views         []transferNativeView
-	}{verified, confirmed, tables, record.Views})
+		Routines      []transferNativeRoutine
+	}{verified, confirmed, tables, record.Views, record.Routines})
 	result.TargetGeneration, result.SourcePreserved, result.Promoted = live.Generation, true, true
 	result.ProofDigest, result.CompletedAt = transferDigest(proof), executor.now().UTC()
 	record.State, record.Promotion = "promotion-verified", &result
