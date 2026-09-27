@@ -774,9 +774,11 @@ func (host *LinuxMailHost) reloadAll(ctx context.Context) (string, error) {
 		receipt, err := host.controlService(ctx, service, ServiceReload)
 		evidence = append(evidence, string(service), receipt.EvidenceDigest)
 		if err != nil {
+			log.Printf("mail activation: reload %s failed: %v", host.profile.units[service], err)
 			restart, restErr := host.controlService(ctx, service, ServiceRestart)
 			evidence = append(evidence, restart.EvidenceDigest)
 			if restErr != nil {
+				log.Printf("mail activation: restart %s failed: %v", host.profile.units[service], restErr)
 				failures = append(failures, errors.Join(err, restErr))
 			}
 		}
@@ -790,6 +792,7 @@ func (host *LinuxMailHost) probeAll(ctx context.Context) (string, error) {
 		receipt, err := host.controlService(ctx, service, ServiceProbe)
 		evidence = append(evidence, string(service), receipt.EvidenceDigest)
 		if err != nil {
+			log.Printf("mail activation: probe %s failed: %v", host.profile.units[service], err)
 			failures = append(failures, err)
 		}
 	}
