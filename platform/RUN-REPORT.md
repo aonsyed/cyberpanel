@@ -3,6 +3,23 @@
 This is a verification checkpoint, not a parity-release certification.
 The scope remains the complete product defined in the existing design spec.
 
+## Rehearsal strace evidence — 2026-09-28
+
+Source = 497da61ef. Diagnostic worker builds wrapped the worker re-exec
+and the engine control script with strace inside the rehearsal namespace
+(output to the host-visible shadow-debug root). Findings, verbatim from
+the traces: lswsctrl start exits 0 with the daemonized engine alive
+(kill(pid,0)=0), the engine binds the rehearsal listeners
+127.0.0.1:18081/18082/18443 within ~300 of its own syscalls, and the
+worker was stuck in read() on the command-output pipe for its whole
+window — zero sockets ever created. The committed fix (file-based
+command output) is proven by the next run: the cycle completes in ~2s
+(`stop, LSWS running: 1`), the probe dials the engine, and the exchange
+failure output names the residual gap — an engine 503 "candidate did not
+execute the bound PHP challenge" because the imported site's LSAPI pool
+unit was never provisioned (no cyberpanel-lsapi-<site>-g1.service for
+the m_site in the catalog). webengine/management suite passes.
+
 ## Shadow engine log capture evidence — 2026-09-27 (third follow-up)
 
 Source = 190dbdcb2. A diagnostic worker build bind-mounted

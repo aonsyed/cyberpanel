@@ -7,6 +7,44 @@ This file is the compact recovery point for ongoing implementation. The normativ
 All builds, formatting, program execution and tests run inside QEMU guests.
 No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
+## Strace of the rehearsal engine launch — 2026-09-28
+
+Directive: strace the litespeed launch inside the rehearsal namespace,
+name the killing syscall/path, fix it, and drive the migration through
+cutover. The worker re-exec and the engine control script were wrapped
+with strace inside the namespace (diagnostic builds; output captured on
+the host via the established log-root bind). The traces named the real
+blocker — not a failing syscall at all:
+
+- lswsctrl start exits 0 and the engine daemonizes successfully, but the
+  daemonized engine keeps every inherited descriptor open. The command
+  runner collected output through an in-memory pipe, so exec.Cmd.Run()
+  blocked on pipe EOF long after the script exited: the worker sat in
+  read() for its entire 110-second window and the probe loop never ran —
+  every rehearsal settled ambiguous after exactly its two-minute broker
+  deadline with zero sockets ever created.
+- Fixed by writing command output to a private temporary file
+  (commit 497da61ef): the descriptor the daemon inherits is harmless and
+  Wait() only tracks the control script. Verified on dr2: the rehearsal
+  cycle now completes start-to-stop in ~2 seconds, lswsctrl reports
+  `stop, LSWS running: 1`, and the probe executes its HTTP exchanges.
+- The rehearsal's health-dir creation also needed an explicit chmod (the
+  inherited umask turned 0755 into 0750, which the sealed-generation
+  contract rejects and which poisoned a later live activation at the same
+  snapshot generation); the rehearsal now removes its directory again
+  when the engine stops.
+
+Remaining gate, now precisely named: the probe's exchange reaches the
+candidate engine on the rehearsal ports and receives a well-formed
+engine 503 — `candidate did not execute the bound PHP challenge` —
+because the migration-imported site's LSAPI pool unit is never
+provisioned at import (the m_site input exists while no
+`cyberpanel-lsapi-<site>-g1.service` is present, so the engine has no
+PHP backend). Next step: wire pool provisioning into the migration
+site import (the hosting CreateSite path provisions it for ordinary
+site creation), then the dark verification chain is complete and
+quiescing/cutover can run.
+
 ## Shadow engine log capture + startability fixes — 2026-09-27 (third follow-up)
 
 Directive: capture the shadow OLS candidate's own logs from inside the
