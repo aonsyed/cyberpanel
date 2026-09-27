@@ -957,6 +957,12 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 			return InstallReceipt{}, err
 		}
 	}
+	// Fresh installs must complete the bootstrap ceremony before the first
+	// service probe: packaged units consume credential files and directories
+	// the hooks create. Effects are idempotent across resumes.
+	if err = installer.bootstrapFreshInstall(ctx, journal); err != nil {
+		return installer.rollbackLocked(ctx, journal, trust, err)
+	}
 	journal.State = "probing"
 	if err = updateJournal(journal, installer.now()); err != nil {
 		return InstallReceipt{}, err
@@ -997,6 +1003,13 @@ func (installer *Installer) resumeLocked(ctx context.Context, journal *Journal, 
 		}
 		if service.Unit == "panel-secretd.service" {
 			if err = installer.transitionSecretConsumers(ctx, journal, trust, false); err != nil {
+				return installer.rollbackLocked(ctx, journal, trust, err)
+			}
+			// The pre-probe reconciliation defers broker-dependent trust
+			// (malware approval) until the secret broker answers; rerun it
+			// now that panel-secretd is freshly active, exactly where the
+			// system installer placed it.
+			if err = installer.reconcileServicesAfterBroker(ctx, journal); err != nil {
 				return installer.rollbackLocked(ctx, journal, trust, err)
 			}
 		}
@@ -1822,6 +1835,21 @@ func installOfflinePackages(ctx context.Context, root string, artifacts []Artifa
 			arguments = append(arguments, packagePath)
 		}
 	}
+	// A clean host must satisfy every declared dependency offline. Neither
+	// package manager surfaces configure-time dependency failures before
+	// mutation (dpkg --dry-run stops at unpack preparation), so the declared
+	// relation set is checked explicitly before the first maintainer script
+	// can leave a half-configured system behind.
+	if err := verifyOfflineDependencyClosure(ctx, root, artifacts, target); err != nil {
+		return nil, err
+	}
+	// Noninteractive Postfix configuration derives mydestination from
+	// /etc/mailname; without it the packaged default is not the pristine
+	// shape mail adoption expects. Provision it like debian-installer does,
+	// before any maintainer script runs.
+	if err := ensureMailname(target); err != nil {
+		return nil, err
+	}
 	if len(arguments) > baseArguments {
 		if _, err := runOfflineFixed(ctx, path, arguments...); err != nil {
 			return nil, err
@@ -1893,6 +1921,7 @@ func runFixedMode(ctx context.Context, path string, isolateNetwork bool, argumen
 		"/usr/bin/dpkg":       true,
 		"/usr/bin/dpkg-query": true,
 		"/usr/bin/rpm":        true,
+		"/usr/sbin/useradd":   true,
 		"/usr/bin/systemctl":  true,
 	}
 	if !allowed[path] {

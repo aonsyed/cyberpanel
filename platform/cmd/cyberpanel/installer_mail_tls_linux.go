@@ -20,6 +20,14 @@ func bootstrapDefaultMailCertificate() error {
 	if err := certificates.PublishLocalMailIdentity(""); err != nil {
 		return err
 	}
+	// A clean host has no mail store yet; the first generation belongs to the
+	// running panel, but the fixed store root is installer-owned.
+	if err := trustedDNSAncestors("/var/lib/cyberpanel"); err != nil {
+		return err
+	}
+	if err := ensureOwnedDirectory("/var/lib/cyberpanel/mail", 0750, 0, 0); err != nil {
+		return err
+	}
 	const parent = "/var/lib/cyberpanel/mail/tls"
 	if err := trustedDNSAncestors("/var/lib/cyberpanel/mail"); err != nil {
 		return err
