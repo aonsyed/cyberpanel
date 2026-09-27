@@ -7,21 +7,21 @@ import (
 	"testing"
 )
 
-func TestNativeRestoreRejectsUnmappedDatabaseScope(t *testing.T) {
+func TestNativeRestoreRejectsUnmappedMailScope(t *testing.T) {
 	called := false
 	host := &LinuxBackupHost{Resolver: LinuxBackupSiteResolverFunc(func(context.Context, string, string) (LinuxBackupSiteBinding, error) {
 		called = true
 		return LinuxBackupSiteBinding{}, ErrInvalidBackup
 	})}
-	plan := RestorePlanSpec{ID: "restore", TenantID: "tenant", SourceScope: "source", TargetScope: "target", RecoveryPointID: "point", CollisionPolicy: CollisionReplaceBlueGreen, SecretPolicy: SecretResetRequired, ComponentMapping: map[ComponentKind]string{ComponentDatabase: "target"}}
+	plan := RestorePlanSpec{ID: "restore", TenantID: "tenant", SourceScope: "source", TargetScope: "target", RecoveryPointID: "point", CollisionPolicy: CollisionReplaceBlueGreen, SecretPolicy: SecretResetRequired, ComponentMapping: map[ComponentKind]string{ComponentMail: "target"}}
 	_, err := host.CreateScratch(context.Background(), plan, RecoveryPointManifest{RecoveryPointID: "point", Scope: "source"}, "restore")
 	if err == nil || called {
-		t.Fatal("cross-scope database restore must be rejected before resolving or mutating the target")
+		t.Fatal("cross-scope mail restore must be rejected before resolving or mutating the target")
 	}
 	// Previously staged plans must not bypass the boundary on restart.
 	_, err = host.Promote(context.Background(), plan, "existing-scratch", "restore")
 	if err == nil || called {
-		t.Fatal("resumed cross-scope database promotion must be rejected before touching the target")
+		t.Fatal("resumed cross-scope mail promotion must be rejected before touching the target")
 	}
 }
 
@@ -32,10 +32,15 @@ func TestLinuxRestoreScopeSelection(t *testing.T) {
 		if err := validateLinuxRestoreScope(plan, manifest); err != nil {
 			t.Fatalf("same-scope %s: %v", component, err)
 		}
+		// Cross-scope database restores are admitted: the remapping importer
+		// renames every source database before anything reaches MariaDB.
 		plan.TargetScope = "target"
 		err := validateLinuxRestoreScope(plan, manifest)
-		if component == ComponentFiles && err != nil || component != ComponentFiles && err == nil {
+		if component != ComponentMail && err != nil {
 			t.Fatalf("cross-scope %s: %v", component, err)
+		}
+		if component == ComponentMail && err == nil {
+			t.Fatal("cross-scope mail restore accepted without a remapping importer")
 		}
 		manifest.Scope = "other"
 		if validateLinuxRestoreScope(plan, manifest) == nil {
