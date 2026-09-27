@@ -369,7 +369,7 @@ func fixedConversionCommand(ctx context.Context, program string, arguments ...st
 
 func runConversionCandidate(ctx context.Context, input lifecycleGenerationInput, record *lifecycleConversionRecord) (lifecycleWorkerResult, error) {
 	plan := record.Input.Plan
-	return runLifecycleWorker(ctx, lifecycleWorkerInput{Candidate: input, Mode: "validate", ConversionEffectID: record.Input.Request.EffectID, TargetPlan: &plan})
+	return runLifecycleWorker(ctx, lifecycleWorkerInput{Candidate: input, Mode: "validate", ConversionEffectID: record.Input.Request.EffectID, TargetPlan: &plan, OriginNamespaces: lifecycleOriginNamespaces()})
 }
 
 func conversionPackageActionDigest(effect, action, hostDigest string) string {
@@ -377,7 +377,7 @@ func conversionPackageActionDigest(effect, action, hostDigest string) string {
 }
 
 func runConversionPackages(ctx context.Context, record *lifecycleConversionRecord, action string) error {
-	result, err := runLifecycleWorker(ctx, lifecycleWorkerInput{Mode: "packages", ConversionEffectID: record.Input.Request.EffectID, PackageAction: action})
+	result, err := runLifecycleWorker(ctx, lifecycleWorkerInput{Mode: "packages", ConversionEffectID: record.Input.Request.EffectID, PackageAction: action, OriginNamespaces: lifecycleOriginNamespaces()})
 	if err != nil {
 		return err
 	}

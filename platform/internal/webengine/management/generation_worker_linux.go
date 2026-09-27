@@ -31,6 +31,10 @@ type lifecycleWorkerInput struct {
 	ConversionEffectID string `json:"conversion_effect_id,omitempty"`
 	TargetPlan *ArtifactPlan `json:"target_plan,omitempty"`
 	PackageAction string `json:"package_action,omitempty"`
+	// OriginNamespaces carries the spawning broker's own namespace links. The
+	// sandboxed worker cannot read init's links from inside its child PID
+	// namespace, so isolation is proven against the broker's links instead.
+	OriginNamespaces map[string]string `json:"origin_namespaces,omitempty"`
 }
 
 type lifecycleWorkerResult struct {
@@ -45,11 +49,19 @@ func (output *lifecycleBoundedOutput) Write(content []byte) (int, error) {
 	return output.Buffer.Write(content)
 }
 
+// lifecycleLoopbackTool brings the namespace's loopback up before the shadow
+// listener starts; on usrmerged distributions it is a symlink to /usr/bin/ip.
+const lifecycleLoopbackTool = "/usr/sbin/ip"
+const lifecycleLoopbackResolved = "/usr/bin/ip"
+
 func trustedLifecycleProgram(program string) error {
 	info, err := os.Lstat(program)
-	if err==nil&&info.Mode()&os.ModeSymlink!=0&&(program==lifecycleBinaryPath||program==lifecycleControlPath){
+	if err==nil&&info.Mode()&os.ModeSymlink!=0&&(program==lifecycleBinaryPath||program==lifecycleControlPath||program==lifecycleLoopbackTool){
 		resolved,resolveErr:=filepath.EvalSymlinks(program)
-		if resolveErr!=nil||!strings.HasPrefix(resolved,"/usr/local/lsws/bin"+string(os.PathSeparator))||!rootOwnedFile(info){return ErrInvalid}
+		// Usrmerged systems expose /usr/sbin/ip as a symlink to /usr/bin/ip;
+		// the loopback tool resolves like the engine links, every target must
+		// remain a root-owned file inside the fixed system roots.
+		if resolveErr!=nil||!strings.HasPrefix(resolved,"/usr/local/lsws/bin"+string(os.PathSeparator))&&resolved!=lifecycleLoopbackResolved||!rootOwnedFile(info){return ErrInvalid}
 		return trustedLifecycleProgram(resolved)
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 || info.Mode().Perm()&0o022 != 0 || !rootOwnedFile(info) { return ErrUnsupported }
@@ -69,7 +81,7 @@ func runLifecycleCandidate(ctx context.Context, input lifecycleGenerationInput, 
 	// This is the installed privileged broker itself, not a caller-chosen
 	// executable, shell fragment, image, namespace path, or service template.
 	if err = trustedLifecycleProgram(program); err != nil { return result, err }
-	worker := lifecycleWorkerInput{Candidate: input, Mode: mode}
+	worker := lifecycleWorkerInput{Candidate: input, Mode: mode, OriginNamespaces: lifecycleOriginNamespaces()}
 	if mode == "probe" {
 		var cleanup func() error
 		worker.Challenges, cleanup, err = prepareLifecycleChallenges(input.Render)
@@ -101,17 +113,39 @@ func runLifecycleWorker(ctx context.Context,worker lifecycleWorkerInput)(result 
 	return result, nil
 }
 
+func lifecycleOriginNamespaces() map[string]string {
+	links := make(map[string]string, 3)
+	for _, kind := range []string{"net", "mnt", "pid"} {
+		if link, err := os.Readlink("/proc/self/ns/" + kind); err == nil { links[kind] = link }
+	}
+	return links
+}
+
+// verifyLifecycleIsolation proves the worker runs in its own network, mount
+// and PID namespaces. The spawning broker passes its own namespace links in
+// the worker input: reading init's links from inside the child PID namespace
+// is denied to this deliberately unprivileged sandbox, while the broker's
+// links describe exactly the namespaces the worker was cloned from.
+func verifyLifecycleIsolation(content []byte) error {
+	var header struct {
+		OriginNamespaces map[string]string `json:"origin_namespaces,omitempty"`
+	}
+	if json.Unmarshal(content, &header) != nil || len(header.OriginNamespaces) == 0 { return ErrInvalid }
+	for _, kind := range []string{"net", "mnt", "pid"} {
+		origin, present := header.OriginNamespaces[kind]
+		self, selfErr := os.Readlink("/proc/self/ns/" + kind)
+		if !present || origin == "" || selfErr != nil || self == origin { return ErrInvalid }
+	}
+	return nil
+}
+
 // RunLinuxLifecycleWorker is a fixed broker re-exec entrypoint. It refuses a
 // host-namespace invocation before mounting or starting any engine process.
 func RunLinuxLifecycleWorker() (err error) {
 	if os.Geteuid() != 0 { return ErrInvalid }
-	for _, kind := range []string{"net", "mnt", "pid"} {
-		self, selfErr := os.Readlink("/proc/self/ns/"+kind)
-		init, initErr := os.Readlink("/proc/1/ns/"+kind)
-		if selfErr != nil || initErr != nil || self == init { return ErrInvalid }
-	}
 	content, err := io.ReadAll(io.LimitReader(os.Stdin, linuxManagementMaximumFrame+1))
 	if err != nil || len(content) > linuxManagementMaximumFrame { return ErrInvalid }
+	if err = verifyLifecycleIsolation(content); err != nil { return err }
 	var input lifecycleWorkerInput
 	if decodeLifecyclePayload(content, &input) != nil || input.Mode != "validate" && input.Mode != "probe" && input.Mode!="packages" { return ErrInvalid }
 	maximum:=110*time.Second;if input.Mode=="packages"{maximum=24*time.Minute}

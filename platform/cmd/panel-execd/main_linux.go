@@ -101,6 +101,41 @@ type writerAuthorityRecovery interface {
 	VerifyActiveWriterAuthority(context.Context, json.RawMessage) error
 }
 
+// credentialPeerAuthorizer gates a protected broker on the caller's socket
+// credentials, the same boundary every other broker in this service uses.
+type credentialPeerAuthorizer struct{ allowed map[uint32]struct{} }
+
+func newCredentialPeerAuthorizer(allowedUIDs ...uint32) (*credentialPeerAuthorizer, error) {
+	if len(allowedUIDs) == 0 {
+		return nil, secrets.ErrInvalid
+	}
+	allowed := make(map[uint32]struct{}, len(allowedUIDs))
+	for _, uid := range allowedUIDs {
+		allowed[uid] = struct{}{}
+	}
+	return &credentialPeerAuthorizer{allowed: allowed}, nil
+}
+
+func (authorizer *credentialPeerAuthorizer) Authorize(connection net.Conn) (secrets.VerifiedPeer, error) {
+	unixConnection, ok := connection.(*net.UnixConn)
+	if !ok {
+		return secrets.VerifiedPeer{}, secrets.ErrForbidden
+	}
+	raw, err := unixConnection.SyscallConn()
+	if err != nil {
+		return secrets.VerifiedPeer{}, secrets.ErrForbidden
+	}
+	var credential *syscall.Ucred
+	var controlErr error
+	if err = raw.Control(func(fd uintptr) { credential, controlErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED) }); err != nil || controlErr != nil || credential == nil || credential.Pid <= 1 {
+		return secrets.VerifiedPeer{}, secrets.ErrForbidden
+	}
+	if _, allowed := authorizer.allowed[credential.Uid]; !allowed {
+		return secrets.VerifiedPeer{}, secrets.ErrForbidden
+	}
+	return secrets.VerifiedPeer{UID: credential.Uid, PID: uint32(credential.Pid)}, nil
+}
+
 func main() {
 	if len(os.Args) == 4 && os.Args[1] == "--lsapi-web-access" {
 		if err := siteops.GrantLSAPIWebAccess(context.Background(), os.Args[2], os.Args[3]); err != nil {
@@ -541,7 +576,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("initialize certificate host: %v", err)
 	}
-	certificatePolicy, err := secrets.NewLinuxMaterialPeerAuthorizer(uint32(controlUID))
+	// The certificate broker authorizes peers by socket credentials alone, like
+	// this service's other brokers: the sandbox deliberately omits
+	// CAP_SYS_PTRACE and the shared material inspector serves only the secret
+	// broker's account, so digest-based peer identity is unavailable here.
+	certificatePolicy, err := newCredentialPeerAuthorizer(uint32(controlUID))
 	if err != nil {
 		log.Fatalf("initialize certificate peer policy: %v", err)
 	}
@@ -608,7 +647,7 @@ func main() {
 		if brokerErr != nil {
 			log.Fatalf("initialize package-maintenance broker: %v", brokerErr)
 		}
-		packagePolicy, policyErr := secrets.NewLinuxMaterialPeerAuthorizer(controlUID)
+		packagePolicy, policyErr := newCredentialPeerAuthorizer(controlUID)
 		if policyErr != nil {
 			log.Fatalf("initialize package-maintenance peer policy: %v", policyErr)
 		}

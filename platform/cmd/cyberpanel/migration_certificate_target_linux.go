@@ -267,7 +267,9 @@ func (target *migrationCertificateTarget) admit(ctx context.Context, intent migr
 		return admission, migration.ErrInvalid
 	}
 	for _, chunk := range allChunks {
-		if chunk.Compression != "" && chunk.Compression != "none" || chunk.Size == 0 || chunk.Size > 1<<20 || len(admission.chain)+int(chunk.Size) > 1<<20 || chunk.MediaType != "application/pem-certificate-chain" || chunk.EncryptionDomain != "certificate-public" {
+		// The intake's direct PEM chunks carry the identity dialect, matching
+		// the uncompressed database dumps accepted by the database importer.
+		if chunk.Compression != "" && chunk.Compression != "none" && chunk.Compression != "identity" || chunk.Size == 0 || chunk.Size > 1<<20 || len(admission.chain)+int(chunk.Size) > 1<<20 || chunk.MediaType != "application/pem-certificate-chain" || chunk.EncryptionDomain != "certificate-public" {
 			return admission, migration.ErrBlocked
 		}
 		content, err := target.chunks.ReadRange(ctx, chunk.Digest, 0, chunk.Size)
@@ -278,7 +280,11 @@ func (target *migrationCertificateTarget) admit(ctx context.Context, intent migr
 		if hex.EncodeToString(sum[:]) != chunk.Digest {
 			return admission, migration.ErrConflict
 		}
-		admission.chain = append(admission.chain, content...)
+		// A legacy fullchain repeats the leaf ahead of the intermediates;
+		// the material parser takes the first certificate as the leaf and
+		// requires every following certificate to be a CA, so an identical
+		// repeat of the leaf is dropped while assembling the chain.
+		admission.chain = appendLinuxBackupUniquePEM(admission.chain, content)
 	}
 	block, _ := pem.Decode(admission.chain)
 	if block == nil || block.Type != "CERTIFICATE" {
@@ -372,6 +378,25 @@ func (target *migrationCertificateTarget) Apply(ctx context.Context, intent migr
 		}
 	}
 	return target.observe(ctx, intent, admission)
+}
+
+// appendLinuxBackupUniquePEM appends PEM blocks from addition, skipping any
+// block whose bytes already appear in base.
+func appendLinuxBackupUniquePEM(base, addition []byte) []byte {
+	rest := addition
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		encoded := pem.EncodeToMemory(block)
+		if bytes.Contains(base, encoded) {
+			continue
+		}
+		base = append(base, encoded...)
+	}
+	return base
 }
 
 func (target *migrationCertificateTarget) state(ctx context.Context, intent migration.ImportIntent, admission migrationCertificateAdmission) (string, error) {
