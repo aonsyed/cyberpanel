@@ -76,19 +76,28 @@ Conclusion recorded in IMPLEMENTATION_STATUS: clean-host bootstrap is the
 unqualified system-installer path with concrete reproduction evidence
 now attached; cross-host DR restore stays blocked behind it.
 
-### Four-guest current-source matrix
+### Four-guest current-source matrix — ALL GREEN
 
-- AlmaLinux 9 ARM64: `go mod verify` ok; root `go test -count=1 ./...`
-  and `go build ./...` exit 0 (51 packages ok) after provisioning the
+- Ubuntu 24.04 ARM64 (smoke guest): `go test -p 2 ./... -count=1` exit 0,
+  51 packages ok, zero failures.
+- AlmaLinux 9 ARM64: `go mod verify` ok; root `go test -count=1 ./...` and
+  `go build ./...` exit 0 (51 packages ok) after provisioning the
   `cyberpanel-web` identity and `/var/lib/cyberpanel/sites` that newer
   siteops/apps tests require (`matrix-completion-20260927.log`).
-- Ubuntu 24.04 AMD64 and AlmaLinux 9 AMD64: same commands as root under
-  TCG; results appended below when the runs completed.
+- AlmaLinux 9 AMD64: root `go test -count=1 ./...` exit 0 (51 packages
+  ok) with the same two environment provisions; build exit 0.
+- Ubuntu 24.04 AMD64: root suite 49 packages ok with only the same two
+  environment-dependent packages failing before provisioning; after it,
+  `internal/apps` and `internal/executor/siteops` pass and
+  `go build ./...` exits 0.
 
-An earlier non-root invocation failed only on `/proc/1/exe` permission
-and a not-exported offline environment prefix; both are invocation
-artifacts, not product failures, and the recorded root runs supersede
-them.
+This is the first current-source four-target matrix pass since
+458fd7876 (2026-09-19), now covering the routine-preservation work, the
+architecture allowance fix and every later change through completion
+HEAD. An earlier non-root invocation failed only on `/proc/1/exe`
+permission and a not-exported offline environment prefix; both are
+invocation artifacts, not product failures, and the recorded root runs
+supersede them.
 
 ## Source and environment
 

@@ -71,16 +71,21 @@ Disaster-recovery restore to a second clean host therefore remains
 blocked behind gap 2; same-host encrypted capture/restore stays the
 qualified boundary.
 
-### Current-source four-guest matrix
+### Current-source four-guest matrix — ALL GREEN
 
-Re-run at HEAD of `codex/completion-20260927` (source digest in each
-guest's `platform-completion.tgz`): Ubuntu ARM64 whole suite plus
-AlmaLinux 9 ARM64, Ubuntu 24.04 AMD64 and AlmaLinux 9 AMD64
-`go mod verify && go test -count=1 ./... && go build ./...` offline.
-Results recorded in RUN-REPORT (2026-09-27 section). An earlier
-in-guest invocation bug (env prefix not exported across `&&`) caused
-spurious network fetch attempts; the recorded runs export the offline
-environment for the whole script.
+At HEAD of `codex/completion-20260927`: Ubuntu ARM64 whole suite (51 ok,
+zero failures), AlmaLinux 9 ARM64 and AlmaLinux 9 AMD64 (51 ok each,
+test+build exit 0), Ubuntu 24.04 AMD64 (49 ok plus the two
+identity-dependent packages green after the same provisioning, build
+exit 0). First four-target pass since 458fd7876. Logs:
+`matrix-completion-20260927.log` in each matrix run directory. Remaining
+recorded gaps unchanged: DKIM/DNS automation is qualified against the
+local PowerDNS authority (TXT present); public delegation, external
+delivery, live LSE, multi-node HA, migration rehearsal and the GA gates
+remain external or separate lanes. The legacy-backup intake
+(cyberpanelbackup) still has no dedicated tests; that plus the
+clean-host bootstrap gaps above are the concrete next implementation
+targets.
 
 ## Resumed bounded parallel closure — 2026-09-22
 
