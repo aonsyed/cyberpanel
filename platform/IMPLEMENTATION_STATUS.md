@@ -7,6 +7,53 @@ This file is the compact recovery point for ongoing implementation. The normativ
 All builds, formatting, program execution and tests run inside QEMU guests.
 No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
+## Shadow PHP/TLS rehearsal diagnosis — 2026-09-27 (follow-up)
+
+Directive: wire the shadow rehearsal probe
+(`migrationApplicationProbe.VerifyDark`) on dr2 and drive the migration
+through cutover. The rehearsal chain was driven layer by layer with
+instrumented builds; five genuine cross-layer defects were found and fixed
+(commit 97efff77d), each proven by the next layer becoming reachable:
+
+1. Self-signed legacy certificates ship a fullchain identical to the leaf;
+   canonical intents forbid duplicate chunk digests — the converter now
+   transfers the chain chunk only when it differs (intake mapping matches).
+2. The certificate importer rejected the intake's `identity` compression
+   dialect for PEM chunks (the database importer already accepted it).
+3. A legacy fullchain repeats the leaf ahead of the intermediates; the
+   material parser requires CAs after the leaf — the repeat is now dropped
+   while assembling the chain.
+4. panel-execd's certificate/package brokers used the digest-based material
+   authorizer, which cannot read cross-uid `/proc/<pid>/exe` under the
+   service's deliberate no-CAP_SYS_PTRACE sandbox, and the shared material
+   inspector serves only the secret broker's account — every client was
+   refused with a bare connection reset. Peers are now authorized by socket
+   credentials, like every other broker in the service.
+5. The shadow worker's namespace self-check read init's `/proc/1/ns/*` links
+   from inside its child PID namespace — denied to the sandbox — so every
+   worker invocation exited before doing any work; isolation is now proven
+   against the spawning broker's namespace links passed in the worker input.
+   The usrmerge symlink for the loopback tool (`/usr/sbin/ip`) is also
+   accepted by the fixed-program trust check.
+
+After the fixes the drill host's migration reaches the fully staged dark
+state: site, database, DNS zone and certificate host effects all `dark`,
+the certificate staged with a real CA-validated chain (a drill CA was
+installed into the guest trust store — the material policy validates
+against system roots), the private TLS candidate staged through the
+certificate broker, and the rehearsal worker runs isolated with loopback
+up and the shadow engine launched by lswsctrl.
+
+Remaining gate: the shadow OLS does not serve the rehearsal probe inside
+its 110-second namespace window — the probe's connection attempts never
+succeed, the worker times out and the management lease settles `ambiguous`
+(silent EOF for retries until the lease is cleared). Next concrete step:
+capture the candidate engine's own logs from inside the namespace (the
+tmpfs mounts currently discard them) to see why the shadow listener never
+accepts. Regressions: webengine/management, migration, backup (live) and
+certificates suites pass in QEMU; the one failing certificates test fails
+identically on the untouched baseline.
+
 ## Legacy backup migration rehearsal — 2026-09-27 (later session)
 
 Directive: synthesize a faithful legacy CyberPanel backup from the documented

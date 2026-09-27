@@ -3,6 +3,29 @@
 This is a verification checkpoint, not a parity-release certification.
 The scope remains the complete product defined in the existing design spec.
 
+## Shadow rehearsal chain diagnosis — 2026-09-27 (follow-up)
+
+Source = 97efff77d, installed dr2 host. Five cross-layer fixes, each proven
+by the next layer becoming reachable (evidence collected with instrumented
+builds; final state on the untouched-worktree binaries):
+
+- Certificate import path fully staged for the first time: CA-validated
+  chain (drill CA installed in the guest trust store per the system-root
+  material policy), `panel_migration_certificate_targets` reaches
+  `staged`, all four host effects `dark`.
+- Certificate broker dispatches `stage` for the migrated site's private
+  TLS candidate (was: bare connection reset from the digest-based peer
+  authorizer).
+- Rehearsal worker accepted: namespace isolation proven against the
+  broker-supplied links, loopback up inside the net namespace, shadow
+  engine launched via lswsctrl (was: instant exit reading /proc/1).
+- Remaining gate: the shadow OLS never serves the probe inside its
+  110-second window; the management lease settles `ambiguous` and retries
+  EOF until cleared. Next: capture the candidate engine's in-namespace
+  logs (currently on tmpfs) to find why the listener never accepts.
+- Suites: webengine/management, migration, backup (live fixtures) pass;
+  the failing certificates test fails identically on the baseline tree.
+
 ## Cross-scope database remapping importer evidence — 2026-09-27 (follow-up)
 
 Source = 359f16fcf, QEMU guest with live MariaDB
