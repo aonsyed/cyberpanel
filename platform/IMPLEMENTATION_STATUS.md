@@ -13,6 +13,47 @@ Branch `codex/completion-20260927` (from b0fd20158). Whole-source build
 passed at HEAD in Ubuntu ARM64; the full suite passed there after the
 changes below (log `/home/harness/final-completion-test.log`).
 
+### Mail first-generation cascade — FIXED; all native services converge
+
+The cold-fleet ambiguity is resolved by three product fixes, each
+verified by a fresh clean-host apply on dr2:
+
+1. **Convergence polling instead of instantaneous probes**: a cold fleet
+   reports `activating` long after the start job returns (ClamAV loads
+   signatures for tens of seconds). Probes now poll unit state through
+   a bounded settle window (`waitForMailService`), and the mail redis
+   PONG check retries transiently (`waitForMailRedis`).
+2. **First-generation retention**: any probe failure used to roll back
+   `current`, leaving every native binding dangling and every service
+   unstartable — the cascade fed itself. With no previous generation,
+   activation now retains the store and fails plainly, so core's retries
+   converge through the existing reconcile path against the retained
+   generation.
+3. **Cascade observability**: per-service reload/restart/probe failures
+   and broker operation causes are retained in the execd journal.
+
+With these plus provisioned ClamAV signatures (see below), dr2 reached
+`committed` with panel-core, gateway, execd, dovecot, postfix, opendkim,
+rspamd, redis-server@cyberpanel-mail AND clamav-daemon all active, and
+panel-core's assembly crossed the entire mail bridge.
+
+**Clean-host prerequisite identified**: `clamav-daemon.service` carries
+`ConditionPathExistsGlob=/var/lib/clamav/daily.*` — a clean offline host
+has no signatures, the unit start is skipped, and every activation probe
+fails until `freshclam` provisions them. The installer/bootstrap should
+either provision signatures or the mail fleet probe should tolerate
+signature-less ClamAV explicitly. (dr2: signatures fetched once via
+freshclam to continue the drill.)
+
+**Two follow-ups recorded**: execd exhausted file descriptors after
+~1h of a 2s-interval broker retry storm (connection leak under sustained
+failure); and the NEXT boundary after mail is now
+`activate initial web-engine configuration: webengine management:
+ambiguous effect` joined with a bare `EOF` — the web-engine initial
+activation on a truly clean host drops its execd connection silently
+(no execd-side log, no crash). That is the continuation point; the DR
+drill stays behind a stable panel-core.
+
 ### Clean-host lane update — apply reached COMMITTED once; core's first mail generation is the remaining boundary
 
 Continuing the campaign below, the PowerDNS fail-closed was instrumented
