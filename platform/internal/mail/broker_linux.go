@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"io"
 	"net"
 	"os"
@@ -589,6 +590,9 @@ func (server *MailDaemonServer) serve(connection net.Conn) {
 		response.SubmittedQueueID, err = server.Host.CampaignSubmit(ctx, request.Campaign)
 	}
 	if err != nil {
+		// The wire protocol carries closed failure codes only; retain the
+		// underlying cause in the daemon journal for diagnosis.
+		log.Printf("mail broker operation %s failed: %v", request.Operation, err)
 		if request.Operation == MailBrokerApply && validEffect(response.Effect, request.Effect) || request.Operation == MailBrokerMigrationPublication && response.Publication != nil && response.Publication.valid(*request.Publication) || request.Operation == MailBrokerMaildirImport && response.Maildir != nil && response.Maildir.valid(*request.Maildir) {
 			response.FailureCode = mailBrokerErrorCode(err)
 			if response.Validate(request, time.Now().UTC()) == nil {
