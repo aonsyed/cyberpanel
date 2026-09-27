@@ -177,6 +177,7 @@ func RunLinuxLifecycleWorker() (err error) {
 		store,err=openLifecycleStore(edition)
 	}
 	if err != nil { return err }
+	healthCreated := false
 	master, err := store.GenerationPath(ctx, activation.Receipt{Edition: generation.Edition, Digest: generation.ContentDigest})
 	closeErr := store.Close()
 	if err != nil || closeErr != nil { return errors.Join(err, closeErr) }
@@ -185,12 +186,18 @@ func RunLinuxLifecycleWorker() (err error) {
 		// The renderer maps the panel-health context at the candidate's
 		// snapshot generation; the activation flow creates that directory
 		// when it seals a generation, so a rehearsal candidate must create
-		// it too or the engine refuses the vhost at startup.
+		// it too or the engine refuses the vhost at startup. The sealed-
+		// generation contract is root 0755; the inherited umask is tighter,
+		// so the mode is set explicitly after creation and a rehearsal-
+		// created directory is removed again after the engine stops — the
+		// activation flow owns the sealed state, never the rehearsal.
 		health := native.HealthDocumentRoot(input.Candidate.Render.Snapshot.Generation)
 		if info, statErr := os.Lstat(health); statErr == nil {
 			if !info.IsDir() || info.Mode().Perm() != 0o755 { return ErrConflict }
 		} else if os.IsNotExist(statErr) {
 			if err = os.Mkdir(health, 0o755); err != nil { return err }
+			if err = os.Chmod(health, 0o755); err != nil { return err }
+			healthCreated = true
 		} else { return statErr }
 	}
 	if len(input.Candidate.PrivateTLS) != 0 {
@@ -214,6 +221,14 @@ func RunLinuxLifecycleWorker() (err error) {
 		defer stop()
 		_, stopErr := fixedLifecycleWorkerCommand(stopCtx, lifecycleControlPath, "stop")
 		err = errors.Join(err, stopErr)
+		// The rehearsal only borrows the candidate's health generation
+		// directory; whatever it created is removed so the activation
+		// flow's sealed state remains the only durable artifact.
+		if healthCreated {
+			if removeErr := os.Remove(filepath.Join(native.HealthDocumentRoot(input.Candidate.Render.Snapshot.Generation), "activation")); removeErr == nil || os.IsNotExist(removeErr) {
+				_ = os.Remove(native.HealthDocumentRoot(input.Candidate.Render.Snapshot.Generation))
+			}
+		}
 	}()
 	// lswsctrl may return before the private listener is ready. Only retry
 	// connection startup, with a bounded deadline; never invent success.
@@ -238,10 +253,22 @@ func fixedLifecycleWorkerCommand(ctx context.Context, program string, arguments 
 	if err := trustedLifecycleProgram(program); err != nil { return nil, err }
 	command := exec.CommandContext(ctx, program, arguments...)
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}
-	output := &lifecycleBoundedOutput{maximum: 1<<20}
+	// The control script daemonizes the engine, which survives the script and
+	// keeps every inherited descriptor open. An in-memory pipe would leave
+	// Run() blocked on pipe EOF long after the script exited, so the output
+	// lands in a private temporary file instead — the file descriptor the
+	// engine inherits is harmless and Wait() only tracks the script itself.
+	output, outputErr := os.CreateTemp("", "lifecycle-command-*.log")
+	if outputErr != nil { return nil, outputErr }
+	name := output.Name()
+	defer func() { _ = os.Remove(name) }()
 	command.Stdout, command.Stderr = output, output
-	err := command.Run()
-	return output.Bytes(), err
+	runErr := command.Run()
+	_, seekErr := output.Seek(0, io.SeekStart)
+	content, readErr := io.ReadAll(io.LimitReader(output, 1<<20))
+	closeErr := output.Close()
+	if seekErr != nil || readErr != nil || closeErr != nil { return content, errors.Join(runErr, seekErr, readErr, closeErr) }
+	return content, runErr
 }
 
 func isolateLifecycleFiles(candidate string, edition webengine.Edition) error {
