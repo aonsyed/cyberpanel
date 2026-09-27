@@ -3,6 +3,32 @@
 This is a verification checkpoint, not a parity-release certification.
 The scope remains the complete product defined in the existing design spec.
 
+## Legacy backup migration rehearsal evidence — 2026-09-27 (later session)
+
+Installed dr2 host; source = 327283677. Fixture archive converted through
+the live converter protocol (root CLI → unix socket → SO_PEERCRED →
+signed+sealed intake bundle), admitted through `migration.create` under a
+WebAuthn passkey session, inventoried, planned and base-synced.
+
+Verified on the guest:
+
+- Site content: `/var/lib/cyberpanel/sites/s-*/roots/g1/releases/current/
+  public/migrate-marker.txt` == `migration rehearsal marker — legacy backup
+  fixture` (byte-identical to the fixture member); `index.html` present.
+- Database: `sudo mariadb qemu_migrate -e "select id,note,hex(payload) from
+  migrate_proof"` → `(1, 'legacy backup migration drill', '0001FEFF')` —
+  exact fixture row including the blob payload. Restore receipt state
+  `applied`, 357 bytes (202-byte canonical preamble + 155-byte dump),
+  exit 0, input verified, proof digest sealed.
+- Import effects: site, dns_zone and database all `applied`; host effects
+  `dark`. Migration paused at dark verification's shadow PHP/TLS rehearsal
+  probe (preview-stack wiring on this host), so cutover remains unexercised.
+
+Regressions: `internal/migration/...` pass, `internal/secrets` pass,
+`internal/migration/cyberpanel` ok; `cmd/cyberpanel` and the database
+transfer retention test show identical failures on the untouched baseline
+(environmental), none attributable to this change set.
+
 ## Completion pass evidence — 2026-09-27
 
 Branch `codex/completion-20260927` (base b0fd20158).

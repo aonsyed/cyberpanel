@@ -7,6 +7,112 @@ This file is the compact recovery point for ongoing implementation. The normativ
 All builds, formatting, program execution and tests run inside QEMU guests.
 No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
+## Legacy backup migration rehearsal — 2026-09-27 (later session)
+
+Directive: synthesize a faithful legacy CyberPanel backup from the documented
+`cyberpanel-backup-meta-v1` contract, drive it through the installed panel's
+migrator path (converter → import → cutover) inside QEMU, verify imported
+site/database state, then implement the cross-scope database remapping
+importer. The rehearsal ran on the installed dr2 host against the real
+installed fleet (panel-core, gateway, execd, secretd, MariaDB, PowerDNS).
+
+### Fixture
+
+`/tmp/legacy-backup` on the host packaged as a ustar tar.gz with **no gzip
+FNAME** (`auditArchive` rejects a non-empty gzip header name — Python's
+`tarfile.open(path, 'w:gz')` writes one and must be avoided), the required
+`<ChildDomains>` element, numeric `<priority>`, one public_html tree with
+`migrate-marker.txt` (53 bytes) and `index.html`, plus `qemu_migrate.sql`
+(155 bytes; `migrate_proof` row with a `0x0001FEFF` blob). Artifact
+`legacy-migrate-01.tar.gz` (0440 root:cyberpanel in the raw path,
+sha256 `aa683723156c1c36b4379ecd92e7c8f2e264411a902dcd48b6341739d5c311f4`).
+
+### Ceremony (all live on dr2)
+
+trust.json (target `qemu-dr2-install-01`, converter signing key
+`converter2026`, schema hash taken from the produced manifest — an earlier
+hand-typed hash had a transposition typo that fail-closed every admission);
+`migration-key create --key-id dr2migration2026` (X25519 sealing pair; the
+CLI now resolves the installed managed link, commit 636e96b0b); converter
+serving unprivileged over `/run/cyberpanel-backup-convert/converter.sock`
+(manual credential dir; systemd 255 LoadCredential ACL limitation); root CLI
+`cyberpanel-backup-convert convert` emits the `migration.create` handoff.
+
+### Rehearsal result
+
+`migration.create` under a WebAuthn passkey session (201) → `inventory`
+(inventoried) → `plan` (planned) → `sync`: **site, database and DNS zone
+imports all applied**; the database restore streamed the dump wrapped in the
+canonical logical-dump preamble and exited 0 with a sealed applied receipt.
+Imported state verified **byte-exact**:
+`/var/lib/cyberpanel/sites/<id>/roots/g1/releases/current/public/migrate-marker.txt`
+== `migration rehearsal marker — legacy backup fixture`, and
+`qemu_migrate.migrate_proof` row `(1, 'legacy backup migration drill',
+0x0001FEFF)`.
+
+The flow pauses at the final dark-verification gate: the shadow PHP/TLS
+rehearsal probe (`applicationProbe.VerifyDark`) returns blocked on this
+host — an environment/wiring matter of the preview rehearsal stack, not a
+mapping defect; all resource probes and the file/database evidence chain
+passed. Cutover was therefore not exercised this session.
+
+### Contract gaps found and fixed (commit 327283677)
+
+1. Migration counters crossed the SQLite boundary as uint64; digest-derived
+   source generations set the high bit (~50% of archives) and the driver
+   rejects them → bit-preserving two's-complement encoding
+   (sql_repository.go, runtime_store.go).
+2. Derived snapshot generations exceeded the canonical intent contract
+   (int64-representable) → 63-bit derivation at both sources
+   (intake_linux.go, extractor.go).
+3. Legacy credentials are unimportable by design (reset-by-policy; the
+   canonical single-site adapter has no credential resource) → converter no
+   longer emits them; the intake mapping enforces absence.
+4. Legacy zones without a backup SOA describe a served zone → default SOA
+   synthesized (converter + mapping validator).
+5. Backups without mail data (no vmail tree, no mailboxes) describe no mail
+   service → no empty mail domain is invented.
+6. Database import only accepted `ALL PRIVILEGES` and empty/`none`
+   compression → accepts the legacy per-host owner grant label and the
+   `identity` dialect.
+7. The restore executor only accepts canonical logical dumps → the importer
+   wraps raw legacy dump chunks in the canonical preamble at upload, with
+   the wrapped identity kept consistent across begin/observe/discard.
+
+### Operational findings
+
+- Binary swaps into the release tree bypass the consumer-release transition;
+   the secrets broker then fail-closes material reads (`secrets: forbidden`)
+   until `AuthorizeRelease` registers the successor digest (the same
+   management call the installer makes).
+- The synchronous migration sync exceeds the gateway's default 30 s request
+   timeout; the policy caps it at 5 min (`request_timeout` raised on dr2).
+   Every restore call after deadline expiry fails client validation as
+   `invalid database command`.
+- An admission lease that settles `ambiguous` (restore executor error)
+   dead-locks retries silently — the client sees bare EOF. Drill-level
+   recovery cleared `reboot_execution_effects`/restore state; a protocol
+   recovery path remains future work.
+- The pause receipt records only the wrapped domain error text; several of
+   the failures above required instrumented builds to identify.
+
+### Regressions
+
+`internal/migration/...` and `internal/secrets` suites pass in QEMU;
+`internal/migration/cyberpanel` ok. `cmd/cyberpanel` shows 2 failures on
+both the fixed tree and the untouched baseline (unsafe DNS configuration
+ancestor — environmental on this guest); the database transfer retention
+test likewise fails identically on the baseline. No regressions from this
+change set.
+
+### Remaining
+
+- Cross-scope database resource-remapping importer
+  (`platform/internal/backup/linux_runtime.go:89` still fail-closes
+  cross-scope restores) — not implemented this session.
+- Shadow PHP/TLS rehearsal probe wiring on drill hosts, migration cutover
+  exercise, and an ambiguous-lease recovery protocol for restore retries.
+
 ## Completion pass — 2026-09-27
 
 Branch `codex/completion-20260927` (from b0fd20158). Whole-source build
