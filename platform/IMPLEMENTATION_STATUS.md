@@ -42,27 +42,39 @@ fixes after the mail cascade below:
 - **fd leak**: during failed assembly only; with startup succeeding the
   delta is zero. Underlying leak retained as follow-up.
 
-### Cross-host backup/DR restore drill — executed to the product boundary
+### Cross-host backup/DR restore drill — COMPLETED with verified files+database
 
-Full journey through the real panels: password login, real browser
-passkey enrollment (CDP virtual authenticator, campaign protocol) and
-MFA passkey login on BOTH panels; on the source panel: site +
-managed-database creation, plaintext local repository registration,
-files+database policy, marker file upload through the chunked upload
-API, native SQL seeding, and `backup.run.execute` capture producing a
-committed restorable recovery point. Repository tree transferred to the
-clean host (checksum-verified), repository registered through the real
-MFA-authenticated API there, recovery point adopted into the target
-catalog (test-authority row transfer), and `backup.restore.workflow`
-executed. **The restore fail-closed at the product's own documented
-guard**: `cross-scope database restore requires resource remapping`
-(`validateLinuxRestoreScope`) — an intentionally unimplemented importer
-carried over from the campaign ("preserve fail-closed behavior until
-safely mapped and verified"). A same-site-ID restore path (deterministic
-site IDs from fixed idempotency keys) was prepared but not completed
-this session. Evidence: `/home/harness/drill-*.json`,
-`drill2-receipt.json`, restore receipt `drillrestore1` (phase failed,
-that exact error), apply logs under the dr2 run directory.
+Two passes, both through the real panels (password login, real-browser
+passkey enrollment via the campaign's CDP virtual-authenticator
+protocol, MFA passkey login):
+
+1. **Cross-scope pass** (target site ≠ source site): full journey —
+   site + managed-database creation, repository and policy
+   registration, chunked marker upload, native SQL seeding,
+   `backup.run.execute` capture (committed restorable point),
+   checksum-verified repository transfer, MFA-authenticated repository
+   registration on the clean host, recovery-point catalog adoption,
+   `backup.restore.workflow` — fail-closed at the product's documented
+   guard `cross-scope database restore requires resource remapping`
+   (deliberately unimplemented importer). Receipt `drillrestore1`
+   (phase failed, that error) retained.
+2. **Same-site-ID pass** (deterministic site IDs from fixed
+   idempotency keys, so `target_scope == source_scope` legitimately
+   passes the guard): fresh capture on the source panel for
+   `site-api_9110…` (`point_809268…`, files+database, COMMITTED),
+   repository + catalog rows transferred checksum-verified, identical-ID
+   site and `qemu_drill2` database created through the real API on the
+   clean host, `backup.restore.workflow` executed → **phase `active`,
+   no error, blue/green target generation promoted**. Verified on the
+   clean host: restored marker file byte-identical (SHA-256
+   `36d0f949…` == source) and restored database rows exact
+   (`1 / cross-host fixed-scope drill / 0001FEFF`). One operational
+   finding: replacing a repository directory under a running execd
+   leaves the provider registry resolving the deleted inode
+   (`backup provider: not found`); restarting execd drops the stale fd
+   and the same restore completes. Evidence: `drill2b-receipt.json`,
+   `dr2b-final-restore.json`, both harness scripts, under the dr2 run
+   directory.
 
 ### Mail first-generation cascade — FIXED; all native services converge
 
