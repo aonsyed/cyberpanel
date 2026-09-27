@@ -320,6 +320,13 @@ func (host *LinuxMailHost) ApplyGeneration(ctx context.Context, generation Confi
 	validation, validationErr := host.validateGeneration(ctx, storeGenerationID)
 	receipt.ValidationDigest = validation
 	if validationErr != nil {
+		if previous == "" {
+			// Nothing to roll back to: removing the only generation would
+			// leave every native binding dangling and every service
+			// unstartable. Retain it and fail plainly; the reconcile path
+			// validates and re-probes this same generation on retry.
+			return receipt, validationErr
+		}
 		rollbackErr := host.Store.Rollback(ctx, previous)
 		rollbackProbe, rollbackProbeErr := host.probeAll(ctx)
 		receipt.RollbackDigest = digestMailEvidence(rollbackProbe, errorText(rollbackErr), errorText(rollbackProbeErr), errorText(validationErr))
@@ -335,6 +342,11 @@ func (host *LinuxMailHost) ApplyGeneration(ctx context.Context, generation Confi
 	receipt.ProbeDigest = probeDigest
 	if reloadErr == nil && probeErr == nil {
 		return receipt, nil
+	}
+	if previous == "" {
+		// First generation: retain the activated store (see above) and
+		// report the plain failure so retries converge through reconcile.
+		return receipt, errors.Join(reloadErr, probeErr)
 	}
 	rollbackErr := host.Store.Rollback(ctx, previous)
 	rollbackReload, rollbackReloadErr := host.reloadAll(ctx)
