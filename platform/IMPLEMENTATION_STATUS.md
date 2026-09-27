@@ -13,6 +13,53 @@ Branch `codex/completion-20260927` (from b0fd20158). Whole-source build
 passed at HEAD in Ubuntu ARM64; the full suite passed there after the
 changes below (log `/home/harness/final-completion-test.log`).
 
+### Clean-host installation lane — five boundary fixes, chain still open
+
+The clean-host drill continued past documentation into product fixes. A
+truly fresh Ubuntu 24.04 ARM64 cloud-image guest (dr2) was driven with a
+rebuilt self-contained signed release (qemu-complete-3.1.85, sequence 85:
+release-84 content + refreshed application catalog whose signed recipe
+windows had expired 2026-09-26 + php8.3-cli/php-cli/php-common/
+php8.3-common/php8.3-readline/php8.3-opcache/libzip4t64 distro packages +
+native distro modsecurity-crs 3.3.5 + panel-owned unicode mapping package
++ rebuilt cyberpanel/panel-node-install binaries). Each installer defect
+found was fixed in the product and re-qualified by a fresh apply:
+
+1. **Offline dependency admission** (new): declared dpkg/rpm relations of
+   bundle packages must be satisfied by system+bundle (including
+   Provides) before the native transaction; missing names fail before any
+   mutation. Live QEMU regression passes (missing dep rejected without
+   installation; bundle- and Provides-satisfied closures install).
+2. **Fresh-install bootstrap ceremony** (new): identities + the seven
+   closed hooks run between activation and the first service probe as
+   replay-safe journal effects; broker-dependent malware trust defers to
+   a post-secretd reconcile rerun; the panel binary path resolves under
+   the materialized release root.
+3. **/etc/mailname provisioning** before Postfix maintainer scripts, so
+   the noninteractive packaged default is the pristine shape mail
+   adoption requires (debian-installer parity).
+4. **Mail store root creation** before the ancestor check in the mail
+   TLS bootstrap.
+5. Application catalog recipe windows can be refreshed by the retained
+   test key (`reciperefresh` guest tool): the canonical payload embeds
+   its reference, so refreshes rewrite payload+digest+signature together.
+
+Position after these fixes: the fresh apply passes dependency admission,
+installs all 115 artifacts, links, activates, completes identities and
+all seven hooks (initialize-authority through reconcile-services, with
+CRS/Unicode mapping adoption and Postfix pristine-config adoption), and
+passes the panel-authd, peer-inspectd, providerd and secretd probes. The
+current boundary is inside panel-execd's own startup: its PowerDNS
+native-access validation fails closed on the clean host
+("PowerDNS authoritative database could not be opened"; the ACL/sidecar
+discipline in powerdns_native_access_linux.go assumes state the
+long-lived guest accrued during the sequence-29/30 DNS bring-up). Every
+failed apply rolled back cleanly under the watchdog; dr2 disk and apply
+logs are retained (`dr2-ubuntu-arm64-20260927-01`). The remaining chain
+(PowerDNS native access, then plausibly MariaDB authority bootstrap,
+first OLS activation and core admission schema) is the continuation of
+this lane; cross-host DR restore stays behind it.
+
 ### INVOKER routine preservation completed and live-qualified
 
 The 2026-09-27 database WIP is finished end to end. Routines now travel
