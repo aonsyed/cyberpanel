@@ -3,6 +3,32 @@
 This is a verification checkpoint, not a parity-release certification.
 The scope remains the complete product defined in the existing design spec.
 
+## Cross-scope database remapping importer evidence — 2026-09-27 (follow-up)
+
+Source = 359f16fcf, QEMU guest with live MariaDB
+(`CYBERPANEL_NATIVE_BACKUP_TEST=1`).
+
+- Unit: dump database-statement parsing (including the versioned
+  `CREATE DATABASE /*!32312 IF NOT EXISTS*/` form), surgical rewrite of
+  DROP/CREATE/USE only with string literals and table identifiers
+  untouched, fail-closed refusal on qualified body references with no
+  partial artifact left behind, deterministic per-destination-scope
+  naming within the 64-character limit, and refusal of names already
+  claimed physically or in the registry.
+- Live drill 1: a real `mariadb-dump` capture of a source site's database
+  is remapped, imported under the fresh name (row verified byte-exact,
+  source database proven untouched), registered so the target scope owns
+  only the restored database, retried with the identical mapping, then
+  rolled back — remapped database and registry records gone, source
+  intact.
+- Live drill 2: the full staged `Promote` path for a cross-scope plan —
+  remap persisted in the restore state before import, import applied,
+  resources registered, target fingerprint computed over the restored
+  scope, re-promotion correctly terminal-conflicts, cleanup verified.
+- Full `internal/backup/...` suite passes with `-count=1` under live
+  fixtures; no fixture databases or registry records remain afterwards;
+  dependent binaries (cyberpanel, panel-execd, panel-node-install) build.
+
 ## Legacy backup migration rehearsal evidence — 2026-09-27 (later session)
 
 Installed dr2 host; source = 327283677. Fixture archive converted through

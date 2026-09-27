@@ -105,11 +105,23 @@ ancestor — environmental on this guest); the database transfer retention
 test likewise fails identically on the baseline. No regressions from this
 change set.
 
+### Cross-scope database remapping importer — IMPLEMENTED (359f16fcf)
+
+The fail-closed guard at the database scope boundary is replaced by a
+validated remapping importer in `internal/backup/linux_restore_remap_linux.go`
+(the follow-up directive from the rehearsal): every source database named by
+the dump's database-level statements is mapped to a deterministic fresh name
+(checked against the physical MariaDB namespace and every registry claim),
+only DROP/CREATE DATABASE and USE statements are rewritten — any other
+reference to a source name fails closed — the restored databases are
+registered as target-scope resources, and rollback drops them again.
+Cross-scope mail restores remain fail-closed. QEMU verification: unit tests
+plus two live MariaDB drills (remap/import/ownership/retry/rollback, and a
+full staged Promote with the persisted mapping); the whole backup suite
+passes with live fixtures enabled and leaves no residue.
+
 ### Remaining
 
-- Cross-scope database resource-remapping importer
-  (`platform/internal/backup/linux_runtime.go:89` still fail-closes
-  cross-scope restores) — not implemented this session.
 - Shadow PHP/TLS rehearsal probe wiring on drill hosts, migration cutover
   exercise, and an ambiguous-lease recovery protocol for restore retries.
 
