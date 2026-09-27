@@ -865,3 +865,13 @@ func errorText(err error) string {
 	}
 	return err.Error()
 }
+
+// commandDiagnostic reduces bounded native output to its trailing lines so
+// wrapped validation errors stay journal-readable.
+func commandDiagnostic(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) > 4 {
+		lines = lines[len(lines)-4:]
+	}
+	return strings.Join(lines, " | ")
+}
