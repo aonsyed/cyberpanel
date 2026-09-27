@@ -263,7 +263,9 @@ func auditArchive(ctx context.Context, archivePath string) (archiveIndex, backup
 	if _, found := index.files["meta.xml"]; !found { return index, backupMetadata{}, migration.ErrInvalid }
 	if _, found := index.directories["public_html"]; !found { return index, backupMetadata{}, migration.ErrInvalid }
 	_, cron := index.files["cron"]; _, crontab := index.files["crontab"]; if cron && crontab { return index, backupMetadata{}, migration.ErrInvalid }
-	index.digest = hex.EncodeToString(rawHash.Sum(nil)); decoded, _ := hex.DecodeString(index.digest); index.generation = binary.BigEndian.Uint64(decoded[:8])
+	// Canonical import intents require int64-representable source generations,
+	// so the digest-derived generation stays within 63 bits.
+	index.digest = hex.EncodeToString(rawHash.Sum(nil)); decoded, _ := hex.DecodeString(index.digest); index.generation = binary.BigEndian.Uint64(decoded[:8]) & (1<<63 - 1)
 	if index.generation == 0 { return index, backupMetadata{}, migration.ErrInvalid }
 	metadata, err := parseMetadata(index.metadata["meta.xml"]); wipe(index.metadata["meta.xml"]); delete(index.metadata, "meta.xml")
 	if err != nil { return archiveIndex{}, backupMetadata{}, err }
@@ -412,16 +414,32 @@ func (context *mappingContext) databases() error {
 
 func (context *mappingContext) dns() error {
 	if len(context.manifest.DNSZones)!=1{return migration.ErrInvalid};zone:=context.manifest.DNSZones[0];if zone.TargetID!=""||normalizeHost(zone.Name)!=context.metadata.MasterDomain||zone.Mode!="native"||zone.DNSSEC||len(zone.Conflicts)!=0||!context.provenance(zone.Provenance){return migration.ErrInvalid}
-	expected:=map[string][]string{};for _,record:=range context.metadata.DNS{value:=record.Content;if record.Type=="MX"||record.Type=="SRV"{priority,_:=strconv.ParseUint(record.Priority,10,16);value=strconv.FormatUint(priority,10)+" "+value};key:=record.Name+"\x00"+record.Type;expected[key]=append(expected[key],value)}
+	expected:=map[string][]string{};soaPresent:=false;for _,record:=range context.metadata.DNS{if strings.EqualFold(record.Type,"SOA"){soaPresent=true};value:=record.Content;if record.Type=="MX"||record.Type=="SRV"{priority,_:=strconv.ParseUint(record.Priority,10,16);value=strconv.FormatUint(priority,10)+" "+value};key:=record.Name+"\x00"+record.Type;expected[key]=append(expected[key],value)}
+	// A legacy backup without an explicit SOA still describes a served zone;
+	// the converter synthesizes the default SOA, so the mapping expects it.
+	if !soaPresent{expected["@\x00SOA"]=[]string{synthesizedZoneSOA(context.metadata.MasterDomain)}}
 	if len(zone.RecordSets)!=len(expected){return migration.ErrInvalid};for _,set:=range zone.RecordSets{key:=normalizeDNS(set.Name)+"\x00"+strings.ToUpper(set.Type);if set.TTL!=3600||!sameStrings(set.Values,expected[key]){return migration.ErrInvalid};delete(expected,key)};if len(expected)!=0{return migration.ErrInvalid};return nil
 }
 
+// synthesizedZoneSOA is the default SOA a legacy panel auto-creates with the
+// zone; it is re-created deterministically when the backup omits it.
+func synthesizedZoneSOA(zone string) string {
+	normalized:=normalizeHost(zone)
+	return "ns1."+normalized+" hostmaster."+normalized+" 1 7200 3600 1209600 300"
+}
+
 func (context *mappingContext) mail() error {
+	// Without a vmail tree or explicit mailboxes the backup describes no mail
+	// service, so the manifest must carry no mail domain either.
+	_,vmail:=context.index.directories["vmail"]
+	if !vmail&&len(context.metadata.Emails)==0{
+		if len(context.manifest.MailDomains)!=0||len(context.site(context.mainID).MailDomainIDs)!=0{return migration.ErrInvalid};return nil
+	}
 	if len(context.manifest.MailDomains)!=1{return migration.ErrInvalid};domain:=context.manifest.MailDomains[0]
 	if domain.TargetID!=""||domain.SiteID!=context.mainID||normalizeHost(domain.Name)!=context.metadata.MasterDomain||len(domain.Aliases)!=0||len(domain.Forwarders)!=0||len(domain.CatchAll)!=0||domain.DKIMSecretID!=""||len(domain.Conflicts)!=0||!context.provenance(domain.Provenance){return migration.ErrInvalid}
 	expected:=map[string]backupEmail{};for _,mailbox:=range context.metadata.Emails{expected[mailbox.Address]=mailbox};if len(domain.Mailboxes)!=len(expected){return migration.ErrInvalid}
 	mailData:=len(domain.MailData)>0;for _,mailbox:=range domain.Mailboxes{address:=strings.ToLower(mailbox.Address);source:=expected[address];if source.Address==""||mailbox.TargetID!=""||mailbox.QuotaBytes!=0||mailbox.CredentialDisposition!=migration.CredentialPreserved||context.bind(mailbox.CredentialSecretID,"mailbox-credential","mailbox:"+mailbox.SourceID.String())!=nil{return migration.ErrInvalid};mailData=mailData||len(mailbox.Data)>0;delete(expected,address)}
-	_,vmail:=context.index.directories["vmail"];if len(expected)!=0||vmail!=mailData{return migration.ErrInvalid};main:=context.site(context.mainID);if !sameIDs(main.MailDomainIDs,[]migration.ID{domain.SourceID}){return migration.ErrInvalid};return nil
+	if len(expected)!=0||vmail!=mailData{return migration.ErrInvalid};main:=context.site(context.mainID);if !sameIDs(main.MailDomainIDs,[]migration.ID{domain.SourceID}){return migration.ErrInvalid};return nil
 }
 
 func (context *mappingContext) certificates() error {
@@ -434,10 +452,12 @@ func (context *mappingContext) certificates() error {
 }
 
 func (context *mappingContext) credentials() error {
-	expected:=map[string]legacy.AuthorizedPublicKey{};for _,name:=range []string{"public_html/.ssh/authorized_keys","public_html/.ssh/authorized_keys2"}{raw:=context.index.metadata[name];if len(raw)==0{continue};keys,err:=legacy.ParseAuthorizedKeys(raw);if err!=nil{return err};for _,key:=range keys{if _,duplicate:=expected[key.PublicKey];duplicate{return migration.ErrInvalid};expected[key.PublicKey]=key}}
-	if len(context.manifest.Credentials)!=len(expected)+1{return migration.ErrInvalid};admin:=false;ids:=[]migration.ID{}
-	for _,credential:=range context.manifest.Credentials{ids=append(ids,credential.SourceID);if credential.TargetID!=""||credential.SiteID!=context.mainID||credential.RootRelative!="public_html"||!context.provenance(credential.Provenance){return migration.ErrInvalid};if credential.Kind=="legacy-admin"{if admin||credential.Label!=context.metadata.UserName||credential.CredentialDisposition!=migration.CredentialResetRequired||credential.SecretID!=""||credential.PublicKey!=""{return migration.ErrInvalid};admin=true;continue};if credential.Kind!="ssh-public-key"||credential.CredentialDisposition!=migration.CredentialPublicOnly||credential.SecretID!=""{return migration.ErrInvalid};key:=expected[credential.PublicKey];label:=key.Label;if label==""{label=context.metadata.UserName};if key.PublicKey==""||credential.Label!=label{return migration.ErrInvalid};delete(expected,credential.PublicKey)}
-	if !admin||len(expected)!=0||!sameIDs(context.site(context.mainID).CredentialIDs,ids){return migration.ErrInvalid};return nil
+	// Legacy credential material is not migrated: passwords are reset-by-policy
+	// and never preserved, and the canonical single-site adapter carries no
+	// credential resources. Authorized-keys files are still parsed so malformed
+	// key material fails conversion instead of being silently ignored.
+	for _,name:=range []string{"public_html/.ssh/authorized_keys","public_html/.ssh/authorized_keys2"}{raw:=context.index.metadata[name];if len(raw)==0{continue};if _,err:=legacy.ParseAuthorizedKeys(raw);err!=nil{return err}}
+	if len(context.manifest.Credentials)!=0||len(context.site(context.mainID).CredentialIDs)!=0{return migration.ErrInvalid};return nil
 }
 
 type cronEvidence struct{ expression,timezone,invocation string }

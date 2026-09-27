@@ -428,7 +428,9 @@ func sourceGeneration(snapshot Snapshot, descriptors map[ArtifactID]migration.Ch
 	raw, err := json.Marshal(struct{ Snapshot Snapshot; Artifacts any;Secrets any }{Snapshot: stable, Artifacts: artifacts,Secrets:secrets})
 	if err != nil { return 0, err }
 	sum := sha256.Sum256(raw)
-	generation := binary.BigEndian.Uint64(sum[:8])
+	// Canonical import intents require int64-representable source generations,
+	// so derived snapshot generations stay within 63 bits.
+	generation := binary.BigEndian.Uint64(sum[:8]) & (1<<63 - 1)
 	if generation == 0 { generation = 1 }
 	return generation, nil
 }

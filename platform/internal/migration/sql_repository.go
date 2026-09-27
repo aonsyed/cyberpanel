@@ -110,7 +110,7 @@ func (r *SQLRepository) Create(ctx context.Context, value Migration) error {
 	_, err := r.db.ExecContext(ctx, `INSERT INTO panel_migrations
 (id,source,phase,attempt_id,manifest_root,plan_digest,source_generation,target_generation,fence,last_checkpoint,target_write_watermark,rollback_deadline,created_at,updated_at,error_code,error_message)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, value.ID.String(), string(value.Source), string(value.Phase), value.AttemptID,
-		value.ManifestRoot, value.PlanDigest, value.SourceGeneration, value.TargetGeneration, value.Fence,
+		value.ManifestRoot, value.PlanDigest, encodeCounter(value.SourceGeneration), encodeCounter(value.TargetGeneration), encodeCounter(value.Fence),
 		value.LastCheckpoint, value.TargetWriteWatermark, encodeTime(value.RollbackDeadline), encodeTime(value.CreatedAt),
 		encodeTime(value.UpdatedAt), value.ErrorCode, value.ErrorMessage)
 	if isUniqueViolation(err) {
@@ -174,9 +174,9 @@ func (r *SQLRepository) Transition(ctx context.Context, id ID, from, to Phase, c
 		value.ErrorCode, value.ErrorMessage = "", ""
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE panel_migrations SET phase=?,manifest_root=?,plan_digest=?,source_generation=?,target_generation=?,fence=?,last_checkpoint=?,target_write_watermark=?,rollback_deadline=?,updated_at=?,error_code=?,error_message=? WHERE id=? AND phase=? AND fence=?`,
-		string(value.Phase), value.ManifestRoot, value.PlanDigest, value.SourceGeneration, value.TargetGeneration, value.Fence,
+		string(value.Phase), value.ManifestRoot, value.PlanDigest, encodeCounter(value.SourceGeneration), encodeCounter(value.TargetGeneration), encodeCounter(value.Fence),
 		value.LastCheckpoint, value.TargetWriteWatermark, encodeTime(value.RollbackDeadline), encodeTime(value.UpdatedAt),
-		value.ErrorCode, value.ErrorMessage, id.String(), string(from), value.Fence)
+		value.ErrorCode, value.ErrorMessage, id.String(), string(from), encodeCounter(value.Fence))
 	if err != nil {
 		return Migration{}, err
 	}
@@ -200,7 +200,7 @@ func (r *SQLRepository) PutManifest(ctx context.Context, value Manifest) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, err = r.db.ExecContext(ctx, `INSERT INTO panel_migration_manifests(merkle_root,migration_id,source_generation,manifest_json,created_at) VALUES(?,?,?,?,?)`, value.MerkleRoot, value.MigrationID.String(), value.SourceGeneration, raw, encodeTime(value.CreatedAt))
+	_, err = r.db.ExecContext(ctx, `INSERT INTO panel_migration_manifests(merkle_root,migration_id,source_generation,manifest_json,created_at) VALUES(?,?,?,?,?)`, value.MerkleRoot, value.MigrationID.String(), encodeCounter(value.SourceGeneration), raw, encodeTime(value.CreatedAt))
 	if isUniqueViolation(err) {
 		var existing []byte
 		loadErr := r.db.QueryRowContext(ctx, `SELECT manifest_json FROM panel_migration_manifests WHERE merkle_root=?`, value.MerkleRoot).Scan(&existing)
@@ -346,10 +346,12 @@ type scanner interface{ Scan(...any) error }
 func scanMigration(id ID, row scanner) (Migration, error) {
 	var value Migration
 	var source, phase, rollback, created, updated string
+	var sourceGeneration, targetGeneration, fence int64
 	value.ID = id
-	if err := row.Scan(&source, &phase, &value.AttemptID, &value.ManifestRoot, &value.PlanDigest, &value.SourceGeneration, &value.TargetGeneration, &value.Fence, &value.LastCheckpoint, &value.TargetWriteWatermark, &rollback, &created, &updated, &value.ErrorCode, &value.ErrorMessage); err != nil {
+	if err := row.Scan(&source, &phase, &value.AttemptID, &value.ManifestRoot, &value.PlanDigest, &sourceGeneration, &targetGeneration, &fence, &value.LastCheckpoint, &value.TargetWriteWatermark, &rollback, &created, &updated, &value.ErrorCode, &value.ErrorMessage); err != nil {
 		return Migration{}, err
 	}
+	value.SourceGeneration, value.TargetGeneration, value.Fence = decodeCounter(sourceGeneration), decodeCounter(targetGeneration), decodeCounter(fence)
 	value.Source, value.Phase = SourceKind(source), Phase(phase)
 	var err error
 	if value.RollbackDeadline, err = decodeTime(rollback); err != nil {
@@ -498,6 +500,13 @@ func encodeTime(value time.Time) string {
 	}
 	return value.UTC().Format(time.RFC3339Nano)
 }
+
+// Migration counters are full 64-bit values; the source generation is derived
+// from the leading bytes of a digest, so the high bit is set for roughly half
+// of all archives. SQLite stores signed 64-bit integers, so counters cross the
+// SQL boundary as a bit-preserving two's-complement conversion.
+func encodeCounter(value uint64) int64 { return int64(value) }
+func decodeCounter(value int64) uint64 { return uint64(value) }
 
 func decodeTime(value string) (time.Time, error) {
 	if value == "" {

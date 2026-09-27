@@ -308,9 +308,11 @@ func (store *RuntimeScopeStore) List(ctx context.Context, tenantID string, limit
 	for rows.Next() {
 		var value ScopedMigration
 		var migrationID, source, phase, scopeUpdated, rollbackDeadline, createdAt, updatedAt string
-		if err := rows.Scan(&migrationID, &value.Scope.SourceEndpoint, &value.Scope.Generation, &value.Scope.LastCommandID, &scopeUpdated, &source, &phase, &value.Migration.AttemptID, &value.Migration.ManifestRoot, &value.Migration.PlanDigest, &value.Migration.SourceGeneration, &value.Migration.TargetGeneration, &value.Migration.Fence, &value.Migration.LastCheckpoint, &value.Migration.TargetWriteWatermark, &rollbackDeadline, &createdAt, &updatedAt, &value.Migration.ErrorCode, &value.Migration.ErrorMessage); err != nil {
+		var sourceGeneration, targetGeneration, fence int64
+		if err := rows.Scan(&migrationID, &value.Scope.SourceEndpoint, &value.Scope.Generation, &value.Scope.LastCommandID, &scopeUpdated, &source, &phase, &value.Migration.AttemptID, &value.Migration.ManifestRoot, &value.Migration.PlanDigest, &sourceGeneration, &targetGeneration, &fence, &value.Migration.LastCheckpoint, &value.Migration.TargetWriteWatermark, &rollbackDeadline, &createdAt, &updatedAt, &value.Migration.ErrorCode, &value.Migration.ErrorMessage); err != nil {
 			return nil, "", 0, err
 		}
+		value.Migration.SourceGeneration, value.Migration.TargetGeneration, value.Migration.Fence = decodeCounter(sourceGeneration), decodeCounter(targetGeneration), decodeCounter(fence)
 		id, parseErr := NewID(migrationID)
 		if parseErr != nil {
 			return nil, "", 0, ErrInvalid

@@ -56,6 +56,16 @@ type databaseImportPlan struct {
 	header database.CommandHeader
 	restore database.MigrationRestoreRequest
 	chunk Chunk
+	preamble []byte
+}
+
+// Both source dialects mean "the legacy owner holds every privilege on this
+// database": live collection normalizes to ALL PRIVILEGES, while converted
+// legacy backups carry the per-host owner label validated at intake.
+func legacyOwnerGrantSet(value string) bool {
+	if value == "ALL PRIVILEGES" { return true }
+	host, ok := strings.CutPrefix(value, "legacy-database-owner@")
+	return ok && host != "" && len(host) <= 255 && !strings.ContainsAny(host, " \t\r\n\x00")
 }
 
 func (handler *DatabaseImportHandler) plan(ctx context.Context,intent ImportIntent)(databaseImportPlan,error) {
@@ -65,9 +75,11 @@ func (handler *DatabaseImportHandler) plan(ctx context.Context,intent ImportInte
 	if err:=strictDecode(intent.Payload,&payload,8<<20); err!=nil { return databaseImportPlan{},err }
 	if len(payload.Principals)!=1 || len(payload.Dump)!=1 || payload.Dump[0]!=intent.Chunks[0] { return databaseImportPlan{},ErrBlocked }
 	credential:=payload.Principals[0]
-	if credential.CredentialDisposition!=CredentialPreserved || len(credential.GrantSets)!=1 || strings.ToUpper(strings.TrimSpace(credential.GrantSets[0]))!="ALL PRIVILEGES" { return databaseImportPlan{},ErrBlocked }
+	if credential.CredentialDisposition!=CredentialPreserved || len(credential.GrantSets)!=1 || !legacyOwnerGrantSet(credential.GrantSets[0]) { return databaseImportPlan{},ErrBlocked }
 	chunk:=intent.Chunks[0]
-	if chunk.Size==0 || chunk.Size>64<<30 || chunk.Compression!="" && chunk.Compression!="none" { return databaseImportPlan{},ErrBlocked }
+	// The restore streams chunk bytes directly into MariaDB, so only the
+	// uncompressed dialects are importable; gzipped dumps stay fail-closed.
+	if chunk.Size==0 || chunk.Size>64<<30 || chunk.Compression!="" && chunk.Compression!="none" && chunk.Compression!="identity" { return databaseImportPlan{},ErrBlocked }
 	scope,err:=handler.scopes.LoadByMigration(ctx,intent.MigrationID); if err!=nil { return databaseImportPlan{},err }
 	tenant,err:=site.NewTenantID(scope.TenantID); if err!=nil { return databaseImportPlan{},err }
 	siteID,err:=handler.siteTarget(ctx,intent.MigrationID,payload.SiteID); if err!=nil { return databaseImportPlan{},err }
@@ -90,8 +102,9 @@ func (handler *DatabaseImportHandler) plan(ctx context.Context,intent ImportInte
 	meta.ID=grantID
 	grants:=database.GrantSet{Metadata:meta,InstanceID:instance.ID,DatabaseID:databaseID,PrincipalID:principalID,Grants:[]database.Grant{{Scope:database.GrantScopeDatabase,Privileges:[]database.Privilege{database.PrivilegeSelect,database.PrivilegeInsert,database.PrivilegeUpdate,database.PrivilegeDelete,database.PrivilegeCreate,database.PrivilegeAlter,database.PrivilegeIndex,database.PrivilegeDrop,database.PrivilegeCreateTemporary,database.PrivilegeExecute,database.PrivilegeCreateView,database.PrivilegeShowView,database.PrivilegeTrigger,database.PrivilegeEvent}}}}
 	header:=database.CommandHeader{Actor:database.Actor{TenantID:tenant,Capability:database.CapabilityTenantManage},TenantID:tenant}
+	preamble:=canonicalDumpPreamble(name,charset,collation)
 	restore:=database.MigrationRestoreRequest{ID:restoreID,TenantID:tenant,SiteID:siteID,DatabaseID:databaseID,PrincipalID:principalID,GrantSetID:grantID,SourceName:name,InputDigest:intent.InputDigest,DumpDigest:chunk.Digest,DumpBytes:chunk.Size}
-	return databaseImportPlan{target,principal,grants,header,restore,chunk},nil
+	return databaseImportPlan{target,principal,grants,header,restore,chunk,preamble},nil
 }
 
 func (handler *DatabaseImportHandler) admit(ctx context.Context,intent ImportIntent)(string,error) {
@@ -115,11 +128,19 @@ func (handler *DatabaseImportHandler) Apply(ctx context.Context,intent ImportInt
 	commands:=plan.createCommands(intent)
 	for _,command:=range commands { receipt,commandErr:=handler.commands.Handle(ctx,command); if commandErr!=nil || receipt.Status!=database.OperationApplied || receipt.Effect.Outcome!=database.EffectConfirmed { return ambiguousImportEffect(intent,"DATABASE_PROVISIONING_UNPROVEN",time.Now().UTC()),errors.Join(ErrBlocked,commandErr) } }
 	request:=plan.restore; request.Action="begin"
+	// The restore only accepts a canonical logical dump: the preamble carries
+	// the source database identity and is consumed by the server, never
+	// executed. A legacy raw dump chunk is wrapped before upload, so the
+	// staged bytes and digests describe the wrapped stream. Every restore
+	// request must describe the same wrapped identity.
+	dumpDigest,dumpErr:=handler.digestWrapped(ctx,plan.chunk,plan.preamble)
+	if dumpErr!=nil { return ImportEffect{},dumpErr }
+	request.DumpDigest=dumpDigest; request.DumpBytes=plan.chunk.Size+uint64(len(plan.preamble))
 	receipt,err:=handler.broker.RestoreMigrationDatabase(ctx,request); if err!=nil { return ambiguousImportEffect(intent,"DATABASE_RESTORE_UNOBSERVED",time.Now().UTC()),err }
 	if receipt.State=="uploading" {
-		for offset:=receipt.Bytes; offset<plan.chunk.Size; {
-			length:=uint64(256<<10); if length>plan.chunk.Size-offset { length=plan.chunk.Size-offset }
-			content,readErr:=handler.chunks.ReadRange(ctx,plan.chunk.Digest,offset,length); if readErr!=nil { return ImportEffect{},readErr }
+		for offset:=receipt.Bytes; offset<request.DumpBytes; {
+			length:=uint64(256<<10); if length>request.DumpBytes-offset { length=request.DumpBytes-offset }
+			content,readErr:=handler.wrappedRange(ctx,plan.chunk,plan.preamble,offset,length); if readErr!=nil { return ImportEffect{},readErr }
 			request.Action="chunk"; request.Offset=offset; request.Data=content
 			if _,err=handler.broker.RestoreMigrationDatabase(ctx,request); err!=nil { return ambiguousImportEffect(intent,"DATABASE_UPLOAD_UNCERTAIN",time.Now().UTC()),err }; offset+=length
 		}
@@ -127,6 +148,43 @@ func (handler *DatabaseImportHandler) Apply(ctx context.Context,intent ImportInt
 		receipt,err=handler.broker.RestoreMigrationDatabase(ctx,request); if err!=nil { return ambiguousImportEffect(intent,"DATABASE_RESTORE_UNCERTAIN",time.Now().UTC()),err }
 	}
 	return databaseImportEffect(intent,receipt)
+}
+
+// canonicalDumpPreamble matches the header and preamble consumed by the
+// restore executor; the database-creation lines are stripped server-side and
+// never reach the constrained SQL reader.
+func canonicalDumpPreamble(source,charset,collation database.SQLIdentifier) []byte {
+	return []byte("-- CyberPanel canonical logical dump v1\n"+
+		"SET FOREIGN_KEY_CHECKS=0;\n"+
+		"SET UNIQUE_CHECKS=0;\n"+
+		"CREATE DATABASE IF NOT EXISTS `"+source.String()+"` CHARACTER SET "+charset.String()+" COLLATE "+collation.String()+";\n"+
+		"USE `"+source.String()+"`;\n")
+}
+
+// wrappedRange reads length bytes of the canonical dump stream (preamble
+// followed by the raw dump chunk) starting at the wrapped-stream offset.
+func (handler *DatabaseImportHandler) wrappedRange(ctx context.Context,chunk Chunk,preamble []byte,offset,length uint64)([]byte,error) {
+	content:=make([]byte,length)
+	written:=uint64(0)
+	if offset<uint64(len(preamble)) {
+		take:=length; if uint64(len(preamble))-offset<take { take=uint64(len(preamble))-offset }
+		copy(content,preamble[offset:uint64(offset)+take]); written=take
+	}
+	if written<length {
+		tail,err:=handler.chunks.ReadRange(ctx,chunk.Digest,offset+written-uint64(len(preamble)),length-written); if err!=nil { return nil,err }
+		copy(content[written:],tail)
+	}
+	return content,nil
+}
+
+func (handler *DatabaseImportHandler) digestWrapped(ctx context.Context,chunk Chunk,preamble []byte)(string,error) {
+	hash:=sha256.New()
+	for offset:=uint64(0); offset<chunk.Size+uint64(len(preamble)); {
+		length:=uint64(256<<10); if length>chunk.Size+uint64(len(preamble))-offset { length=chunk.Size+uint64(len(preamble))-offset }
+		content,err:=handler.wrappedRange(ctx,chunk,preamble,offset,length); if err!=nil { return "",err }
+		if _,err=hash.Write(content);err!=nil{ return "",err }; offset+=length
+	}
+	return hex.EncodeToString(hash.Sum(nil)),nil
 }
 
 func (plan databaseImportPlan) createCommands(intent ImportIntent)[]database.Command {
@@ -145,6 +203,9 @@ func (handler *DatabaseImportHandler) Observe(ctx context.Context,intent ImportI
 	if state=="compensated" { return ImportEffect{EffectID:intent.EffectID,InputDigest:intent.InputDigest,Status:ImportEffectCompensated,AppliedAt:time.Now().UTC()},nil }
 	if state=="compensating" { return ambiguousImportEffect(intent,"DATABASE_COMPENSATING",time.Now().UTC()),ErrBlocked }
 	request:=plan.restore; request.Action="observe"
+	dumpDigest,dumpErr:=handler.digestWrapped(ctx,plan.chunk,plan.preamble)
+	if dumpErr!=nil { return ImportEffect{},dumpErr }
+	request.DumpDigest=dumpDigest; request.DumpBytes=plan.chunk.Size+uint64(len(plan.preamble))
 	receipt,err:=handler.broker.RestoreMigrationDatabase(ctx,request); if err!=nil { return ambiguousImportEffect(intent,"DATABASE_PROBE_FAILED",time.Now().UTC()),err }
 	return databaseImportEffect(intent,receipt)
 }
@@ -166,6 +227,9 @@ func (handler *DatabaseImportHandler) Compensate(ctx context.Context,intent Impo
 	if state!="compensated" {
 		if _,err=handler.db.ExecContext(ctx,`UPDATE panel_migration_database_imports SET state='compensating' WHERE migration_id=? AND target_id=? AND input_digest=?`,intent.MigrationID.String(),intent.TargetID.String(),intent.InputDigest); err!=nil { return ImportEffect{},err }
 		request:=plan.restore; request.Action="discard"
+		dumpDigest,discardDigestErr:=handler.digestWrapped(ctx,plan.chunk,plan.preamble)
+		if discardDigestErr!=nil { return ImportEffect{},discardDigestErr }
+		request.DumpDigest=dumpDigest; request.DumpBytes=plan.chunk.Size+uint64(len(plan.preamble))
 		discard,discardErr:=handler.broker.RestoreMigrationDatabase(ctx,request);if discardErr!=nil||discard.State!="discarded"||discard.ID!=request.ID||discard.InputDigest!=intent.InputDigest||discard.ObservedAt.IsZero(){return ambiguousImportEffect(intent,"DATABASE_RESTORE_CLEANUP_UNCERTAIN",time.Now().UTC()),errors.Join(ErrAmbiguous,discardErr)}
 		removedReceipts:=[]database.OperationReceipt{}
 		for _,item:=range []struct{kind database.ResourceKind; id database.ResourceID; command string}{{database.KindPrincipal,plan.principal.ID,"mig-db-principal-"},{database.KindDatabase,plan.target.ID,"mig-db-create-"}} {
