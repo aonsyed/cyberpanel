@@ -28,6 +28,9 @@ import DomainCards from "./DomainCards.vue";
 import LogViewer from "./LogViewer.vue";
 import MetricsDashboard from "./MetricsDashboard.vue";
 import MigrationTimeline from "./MigrationTimeline.vue";
+import AlertCards from "./AlertCards.vue";
+import SecurityFindings from "./SecurityFindings.vue";
+import PHPSettings from "./PHPSettings.vue";
 
 const page = computed(() => pageForPath(router.currentPath.value));
 
@@ -61,6 +64,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", shortcuts));
       <LogViewer v-else-if="router.currentPath.value === '/logs'" />
       <MetricsDashboard v-else-if="router.currentPath.value === '/observability'" />
       <MigrationTimeline v-else-if="router.currentPath.value === '/migrations'" />
+      <AlertCards v-else-if="router.currentPath.value === '/alerts'" />
+      <SecurityFindings v-else-if="router.currentPath.value === '/security'" />
+      <PHPSettings v-else-if="router.currentPath.value === '/engines'" />
       <DashboardPage v-else-if="page.id === 'dashboard'" />
       <WebmailPage v-else-if="page.id === 'webmail'" />
       <SecurityPosture v-else-if="page.component === 'security-posture'" />
