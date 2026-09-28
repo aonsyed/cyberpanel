@@ -104,6 +104,7 @@ func usage() {
 	message := strings.TrimSpace(`panel-node-install <command>
 
 Commands:
+  bootstrap                            prepare a clean host (identities, trust, TLS, checks)
   apply --bundle /absolute/release.tar  verify every member before mutation, then install or resume
   reconcile                            converge or roll back every durable incomplete operation
   reconcile-secrets                    authorize consumers from verified current/previous releases
