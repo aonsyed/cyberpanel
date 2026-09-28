@@ -1,12 +1,24 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from "vue";
 import { PhArrowRight as ArrowRight, PhCommand as Command, PhMagnifyingGlass as MagnifyingGlass, PhX as X } from "@phosphor-icons/vue";
-import { navigation } from "../domain";
+import { navigation, pages } from "../domain";
 import { router } from "../router";
 import { sessionStore } from "../store";
+import { fuzzyScore } from "../consoleLogic";
 
 const query=ref("");const selected=ref(0);const input=ref<HTMLInputElement|null>(null);
-const commands=computed(()=>navigation.flatMap((group)=>group.items.map((item)=>({id:item.id,label:item.label,route:item.route,group:group.label,keywords:item.keywords.join(" ")}))).filter((item)=>{const term=query.value.trim().toLowerCase();return!term||`${item.label} ${item.group} ${item.keywords}`.toLowerCase().includes(term)}).slice(0,12));
+interface PaletteCommand { id:string;label:string;route:string;group:string;keywords:string;kind:"page"|"action" }
+const commands=computed<PaletteCommand[]>(()=>{
+  const pageCommands:PaletteCommand[]=navigation.flatMap((group)=>group.items.map((item)=>({id:item.id,label:item.label,route:item.route,group:group.label,keywords:item.keywords.join(" "),kind:"page" as const})));
+  const actionCommands:PaletteCommand[]=Object.values(pages).flatMap((page)=>page.createAction?[{id:`${page.id}:${page.createAction.id}`,label:page.createAction.label,route:page.id==="dashboard"?"/":`/${navigation.flatMap((group)=>group.items).find((item)=>item.pageId===page.id)?.route.replaceAll("/","")??page.id}`,group:page.title,keywords:`${page.title} new create ${page.resourceKind}`,kind:"action" as const}]:[]);
+  const term=query.value.trim().toLowerCase();
+  return pageCommands.concat(actionCommands)
+    .map((item)=>({item,score:term?fuzzyScore(term,`${item.label} ${item.group} ${item.keywords}`):1}))
+    .filter((entry)=>entry.score>0)
+    .sort((left,right)=>right.score-left.score)
+    .slice(0,12)
+    .map((entry)=>entry.item);
+});
 onMounted(()=>void nextTick(()=>input.value?.focus()));
 function choose(index=selected.value):void{const item=commands.value[index];if(!item)return;router.push(item.route);sessionStore.setCommandOpen(false)}
 function keydown(event:KeyboardEvent):void{if(event.key==="ArrowDown"){event.preventDefault();selected.value=Math.min(selected.value+1,commands.value.length-1)}else if(event.key==="ArrowUp"){event.preventDefault();selected.value=Math.max(selected.value-1,0)}else if(event.key==="Enter"){event.preventDefault();choose()}else if(event.key==="Escape")sessionStore.setCommandOpen(false)}

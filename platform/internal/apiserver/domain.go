@@ -171,6 +171,7 @@ type DomainServices struct {
 	Database DatabaseCommandService
 	DatabaseTransfers DatabaseTransferService
 	Operations OperationsCommandService
+	OperationsResources operations.Repository
 	ProductUpdates ProductUpdateEdgeService
 	PackageMaintenance PackageMaintenanceEdgeService
 	MaintenanceWindows MaintenanceWindowEdgeService

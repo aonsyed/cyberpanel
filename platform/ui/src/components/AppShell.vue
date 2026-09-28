@@ -10,6 +10,8 @@ import DashboardPage from "./DashboardPage.vue";
 import CommandPalette from "./CommandPalette.vue";
 import WebmailPage from "./WebmailPage.vue";
 import FileManagerPage from "./FileManagerPage.vue";
+import SecurityPosture from "./SecurityPosture.vue";
+import MailRouting from "./MailRouting.vue";
 
 const page = computed(() => pageForPath(router.currentPath.value));
 
@@ -30,6 +32,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", shortcuts));
       <DashboardPage v-if="page.id === 'dashboard'" />
       <WebmailPage v-else-if="page.id === 'webmail'" />
       <FileManagerPage v-else-if="page.id === 'files'" />
+      <SecurityPosture v-else-if="page.component === 'security-posture'" />
+      <MailRouting v-else-if="page.component === 'mail-routing'" />
       <ResourcePage v-else :definition="page" />
     </div>
     <CommandPalette v-if="sessionStore.state.commandOpen" />

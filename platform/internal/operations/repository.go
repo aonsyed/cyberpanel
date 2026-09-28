@@ -82,6 +82,7 @@ type Completion struct {
 type Repository interface {
 	LookupOperation(context.Context, OperationScope, string) (OperationReceipt, bool, error)
 	LoadResource(context.Context, ResourceKind, ResourceID) (ResourceEnvelope, error)
+	ListResources(context.Context, ResourceKind, string, int) ([]ResourceEnvelope, error)
 	Admit(context.Context, Admission) (AdmissionResult, error)
 	Complete(context.Context, Completion) (OperationReceipt, error)
 }

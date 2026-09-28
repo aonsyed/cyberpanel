@@ -91,6 +91,53 @@ FROM panel_operation_resources WHERE kind = ? AND resource_id = ?`, string(kind)
 	return envelope, err
 }
 
+// ListResources returns every persisted resource of one kind, newest first,
+// optionally narrowed to a tenant. It backs read-only posture views only;
+// every mutation still flows through Admit/Complete.
+func (repository *SQLRepository) ListResources(ctx context.Context, kind ResourceKind, tenantID string, limit int) ([]ResourceEnvelope, error) {
+	if repository == nil || repository.db == nil { return nil, ErrInvalidResource }
+	if limit <= 0 || limit > 512 { limit = 64 }
+	query := `SELECT resource_id, node_id, tenant_id, site_id, parent_id, physical_key, generation, spec_json, status_json
+FROM panel_operation_resources WHERE kind = ?`
+arguments := []any{string(kind)}
+	if tenantID != "" { query += ` AND tenant_id = ?`; arguments = append(arguments, tenantID) }
+	query += ` ORDER BY updated_at DESC, resource_id LIMIT ?`; arguments = append(arguments, limit)
+	rows, err := repository.db.QueryContext(ctx, query, arguments...)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	envelopes := []ResourceEnvelope{}
+	for rows.Next() {
+		var idRaw string
+		var nodeRaw, tenantRaw, siteRaw, parentRaw, physicalKey string
+		var generation uint64
+		var specJSON, statusJSON []byte
+		if err = rows.Scan(&idRaw, &nodeRaw, &tenantRaw, &siteRaw, &parentRaw, &physicalKey, &generation, &specJSON, &statusJSON); err != nil { return nil, err }
+		id, idErr := NewResourceID(idRaw); if idErr != nil { return nil, ErrInvalidResource }
+		envelope, scanErr := scanOperationResource(kind, id, resourceRow{nodeRaw, tenantRaw, siteRaw, parentRaw, physicalKey, generation, specJSON, statusJSON})
+		if scanErr != nil { return nil, scanErr }
+		envelopes = append(envelopes, envelope)
+	}
+	return envelopes, rows.Err()
+}
+
+// resourceRow adapts already-scanned columns onto the rowScanner contract so
+// list results reuse the exact single-row decode path.
+type resourceRow struct{ node, tenant, site, parent, physicalKey string; generation uint64; spec, status []byte }
+
+func (row resourceRow) Scan(targets ...any) error {
+	values := []any{row.node, row.tenant, row.site, row.parent, row.physicalKey, row.generation, row.spec, row.status}
+	if len(targets) != len(values) { return ErrInvalidResource }
+	for index, target := range targets {
+		switch slot := target.(type) {
+		case *string: value, ok := values[index].(string); if !ok { return ErrInvalidResource }; *slot = value
+		case *uint64: value, ok := values[index].(uint64); if !ok { return ErrInvalidResource }; *slot = value
+		case *[]byte: value, ok := values[index].([]byte); if !ok { return ErrInvalidResource }; *slot = value
+		default: return ErrInvalidResource
+		}
+	}
+	return nil
+}
+
 func (repository *SQLRepository) Admit(ctx context.Context, admission Admission) (AdmissionResult, error) {
 	if repository == nil || repository.db == nil || validateAdmission(admission) != nil { return AdmissionResult{}, ErrInvalidReceipt }
 	repository.writer.Lock(); defer repository.writer.Unlock()

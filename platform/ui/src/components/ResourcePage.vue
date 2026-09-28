@@ -5,6 +5,7 @@ import type { APIClient } from "../api";
 import type { ActionDefinition, PageDefinition } from "../domain";
 import { sessionStore } from "../store";
 import ActionDrawer from "./ActionDrawer.vue";
+import DetailDrawer from "./DetailDrawer.vue";
 import MailDomainCreate from "./MailDomainCreate.vue";
 import MailboxCreate from "./MailboxCreate.vue";
 import DatabaseConsole from "./DatabaseConsole.vue";
@@ -73,6 +74,16 @@ function openAction(action: ActionDefinition, resource: Record<string, unknown> 
   activeAction.value = action;
   activeResource.value = resource;
 }
+const detailOpen = ref(false);
+function openDetail(row: Record<string, unknown>): void {
+  if (!props.definition.detailOperation || !api.available(props.definition.detailOperation)) return;
+  activeResource.value = row;
+  detailOpen.value = true;
+}
+function detailAction(action: ActionDefinition, resource: Record<string, unknown>): void {
+  detailOpen.value = false;
+  openAction(action, resource);
+}
 function complete(): void { void load(); }
 function sort(key: string): void {
   if (sortKey.value === key) sortDirection.value = sortDirection.value === "asc" ? "desc" : "asc";
@@ -126,10 +137,11 @@ function isRecord(value: unknown): value is Record<string, unknown> { return Boo
       <button v-else-if="availableCreate" class="button button-primary" type="button" @click="openAction(availableCreate)">{{ availableCreate.label }}<ArrowRight :size="15"/></button>
     </section>
     <template v-else>
-      <DataTable :columns="definition.columns" :rows="visibleRows" :actions="availableRowActions" @action="openAction" @sort="sort" @select="(row) => definition.detailOperation && api.available(definition.detailOperation) ? openAction({id:'details',label:'Details',operation:definition.detailOperation,mutating:false},row) : undefined"/>
+      <DataTable :columns="definition.columns" :rows="visibleRows" :actions="availableRowActions" @action="openAction" @sort="sort" @select="openDetail"/>
       <footer v-if="nextCursor || previousCursors.length" class="pagination"><button class="button button-small" type="button" :disabled="!previousCursors.length" @click="previousPage">Previous</button><span class="mono">CURSOR PAGE {{ previousCursors.length + 1 }}</span><button class="button button-small" type="button" :disabled="!nextCursor" @click="nextPage">Next</button></footer>
     </template>
 
+    <DetailDrawer v-if="detailOpen && activeResource && definition.detailOperation" :operation="definition.detailOperation" :resource="activeResource" :title="definition.title" :actions="availableRowActions" :tenant-id="activeTenantID" @close="detailOpen=false" @action="detailAction"/>
     <DNSRecords v-if="(activeAction?.operation === 'dns.recordset.list' || activeAction?.operation === 'dns.zone.import') && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null" @complete="complete"/>
     <DatabaseConsole v-else-if="activeAction?.operation === 'database.console.issue' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null"/>
     <DatabaseUploadImport v-else-if="activeAction?.operation === 'database.upload.begin' && activeResource" :tenant-id="activeTenantID" :resource="activeResource" @close="activeAction=null;activeResource=null" @complete="complete"/>

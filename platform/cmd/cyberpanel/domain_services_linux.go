@@ -844,6 +844,7 @@ func assembleDomainServices(ctx context.Context, repositories controlRepositorie
 		DatabaseTransfers:           databaseTransfers,
 		DatabaseEdge:                databaseConsoleEdge,
 		Operations:                  operationsCoordinator,
+		OperationsResources:         repositories.Operations,
 		OperationsEdge:              operationsConsoleEdge,
 		ProductUpdates:              productUpdateEdge,
 		PackageMaintenance:          packageMaintenanceEdge,

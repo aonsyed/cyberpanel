@@ -83,6 +83,7 @@ func registerOperationsContracts(registry *Registry)error{
 		{Name:"operations.ssh_key.put",Permission:identity.MustPermission("security:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &SSHPutKeyPayload{}},ResolveScope:tenantOrInstallationScope},
 		{Name:"operations.ssh_key.delete",Permission:identity.MustPermission("security:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &SSHDeleteKeyPayload{}},ResolveScope:tenantOrInstallationScope},
 		{Name:"operations.waf.replace",Permission:identity.MustPermission("security:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &WAFPayload{}},ResolveScope:tenantOrInstallationScope},
+		{Name:"operations.security.snapshot",Permission:identity.MustPermission("operations:observe"),Assurance:identity.AssurancePassword,Auth:AuthRequired,Mutating:false,NewPayload:func()any{return &struct{}{}},ResolveScope:tenantOrInstallationScope},
 		{Name:"operations.service_policy.set",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &ServicePolicyPayload{}},ResolveScope:installationScope},
 		{Name:"operations.service.control",Permission:identity.MustPermission("operations:manage"),Assurance:identity.AssuranceMFA,Auth:AuthRequired,Mutating:true,NewPayload:func()any{return &ServiceControlPayload{}},ResolveScope:installationScope},
 		{Name:"operations.service.diagnose",Permission:identity.MustPermission("operations:observe"),Assurance:identity.AssurancePassword,Auth:AuthRequired,Mutating:false,NewPayload:func()any{return &ServiceDiagnosePayload{}},ResolveScope:installationScope},
@@ -134,7 +135,42 @@ func bindOperations(registry *Registry,services DomainServices)error{
 	if err:=bind("operations.logs.query",func(inv Invocation,value any)(operations.Command,error){p:=value.(*LogsPayload);header,err:=operationHeader(inv,p.NodeID,operations.ResourceID{},p.SiteID,observationCapability(inv));return operations.OpenLogStream{Header:header,Source:p.Source,Service:p.Service,Start:p.Start,End:p.End,MinimumSeverity:p.MinimumSeverity,Cursor:p.Cursor,Limit:p.Limit},err});err!=nil{return err}
 	if err:=bind("operations.package.apply",func(inv Invocation,value any)(operations.Command,error){p:=value.(*PackagePayload);header,err:=operationHeader(inv,p.NodeID,p.ApprovalRef,"",operations.CapabilityNodePackages);p.Transaction.Metadata.NodeID=p.NodeID;p.Transaction.Metadata.Generation=1;return operations.RequestPackageTransaction{Header:header,Transaction:p.Transaction},err});err!=nil{return err}
 	if err:=bind("operations.managed_service.reconcile",func(inv Invocation,value any)(operations.Command,error){p:=value.(*ManagedServicePayload);header,err:=operationHeader(inv,p.NodeID,operations.ResourceID{},p.Service.Metadata.SiteID.String(),operations.CapabilityNodeOperations);p.Service.Metadata.NodeID=p.NodeID;p.Service.Metadata.Generation=generation(inv.Request.ExpectedGeneration);p.Service.Metadata.TenantID=header.TenantID;p.Service.Metadata.SiteID=header.SiteID;return operations.ReconcileManagedService{Header:header,Service:p.Service,ExpectedGeneration:inv.Request.ExpectedGeneration},err});err!=nil{return err}
+	if services.OperationsResources!=nil{
+		repository:=services.OperationsResources
+		if err:=registry.Bind("operations.security.snapshot",func(ctx context.Context,inv Invocation,_ any)(OperationResult,error){
+			snapshot,err:=securitySnapshot(ctx,repository,inv.Request.TenantID)
+			if err!=nil{return OperationResult{},mapOperationsError(err)}
+			return OperationResult{Status:http.StatusOK,Value:snapshot},nil});err!=nil{return err}
+	}
 	return bindRedisOperations(registry,services)
+}
+
+type SecuritySnapshot struct {
+	FirewallPolicies []operations.FirewallPolicy `json:"firewall_policies"`
+	WAFPolicies      []operations.WAFPolicy      `json:"waf_policies"`
+	SSHPolicies      []operations.SSHPolicy      `json:"ssh_policies"`
+	ObservedAt       time.Time                   `json:"observed_at"`
+}
+
+// securitySnapshot projects the persisted security resources without any
+// executor effect: the durable desired state is the authority a posture view
+// needs, and every mutation still flows through the command path.
+func securitySnapshot(ctx context.Context,repository operations.Repository,tenantID string)(SecuritySnapshot,error){
+	snapshot:=SecuritySnapshot{FirewallPolicies:[]operations.FirewallPolicy{},WAFPolicies:[]operations.WAFPolicy{},SSHPolicies:[]operations.SSHPolicy{},ObservedAt:time.Now().UTC()}
+	for _,entry:=range []struct{kind operations.ResourceKind;collect func(operations.Resource)}{
+		{operations.KindFirewallPolicy,func(resource operations.Resource){if policy,ok:=resource.(*operations.FirewallPolicy);ok{snapshot.FirewallPolicies=append(snapshot.FirewallPolicies,*policy)}}},
+		{operations.KindWAFPolicy,func(resource operations.Resource){if policy,ok:=resource.(*operations.WAFPolicy);ok{snapshot.WAFPolicies=append(snapshot.WAFPolicies,*policy)}}},
+		{operations.KindSSHPolicy,func(resource operations.Resource){if policy,ok:=resource.(*operations.SSHPolicy);ok{snapshot.SSHPolicies=append(snapshot.SSHPolicies,*policy)}}},
+	}{
+		envelopes,listErr:=repository.ListResources(ctx,entry.kind,tenantID,64)
+		if listErr!=nil&&!errors.Is(listErr,operations.ErrNotFound){return SecuritySnapshot{},listErr}
+		for _,envelope:=range envelopes{
+			resource,decodeErr:=operations.DecodeResource(envelope)
+			if decodeErr!=nil{return SecuritySnapshot{},decodeErr}
+			entry.collect(resource)
+		}
+	}
+	return snapshot,nil
 }
 
 func mapOperationsError(err error)error{switch{case err==nil:return nil;case errors.Is(err,operations.ErrInvalidCommand)||errors.Is(err,operations.ErrInvalidResource):return ErrInvalidRequest;case errors.Is(err,operations.ErrUnauthorized):return ErrForbidden;case errors.Is(err,operations.ErrNotFound):return ErrNotFound;case errors.Is(err,operations.ErrConflict)||errors.Is(err,operations.ErrIdempotency):return ErrConflict;default:return err}}

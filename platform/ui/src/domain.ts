@@ -60,6 +60,7 @@ export interface PageDefinition {
   scope?: "tenant" | "installation";
   listOperation: string;
   detailOperation?: string;
+  component?: "security-posture" | "mail-routing";
   createAction?: ActionDefinition;
   rowActions?: ActionDefinition[];
   globalActions?: ActionDefinition[];
@@ -283,6 +284,14 @@ export const pages: Record<string, PageDefinition> = {
     columns:[{key:"severity",label:"Severity",format:"status"},{key:"kind",label:"Finding"},{key:"resource",label:"Resource"},{key:"source",label:"Source"},{key:"observed_at",label:"Observed",format:"date"},{key:"state",label:"State",format:"status"}],
     rowActions:[{id:"inspect",label:"Inspect",operation:"security.finding.get",mutating:false},{id:"remediate",label:"Remediate",operation:"security.remediation.apply",mutating:true,assurance:"mfa"},{id:"suppress",label:"Suppress",operation:"security.finding.suppress",mutating:true}],globalActions:[{id:"scan",label:"Run host scan",operation:"security.scan.start",mutating:true,tone:"info"}],emptyTitle:"No active findings",emptyBody:"Current policy checks and scanners have no unresolved findings."
   },
+  securityPosture: {
+    id:"securityPosture",title:"Edge posture",description:"The persisted firewall, WAF, and SSH policy this node enforces, projected read-only from the durable desired state.",resourceKind:"operations.security",component:"security-posture",listOperation:"operations.security.snapshot",
+    columns:[],emptyTitle:"No persisted posture",emptyBody:"Apply a firewall, WAF, or SSH policy to make the node posture observable."
+  },
+  mailRouting: {
+    id:"mailRouting",title:"Routing & aliases",description:"Exact forwarding aliases and catch-all destinations decided by the mail routing generation, including pattern-rule enforcement behind the same authority.",resourceKind:"mail.route",component:"mail-routing",listOperation:"mail.route.list",
+    columns:[],emptyTitle:"No routes",emptyBody:"Create an alias or catch-all to start routing mail."
+  },
   malware: {
     id:"malware",title:"Malware scanning",description:"Bounded local ClamAV, signature, integrity, secret, configuration, and structural heuristic scans with exact evidence and response controls.",resourceKind:"security.malware.finding",listOperation:"security.malware.finding.list",detailOperation:"security.malware.finding.get",
     columns:[{key:"severity",label:"Severity",format:"status"},{key:"confidence",label:"Confidence",format:"status"},{key:"check",label:"Check"},{key:"rule_id",label:"Rule"},{key:"target.locator.relative_path",label:"Exact path"},{key:"scanner.engine",label:"Engine"},{key:"lifecycle",label:"State",format:"status"},{key:"updated_at",label:"Observed",format:"date"}],
@@ -456,6 +465,7 @@ export const navigation: NavigationGroup[] = [
     {id:"dns",label:"DNS",route:"/dns",icon:"TreeStructure",pageId:"dns",keywords:["powerdns","records","dnssec"]},
     {id:"certificates",label:"Certificates",route:"/certificates",icon:"Certificate",pageId:"certificates",keywords:["acme","tls","ssl"]},
     {id:"security",label:"Security posture",route:"/security",icon:"ShieldCheck",pageId:"security",keywords:["firewall","waf","scanner","ssh"]},
+    {id:"security-posture",label:"Edge posture",route:"/security/posture",icon:"Fire",pageId:"securityPosture",keywords:["firewall","nftables","waf","ssh","rules","policy"]},
     {id:"malware",label:"Malware scanning",route:"/security/malware",icon:"Bug",pageId:"malware",keywords:["clamav","integrity","quarantine","remediation","finding","schedule","ignore"]},
     {id:"malware-scans",label:"Malware scan jobs",route:"/security/malware/scans",icon:"ListMagnifyingGlass",pageId:"malwareScans",keywords:["scan","job","clamav","evidence"]},
     {id:"malware-quarantine",label:"Malware quarantine",route:"/security/malware/quarantine",icon:"ShieldWarning",pageId:"malwareQuarantine",keywords:["quarantine","release","delete","evidence"]},
@@ -463,6 +473,7 @@ export const navigation: NavigationGroup[] = [
   ]},
   {id:"mail",label:"Mail",items:[
     {id:"mail",label:"Domains & mailboxes",route:"/mail",icon:"EnvelopeSimple",pageId:"mail",keywords:["postfix","dovecot","dkim"]},
+    {id:"mail-routing",label:"Routing & aliases",route:"/mail/routing",icon:"Signpost",pageId:"mailRouting",keywords:["alias","catch-all","catchall","forwarding","pattern"]},
     {id:"webmail",label:"Webmail",route:"/webmail",icon:"Tray",pageId:"webmail",keywords:["inbox","message","contacts","sieve"]},
     {id:"queue",label:"Queue & delivery",route:"/mail/queue",icon:"PaperPlaneTilt",pageId:"mailQueue",keywords:["smtp","delivery","logs"]},
     {id:"telemetry",label:"Telemetry",route:"/mail/telemetry",icon:"Pulse",pageId:"mailTelemetry",keywords:["delivery","authentication","spam","logs"]},
