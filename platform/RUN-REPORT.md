@@ -3,6 +3,18 @@
 This is a verification checkpoint, not a parity-release certification.
 The scope remains the complete product defined in the existing design spec.
 
+## Console redesign evidence — 2026-09-28 (sixth follow-up)
+
+Source = 0d9ba70a. In-guest (dr2): vue-tsc clean, vite build clean
+(panel-CNZUf7ae.js / index-YHOrIlJk.css), node --test 9/9. Signed node
+release `qemu-complete-3.1.88` (sequence 88, 115 artifacts, bundle
+sha256 887e916a…62f9d) applied `committed`; TLS gateway serves the new
+bundle at / (HTTP 200). Authenticated browser smoke: login 200, shell
++ dashboard + Edge posture + Routing all render live. Redesigned
+screenshots captured for login, dashboard, sites, posture, routing,
+dns, and webmail. The gateway TLS drill config is reapplied after the
+release as documented lab drift.
+
 ## Console upgrade evidence — 2026-09-28 (fifth follow-up)
 
 Source = 2e95bc47a. In-guest (dr2, node 24): `vue-tsc --noEmit` clean,

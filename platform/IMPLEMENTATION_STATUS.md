@@ -7,6 +7,32 @@ This file is the compact recovery point for ongoing implementation. The normativ
 All builds, formatting, program execution and tests run inside QEMU guests.
 No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
+## Console redesign — 2026-09-28 (sixth follow-up)
+
+Directive: make the UI much better everywhere. A full visual-language
+pass (commit 0d9ba70a, 13 files, +862/-128), driven by what the
+authenticated screenshots exposed:
+
+- Design system rewritten from the token block: three-layer composite
+  shadows, tinted status pills (colored text on matching soft
+  background), gradient primary buttons with glow hover, focus-ring
+  inputs, four-step radius scale, polished scrollbars/selection, full
+  light-theme re-tune.
+- Shell: gradient sidebar with icon wells and a glowing gradient
+  accent rail on the active link; glass topbar (blur + saturate) with
+  a session popover (identity, assurance, tenant, sign-out); ambient
+  accent wash behind the content area.
+- Data: table rows are click-to-open (cursor, hover surface, accent
+  edge); action menus and the command palette are glass dropdowns;
+  drawers slide in with glass headers.
+- Dashboard metric cards are elevated tiles with gradient glow and
+  hover lift; login is an elevated card on a soft accent bloom.
+
+Verified on dr2: vue-tsc strict + vite build + 9/9 unit tests in-guest;
+signed node release sequence 88 (qemu-complete-3.1.88) applied
+committed; gateway serves the new bundle over TLS; the authenticated
+browser smoke passes and screenshots confirm the redesign end to end.
+
 ## Console upgrade: security posture, routing surfaces, detail views — 2026-09-28 (fifth follow-up)
 
 Directive: deliver a much better UI and fill the genuine gaps (not the
