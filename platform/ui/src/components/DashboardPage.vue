@@ -5,6 +5,9 @@ import type { APIClient } from "../api";
 import { router } from "../router";
 import { sessionStore } from "../store";
 import Sparkline from "./Sparkline.vue";
+import PrototypeSwitcher from "./prototype/PrototypeSwitcher.vue";
+import VariantCommandCenter from "./prototype/VariantCommandCenter.vue";
+import VariantEditorial from "./prototype/VariantEditorial.vue";
 
 interface MetricProjection { name?:string;label?:string;value?:number;unit?:string;available?:boolean;complete?:boolean;missing_reason?:string;observed_at?:string;sample_interval?:number }
 interface UsageProjection { dimension?:string;used?:number;limit?:number;unit?:string;available?:boolean;limit_state?:string;missing_reason?:string;updated_at?:string }
@@ -15,6 +18,9 @@ const usage=computed(()=>list(raw.value.usage) as unknown as UsageProjection[]);
 const services=computed(()=>list(raw.value.services));
 const alerts=computed(()=>list(raw.value.alerts));
 const warnings=computed(()=>Array.isArray(raw.value.warnings)?raw.value.warnings.map((item)=>String(item)):[]);
+const variant=ref<"A"|"B"|"C">((new URLSearchParams(window.location.search).get("variant") as "A"|"B"|"C")||"A");
+const variants=[{key:"A",name:"Card Grid (live)"},{key:"B",name:"Command Center"},{key:"C",name:"Editorial"}];
+function selectVariant(key:string):void{variant.value=key as "A"|"B"|"C";const url=new URL(window.location.href);url.searchParams.set("variant",variant.value);window.history.replaceState({},"",url.toString())}
 onMounted(()=>void load());
 const series=ref<Record<string, number[]>>({});
 async function loadSeries():Promise<void>{
@@ -52,7 +58,9 @@ function sparkTone(metric:MetricProjection):"accent"|"healthy"|"warning"|"critic
 </script>
 
 <template>
-  <main class="dashboard">
+  <VariantCommandCenter v-if="variant==='B'" :node="node" :metrics="metrics" :usage="usage" :services="services" :alerts="alerts" :loading="loading"/>
+  <VariantEditorial v-else-if="variant==='C'" :node="node" :metrics="metrics" :usage="usage" :services="services" :alerts="alerts" :loading="loading"/>
+  <main v-else class="dashboard">
     <header class="dashboard-head">
       <div><p class="eyebrow">NODE / CACHED OBSERVATION</p><h2>Operational overview</h2><p>Historical telemetry, tenant limits, alerts, and functional service evidence without a fresh host scan.</p></div>
       <div class="head-actions"><span class="node-state" :class="`status-${text(node.health,'unknown').toLowerCase()}`">{{text(node.hostname,'Local node')}} · {{humanize(node.health)}}</span><button class="button button-small" type="button" :disabled="loading" @click="load"><ArrowClockwise :size="15" :class="{spinning:loading}"/>Refresh</button></div>
@@ -72,6 +80,7 @@ function sparkTone(metric:MetricProjection):"accent"|"healthy"|"warning"|"critic
       <section class="panel quality-panel"><header><div><p>DATA QUALITY</p><h3>Projection notices</h3></div><span>{{date(raw.generated_at)}}</span></header><ol><li v-for="warning in warnings" :key="warning"><Warning :size="14"/><span>{{warning}}</span></li><li v-if="!loading&&!warnings.length"><CheckCircle :size="14"/><span>No missing-data notice was reported.</span></li></ol></section>
     </div>
   </main>
+  <PrototypeSwitcher :variants="variants" :current="variant" @select="selectVariant"/>
 </template>
 
 <style scoped>
