@@ -23,6 +23,11 @@ import AppCards from "./AppCards.vue";
 import UserCards from "./UserCards.vue";
 import ServicesGrid from "./ServicesGrid.vue";
 import FileBrowser from "./FileBrowser.vue";
+import AccessCredentials from "./AccessCredentials.vue";
+import DomainCards from "./DomainCards.vue";
+import LogViewer from "./LogViewer.vue";
+import MetricsDashboard from "./MetricsDashboard.vue";
+import MigrationTimeline from "./MigrationTimeline.vue";
 
 const page = computed(() => pageForPath(router.currentPath.value));
 
@@ -51,6 +56,11 @@ onBeforeUnmount(() => window.removeEventListener("keydown", shortcuts));
       <UserCards v-else-if="router.currentPath.value === '/users'" />
       <ServicesGrid v-else-if="router.currentPath.value === '/services'" />
       <FileBrowser v-else-if="router.currentPath.value === '/files'" />
+      <AccessCredentials v-else-if="router.currentPath.value === '/access'" />
+      <DomainCards v-else-if="router.currentPath.value === '/domains'" />
+      <LogViewer v-else-if="router.currentPath.value === '/logs'" />
+      <MetricsDashboard v-else-if="router.currentPath.value === '/observability'" />
+      <MigrationTimeline v-else-if="router.currentPath.value === '/migrations'" />
       <DashboardPage v-else-if="page.id === 'dashboard'" />
       <WebmailPage v-else-if="page.id === 'webmail'" />
       <SecurityPosture v-else-if="page.component === 'security-posture'" />
