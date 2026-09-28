@@ -7,6 +7,76 @@ This file is the compact recovery point for ongoing implementation. The normativ
 All builds, formatting, program execution and tests run inside QEMU guests.
 No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
+## Legacy-backup migration completed end to end — 2026-09-28 (fourth follow-up)
+
+Directive: wire LSAPI pool provisioning into the migration site-import
+path, rerun the drill through dark verification, quiescing, cutover and
+committed, capture the evidence, and push. The directive's premise was
+disproven first: the imported site's pool IS provisioned at import — the
+site key is hashed (`s-<sha256(tenant-site)>`), so the unit lives under
+the hashed key, active with a granted socket ACL. The rehearsal 503 had
+a different root cause chain, found and fixed across five defects
+(commit 6b4760d16):
+
+1. Rehearsal 503 "candidate did not execute the bound PHP challenge":
+   the executor's umask (0027) narrowed the namespace's `/run/cyberpanel`
+   to 0750, so the engine account (cyberpanel-web) could not traverse to
+   the bind-mounted LSAPI pool socket — root probes passed while the
+   engine's connect got EACCES and OpenLiteSpeed answered 503. Proven by
+   an in-namespace connect as cyberpanel-web failing against a socket
+   that connected on the host. Fixed with explicit 0755 chmod on the
+   traversed directories; dark verification now executes the PHP
+   challenge.
+2. Cutover ACTIVATION_AMBIGUOUS "certificate broker: failed": the engine
+   PID file lives under `/tmp`, which panel-execd mounts privately
+   (PrivateTmp=yes), so `lswsctrl reload` from the broker always saw
+   "not running" (exit 2). Reload/probe now run via `systemctl
+   reload/is-active lshttpd.service`, which executes the same control in
+   the engine unit's own mount context.
+3. Cutover "migration: blocked by policy" at the certificate binding:
+   the rehearsal receipt stores the deliberately-remapped private
+   listener port (18443) while the binding compared it against the
+   production port (443) — an equality that can never hold. The listener
+   ref plus TLS mode identify the proven listener; the port comparison
+   is gone.
+4. Cutover "access resource not found": MarkProvisioned advances the
+   site root generation, provisioning an empty `roots/g<N>` skeleton, so
+   the public probe found no imported files. The activation now
+   re-applies the dark-imported content into the current generation
+   (verify-first, idempotent) before the public probe.
+5. Converter service "converter credentials unavailable": systemd 255
+   provisions LoadCredential files root-owned 0440 with a read ACL for
+   the service account; the loader demanded zero group/world bits and
+   could never start through its own packaged unit. Only group/world
+   write access disqualifies a credential now.
+
+Drill-operational notes for repeated runs on the same guest: binary
+swaps of panel-core must be followed by the `rebind-consumer` ceremony
+(secret audiences pin the consumer release digest) and, when the
+migration sealing key is re-created, by re-running the `migration-key`
+ceremony and updating
+`/etc/cyberpanel/secrets/migration-target-public.key`; a completed
+drill leaves deterministic-id residue (certificate material, database
+resources, hosting command ledger, upload sessions, the published DNS
+zone in control.db and the PowerDNS authority db) that the reset must
+clear before the next fresh run.
+
+End-to-end verification on dr2 with the production binaries (no
+diagnostics): create -> inventory -> plan -> sync (dark verify passes)
+-> quiescing -> cutover -> committed -> cleanup, `panel_migrations`
+checkpoint `complete`, 4/4 resources applied, cutover_approval /
+source_fence / activation receipts written, host activation
+`finalized`. Live evidence: the engine serves the migrated site
+(`HTTP 200`, `legacy migrate drill`) and `migrate-marker.txt` on port
+80, presents the migrated TLS certificate (SHA-256 9df26bf2…d59ae,
+matching the certificate target fingerprint), and the imported
+database serves `qemu_migrate.migrate_proof` (id 1, "legacy backup
+migration drill"). Regressions on the smoke guest:
+webengine/management, access, and the migration packages pass; the
+certificates suite has one pre-existing baseline failure
+(TestLocalMailIdentityRotationRollback) verified identical on the
+untouched tree.
+
 ## Strace of the rehearsal engine launch — 2026-09-28
 
 Directive: strace the litespeed launch inside the rehearsal namespace,

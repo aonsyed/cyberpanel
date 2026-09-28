@@ -3,6 +3,34 @@
 This is a verification checkpoint, not a parity-release certification.
 The scope remains the complete product defined in the existing design spec.
 
+## End-to-end migration completion evidence — 2026-09-28 (fourth follow-up)
+
+Source = 6b4760d16, production binaries (no diagnostic instrumentation)
+deployed on the dr2 drill guest. The full chain ran to completion:
+`migration.create` 201 -> `inventory` 202 -> `plan` 202 -> `sync` 202
+(dark verification executed the bound PHP challenge inside the shadow
+rehearsal) -> quiescing -> `cutover` 202 -> committed -> cleanup,
+`panel_migrations.phase=cleanup`, `last_checkpoint=complete`,
+4/4 resources applied, all eight import effects `applied`, and the
+`cutover_approval`, `source_fence` and `activation` receipts written
+with the host activation finalized (TargetGeneration 1, routing and DNS
+digests recorded). Live serving evidence, captured after cutover:
+`GET /` with `Host: migrate-drill.example.invalid` on 127.0.0.1:80
+returns HTTP 200 with the migrated page (`legacy migrate drill`),
+`GET /migrate-marker.txt` returns the fixture marker, the TLS listener
+presents the migrated certificate (SHA-256 fingerprint 9df26bf2…d59ae,
+equal to the panel_migration_certificate_targets fingerprint), and the
+imported MariaDB database answers `SELECT … FROM migrate_proof` with
+row id 1 (`legacy backup migration drill`). The five fixed defects
+(rehearsal /run/cyberpanel umask traverse, PrivateTmp-blind lswsctrl
+reload via systemctl lshttpd, impossible rehearsal-port equality,
+generation-advance content re-materialization, systemd 0440+ACL
+credential loading) are recorded in IMPLEMENTATION_STATUS.md.
+Regressions: webengine/management, internal/access and the migration
+packages pass on the smoke guest; internal/certificates retains one
+pre-existing baseline failure (TestLocalMailIdentityRotationRollback,
+identical on the untouched tree).
+
 ## Rehearsal strace evidence — 2026-09-28
 
 Source = 497da61ef. Diagnostic worker builds wrapped the worker re-exec
