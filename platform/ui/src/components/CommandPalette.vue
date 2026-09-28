@@ -35,5 +35,27 @@ function keydown(event:KeyboardEvent):void{if(event.key==="ArrowDown"){event.pre
 </template>
 
 <style scoped>
-.palette-layer{position:fixed;z-index:100;inset:0;background:rgba(0,5,8,.68);backdrop-filter:blur(5px);display:flex;justify-content:center;align-items:flex-start;padding:12vh 20px}.palette{width:min(650px,100%);border:1px solid var(--border-strong);border-radius:10px;background:var(--surface);box-shadow:var(--shadow);overflow:hidden}.palette>header{height:62px;display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid var(--border)}.palette>header>svg{color:var(--accent)}.palette input{flex:1;border:0;outline:0;background:transparent;color:var(--text);font-size:16px}.palette header button{width:31px;height:31px;border:0;border-radius:6px;background:transparent;color:var(--subtle);display:grid;place-items:center;cursor:pointer}.palette header button:hover{background:var(--surface-2);color:var(--text)}.results{padding:7px;max-height:460px;overflow:auto}.results button{width:100%;min-height:51px;border:0;border-radius:6px;background:transparent;color:var(--text);padding:8px 11px;display:flex;justify-content:space-between;align-items:center;text-align:left;cursor:pointer}.results button.selected{background:var(--accent-soft)}.results button>span{display:grid;gap:4px}.results small{color:var(--subtle);font:9px/1 "Panel Mono",monospace;text-transform:uppercase;letter-spacing:.1em}.results strong{font-size:13px}.results button>svg{color:var(--accent);opacity:0}.results button.selected>svg{opacity:1}.results>p{padding:30px;text-align:center;color:var(--muted)}.palette footer{min-height:42px;padding:0 14px;border-top:1px solid var(--border);background:var(--bg-raised);display:flex;align-items:center;gap:14px;color:var(--subtle);font-size:10px}.palette footer span{display:flex;align-items:center;gap:4px}.palette kbd{font:9px/1 "Panel Mono",monospace;border:1px solid var(--border);border-radius:4px;background:var(--surface);padding:3px 5px;color:var(--muted)}.command-hint{margin-left:auto}
+.palette-layer{position:fixed;z-index:100;inset:0;background:rgba(2,6,10,.65);backdrop-filter:blur(8px);display:flex;justify-content:center;align-items:flex-start;padding:12vh 20px}
+.palette{width:min(650px,100%);border:1px solid var(--border-strong);border-radius:var(--radius-lg);background:var(--surface-glass);backdrop-filter:blur(24px) saturate(1.3);box-shadow:var(--shadow-lg);overflow:hidden;animation:palette-in .18s cubic-bezier(.3,.7,.3,1)}
+@keyframes palette-in{from{transform:scale(.97) translateY(-8px);opacity:0}}
+.palette>header{height:62px;display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid var(--border)}
+.palette>header>svg{color:var(--accent)}
+.palette input{flex:1;border:0;outline:0;background:transparent;color:var(--text);font-size:16px}
+.palette input::placeholder{color:var(--faint)}
+.palette header button{width:31px;height:31px;border:0;border-radius:var(--radius-xs);background:transparent;color:var(--subtle);display:grid;place-items:center;cursor:pointer;transition:background .1s ease,color .1s ease}
+.palette header button:hover{background:var(--surface-2);color:var(--text)}
+.results{padding:7px;max-height:460px;overflow:auto}
+.results button{width:100%;min-height:51px;border:0;border-radius:var(--radius-sm);background:transparent;color:var(--text);padding:8px 11px;display:flex;justify-content:space-between;align-items:center;text-align:left;cursor:pointer;transition:background .08s ease}
+.results button.selected{background:var(--accent-soft)}
+.results button>span{display:grid;gap:4px}
+.results small{color:var(--subtle);font:600 9px/1 var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.results strong{font-size:13px}
+.results button>svg{color:var(--accent);opacity:0;transition:opacity .1s ease}
+.results button.selected>svg{opacity:1}
+.results>p{padding:30px;text-align:center;color:var(--muted)}
+.palette footer{min-height:42px;padding:0 14px;border-top:1px solid var(--border);background:var(--bg-raised);display:flex;align-items:center;gap:14px;color:var(--subtle);font-size:10px}
+.palette footer span{display:flex;align-items:center;gap:4px}
+.palette kbd{font:9px/1 var(--font-mono);border:1px solid var(--border);border-radius:var(--radius-xs);background:var(--surface);padding:3px 5px;color:var(--muted)}
+.command-hint{margin-left:auto}
 </style>
+

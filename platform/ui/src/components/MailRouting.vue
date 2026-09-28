@@ -150,38 +150,40 @@ async function removeRoute(route: RouteRow): Promise<void> {
 </template>
 
 <style scoped>
-.routing{padding:34px clamp(18px,3.2vw,48px) 64px;max-width:1300px;margin:0 auto}
-.page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin:0 0 24px}
-.page-head h2{margin:5px 0 8px;font-size:clamp(27px,3vw,38px);line-height:1;letter-spacing:-.045em}
+.routing{padding:36px clamp(18px,3.2vw,52px) 64px;max-width:1300px;margin:0 auto}
+.page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin:0 0 26px}
+.page-head h2{margin:6px 0 8px;font-size:clamp(28px,3vw,40px);line-height:1;letter-spacing:-.048em;font-weight:750}
 .page-head>div>p:last-child{margin:0;color:var(--muted);max-width:72ch}
-.eyebrow{margin:0;color:var(--accent);font:10px/1 "Panel Mono",monospace;letter-spacing:.13em;text-transform:uppercase}
 .head-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-.routing-error{display:flex;align-items:center;gap:8px;margin:0 0 15px;padding:11px 13px;border-left:3px solid var(--critical);background:color-mix(in srgb,var(--critical),transparent 92%);color:var(--critical)}
-.routing-notice{display:flex;align-items:center;gap:8px;margin:0 0 15px;padding:10px 13px;border-left:3px solid var(--healthy);background:color-mix(in srgb,var(--healthy),transparent 92%);color:var(--healthy)}
-.alias-form{border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--surface);margin-bottom:18px}
-.alias-form>header{min-height:54px;padding:11px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.alias-form h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}
-.alias-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;padding:16px}
-.alias-form>footer{border-top:1px solid var(--border);padding:12px 16px;display:flex;align-items:center;justify-content:space-between}
-.alias-form>footer span{color:var(--subtle);font-size:10px}
+.routing-error{display:flex;align-items:center;gap:8px;margin:0 0 15px;padding:12px 14px;border-left:3px solid var(--critical);border-radius:var(--radius-xs);background:var(--critical-soft);color:var(--critical)}
+.routing-notice{display:flex;align-items:center;gap:8px;margin:0 0 15px;padding:11px 14px;border-left:3px solid var(--healthy);border-radius:var(--radius-xs);background:var(--healthy-soft);color:var(--healthy)}
+.alias-form{border:1px solid var(--border-strong);border-radius:var(--radius-lg);background:var(--surface);margin-bottom:18px;box-shadow:var(--shadow)}
+.alias-form>header{min-height:54px;padding:11px 17px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.alias-form h3{margin:0;font-size:14px;font-weight:650;display:flex;align-items:center;gap:8px;letter-spacing:-.02em}
+.alias-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;padding:17px}
+.alias-form>footer{border-top:1px solid var(--border);padding:12px 17px;display:flex;align-items:center;justify-content:space-between}
+.alias-form>footer span{color:var(--subtle);font-size:10px;font-family:var(--font-mono)}
 .alias-form>footer div{display:flex;gap:8px}
-.alias-form .field-error{margin:0 16px 14px}
+.alias-form .field-error{margin:0 17px 14px}
 .routing-search{display:flex;margin:0 0 14px}
-.routing-search input{width:100%;max-width:420px;height:38px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);padding:0 11px}
-.routing-loading{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
-.routing-panel{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);margin-bottom:18px}
-.routing-panel>header{min-height:58px;padding:12px 17px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.routing-panel header p{margin:0 0 5px;color:var(--subtle);font:9px/1 "Panel Mono",monospace;letter-spacing:.12em}
-.routing-panel h3{margin:0;font-size:14px}
-.routing-panel>header>span{color:var(--subtle);font:11px/1 "Panel Mono",monospace}
-.routing-empty{margin:0;padding:20px 17px;color:var(--subtle);font-size:12px}
+.routing-search input{width:100%;max-width:420px;height:38px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);padding:0 12px;transition:border-color .14s ease,box-shadow .14s ease}
+.routing-search input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.routing-loading{border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--shadow-sm);overflow:hidden}
+.routing-panel{border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);margin-bottom:16px;box-shadow:var(--shadow-sm)}
+.routing-panel>header{min-height:58px;padding:12px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.routing-panel header p{margin:0 0 5px;color:var(--subtle);font:600 9px/1 var(--font-mono);letter-spacing:.13em}
+.routing-panel h3{margin:0;font-size:14px;font-weight:650;letter-spacing:-.02em}
+.routing-panel>header>span{color:var(--subtle);font:600 11px/1 var(--font-mono)}
+.routing-empty{margin:0;padding:20px 18px;color:var(--subtle);font-size:12px;line-height:1.5}
 .route-list{list-style:none;margin:0;padding:4px 0}
-.route-list li{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 17px;border-bottom:1px solid var(--border)}
+.route-list li{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 18px;border-bottom:1px solid var(--border);transition:background .1s ease}
+.route-list li:hover{background:var(--surface-2)}
 .route-list li:last-child{border-bottom:0}
 .route-list li>div{display:grid;gap:5px;min-width:0}
 .route-list strong{font-size:12px;word-break:break-all}
 .route-list small{color:var(--subtle);font-size:10px;word-break:break-all}
 .route-list li>div:last-child{display:flex;align-items:center;gap:10px}
-.routing-note{margin:0;color:var(--subtle);font-size:11px}
+.routing-note{margin:0;color:var(--subtle);font-size:11px;line-height:1.45}
 .spinning{animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(1turn)}}
 </style>
+

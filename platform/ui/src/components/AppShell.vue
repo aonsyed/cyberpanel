@@ -41,6 +41,15 @@ onBeforeUnmount(() => window.removeEventListener("keydown", shortcuts));
 </template>
 
 <style scoped>
-.shell { min-height:100dvh; display:grid; grid-template-columns:var(--nav) minmax(0,1fr); }.shell-main { grid-column:2; min-width:0; padding-top:var(--topbar); }.offline-banner { position:fixed; z-index:30; top:var(--topbar); left:var(--nav); right:0; padding:7px 18px; background:var(--warning); color:#171006; font-size:12px; font-weight:700; text-align:center; }.shell-collapsed { --nav:72px; }
+.shell { min-height:100dvh; display:grid; grid-template-columns:var(--nav) minmax(0,1fr); }
+.shell-main {
+  grid-column:2; min-width:0; padding-top:var(--topbar);
+  background:
+    radial-gradient(ellipse 50% 20% at 50% -60px, var(--accent-softer), transparent),
+    var(--bg);
+}
+.offline-banner { position:fixed; z-index:30; top:var(--topbar); left:var(--nav); right:0; padding:7px 18px; background:var(--warning); color:#171006; font-size:12px; font-weight:700; text-align:center; }
+.shell-collapsed { --nav:72px; }
 @media(max-width:900px){.shell{display:block}.shell-main{padding-top:56px}.offline-banner{left:0;top:56px}}
 </style>
+
