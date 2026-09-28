@@ -19,6 +19,10 @@ import DNSZoneEditor from "./DNSZoneEditor.vue";
 import BackupHistory from "./BackupHistory.vue";
 import CertificateCards from "./CertificateCards.vue";
 import ContainerCards from "./ContainerCards.vue";
+import AppCards from "./AppCards.vue";
+import UserCards from "./UserCards.vue";
+import ServicesGrid from "./ServicesGrid.vue";
+import FileBrowser from "./FileBrowser.vue";
 
 const page = computed(() => pageForPath(router.currentPath.value));
 
@@ -43,9 +47,12 @@ onBeforeUnmount(() => window.removeEventListener("keydown", shortcuts));
       <BackupHistory v-else-if="router.currentPath.value === '/backups'" />
       <CertificateCards v-else-if="router.currentPath.value === '/certificates'" />
       <ContainerCards v-else-if="router.currentPath.value === '/containers'" />
+      <AppCards v-else-if="router.currentPath.value === '/applications'" />
+      <UserCards v-else-if="router.currentPath.value === '/users'" />
+      <ServicesGrid v-else-if="router.currentPath.value === '/services'" />
+      <FileBrowser v-else-if="router.currentPath.value === '/files'" />
       <DashboardPage v-else-if="page.id === 'dashboard'" />
       <WebmailPage v-else-if="page.id === 'webmail'" />
-      <FileManagerPage v-else-if="page.id === 'files'" />
       <SecurityPosture v-else-if="page.component === 'security-posture'" />
       <MailRouting v-else-if="page.component === 'mail-routing'" />
       <ResourcePage v-else :definition="page" />
