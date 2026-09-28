@@ -31,6 +31,8 @@ import MigrationTimeline from "./MigrationTimeline.vue";
 import AlertCards from "./AlertCards.vue";
 import SecurityFindings from "./SecurityFindings.vue";
 import PHPSettings from "./PHPSettings.vue";
+import GenericCardPage from "./GenericCardPage.vue";
+import { adminConfigFor } from "./AdminPages";
 
 const page = computed(() => pageForPath(router.currentPath.value));
 
@@ -71,6 +73,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", shortcuts));
       <WebmailPage v-else-if="page.id === 'webmail'" />
       <SecurityPosture v-else-if="page.component === 'security-posture'" />
       <MailRouting v-else-if="page.component === 'mail-routing'" />
+      <GenericCardPage v-else-if="adminConfigFor(router.currentPath.value)" :config="adminConfigFor(router.currentPath.value)!" />
       <ResourcePage v-else :definition="page" />
     </div>
     <CommandPalette v-if="sessionStore.state.commandOpen" />
