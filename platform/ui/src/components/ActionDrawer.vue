@@ -110,7 +110,7 @@ onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>{c
             <ul><li v-for="service in plannedServices" :key="service">{{service}}</li></ul>
             <p>Reboot: {{resource.planned_reboot}} · Recovery: {{resource.recovery_kind||resource.recovery_status}}</p>
           </section>
-          <FormBuilder :fields="visibleFields" v-model="values" :errors="errors" :disabled="submitting"/>
+          <FormBuilder :fields="visibleFields" :model-value="values" :errors="errors" :disabled="submitting ?? undefined" @update:model-value="Object.assign(values, $event)"/>
           <div v-if="action.confirmation&&!completed" class="confirmation" :class="`confirmation-${action.tone||'warning'}`"><ShieldWarning :size="22" weight="fill"/><div><strong>Confirm impact</strong><p>{{action.confirmation}}</p><label class="checkbox"><input v-model="confirmation" type="checkbox"/><span>I understand this change and its rollback boundary.</span></label></div></div>
           <div v-if="submitting&&!action.mutating" class="loading-result"><ArrowClockwise :size="20"/><span>Loading the current projection…</span></div>
           <div v-if="failure" class="operation-error" role="alert">{{failure}}</div>

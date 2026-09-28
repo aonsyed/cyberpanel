@@ -65,7 +65,7 @@ function iconFor(name: string): unknown {
       </div>
     </header>
 
-    <p v-if="error" class="error-banner">{{ error }}</p>
+    <div v-if="error" class="notice">Couldn't load live service status. Check back in a moment.</div>
     <div v-if="loading" class="loading-grid">
       <div v-for="i in 6" :key="i" class="skeleton" style="height:120px;border-radius:var(--radius-lg)"/>
     </div>
@@ -90,10 +90,10 @@ function iconFor(name: string): unknown {
       </article>
     </div>
 
-    <div v-if="!loading && !services.length && !error" class="empty-state">
+    <div v-if="!loading && !services.length" class="empty-state">
       <PhWrench :size="48" weight="duotone"/>
       <h3>No service observations</h3>
-      <p>Service health data hasn't been collected yet. This populates automatically as the node monitors its services.</p>
+      <p>We're still checking your services. This page fills in automatically.</p>
     </div>
   </main>
 </template>
@@ -104,6 +104,7 @@ function iconFor(name: string): unknown {
 .page-header h2{margin:0 0 4px;font-size:clamp(24px,2.5vw,32px);letter-spacing:-.04em;font-weight:700}
 .page-header p{margin:0;color:var(--muted);font-size:14px}
 .header-actions{display:flex;gap:8px}
+.notice{padding:12px 16px;border-left:3px solid var(--warning);border-radius:var(--radius-xs);background:var(--warning-soft);color:var(--warning);margin:0 0 16px;font-size:13px}
 .error-banner{padding:14px 16px;border-left:3px solid var(--critical);border-radius:var(--radius-xs);background:var(--critical-soft);color:var(--critical);margin:0 0 16px}
 .loading-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
 

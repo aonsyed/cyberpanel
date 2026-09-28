@@ -45,7 +45,7 @@ async function load(): Promise<void> {
           <PhArrowClockwise :size="15" :class="{ spinning: loading }"/> Refresh
         </button>
         <button class="button button-primary" type="button">
-          <PhPlus :size="16" weight="bold"/> Deploy Container
+          <PhPlus :size="16" weight="bold"/> New Container
         </button>
       </div>
     </header>
@@ -87,9 +87,9 @@ async function load(): Promise<void> {
 
     <div v-if="!loading && !containers.length && !error" class="empty-state">
       <PhCube :size="48" weight="duotone"/>
-      <h3>No containers</h3>
-      <p>Deploy containerized applications with managed networking, volumes, and automatic health checks.</p>
-      <button class="button button-primary" type="button"><PhPlus :size="16"/> Deploy Your First Container</button>
+      <h3>No containers yet</h3>
+      <p>Run apps in isolated containers with networking and health monitoring included.</p>
+      <button class="button button-primary" type="button"><PhPlus :size="16"/> Deploy a Container</button>
     </div>
   </main>
 </template>

@@ -52,7 +52,7 @@ function roleColor(role: string): string {
           <PhArrowClockwise :size="15" :class="{ spinning: loading }"/> Refresh
         </button>
         <button class="button button-primary" type="button">
-          <PhPlus :size="16" weight="bold"/> Invite User
+          <PhPlus :size="16" weight="bold"/> Add User
         </button>
       </div>
     </header>
@@ -96,9 +96,9 @@ function roleColor(role: string): string {
     <!-- Empty state -->
     <div v-if="!loading && !tenants.length && !error" class="empty-state">
       <PhUsersThree :size="48" weight="duotone"/>
-      <h3>No users yet</h3>
-      <p>Invite team members to help manage sites, databases, and mail. Each user gets scoped permissions based on their role.</p>
-      <button class="button button-primary" type="button"><PhPlus :size="16"/> Invite Your First User</button>
+      <h3>No other users yet</h3>
+      <p>Add team members to help manage your websites, databases, and email. Each person gets their own permissions.</p>
+      <button class="button button-primary" type="button"><PhPlus :size="16"/> Add a User</button>
     </div>
   </main>
 </template>

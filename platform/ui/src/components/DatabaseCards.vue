@@ -44,14 +44,14 @@ function fmtBytes(value: unknown): string {
     <header class="page-header">
       <div>
         <h2>Databases</h2>
-        <p>{{ databases.length }} database{{ databases.length === 1 ? '' : 's' }} across your sites</p>
+        <p>{{ databases.length }} database{{ databases.length === 1 ? '' : 's' }} on your account</p>
       </div>
       <div class="header-actions">
         <button class="button" type="button" :disabled="loading" @click="load">
           <PhArrowClockwise :size="15" :class="{ spinning: loading }"/> Refresh
         </button>
         <button class="button button-primary" type="button" @click="showCreateForm = !showCreateForm">
-          <PhPlus :size="16" weight="bold"/> New Database
+          <PhPlus :size="16" weight="bold"/> Create Database
         </button>
       </div>
     </header>
@@ -67,7 +67,7 @@ function fmtBytes(value: unknown): string {
       <h3>Create a Database</h3>
       <div class="create-fields">
         <label class="field">Database name<input class="input" placeholder="myapp_production"/></label>
-        <label class="field">Site (optional)<select class="input"><option>Not linked to a site</option><option>example.com</option></select></label>
+        <label class="field">Site (optional)<select class="input"><option>Not linked to a website</option><option>example.com</option></select></label>
         <label class="field">Character set<select class="input"><option>utf8mb4</option><option>utf8</option></select></label>
       </div>
       <div class="create-actions">
@@ -124,9 +124,9 @@ function fmtBytes(value: unknown): string {
     <div v-if="!loading && !databases.length && !error" class="empty-state">
       <PhDatabase :size="48" weight="duotone"/>
       <h3>No databases yet</h3>
-      <p>Create a database to store your application's data. Each database gets an isolated user account with least-privilege access.</p>
+      <p>Create a database to store your application's data. Each database gets its own username and password.</p>
       <button class="button button-primary" type="button" @click="showCreateForm = true">
-        <PhPlus :size="16"/> Create Your First Database
+        <PhPlus :size="16"/> Create a Database
       </button>
     </div>
   </main>

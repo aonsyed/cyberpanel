@@ -75,7 +75,7 @@ function recordTypeClass(type: string): string {
           <PhArrowClockwise :size="15" :class="{ spinning: loading }"/> Refresh
         </button>
         <button class="button button-primary" type="button">
-          <PhPlus :size="16" weight="bold"/> Add Zone
+          <PhPlus :size="16" weight="bold"/> Add DNS Zone
         </button>
       </div>
     </header>
@@ -132,7 +132,7 @@ function recordTypeClass(type: string): string {
         </div>
         <div v-else class="empty-hint">
           <PhTreeStructure :size="24"/>
-          <p>No records in this zone yet. Add your first record to start resolving.</p>
+          <p>No DNS records yet. Add one to point your domain somewhere.</p>
         </div>
       </section>
     </div>
@@ -140,9 +140,9 @@ function recordTypeClass(type: string): string {
     <!-- Empty state -->
     <div v-if="!loading && !zones.length && !error" class="empty-state">
       <PhGlobe :size="48" weight="duotone"/>
-      <h3>No DNS zones</h3>
-      <p>Create a DNS zone to manage records for your domains — A, AAAA, CNAME, MX, TXT and more.</p>
-      <button class="button button-primary" type="button"><PhPlus :size="16"/> Create Your First Zone</button>
+      <h3>No DNS zones yet</h3>
+      <p>Add a DNS zone to control where your domain points — A records, MX for email, CNAME, TXT and more.</p>
+      <button class="button button-primary" type="button"><PhPlus :size="16"/> Add a DNS Zone</button>
     </div>
   </main>
 </template>

@@ -86,7 +86,7 @@ function fmtDate(value: unknown): string {
     <!-- Breadcrumb header -->
     <nav class="breadcrumb">
       <button class="back" type="button" @click="router.push('/sites')">
-        <PhArrowLeft :size="16"/> All Sites
+        <PhArrowLeft :size="16"/> All Websites
       </button>
       <span class="sep">/</span>
       <strong>{{ hostname }}</strong>
@@ -194,7 +194,7 @@ function fmtDate(value: unknown): string {
           </article>
           <div v-if="!bindings.length" class="empty-hint">
             <PhGlobe :size="24"/>
-            <p>No additional domains. Only the primary hostname is bound.</p>
+            <p>No extra domains yet. Just the main website address.</p>
           </div>
         </div>
       </section>
@@ -206,13 +206,13 @@ function fmtDate(value: unknown): string {
           <div>
             <h4>TLS Certificate</h4>
             <p v-if="bindings.some(b => String(b.tls ?? '') !== '')" class="ssl-status healthy">
-              A certificate is active for this site's domains.
+              SSL is active for this website.
             </p>
             <p v-else class="ssl-status warning">
-              No certificate found. A Let's Encrypt certificate can be issued from the Certificates page.
+              No SSL certificate yet. You can get a free one from the SSL page.
             </p>
             <button class="button" type="button" @click="router.push('/certificates')">
-              <PhCertificate :size="15"/> Manage Certificates
+              <PhCertificate :size="15"/> Manage SSL
             </button>
           </div>
         </div>
@@ -232,8 +232,8 @@ function fmtDate(value: unknown): string {
         </div>
         <div v-else class="empty-hint">
           <PhPackage :size="24"/>
-          <p>No managed applications installed on this site.</p>
-          <button class="button button-primary" type="button" @click="router.push('/wordpress')">Browse Applications</button>
+          <p>No apps installed on this website yet.</p>
+          <button class="button button-primary" type="button" @click="router.push('/wordpress')">Browse Apps</button>
         </div>
       </section>
 
@@ -251,8 +251,8 @@ function fmtDate(value: unknown): string {
         </div>
         <div v-else class="empty-hint">
           <PhDatabase :size="24"/>
-          <p>No databases associated with this site.</p>
-          <button class="button button-primary" type="button" @click="router.push('/databases')">Create Database</button>
+          <p>No databases linked to this website.</p>
+          <button class="button button-primary" type="button" @click="router.push('/databases')">Create a Database</button>
         </div>
       </section>
     </div>

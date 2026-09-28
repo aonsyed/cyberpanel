@@ -4,7 +4,7 @@ import { computed, inject, onMounted, ref } from "vue";
 import {
   PhArrowClockwise, PhCaretRight, PhDownload, PhFile,
   PhFileArchive, PhFileCode, PhFileImage, PhFileText,
-  PhFileXml, PhFolder, PhFolderOpen, PhHome, PhPencil,
+  PhFileHtml, PhFolder, PhFolderOpen, PhHouse, PhPencil,
   PhTrash, PhUpload, PhCloudArrowUp,
 } from "@phosphor-icons/vue";
 import type { APIClient } from "../api";
@@ -39,7 +39,8 @@ async function load(): Promise<void> {
 }
 
 async function loadDirectory(): Promise<void> {
-  if (!activeSite.value || !api.available("access.files.list")) { entries.value = []; return; }
+  if (!activeSite.value) { entries.value = []; return; }
+    if (!api.available("access.files.list")) { entries.value = []; return; }
   try {
     const response = await api.invoke<unknown>("access.files.list", {
       tenantId: tenantId.value,
@@ -77,7 +78,7 @@ function fileIcon(name: string, isDir: boolean): unknown {
   if (["jpg", "png", "gif", "svg", "webp", "ico"].includes(ext)) return PhFileImage;
   if (["zip", "tar", "gz", "bz2", "xz", "7z"].includes(ext)) return PhFileArchive;
   if (["php", "js", "ts", "py", "rb", "go", "rs"].includes(ext)) return PhFileCode;
-  if (["html", "htm", "xml", "json", "yaml", "yml"].includes(ext)) return PhFileXml;
+  if (["html", "htm", "xml", "json", "yaml", "yml"].includes(ext)) return PhFileHtml;
   if (["txt", "md", "log", "conf"].includes(ext)) return PhFileText;
   return PhFile;
 }
@@ -131,7 +132,7 @@ function onDrop(event: DragEvent): void {
       <!-- Breadcrumb -->
       <nav class="breadcrumb">
         <button type="button" class="crumb" @click="currentPath = ''; loadDirectory()">
-          <PhHome :size="14"/> root
+          <PhHouse :size="14"/> root
         </button>
         <template v-for="(part, i) in currentPath.split('/').filter(Boolean)" :key="i">
           <PhCaretRight :size="10" class="crumb-sep"/>
@@ -142,7 +143,7 @@ function onDrop(event: DragEvent): void {
       <!-- Upload dropzone -->
       <div class="dropzone" :class="{ over: dragOver }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="onDrop">
         <PhCloudArrowUp :size="24"/>
-        <p>Drop files here to upload to <strong>/{{ currentPath }}</strong></p>
+        <p>Drag files here to upload to <strong>/{{ currentPath }}</strong></p>
       </div>
 
       <!-- File grid -->
@@ -162,8 +163,8 @@ function onDrop(event: DragEvent): void {
 
     <div v-if="!loading && !sites.length && !error" class="empty-state">
       <PhFolder :size="48" weight="duotone"/>
-      <h3>No sites to browse</h3>
-      <p>Create a site first, then use the file manager to upload your application files.</p>
+      <h3>No websites yet</h3>
+      <p>Create a website first, then you can upload files to it here.</p>
       <button class="button button-primary" type="button">Create a Site</button>
     </div>
   </main>

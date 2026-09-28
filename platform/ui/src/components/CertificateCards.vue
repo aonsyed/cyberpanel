@@ -63,7 +63,7 @@ function expiryText(dateStr: unknown): string {
           <PhArrowClockwise :size="15" :class="{ spinning: loading }"/> Refresh
         </button>
         <button class="button button-primary" type="button">
-          <PhPlus :size="16" weight="bold"/> Issue Certificate
+          <PhPlus :size="16" weight="bold"/> Get Free SSL
         </button>
       </div>
     </header>
@@ -97,9 +97,9 @@ function expiryText(dateStr: unknown): string {
 
     <div v-if="!loading && !certs.length && !error" class="empty-state">
       <PhLock :size="48" weight="duotone"/>
-      <h3>No certificates</h3>
-      <p>Issue a free Let's Encrypt certificate to enable HTTPS for your sites. Certificates auto-renew before expiry.</p>
-      <button class="button button-primary" type="button"><PhPlus :size="16"/> Issue Certificate</button>
+      <h3>No SSL certificates yet</h3>
+      <p>Get a free SSL certificate for your website. It renews automatically before it expires.</p>
+      <button class="button button-primary" type="button"><PhPlus :size="16"/> Get Free SSL</button>
     </div>
   </main>
 </template>

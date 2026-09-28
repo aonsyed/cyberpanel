@@ -3,7 +3,7 @@
 import { computed, inject, onMounted, ref } from "vue";
 import {
   PhArrowClockwise, PhCheckCircle, PhCloudArrowDown, PhGap,
-  PhHardDrive, PhPlus, PhRestore, PhX,
+  PhHardDrive, PhPlus, PhArrowCounterClockwise, PhX,
 } from "@phosphor-icons/vue";
 import type { APIClient } from "../api";
 import { sessionStore } from "../store";
@@ -65,7 +65,7 @@ function statusClass(status: string): string {
           <PhArrowClockwise :size="15" :class="{ spinning: loading }"/> Refresh
         </button>
         <button class="button button-primary" type="button">
-          <PhPlus :size="16" weight="bold"/> Run Backup
+          <PhPlus :size="16" weight="bold"/> Back Up Now
         </button>
       </div>
     </header>
@@ -92,7 +92,7 @@ function statusClass(status: string): string {
           </div>
         </div>
         <div class="run-actions">
-          <button class="button button-small" type="button" title="Restore"><PhRestore :size="14"/> Restore</button>
+          <button class="button button-small" type="button" title="Restore"><PhArrowCounterClockwise :size="14"/> Restore</button>
           <button class="button button-small" type="button" title="Download"><PhCloudArrowDown :size="14"/></button>
         </div>
       </article>
@@ -101,8 +101,8 @@ function statusClass(status: string): string {
     <div v-if="!loading && !runs.length && !error" class="empty-state">
       <PhHardDrive :size="48" weight="duotone"/>
       <h3>No backups yet</h3>
-      <p>Run your first backup to create a restorable recovery point. Backups capture your site files and databases.</p>
-      <button class="button button-primary" type="button"><PhPlus :size="16"/> Run Your First Backup</button>
+      <p>Back up your websites and databases so you can restore them if something goes wrong.</p>
+      <button class="button button-primary" type="button"><PhPlus :size="16"/> Back Up Now</button>
     </div>
   </main>
 </template>

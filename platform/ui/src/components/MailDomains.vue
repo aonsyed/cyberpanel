@@ -57,7 +57,7 @@ function dkimStatus(domain: Record<string, unknown>): string {
           <PhArrowClockwise :size="15" :class="{ spinning: loading }"/> Refresh
         </button>
         <button class="button button-primary" type="button">
-          <PhPlus :size="16" weight="bold"/> Add Domain
+          <PhPlus :size="16" weight="bold"/> Add Email Domain
         </button>
       </div>
     </header>
@@ -98,8 +98,8 @@ function dkimStatus(domain: Record<string, unknown>): string {
         </div>
 
         <footer class="domain-actions">
-          <button class="button button-small" type="button">Manage Mailboxes</button>
-          <button class="button button-small" type="button">Aliases</button>
+          <button class="button button-small" type="button">Email Accounts</button>
+          <button class="button button-small" type="button">Forwarding</button>
           <button class="button button-small" type="button">DKIM</button>
         </footer>
       </article>
@@ -108,10 +108,10 @@ function dkimStatus(domain: Record<string, unknown>): string {
     <!-- Empty state -->
     <div v-if="!loading && !domains.length && !error" class="empty-state">
       <PhEnvelopeSimple :size="48" weight="duotone"/>
-      <h3>No mail domains</h3>
-      <p>Add a mail domain to create email addresses, aliases, and catch-all routing for your sites.</p>
+      <h3>No email domains yet</h3>
+      <p>Add an email domain to create email addresses for your websites.</p>
       <button class="button button-primary" type="button">
-        <PhPlus :size="16"/> Add Your First Domain
+        <PhPlus :size="16"/> Add an Email Domain
       </button>
     </div>
   </main>

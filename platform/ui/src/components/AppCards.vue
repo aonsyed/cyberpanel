@@ -56,7 +56,7 @@ function hasUpdate(app: Record<string, unknown>): boolean {
           <PhArrowClockwise :size="15" :class="{ spinning: loading }"/> Refresh
         </button>
         <button class="button button-primary" type="button" @click="showInstall = !showInstall">
-          <PhPlus :size="16" weight="bold"/> Install App
+          <PhPlus :size="16" weight="bold"/> Install Application
         </button>
       </div>
     </header>
@@ -120,10 +120,10 @@ function hasUpdate(app: Record<string, unknown>): boolean {
     <!-- Empty state -->
     <div v-if="!loading && !apps.length && !error" class="empty-state">
       <PhPackage :size="48" weight="duotone"/>
-      <h3>No applications installed</h3>
-      <p>Install WordPress, Joomla, PrestaShop and other popular apps with one click. Each install gets its own database and managed updates.</p>
+      <h3>No apps installed yet</h3>
+      <p>Install WordPress, Joomla, and other popular apps in one click. We handle the database and updates for you.</p>
       <button class="button button-primary" type="button" @click="showInstall = true">
-        <PhPlus :size="16"/> Install Your First App
+        <PhPlus :size="16"/> Install an App
       </button>
     </div>
   </main>
