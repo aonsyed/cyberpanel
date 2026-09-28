@@ -7,6 +7,45 @@ This file is the compact recovery point for ongoing implementation. The normativ
 All builds, formatting, program execution and tests run inside QEMU guests.
 No downloads, native-vendor forks/builds/patches, or test artifacts in Git.
 
+## Console upgrade: security posture, routing surfaces, detail views — 2026-09-28 (fifth follow-up)
+
+Directive: deliver a much better UI and fill the genuine gaps (not the
+capabilities already replaced by better ones). Two findings shaped the
+work: the classic-parity audit showed firewall/WAF were replace-only
+(no read op, so no console could even render them), and the mail
+routing generation (aliases, catch-all, pattern rules) existed in the
+backend but had no console surface at all.
+
+Shipped (commit 2e95bc47a):
+
+- `operations.security.snapshot` — read-only projection of the
+  persisted firewall, WAF, and SSH policies through a new
+  kind-scoped `ListResources` on the operations repository (tenant
+  narrowing, decode through the shared envelope path).
+- Console: new Edge posture page (rule table, default-action tiles,
+  WAF/SSH policy state), new Routing & aliases page (exact aliases +
+  catch-all destinations with validated create/remove), a real detail
+  drawer for every resource row (replacing form-as-detail), dashboard
+  sparklines from observability.metric.query, and a fuzzy command
+  palette with per-page primary actions. Pure logic lives in
+  `ui/src/consoleLogic.ts` under node tests.
+
+QEMU verification: vue-tsc strict + vite build + unit suite in-guest;
+signed node release sequence 87 (qemu-complete-3.1.87) carries the new
+UI/gateway/core/executor and applied `committed` on dr2; authenticated
+browser smoke through the TLS gateway (passkey login, WebAuthn CDP
+virtual authenticator) renders the dashboard, Edge posture, and
+Routing pages with live data. The apiserver suite passes with the new
+operation; internal/operations retains its pre-existing
+environment-dependent failures (identical on the untouched tree).
+
+Lab note: the release application initially tripped over manual
+binary/UI drift from the migration campaign (payload digests and the
+managed symlink contract). Restoring the signed payloads, managed
+links (via the active-release chain), and the admission frontier
+before a clean sequence-86/87 apply resolved it; the gateway TLS
+drill configuration is reapplied afterward as documented lab drift.
+
 ## Legacy-backup migration completed end to end — 2026-09-28 (fourth follow-up)
 
 Directive: wire LSAPI pool provisioning into the migration site-import

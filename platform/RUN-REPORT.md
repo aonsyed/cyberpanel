@@ -3,6 +3,22 @@
 This is a verification checkpoint, not a parity-release certification.
 The scope remains the complete product defined in the existing design spec.
 
+## Console upgrade evidence — 2026-09-28 (fifth follow-up)
+
+Source = 2e95bc47a. In-guest (dr2, node 24): `vue-tsc --noEmit` clean,
+`vite build` clean (panel-Ciri2Ztf.js / index-D3Zayy1s.css), node
+--test 9/9 across consoleLogic + databaseReplacement. Signed node
+release `qemu-complete-3.1.87` (sequence 87, 115 artifacts, bundle
+sha256 e6de0b3c…bab45) applied `committed` on dr2; catalog serves 677
+operations including `operations.security.snapshot`. Authenticated
+browser smoke over https://localhost:8090 with the CDP virtual
+authenticator: passkey login 200, shell + dashboard render, and both
+new pages return their live content ("Firewall, WAM/SSH posture",
+"Firewall policy", "Aliases, catch-all", "Catch-all destinations").
+Backend: apiserver suite green with the snapshot operation;
+operations package failures verified pre-existing on the untouched
+tree.
+
 ## End-to-end migration completion evidence — 2026-09-28 (fourth follow-up)
 
 Source = 6b4760d16, production binaries (no diagnostic instrumentation)
