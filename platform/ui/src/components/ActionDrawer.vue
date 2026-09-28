@@ -4,6 +4,7 @@ import { PhArrowClockwise as ArrowClockwise, PhArrowRight as ArrowRight, PhCheck
 import { oneTimeToken, type APIClient } from "../api";
 import type { ActionDefinition, FieldDefinition } from "../domain";
 import { sessionStore } from "../store";
+import FormBuilder from "./FormBuilder.vue";
 
 const props=defineProps<{action:ActionDefinition;tenantId?:string|undefined;resource?:Record<string,unknown>|null;expectedGeneration?:number|undefined}>();
 const emit=defineEmits<{close:[];complete:[unknown]}>();
@@ -109,14 +110,7 @@ onMounted(()=>window.addEventListener("keydown",keydown));onBeforeUnmount(()=>{c
             <ul><li v-for="service in plannedServices" :key="service">{{service}}</li></ul>
             <p>Reboot: {{resource.planned_reboot}} · Recovery: {{resource.recovery_kind||resource.recovery_status}}</p>
           </section>
-          <div v-for="field in visibleFields" :key="field.key" class="field">
-            <label :for="`field-${field.key}`">{{field.label}}</label>
-            <select v-if="field.type==='select'" :id="`field-${field.key}`" v-model="values[field.key]" class="select" :required="Boolean(field.required)"><option value="" disabled>Select…</option><option v-for="option in fieldOptions(field)" :key="option.value" :value="option.value">{{option.label}}</option></select>
-            <textarea v-else-if="field.type==='textarea'||field.type==='json'" :id="`field-${field.key}`" :value="String(values[field.key]??'')" @input="values[field.key]=($event.target as HTMLTextAreaElement).value" class="textarea" :class="{mono:field.type==='json'}" :required="Boolean(field.required)" :autocomplete="field.sensitive?'off':'on'" :spellcheck="!field.sensitive"></textarea>
-            <label v-else-if="field.type==='boolean'" class="checkbox"><input :id="`field-${field.key}`" v-model="values[field.key]" type="checkbox"/><span>Enabled</span></label>
-            <input v-else :id="`field-${field.key}`" v-model="values[field.key]" class="input" :class="{mono:field.type==='cidr'||field.type==='cron'}" :type="field.type==='password'?'password':field.type==='number'?'number':field.type==='email'?'email':'text'" :required="Boolean(field.required)"/>
-            <p v-if="field.helper" class="field-help">{{field.helper}}</p><p v-if="errors[field.key]" class="field-error">{{errors[field.key]}}</p>
-          </div>
+          <FormBuilder :fields="visibleFields" v-model="values" :errors="errors" :disabled="submitting"/>
           <div v-if="action.confirmation&&!completed" class="confirmation" :class="`confirmation-${action.tone||'warning'}`"><ShieldWarning :size="22" weight="fill"/><div><strong>Confirm impact</strong><p>{{action.confirmation}}</p><label class="checkbox"><input v-model="confirmation" type="checkbox"/><span>I understand this change and its rollback boundary.</span></label></div></div>
           <div v-if="submitting&&!action.mutating" class="loading-result"><ArrowClockwise :size="20"/><span>Loading the current projection…</span></div>
           <div v-if="failure" class="operation-error" role="alert">{{failure}}</div>

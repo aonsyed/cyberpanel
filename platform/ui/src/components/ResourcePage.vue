@@ -4,6 +4,7 @@ import { PhArrowClockwise as ArrowClockwise, PhArrowRight as ArrowRight, PhFunne
 import type { APIClient } from "../api";
 import type { ActionDefinition, PageDefinition } from "../domain";
 import { sessionStore } from "../store";
+import { router } from "../router";
 import ActionDrawer from "./ActionDrawer.vue";
 import DetailDrawer from "./DetailDrawer.vue";
 import MailDomainCreate from "./MailDomainCreate.vue";
@@ -76,6 +77,12 @@ function openAction(action: ActionDefinition, resource: Record<string, unknown> 
 }
 const detailOpen = ref(false);
 function openDetail(row: Record<string, unknown>): void {
+  const id = String(row.id ?? row.resource_id ?? row.site_id ?? "");
+  if (!id) return;
+  if (props.definition.resourceKind === "hosting.site") {
+    router.push(`/sites/${id}`);
+    return;
+  }
   if (!props.definition.detailOperation || !api.available(props.definition.detailOperation)) return;
   activeResource.value = row;
   detailOpen.value = true;

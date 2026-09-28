@@ -12,6 +12,7 @@ import WebmailPage from "./WebmailPage.vue";
 import FileManagerPage from "./FileManagerPage.vue";
 import SecurityPosture from "./SecurityPosture.vue";
 import MailRouting from "./MailRouting.vue";
+import SiteDetailPage from "./SiteDetailPage.vue";
 
 const page = computed(() => pageForPath(router.currentPath.value));
 
@@ -29,7 +30,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", shortcuts));
     <div class="shell-main">
       <Topbar :page-title="page.title" />
       <div v-if="!sessionStore.state.online" class="offline-banner" role="status">Browser connectivity is offline. Local node work already accepted will continue.</div>
-      <DashboardPage v-if="page.id === 'dashboard'" />
+      <SiteDetailPage v-if="router.currentPath.value.startsWith('/sites/') && router.currentPath.value.split('/').length > 2 && router.currentPath.value.split('/')[2]" :site-id="router.currentPath.value.split('/')[2]" />
+      <DashboardPage v-else-if="page.id === 'dashboard'" />
       <WebmailPage v-else-if="page.id === 'webmail'" />
       <FileManagerPage v-else-if="page.id === 'files'" />
       <SecurityPosture v-else-if="page.component === 'security-posture'" />
