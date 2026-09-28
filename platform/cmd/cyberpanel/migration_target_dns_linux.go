@@ -380,6 +380,11 @@ func (target *migrationHostTarget) activateEntries(ctx context.Context, value mi
 			if applyErr != nil || receipt.Effect.Outcome != hostingservice.EffectConfirmed || receipt.Effect.ProbeDigest == "" {
 				return migration.ActivationReceipt{}, frontier(applyErr)
 			}
+			// MarkProvisioned advances the site's root generation; re-apply the
+			// dark-imported content into the new root before probing it public.
+			if filesErr := target.ensureSiteGenerationFiles(ctx, scope, intent); filesErr != nil {
+				return migration.ActivationReceipt{}, frontier(filesErr)
+			}
 			proof, probeErr := target.probeSite(ctx, scope, intent, true)
 			if probeErr != nil {
 				return migration.ActivationReceipt{}, frontier(probeErr)

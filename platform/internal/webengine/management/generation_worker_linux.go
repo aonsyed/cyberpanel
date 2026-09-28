@@ -283,6 +283,12 @@ func isolateLifecycleFiles(candidate string, edition webengine.Edition) error {
 	if err := syscall.Mount("", "/tmp/site-runtime", "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil { return err }
 	if err := lifecycleTmpfs("/run", "mode=0755,size=16m"); err != nil { return err }
 	if err := os.MkdirAll("/run/cyberpanel/site-runtime", 0o755); err != nil { return err }
+	// The engine reaches the bind-mounted LSAPI sockets as the unprivileged
+	// web account, so every traversed directory must keep world-execute; the
+	// service umask would otherwise narrow /run/cyberpanel to 0750 and every
+	// pool connect would fail before reaching the granted socket ACL.
+	if err := os.Chmod("/run/cyberpanel", 0o755); err != nil { return err }
+	if err := os.Chmod("/run/cyberpanel/site-runtime", 0o755); err != nil { return err }
 	if err := syscall.Mount("/tmp/site-runtime", "/run/cyberpanel/site-runtime", "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil { return err }
 	for _, directory := range []string{"/usr/local/lsws/logs", "/usr/local/lsws/admin/logs", "/usr/local/lsws/admin/tmp", "/usr/local/lsws/cgid", "/dev/shm"} {
 		mode := "mode=0770,size=32m"

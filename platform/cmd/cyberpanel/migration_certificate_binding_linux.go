@@ -79,7 +79,10 @@ func (binding *migrationCertificateSiteBinding) Activate(ctx context.Context, in
 	matchedListener := false
 	for _, listener := range composed.Desired.Engine.Listeners {
 		if listener.Ref == rehearsal.ListenerRef {
-			if listener.TLSMode != webengine.TLSModeTLS || listener.Port != rehearsal.ListenerPort || matchedListener { return "", migration.ErrConflict }
+			// The rehearsal deliberately remaps this listener to a private
+			// loopback port, so the recorded port never equals the production
+			// port; the ref and TLS mode identify the listener it proved.
+			if listener.TLSMode != webengine.TLSModeTLS || matchedListener { return "", migration.ErrConflict }
 			matchedListener = true
 		}
 	}

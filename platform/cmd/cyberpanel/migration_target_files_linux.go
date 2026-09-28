@@ -82,6 +82,24 @@ func (target *migrationHostTarget) uploadMigrationFile(ctx context.Context,scope
 	metadata,err:=target.files.Executor.SetMetadata(ctx,locator,access.FileMetadata{Mode:file.Mode,Ownership:access.OwnershipSiteUser},access.WriteCondition{IfMatch:receipt.ETag});if err!=nil||metadata.ExecutorReceipt==""{return "",errors.Join(migration.ErrAmbiguous,err)};proof,err:=target.verifyMigrationFile(ctx,locator,file);if err!=nil{return "",err};return migrationHostDigest([]string{receipt.ExecutorReceipt,metadata.ExecutorReceipt,proof}),nil
 }
 
+// ensureSiteGenerationFiles re-applies the already-verified dark import into
+// the site's current generation root. Advancing the lifecycle at activation
+// provisions a fresh root skeleton, so content that was verified against the
+// import-time generation must be materialized again before the public probe.
+// Files already present and byte-identical are skipped, keeping the step
+// idempotent across activation retries.
+func (target *migrationHostTarget) ensureSiteGenerationFiles(ctx context.Context,scope migration.RuntimeScope,intent migration.ImportIntent)error{
+	source,err:=target.sitePayload(intent);if err!=nil{return err};files,err:=target.inventoryFiles(ctx,source.Content[0]);if err!=nil{return err}
+	root:=access.SiteRoot{SiteID:access.SiteID(intent.TargetID.String()),Kind:access.RootPublic}
+	for _,file:=range files{if err=target.ensureMigrationDirectories(ctx,root,path.Dir(file.Path));err!=nil{return err};if file.Directory{if err=target.ensureMigrationDirectories(ctx,root,file.Path);err!=nil{return err}}}
+	stream:=&migrationChunkReader{ctx:ctx,chunks:target.chunks,chunk:source.Content[0]};reader:=tar.NewReader(stream)
+	for _,file:=range files{header,nextErr:=reader.Next();if nextErr!=nil||strings.TrimSuffix(header.Name,"/")!=file.Path{return errors.Join(migration.ErrConflict,nextErr)};if file.Directory{continue}
+		relative,_:=access.ParseRelativePath(file.Path);locator:=access.FileLocator{Root:root,Path:relative}
+		if _,verifyErr:=target.verifyMigrationFile(ctx,locator,file);verifyErr==nil{continue}else if!errors.Is(verifyErr,access.ErrNotFound)&&!errors.Is(verifyErr,os.ErrNotExist){return verifyErr}
+		if _,err=target.uploadMigrationFile(ctx,scope,intent,locator,file,reader);err!=nil{return err}}
+	return nil
+}
+
 func (target *migrationHostTarget) probeSite(ctx context.Context,scope migration.RuntimeScope,intent migration.ImportIntent,active bool)(string,error){
 	source,err:=target.sitePayload(intent);if err!=nil{return "",err};tenant,err:=site.NewTenantID(scope.TenantID);if err!=nil{return "",err};id,err:=site.NewSiteID(intent.TargetID.String());if err!=nil{return "",err};aggregate,err:=target.sites.Load(ctx,tenant,id);if err!=nil{return "",err};if active&&aggregate.Lifecycle()!=site.LifecycleActive||!active&&aggregate.Lifecycle()!=site.LifecycleProvisioning{return "",migration.ErrConflict}
 	files,err:=target.inventoryFiles(ctx,source.Content[0]);if err!=nil{return "",err};proofs:=[]string{};root:=access.SiteRoot{SiteID:access.SiteID(id.String()),Kind:access.RootPublic};for _,file:=range files{relative,_:=access.ParseRelativePath(file.Path);locator:=access.FileLocator{Root:root,Path:relative};if file.Directory{entry,statErr:=target.files.Executor.Stat(ctx,locator);if statErr!=nil||entry.Kind!=access.EntryDirectory{return "",errors.Join(migration.ErrConflict,statErr)};proofs=append(proofs,migrationHostDigest(entry));continue};proof,readErr:=target.verifyMigrationFile(ctx,locator,file);if readErr!=nil{return "",readErr};proofs=append(proofs,proof)}
